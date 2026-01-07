@@ -311,6 +311,7 @@ class BaseDataloaderConfig(BaseModel):
     drop_last: bool = True
     num_workers: int
     pin_memory: bool = True
+    prefetch_factor: int = 4
 
 
 class ImageDataLoaderConfig(BaseDataloaderConfig):

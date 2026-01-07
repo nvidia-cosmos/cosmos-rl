@@ -41,6 +41,7 @@ class TestProcessFlow(unittest.TestCase):
         config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+        config["train"]["train_policy"]["allowed_outdated_steps"] = 100
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
         ) as tmpfile:

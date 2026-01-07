@@ -440,17 +440,17 @@ class HFModel(BaseModel):
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight)
+                local_view.data.copy_(sharded_weight)
 
         # Handle weight tying: lm_head shares weights with embed_tokens
         if (
@@ -468,7 +468,7 @@ class HFModel(BaseModel):
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
             if dest_name in self_state_dict:
@@ -480,10 +480,10 @@ class HFModel(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight.to(device))
+                    local_view.data.copy_(sharded_weight.to(device))
 
     def load_hf_weights(
         self,
@@ -548,7 +548,7 @@ class HFModel(BaseModel):
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
 
@@ -556,10 +556,10 @@ class HFModel(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight.to(device))
+                local_view.data.copy_(sharded_weight.to(device))
 
         del hf_model
 

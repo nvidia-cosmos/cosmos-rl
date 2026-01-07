@@ -104,11 +104,14 @@ class CommMixin:
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
     ):
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path, trust_remote_code=True
-        )
-        is_vlm = getattr(hf_config, "vision_config", None) is not None
-        model_type = hf_config.model_type
+        if not self.config.policy.is_diffusers:
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path, trust_remote_code=True
+            )
+            is_vlm = getattr(hf_config, "vision_config", None) is not None
+            model_type = hf_config.model_type
+        else:
+            model_type = "diffusers"
 
         if data_packer:
             assert isinstance(

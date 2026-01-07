@@ -61,7 +61,6 @@ class LIBERODataset(Dataset):
                     }
                     dataframes.append(data)
             self.dataframe = dataframes
-            print(f"dataset <{self.train_val}> len: {len(self.dataframe)}")
         else:
             raise ValueError
 

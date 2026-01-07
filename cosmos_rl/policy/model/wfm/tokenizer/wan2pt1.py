@@ -826,8 +826,7 @@ class WanVAE:
     def __init__(
         self,
         z_dim=16,
-        vae_pth="Wan-AI/Wan2.1-T2V-1.3B",
-        vae_filename="Wan2.1_VAE.pth",
+        vae_pth="Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth",
         s3_credential_path: str = "credentials/s3_training.secret",
         load_mean_std=False,
         mean_std_path: Optional[str] = None,
@@ -879,13 +878,14 @@ class WanVAE:
         self.mean = torch.tensor(mean, dtype=dtype, device=device)
         self.std = torch.tensor(std, dtype=dtype, device=device)
         self.scale = [self.mean, 1.0 / self.std]
-        vae_local_folder = resolve_model_path(vae_pth)
-        vae_pth = os.path.join(vae_local_folder, vae_filename)
+        vae_filename = vae_pth.split("/")[-1]
+        vae_local_folder = resolve_model_path("/".join(vae_pth.split("/")[:-1]))
+        vae_local_path = os.path.join(vae_local_folder, vae_filename)
 
         # init model
         self.model, self.img_mean, self.img_std, self.video_mean, self.video_std = (
             _video_vae(
-                pretrained_path=vae_pth,
+                pretrained_path=vae_local_path,
                 z_dim=z_dim,
                 s3_credential_path=s3_credential_path,
                 load_mean_std=load_mean_std,
@@ -945,9 +945,8 @@ class Wan2pt1VAEInterface(VideoTokenizerInterface):
             load_mean_std=load_mean_std,
             vae_pth=kwargs.get(
                 "vae_pth",
-                "Wan-AI/Wan2.1-T2V-1.3B",
+                "Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth",
             ),
-            vae_filename=kwargs.get("vae_filename", "Wan2.1_VAE.pth"),
             s3_credential_path=kwargs.get(
                 "s3_credential_path", "credentials/s3_training.secret"
             ),

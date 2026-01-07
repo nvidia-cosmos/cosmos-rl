@@ -65,6 +65,7 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
+        self.teacher_result_manager = set()
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
         self.stat_n_samples = 0
@@ -137,8 +138,16 @@ class Controller:
         config_file_path = tempfile.NamedTemporaryFile(
             delete=False, suffix=".redis_config.conf"
         )
+
+        custom_config = """
+maxmemory 500G
+maxmemory-policy allkeys-lfu
+"""
         redis_cfg_path = util.write_redis_config(
-            redis_free_port, redis_logfile_path, file_path=config_file_path.name
+            redis_free_port,
+            redis_logfile_path,
+            file_path=config_file_path.name,
+            custom_config=custom_config,
         )
         redis_server_cmd = f'redis-server {redis_cfg_path} --dbfilename {random_db_file_name} --save ""'
 
@@ -296,7 +305,6 @@ class Controller:
 
         if (
             (not is_validation)
-            and self.config.train.train_policy.on_policy
             and len(self.rollout_status_manager.replica_scaling_log) == 0
             and not self.config.mode == "colocated"
         ):
@@ -456,6 +464,8 @@ class Controller:
             self.policy_status_manager.heartbeat(replica_name)
         elif replica_name in self.rollout_status_manager:
             self.rollout_status_manager.heartbeat(replica_name)
+        elif replica_name in self.teacher_result_manager:
+            pass
         else:
             logger.error(f"[Controller] Replica {replica_name} not found")
 
@@ -473,6 +483,11 @@ class Controller:
                 self.rollout_status_manager.register(
                     atom, self.config, self.policy_status_manager
                 )
+            elif role == Role.REFERENCE:
+                self.teacher_result_manager.add(atom.replica_name)
+                logger.info(
+                    f"[Controller] Registering reference replica {atom.replica_name}"
+                )
             else:
                 raise Exception(f"[Controller] Unknown role: {role}")
 
@@ -485,8 +500,17 @@ class Controller:
                 self.rollout_status_manager.unregister(
                     replica_name, self.policy_status_manager
                 )
+            elif replica_name in self.teacher_result_manager:
+                self.teacher_result_manager.remove(replica_name)
+                if len(self.teacher_result_manager) > 0:
+                    await self.end_reference_replica()
             else:
                 raise Exception(f"[Controller] Replica {replica_name} not found")
+
+    async def end_reference_replica(self):
+        self.redis_controller.publish_teacher_request(
+            {"is_end": True, "prompt_idx": -1, "completion_token_ids": []}, "controller"
+        )
 
     async def set_replica_ncclerror(self, replica_name: str, error: str):
         if replica_name in self.policy_status_manager:

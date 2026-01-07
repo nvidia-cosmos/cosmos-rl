@@ -22,3 +22,31 @@ try:
     from cosmos_rl_reward.model.cosmos_reason1 import CosmosReason1Reward  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from cosmos_rl_reward.model.ocr import OcrReward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] OcrReward not found")
+    print(e)
+    pass
+
+try:
+    from cosmos_rl_reward.model.image_reward import ImageReward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] ImageReward not found")
+    print(e)
+    pass
+
+try:
+    from cosmos_rl_reward.model.gen_eval import GenEvalReward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] GenEvalReward not found")
+    print(e)
+    pass
+
+try:
+    from cosmos_rl_reward.model.hpsv2 import HPSv2Reward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] HPSv2Reward not found")
+    print(e)
+    pass

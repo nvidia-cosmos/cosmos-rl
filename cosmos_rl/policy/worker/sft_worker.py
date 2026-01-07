@@ -16,7 +16,7 @@
 
 import os
 import torch
-from typing import Optional, Union, Callable, Dict, Any, List
+from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from itertools import islice
@@ -226,20 +226,22 @@ class SFTPolicyWorker(PolicyWorkerBase):
         data_packer: Optional[BaseDataPacker] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
-        custom_logger_fns: Optional[List[Callable]] = None,
-        hook_fns: Optional[Dict[str, Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        **kwargs,
     ):
-        super(SFTPolicyWorker, self).__init__(config, parallel_dims)
+        super(SFTPolicyWorker, self).__init__(config, parallel_dims, **kwargs)
 
         # Enlarge the compile cache size for validation
         if self.config.train.compile and self.config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
 
-        self.hook_fns = hook_fns if hook_fns is not None else {}
+        self.hook_fns = self.hook_fns if self.hook_fns is not None else {}
+        self.custom_logger_fns = (
+            self.custom_logger_fns if self.custom_logger_fns is not None else []
+        )
 
         # Prepare wandb
         if "wandb" in self.config.logging.logger and is_wandb_available():
@@ -263,11 +265,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_batch_sampler=val_batch_sampler,
             dataset=dataset,
             val_dataset=val_dataset,
-        )
-
-        # For hooks and custom logger functions
-        self.custom_logger_fns = (
-            custom_logger_fns if custom_logger_fns is not None else []
         )
 
     def setup(
@@ -322,8 +319,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
+        trainer_type = self.config.train.train_policy.type
+        if self.config.policy.is_diffusers:
+            trainer_type = "diffusers_" + trainer_type
 
-        self.trainer = TrainerRegistry.get_trainer_cls("sft")(
+        self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
             config=self.config,
             parallel_dims=self.parallel_dims,
             train_stream=self.train_stream,
@@ -522,7 +522,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
             return None
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
-        if self.train_step % self.config.validation.freq != 0 and not is_last_step:
+        if (
+            (self.train_step == 0 and self.config.validation.val_before_train)
+            or (
+                self.train_step != 0
+                and self.train_step % self.config.validation.freq == 0
+            )
+            or is_last_step
+        ):
+            pass
+        else:
             return None
 
         # Call pre_validation_hook
@@ -609,6 +618,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
+        # For pre-train validation
+        val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:

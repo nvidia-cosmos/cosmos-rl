@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
 import os
+import time
+from types import SimpleNamespace
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 from typing import Optional, List, Dict, Any
-from multiprocessing import Process, Queue
 from PIL import Image
 from transformers import AutoConfig
 
@@ -33,47 +33,16 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils import util
-from cosmos_rl.rollout.vla_rollout.libero_utils import (
+from cosmos_rl.simulators.libero.utils import (
+    normalize_gripper_action,
+    invert_gripper_action,
     obs_to_vla_input,
-    save_rollout_video,
+    LIBERO_MAX_STEPS_MAP,
 )
-from cosmos_rl.rollout.vla_rollout.env_worker import (
-    libero_env_worker,
-    robotwin_env_worker,
-)
-
+from cosmos_rl.simulators.env_manager import EnvManager
+from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
-
-MAX_STEPS_MAP = {
-    # LIBERO tasks
-    "libero_spatial": 512,
-    "libero_object": 512,
-    "libero_goal": 512,
-    "libero_10": 512,
-    "libero_90": 512,
-    # RoboTwin 2.0 tasks
-    "robotwin2_click_bell": 200,
-    "robotwin2_move_can_pot": 200,
-    "robotwin2_place_phone_stand": 200,
-    "robotwin2_place_a2b_left": 200,
-    "robotwin2_place_a2b_right": 200,
-    "robotwin2_handover_mic": 200,
-    "robotwin2_pick_dual_bottles": 100,
-    "robotwin2_lift_pot": 200,
-    "robotwin2_put_bottles_dustbin": 800,
-    "robotwin2_stack_blocks_two": 400,
-    "robotwin2_stack_bowls_two": 400,
-    "robotwin2_handover_block": 400,
-    "robotwin2_place_empty_cup": 200,
-    "robotwin2_shake_bottle": 75,
-    "robotwin2_move_stapler_pad": 200,
-    "robotwin2_place_container_plate": 150,
-    "robotwin2_blocks_ranking_rgb": 600,
-    "robotwin2_beat_block_hammer": 200,
-    "robotwin2_place_mouse_pad": 200,
-    "robotwin2_place_shoe": 250,
-    "robotwin2_move_pillbottle_pad": 200,
-}
+from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -123,6 +92,14 @@ def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
     return result_image
 
 
+def extract_simulator_config(config: Config):
+    cfg = SimpleNamespace()
+    cfg.task_suite_name = config.validation.dataset.subset
+    cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+    cfg.num_envs = config.vla.num_envs
+    return cfg
+
+
 @RolloutRegistry.register(rollout_type="vla")
 class OpenVLARollout(RolloutBase):
     def __init__(
@@ -133,6 +110,12 @@ class OpenVLARollout(RolloutBase):
         **kwargs,
     ):
         super().__init__(config, parallel_dims, device, **kwargs)
+        self.num_envs = config.vla.num_envs
+
+        self.obs_keys = ["full_images", "wrist_images", "states"]
+        self.vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
+        self.vla_output_keys = ["responses", "old_log_probs"]
+        self.vla_train_keys = self.vla_input_keys + self.vla_output_keys
 
     def post_init_hook(self, **kwargs):
         self.model_type = self.config.vla.vla_type
@@ -145,9 +128,20 @@ class OpenVLARollout(RolloutBase):
                 self.config.policy.model_name_or_path
             )
 
-        self.sim_processes = []
-        self.sim_input_queues = []
-        self.sim_output_queues = []
+        self.env_manager = EnvManager(
+            cfg=extract_simulator_config(self.config),
+            rank=torch.distributed.get_rank(),
+            env_cls=LiberoEnvWrapper,
+        )
+        self.env_manager.start_simulator()
+
+        # Initialize tracing system (if enabled via config)
+        trace_verbosity = getattr(self.config.vla, "trace_verbosity", 0)
+        self.tracing_manager = create_tracing_manager(
+            rank=torch.distributed.get_rank(),
+            output_dir=self.config.train.output_dir,
+            trace_verbosity=trace_verbosity,
+        )
 
     def get_underlying_model(self) -> torch.nn.Module:
         return self.model
@@ -162,39 +156,266 @@ class OpenVLARollout(RolloutBase):
         load_format: str = "dummy",
         **kwargs,
     ):
-        if not self._engine_initialized:
-            model_path = self.config.policy.model_name_or_path
+        if self._engine_initialized:
+            return
 
-            if self.model_type == "openvla-oft":
-                from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import (
-                    PrismaticProcessor,
-                )
-            elif self.model_type == "openvla":
-                from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
-                    PrismaticProcessor,
-                )
-            else:
-                raise ValueError(f"Unsupported vla model type: {self.model_type}")
+        self.model = ModelRegistry.build_model(self.config)
+        self.processor = self.model.processor
+        self.tokenizer = self.model.tokenizer
+        self.pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
 
-            self.processor = PrismaticProcessor.from_pretrained(
-                model_path, trust_remote_code=True
-            )
-            self.tokenizer = self.processor.tokenizer
+        pfn, _ = self.model.parallelize_fn
+        pfn(self.model, self.parallel_dims, self.config)
 
-            self.model = ModelRegistry.build_model(self.config)
-
-            pfn, _ = self.model.parallelize_fn
-            pfn(self.model, self.parallel_dims, self.config)
-
-            self.model.eval()
-
+        if self.config.mode != "colocated":
             self.model.load_hf_weights(
                 self.config.policy.model_name_or_path,
                 self.parallel_dims,
                 torch.device("cuda"),
             )
-            self._engine_initialized = True
-            logger.info("[Rollout] Engine initialized.")
+        self.model.eval()
+        self._engine_initialized = True
+        logger.info("[Rollout] Engine initialized.")
+
+    def _prepare_payload_list(
+        self, payloads: List[RLPayload], is_validation: bool
+    ) -> List[RLPayload]:
+        self.n_generation = (
+            max(1, self.config.rollout.n_generation) if not is_validation else 1
+        )
+        return np.array(
+            [[idx for _ in range(self.n_generation)] for idx in range(len(payloads))]
+        ).flatten()
+
+    def _setup_parallel_envs(
+        self, payloads: List[RLPayload], env_ids: List[int], is_validation: bool
+    ):
+        task_ids = []
+        trial_ids = []
+        for payload in payloads:
+            task_ids.append(payload.prompt.get("task_id", 0))
+            trial_ids.append(payload.prompt.get("trial_id", 0))
+
+        images_and_states, task_descriptions = self.env_manager.reset(
+            env_ids, task_ids, trial_ids, [is_validation] * len(env_ids)
+        )
+
+        return {
+            **images_and_states,
+            "task_descriptions": task_descriptions,
+        }
+
+    def _setup_parallel_envs_async(
+        self, payloads: List[RLPayload], env_ids: List[int], is_validation: bool
+    ):
+        task_ids = []
+        trial_ids = []
+        for payload in payloads:
+            task_ids.append(payload.prompt.get("task_id", 0))
+            trial_ids.append(payload.prompt.get("trial_id", 0))
+        self.env_manager.reset_async(
+            env_ids, task_ids, trial_ids, [is_validation] * len(env_ids)
+        )
+
+    def _get_init_results(
+        self,
+        sim_results: Dict[str, Any],
+        available_env_ids: List[int],
+        enqueue_payload_list: List[RLPayload],
+        is_validation: bool,
+    ):
+        with self.tracing_manager.trace("env_reset", env_ids=available_env_ids):
+            init_results = self._setup_parallel_envs(
+                enqueue_payload_list, available_env_ids, is_validation
+            )
+        for key in self.obs_keys:
+            if sim_results[key] is None:
+                data_shape = (
+                    self.num_envs,
+                    *init_results[key].shape[1:],
+                )
+                sim_results[key] = np.zeros(data_shape, dtype=init_results[key].dtype)
+            sim_results[key][available_env_ids] = init_results[key].copy()
+        for i, env_id in enumerate(available_env_ids):
+            sim_results["task_descriptions"][env_id] = init_results[
+                "task_descriptions"
+            ][i]
+
+    def _wait_init_results(
+        self, sim_results: Dict[str, Any], async_wait_envs: List[int]
+    ):
+        wait_env_ids = []
+        for env_id in range(len(async_wait_envs)):
+            if async_wait_envs[env_id] == 0:
+                wait_env_ids.append(env_id)
+            elif async_wait_envs[env_id] > 0:
+                async_wait_envs[env_id] -= 1
+
+        if wait_env_ids:
+            images_and_states, task_descriptions = self.env_manager.reset_wait(
+                wait_env_ids
+            )
+            for key in self.obs_keys:
+                if sim_results[key] is None:
+                    data_shape = (
+                        self.num_envs,
+                        *images_and_states[key].shape[1:],
+                    )
+                    sim_results[key] = np.zeros(
+                        data_shape, dtype=images_and_states[key].dtype
+                    )
+            sim_results[key][wait_env_ids] = images_and_states[key].copy()
+            for i, env_id in enumerate(wait_env_ids):
+                sim_results["task_descriptions"][env_id] = task_descriptions[i]
+            for env_id in wait_env_ids:
+                async_wait_envs[env_id] = -1
+
+    @torch.no_grad()
+    def _do_rollout(
+        self,
+        payloads: List[RLPayload],
+        payload_indices: np.ndarray,
+        is_validation: bool,
+        continuous: bool = False,
+    ):
+        actions = None
+        enqueued_payloads = 0
+        finished_payloads = 0
+
+        sim_results = {k: None for k in self.obs_keys}
+        sim_results["task_descriptions"] = [""] * self.num_envs
+
+        payload_env_mapping = np.full(self.num_envs, -1)
+
+        task_records = [{} for _ in range(len(payload_indices))]
+        for i in range(len(payload_indices)):
+            payload = payloads[payload_indices[i]]
+            task_records[i] = {
+                "task_id": payload.prompt.get("task_id", 0),
+                "trial_id": payload.prompt.get("trial_id", 0),
+                "task_suite_name": payload.prompt.get("task_suite_name", ""),
+                "complete": False,
+                "finish_step": -1,
+            }
+            for key in self.vla_train_keys:
+                task_records[i][key] = []
+
+        rollout_step = 0
+        async_wait_envs = [-1 for _ in range(self.num_envs)]
+
+        active_env_ids = []
+        while finished_payloads < len(payload_indices):
+            # Step 1: Advance active environments
+            if active_env_ids:
+                with self.tracing_manager.trace("sim_step", env_ids=active_env_ids):
+                    step_results = self.env_manager.chunk_step(active_env_ids, actions)
+                active_indices, finished_env_ids = [], []
+                for i, env_id in enumerate(active_env_ids):
+                    if step_results["active"][i]:
+                        active_indices.append(i)
+                    else:
+                        finished_env_ids.append(env_id)
+                        task_idx = payload_env_mapping[env_id]
+                        task_records[task_idx]["complete"] = step_results["complete"][i]
+                        task_records[task_idx]["active"] = step_results["active"][i]
+                        task_records[task_idx]["finish_step"] = step_results[
+                            "finish_step"
+                        ][i]
+                        task_records[task_idx]["end_time"] = time.time()
+                        payload_env_mapping[env_id] = -1
+                active_env_ids = [active_env_ids[i] for i in active_indices]
+                finished_payloads += len(finished_env_ids)
+                for key in self.obs_keys:
+                    data_shape = (
+                        self.num_envs,
+                        *step_results[key][active_indices].shape[1:],
+                    )
+                    sim_results[key] = np.zeros(
+                        data_shape, dtype=step_results[key][active_indices].dtype
+                    )
+                    sim_results[key][active_env_ids] = step_results[key][
+                        active_indices
+                    ].copy()
+
+                if is_validation and self.config.vla.save_video:
+                    rollout_dir = os.path.join(
+                        self.config.train.output_dir, "vla_rollouts"
+                    )
+                    self.env_manager.save_validation_videos(
+                        rollout_dir, finished_env_ids
+                    )
+
+            # Step 2: Enqueue new payloads if envs become available
+            enqueue_payload_list = []
+            left_payloads = len(payload_indices) - enqueued_payloads
+            if continuous and np.any(payload_env_mapping == -1):
+                # continuous rollout, enqueue new payloads if any env becomes available
+                available_env_ids = [
+                    i for i, pidx in enumerate(payload_env_mapping) if pidx == -1
+                ][:left_payloads]
+            elif np.all(payload_env_mapping == -1):
+                # all envs are idle, enqueue new payloads to all envs
+                available_env_ids = list(range(self.num_envs))[:left_payloads]
+            else:
+                available_env_ids = []
+
+            for env_id in available_env_ids:
+                payload_idx = payload_indices[enqueued_payloads]
+                payload = payloads[payload_idx]
+                payload_env_mapping[env_id] = enqueued_payloads
+                enqueue_payload_list.append(payload)
+                enqueued_payloads += 1
+
+            self._wait_init_results(sim_results, async_wait_envs)
+            if available_env_ids:
+                # self._get_init_results(sim_results, available_env_ids, enqueue_payload_list, is_validation)
+                self._setup_parallel_envs_async(
+                    enqueue_payload_list, available_env_ids, is_validation
+                )
+                for env_id in available_env_ids:
+                    async_wait_envs[env_id] = 10
+
+            active_env_ids = [
+                i
+                for i, pidx in enumerate(payload_env_mapping)
+                if pidx != -1 and async_wait_envs[i] == -1
+            ]
+            logger.debug(
+                f"payload_env_mapping: {payload_env_mapping}, "
+                f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
+                f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}, "
+                f"waiting_envs_left_steps: {async_wait_envs}, active_env_ids: {active_env_ids}"
+            )
+            if not active_env_ids:
+                continue
+
+            # if torch.distributed.get_rank() == 0:
+            #     logger.info(sim_results)
+
+            active_sim_results = {"task_descriptions": []}
+            for k in self.obs_keys:
+                active_sim_results[k] = sim_results[k][active_env_ids]
+            for env_id in active_env_ids:
+                active_sim_results["task_descriptions"].append(
+                    sim_results["task_descriptions"][env_id]
+                )
+
+            # Step 3: Generate VLA output
+            with self.tracing_manager.trace(
+                "inference", env_ids=active_env_ids, batch_size=len(active_env_ids)
+            ):
+                vla_input = self._process_input(active_sim_results)
+                vla_output = self._generate_one_step_oft(vla_input)
+            for i, env_id in enumerate(active_env_ids):
+                task_idx = payload_env_mapping[env_id]
+                for key in self.vla_input_keys:
+                    task_records[task_idx][key].append(vla_input[key][i])
+                for key in self.vla_output_keys:
+                    task_records[task_idx][key].append(vla_output[key][i])
+
+            actions = vla_output["action"]
+            rollout_step += 1
+        return task_records
 
     def rollout_generation(
         self,
@@ -207,233 +428,50 @@ class OpenVLARollout(RolloutBase):
     ):
         self.model._set_fsdp_reshard_after_forward("never")
 
-        if is_validation:
-            results = self._rollout_validation(
-                payloads, stream, data_packer, data_fetcher, **kwargs
-            )
+        # Start a new rollout trace (sets validation state)
+        self.tracing_manager.start_rollout(is_validation)
 
-        results = self._rollout_collection(
-            payloads, stream, data_packer, data_fetcher, **kwargs
+        payload_indices = self._prepare_payload_list(payloads, is_validation)
+
+        # Track time for rollout
+        rollout_start = time.time()
+        task_records = self._do_rollout(
+            payloads,
+            payload_indices,
+            is_validation,
+            self.config.vla.continuous,
+        )
+        rollout_end = time.time()
+
+        # Calculate simulation FPS
+        total_sim_frames = sum(task.get("finish_step", 0) for task in task_records)
+        rollout_duration = rollout_end - rollout_start
+        sim_fps = total_sim_frames / rollout_duration if rollout_duration > 0 else 0.0
+
+        logger.info(
+            f"Rollout generation complete: "
+            f"{len(task_records)} tasks, {total_sim_frames} sim frames, "
+            f"{rollout_duration:.2f}s, {sim_fps:.2f} sim FPS"
+        )
+
+        # Finalize rollout (adds task events, rollout-level trace event, and dumps trace file)
+        self.tracing_manager.finalize_rollout(
+            task_records=task_records,
+            rollout_start_time=rollout_start,
+            rollout_end_time=rollout_end,
+            continuous=self.config.vla.continuous,
+        )
+
+        results = self._pack_grpo_results(
+            self.n_generation, payload_indices, task_records, is_validation
         )
 
         self.model._set_fsdp_reshard_after_forward(
             self.config.train.fsdp_reshard_after_forward
         )
-
         return results
 
-    def _rollout_collection(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: BaseDataPacker,
-        data_fetcher: DataFetcherBase,
-        **kwargs,
-    ):
-        n_generation = max(1, self.config.rollout.n_generation)
-        num_batches = len(payloads)
-        collected_results = []
-        for i in range(num_batches):
-            try:
-                group_results = self._generate_minibatch(
-                    payloads=[payloads[i]] * n_generation,
-                    is_validation=False,
-                )
-                collected_results.extend(group_results)
-            except Exception as e:
-                logger.warning(
-                    f"[Rollout Collection] Prompt failed likely due to sim timeout, prompt dropped...: {e}"
-                )
-                self._destroy_parallel_envs()
-                collected_results.append(RolloutResult(completions=[]))
-        return collected_results
-
-    def _rollout_validation(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: BaseDataPacker,
-        data_fetcher: DataFetcherBase,
-        **kwargs,
-    ):
-        batch_size = max(1, self.config.validation.batch_size)
-        num_batches = (len(payloads) + batch_size - 1) // batch_size
-        valid_results = []
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(payloads))
-            payload_batch = payloads[start_idx:end_idx]
-            while True:
-                try:
-                    group_results = self._generate_minibatch(
-                        payloads=payload_batch,
-                        is_validation=True,
-                    )
-                    break
-                except Exception as e:
-                    logger.warning(
-                        f"[Rollout Validation] Batch failed likely due to sim timeout, retrying...: {e}"
-                    )
-                    self._destroy_parallel_envs()
-                    continue
-            valid_results.extend(group_results)
-        return valid_results
-
-    def _setup_parallel_envs(
-        self, payloads: List[RLPayload], gen_indices: List[int], is_validation: bool
-    ):
-        """
-        Setup parallel environment workers
-
-        Args:
-            payloads: List of RLPayload objects containing task information
-            gen_indices: List of generation indices (for varying random seeds)
-            is_validation: Whether to save validation videos
-
-        Returns:
-            Dict with initial_data containing: task_descriptions, inputs, task_records, valid_video
-
-        Side Effects:
-            Populates self.sim_processes, self.sim_input_queues, self.sim_output_queues
-        """
-        batch_size = len(payloads)
-
-        # Extract task information from payloads and construct env configs
-        task_suite_names = []
-        task_ids = []
-        trial_ids = []
-        max_steps_list = []
-
-        for payload in payloads:
-            task_suite_names.append(payload.prompt.get("task_suite_name"))
-            task_ids.append(payload.prompt.get("task_id", 0))
-            trial_ids.append(payload.prompt.get("trial_id", 0))
-            max_steps_list.append(
-                MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
-            )
-
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        if len(cuda_visible_devices.split(",")) >= 8:
-            os.environ["CUDA_VISIBLE_DEVICES"] = f"{torch.distributed.get_rank()}"
-        # logger.info(f"Setting CUDA_VISIBLE_DEVICES to {cuda_visible_devices}")
-        # Spawn worker processes for each environment (stored in member variables/[0].content
-        for idx in range(batch_size):
-            task_name = task_suite_names[idx]
-            t_id = task_ids[idx]
-            tr_id = trial_ids[idx]
-            max_steps = max_steps_list[idx]
-            input_q = Queue()
-            output_q = Queue()
-
-            # Determine worker function based on task type
-            if "libero" in task_name.lower():
-                worker_fn = libero_env_worker
-            elif "robotwin" in task_name.lower():
-                worker_fn = robotwin_env_worker
-            else:
-                logger.warning(f"Unknown task type {task_name}, defaulting to LIBERO")
-                worker_fn = libero_env_worker
-
-            args = (task_name, t_id, tr_id, input_q, output_q, is_validation, max_steps)
-            p = Process(target=worker_fn, args=args)
-            p.start()
-            self.sim_processes.append(p)
-            self.sim_input_queues.append(input_q)
-            self.sim_output_queues.append(output_q)
-
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
-        logger.debug(
-            f"Spawned {len(self.sim_processes)} worker processes (total sim pool: {len(self.sim_processes)})"
-        )
-
-        # Collect initial observations from workers
-        task_descriptions = []
-        inputs = []
-        task_records = []
-        valid_video = defaultdict(list)
-
-        for idx in range(batch_size):
-            init_data = self.sim_output_queues[idx].get(timeout=120)
-            assert (
-                init_data["type"] == "init"
-            ), f"Expected 'init', got '{init_data['type']}'"
-
-            task_descriptions.append(init_data["task_description"])
-            inputs.append(
-                obs_to_vla_input(
-                    init_data["obs"],
-                    is_robotwin="robotwin" in task_suite_names[idx].lower(),
-                )
-            )
-            task_records.append(
-                {
-                    "active": init_data["active"],
-                    "complete": init_data["complete"],
-                    "finish_step": init_data["finish_step"],
-                    "task_file_name": init_data["task_file_name"],
-                    "task_id": task_ids[idx],
-                    "trial_id": trial_ids[idx],
-                    "gen_idx": gen_indices[idx],
-                    "task_suite_name": task_suite_names[idx],
-                }
-            )
-
-            # Collect initial video frames
-            if is_validation:
-                valid_video[init_data["task_file_name"]].extend(
-                    init_data["valid_images"]
-                )
-
-        initial_data = {
-            "task_descriptions": task_descriptions,
-            "inputs": inputs,
-            "task_records": task_records,
-            "valid_video": valid_video,
-        }
-
-        return initial_data
-
-    def _destroy_parallel_envs(self):
-        """
-        Cleanly destroy parallel environment workers and reset simulation pool
-
-        Side Effects:
-            - Terminates processes in self.sim_processes
-            - Resets all self.sim_* member variables to empty
-        """
-        if not self.sim_processes:
-            return  # Nothing to clean up
-
-        logger.debug(f"Destroying {len(self.sim_processes)} simulation processes...")
-
-        # Send termination signal to all workers
-        for q in self.sim_input_queues:
-            try:
-                q.put(None, timeout=1)
-            except Exception:
-                pass  # Ignore errors, process termination will handle stuck workers
-
-        # Wait for processes to finish, terminate if hung
-        for p in self.sim_processes:
-            p.join(timeout=20)
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=5)  # Wait again after terminate
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=2)  # Final wait after kill
-
-        # Reset simulation pool state
-        num_destroyed = len(self.sim_processes)
-        self.sim_processes = []
-        self.sim_input_queues = []
-        self.sim_output_queues = []
-
-        logger.debug(f"Destroyed {num_destroyed} simulation processes, pool reset")
-
-    def _process_input(
-        self, inputs: List[Dict], task_descriptions: List[str]
-    ) -> Dict[str, torch.Tensor]:
+    def _process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """
         Process inputs for VLA model (matching SimpleVLA-RL's process_input)
 
@@ -444,70 +482,40 @@ class OpenVLARollout(RolloutBase):
         Returns:
             Processed batch data for VLA model
         """
-        batchdata = {"input_ids": [], "attention_mask": [], "pixel_values": []}
+        full_images = inputs["full_images"]
+        wrist_images = inputs["wrist_images"]
+        task_descriptions = inputs["task_descriptions"]
 
         vla_type = self.config.vla.vla_type
-        use_proprio = self.config.vla.use_proprio
 
-        if use_proprio:
-            batchdata["proprio"] = []
+        batchdata = {"input_ids": [], "attention_mask": [], "pixel_values": []}
 
-        for i in range(len(inputs)):
-            input_data = inputs[i]
-            task_description = task_descriptions[i]
+        batch_size = full_images.shape[0]
+        for i in range(batch_size):
+            full_image = obs_to_vla_input(full_images[i])
+            full_image = Image.fromarray(full_image).convert("RGB")
+            full_image = center_crop_image(full_image)
+            desp = task_descriptions[i]
 
-            # Process main image
-            if "full_image" in input_data:
-                image_array = input_data["full_image"]
-            elif "agentview_image" in input_data:
-                image_array = input_data["agentview_image"]
-            else:
-                raise RuntimeError(
-                    f"No image found in input_data, expected full_image or agentview_image, got {input_data.keys()}"
-                )
-
-            image = Image.fromarray(image_array).convert("RGB")
-
-            # Center crop if configured
-            image = center_crop_image(image)
-
-            # Create prompt (matching SimpleVLA-RL format)
-            prompt = f"In: What action should the robot take to {task_description.lower()}?\nOut:"
-            batch_feature = self.processor(prompt, image)
+            prompt = f"In: What action should the robot take to {desp.lower()}?\nOut:"
+            batch_feature = self.processor(prompt, full_image)
             input_ids = batch_feature["input_ids"]
             attention_mask = batch_feature.get(
                 "attention_mask", torch.ones_like(input_ids)
             )
             pixel_values = batch_feature["pixel_values"]
 
-            # Handle multi-view images (wrist cameras, etc.)
-            pixel_values_list = [pixel_values]
-
-            # Process additional camera views
             if (
                 hasattr(self.config, "use_wrist_camera")
                 and self.config.use_wrist_camera
             ):
-                if "wrist_image" in input_data:
-                    wrist_image = Image.fromarray(input_data["wrist_image"]).convert(
-                        "RGB"
-                    )
-                    if hasattr(self.config, "center_crop") and self.config.center_crop:
-                        wrist_image = center_crop_image(wrist_image)
-
-                    try:
-                        wrist_feature = self.processor(
-                            "", wrist_image
-                        )  # Empty prompt for additional views
-                        pixel_values_list.append(wrist_feature["pixel_values"])
-                    except Exception:
-                        pass  # Skip if processing fails
-
-            # Concatenate pixel values
-            if len(pixel_values_list) > 1:
-                pixel_values = torch.cat(pixel_values_list, dim=1)
-            else:
-                pixel_values = pixel_values_list[0]
+                wrist_image = obs_to_vla_input(wrist_images[i])
+                wrist_image = Image.fromarray(wrist_images[i]).convert("RGB")
+                wrist_image = center_crop_image(wrist_image)
+                wrist_feature = self.processor(prompt, wrist_image)
+                pixel_values = torch.cat(
+                    [pixel_values, wrist_feature["pixel_values"]], dim=1
+                )
 
             # Handle OpenVLA-OFT specific formatting
             if vla_type == "openvla-oft":
@@ -541,13 +549,6 @@ class OpenVLARollout(RolloutBase):
             batchdata["attention_mask"].append(attention_mask)
             batchdata["pixel_values"].append(pixel_values)
 
-            # Process proprioception for robotwin
-            if use_proprio and "state" in input_data:
-                norm_stats = self.hf_config.norm_stats.get("proprio", {})
-                proprio = input_data["state"]
-                proprio = normalize_proprio(proprio, norm_stats)
-                batchdata["proprio"].append(torch.from_numpy(proprio))
-
         # Device placement
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -558,10 +559,11 @@ class OpenVLARollout(RolloutBase):
                 x.transpose(0, 1) for x in batchdata["attention_mask"]
             ]
 
-            pad_token_id = getattr(self.processor.tokenizer, "pad_token_id", 0)
             batchdata["input_ids"] = (
                 pad_sequence(
-                    batchdata["input_ids"], batch_first=True, padding_value=pad_token_id
+                    batchdata["input_ids"],
+                    batch_first=True,
+                    padding_value=self.pad_token_id,
                 )
                 .squeeze(-1)
                 .to(device)
@@ -575,7 +577,7 @@ class OpenVLARollout(RolloutBase):
             )
 
             # Handle padding and sorting (matching SimpleVLA-RL)
-            padding_mask = batchdata["input_ids"].ne(pad_token_id)
+            padding_mask = batchdata["input_ids"].ne(self.pad_token_id)
             padding_mask = ~padding_mask
             padding_mask = padding_mask.int()
             sorted_indices = torch.argsort(
@@ -591,20 +593,10 @@ class OpenVLARollout(RolloutBase):
             batchdata["pixel_values"] = torch.cat(batchdata["pixel_values"], dim=0).to(
                 device
             )
-
-            if use_proprio:
-                batchdata["proprio"] = torch.stack(batchdata["proprio"], dim=0).to(
-                    device
-                )
         else:
             # Standard batch processing
             for key in ["input_ids", "attention_mask", "pixel_values"]:
                 batchdata[key] = torch.cat(batchdata[key], dim=0).to(device)
-
-            if use_proprio:
-                batchdata["proprio"] = torch.stack(batchdata["proprio"], dim=0).to(
-                    device
-                )
         return batchdata
 
     def _generate_one_step_oft(
@@ -621,266 +613,121 @@ class OpenVLARollout(RolloutBase):
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             # Try to call the VLA model's generation method
-            actions, responses = self.model.model.generate_action(
+            actions, responses, logprobs = self.model.model.generate_action(
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 proprio=proprio,
                 attention_mask=attention_mask,
-                padding_idx=getattr(self.processor.tokenizer, "pad_token_id", 0),
+                padding_idx=self.pad_token_id,
                 do_sample=not is_valid,
                 unnorm_key=getattr(self.config, "unnorm_key", "libero_10_no_noops"),
                 temperature=temperature,
             )
 
-            # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
-            if isinstance(actions, torch.Tensor):
-                actions_np = actions.cpu().numpy()
-            else:
-                actions_np = actions
+            actions = normalize_gripper_action(actions)
+            actions = invert_gripper_action(actions)
 
             return {
-                "action": actions_np,
+                "action": actions,
                 "responses": responses,
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
+                "old_log_probs": logprobs,
             }
 
     def _pack_grpo_results(
         self,
-        vla_history: List[Dict],
+        n_generation: int,
+        payload_indices: List[int],
         task_records: List[Dict],
-        group_size: int,
         is_validation: bool,
     ):
         """
-        Pack GRPO results: apply filtering, compute old_log_probs, create RolloutResults
-
-        This function:
-        1. Checks GRPO filtering criteria (if enabled)
-        2. If group is invalid, returns None (skips expensive log prob computation)
-        3. If group is valid, extracts trajectories and computes old_log_probs
-        4. Creates and returns RolloutResult objects
+        Pack GRPO results and create RolloutResults
 
         Args:
-            vla_history: List of step_data dicts from _parallel_inference_and_sim
+            n_generation: Number of generations per payload
+            payload_indices: List of payload indices
             task_records: List of task metadata dicts
-            group_size: Number of episodes in the group (n_generation)
-            enable_filtering: Whether to apply GRPO filtering
+            is_validation: Whether to save validation videos
 
         Returns:
             List of RolloutResult objects if valid, None if filtered out
         """
-        n_success = sum([task_records[i]["complete"] for i in range(group_size)])
-        if not is_validation:
-            task_id = task_records[0]["task_id"]
-            trial_id = task_records[0]["trial_id"]
+
+        n_payloads = len(payload_indices) // n_generation
+        successes = [0] * n_payloads
+        for i in range(n_payloads):
+            for j in range(n_generation):
+                payload_idx = i * n_generation + j
+                if task_records[payload_idx]["complete"]:
+                    successes[i] += 1
+        success_rates = [successes[i] / n_generation for i in range(n_payloads)]
+        avg_success_rate = sum(success_rates) / n_payloads * 100
+
+        if is_validation:
             logger.info(
-                f"[Rollout] task_id: {task_id}, trial_id: {trial_id}, success rate: {n_success}/{group_size}"
+                f"Validation {n_payloads} avg success rate: {avg_success_rate:.2f}%"
             )
         else:
-            logger.info(f"[Validation] success rate: {n_success}/{group_size}")
+            formatted_rates = ", ".join(
+                [f"{rate * 100:.2f}%" for rate in success_rates]
+            )
+            logger.info(
+                f"Rollout {n_payloads}x{n_generation} success rates: [{formatted_rates}], avg {avg_success_rate:.2f}%"
+            )
 
-        # Check GRPO filtering criteria first (before expensive log prob computation)
-        num_chunks = len(vla_history)
-        trajectories = [{} for _ in range(group_size)]
-        for episode_idx in range(group_size):
-            for key in ["input_ids", "attention_mask", "pixel_values", "responses"]:
-                trajectories[episode_idx][key] = torch.stack(
-                    [
-                        vla_history[step_idx][key][episode_idx]
-                        for step_idx in range(num_chunks)
-                    ],
-                    dim=0,
-                )
-
-        # Compute old_log_probs for each episode by replaying trajectory
-        completions = []
-        with (
-            torch.no_grad(),
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+        def _trim_input_ids(
+            input_ids: List[torch.Tensor], attention_mask: List[torch.Tensor]
         ):
-            for episode_idx in range(group_size):
-                traj = trajectories[episode_idx]
-                traj["old_log_probs"] = self.model.forward_with_trajectory_structure(
-                    input_ids=traj["input_ids"],
-                    pixel_values=traj["pixel_values"],
-                    attention_mask=traj["attention_mask"],
-                    labels=traj["responses"],
-                    temperature=self.config.rollout.sampling_config.temperature,
-                    proprio=None,
-                ).logprobs
+            """Remove padding tokens from input_ids using attention_mask."""
+            trimmed_input_ids, trimmed_attention_mask = [], []
+            for step_input_ids, step_attention_mask in zip(input_ids, attention_mask):
+                # Convert to CPU for indexing if needed, then create boolean mask
+                valid_mask = step_attention_mask.bool()
+                trimmed_step_input_ids = step_input_ids[valid_mask]
+                trimmed_step_attention_mask = torch.ones_like(trimmed_step_input_ids)
+                trimmed_input_ids.append(trimmed_step_input_ids)
+                trimmed_attention_mask.append(trimmed_step_attention_mask)
+            return trimmed_input_ids, trimmed_attention_mask
 
-                trajectory_id = save_trajectory_to_buffer(
-                    traj,
-                    buffer_dir=os.path.join(
-                        self.config.train.output_dir, "replay_buffer"
-                    ),
+        def pack_trajectory(payload_idx: int):
+            start_idx = payload_idx * n_generation
+            completions = []
+            sr = success_rates[payload_idx]
+            filter = sr == 0 or sr == 1
+
+            for i in range(n_generation):
+                record = task_records[start_idx + i]
+                traj = {}
+                record["input_ids"], record["attention_mask"] = _trim_input_ids(
+                    record["input_ids"], record["attention_mask"]
                 )
-                # {'active': False, 'complete': True, 'finish_step': 164, 'task_file_name': 'libero_10_task_5_trial_13', 'task_id': 5, 'trial_id': 13, 'gen_idx': 0, 'task_suite_name': 'libero_10'}
+                for key in [
+                    "input_ids",
+                    "attention_mask",
+                    "pixel_values",
+                    "responses",
+                    "old_log_probs",
+                ]:
+                    traj[key] = torch.stack(record[key], dim=0)
+
+                trajectory_id = (
+                    save_trajectory_to_buffer(
+                        traj,
+                        buffer_dir=os.path.join(
+                            self.config.train.output_dir, "replay_buffer"
+                        ),
+                    )
+                    if not filter
+                    else ""
+                )
                 completions.append(
                     {
-                        "complete": bool(task_records[episode_idx]["complete"]),
-                        "finish_step": int(task_records[episode_idx]["finish_step"]),
+                        "complete": bool(task_records[start_idx + i]["complete"]),
+                        "finish_step": int(task_records[start_idx + i]["finish_step"]),
                         "trajectory_id": trajectory_id,
                     }
                 )
-        if is_validation:
-            return [RolloutResult(completions=[c]) for c in completions]
-        else:
-            return [RolloutResult(completions=completions)]
+            return RolloutResult(completions=completions)
 
-    @torch.no_grad()
-    def _generate_minibatch(
-        self, payloads: List[RLPayload], is_validation: bool = False
-    ):
-        """
-        Run parallel VLA inference and simulation for a minibatch
-
-        Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
-
-        Args:
-            payloads: List of RLPayload objects containing task information
-            is_validation: Whether to save validation videos
-
-        Returns:
-            Tuple of (vla_history, task_records)
-        """
-        # Extract task info from payloads (already available, no need to pass through initial_data)
-        task_suite_names = []
-        task_ids = []
-        trial_ids = []
-        max_steps = -1
-        for payload in payloads:
-            task_suite_names.append(payload.prompt.get("task_suite_name"))
-            task_ids.append(payload.prompt.get("task_id", 0))
-            trial_ids.append(payload.prompt.get("trial_id", 0))
-            max_steps = max(
-                max_steps, MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
-            )
-        gen_indices = (
-            [0] * len(payloads) if is_validation else [i for i in range(len(payloads))]
-        )
-
-        # CRITICAL: Release GPU resources before spawning sim workers
-        # After NCCL broadcast, GPU SM resources may still be occupied by:
-        # - Lingering CUDA kernels from weight sync
-        # - VLA model occupying GPU memory
-        # - CUDA context fragmentation
-        # Without this, sim workers timeout trying to initialize rendering contexts
-        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
-        torch.cuda.empty_cache()  # Free up cached GPU memory
-        logger.debug(
-            f"Released GPU resources before spawning {len(payloads)} sim workers"
-        )
-
-        # Setup parallel environments (populates self.sim_processes, self.sim_input_queues, self.sim_output_queues)
-        initial_data = self._setup_parallel_envs(payloads, gen_indices, is_validation)
-
-        # Unpack initial data
-        task_descriptions = initial_data["task_descriptions"]
-        inputs = initial_data["inputs"]
-        task_records = initial_data["task_records"]
-        valid_video = initial_data["valid_video"]
-
-        # Use member variables for process/queue management
-        batch_size = len(self.sim_processes)
-
-        # Episode execution loop
-        step = 0
-        vla_history = []
-
-        from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
-
-        while step < max_steps:
-            # Find active environments
-            active_indices = [i for i, r in enumerate(task_records) if r["active"]]
-            if not active_indices:
-                break
-
-            # VLA model inference on all inputs
-            current_inputs = inputs
-            current_task_descriptions = task_descriptions
-
-            vla_input = self._process_input(current_inputs, current_task_descriptions)
-            vla_output = self._generate_one_step_oft(vla_input, is_validation)
-
-            # if task_ids[0] == 0 and trial_ids[0] == 0 and gen_indices[0] == 0:
-            #     # logger.info(f"task_suite_name: {task_suite_names[0]}, task_id: {task_ids[0]}, trial_id: {trial_ids[0]}, gen_idx: {gen_indices[0]}")
-            #     # logger.info(f"current_inputs.full_image {current_inputs[0]['full_image'].shape}, {current_inputs[0]['full_image']}")
-            #     # logger.info(f"current_task_descriptions {current_task_descriptions}")
-            #     for k, v in vla_input.items():
-            #         logger.info(f"vla_input {k} {v.shape}")
-            #     for k, v in vla_output.items():
-            #         logger.info(f"vla_output {k} {v.shape}")
-
-            step_data = {
-                "input_ids": vla_input["input_ids"],
-                "attention_mask": vla_input["attention_mask"],
-                "pixel_values": vla_input["pixel_values"],
-                "responses": vla_output["responses"],
-                "action": vla_output["action"],
-            }
-
-            vla_history.append(step_data)
-
-            # Send actions to active workers
-            for idx in active_indices:
-                self.sim_input_queues[idx].put(step_data["action"][idx])
-
-            # Collect results from active workers
-            new_inputs = inputs.copy()
-            for idx in active_indices:
-                result = self.sim_output_queues[idx].get(timeout=30)
-                assert (
-                    result["type"] == "step"
-                ), f"Expected 'step', got '{result['type']}'"
-
-                new_inputs[idx] = obs_to_vla_input(
-                    result["obs"],
-                    is_robotwin="robotwin" in task_suite_names[idx].lower(),
-                )
-                task_records[idx]["active"] = result["active"]
-                task_records[idx]["complete"] = result["complete"]
-                task_records[idx]["finish_step"] = result["finish_step"]
-
-                # Collect video frames
-                if is_validation and len(result["valid_images"]) > 0:
-                    valid_video[task_records[idx]["task_file_name"]].extend(
-                        result["valid_images"]
-                    )
-
-                if not result["active"]:
-                    status = "✅ SUCCESS" if result["complete"] else "❌ FAILED"
-                    logger.debug(
-                        f"Task {idx} [task_id={task_ids[idx]}, trial_id={trial_ids[idx]}, gen={gen_indices[idx]}]: {status} (steps={result['finish_step']})"
-                    )
-
-            inputs = new_inputs
-            step += NUM_ACTIONS_CHUNK
-
-        # Save rollout videos
-        if valid_video:
-            rollout_dir = os.path.join(self.config.train.output_dir, "vla_rollouts")
-
-            for task_file, images in valid_video.items():
-                if len(images) > 0:
-                    complete = any(
-                        r["complete"]
-                        for r in task_records
-                        if r["task_file_name"] == task_file
-                    )
-
-                    try:
-                        save_rollout_video(images, rollout_dir, task_file, 0, complete)
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
-                        import traceback
-
-                        traceback.print_exc()
-
-        self._destroy_parallel_envs()
-
-        return self._pack_grpo_results(
-            vla_history, task_records, batch_size, is_validation
-        )
+        results = [pack_trajectory(i) for i in range(n_payloads)]
+        return results

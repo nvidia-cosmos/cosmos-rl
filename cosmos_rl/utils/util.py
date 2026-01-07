@@ -1245,6 +1245,7 @@ def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
         model_name_or_path,
         trust_remote_code=True,
     )
+
     # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
     if getattr(tokenizer, "pad_token_id", None) is None:
         try:

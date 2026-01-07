@@ -510,6 +510,12 @@ class PolicyStatusManager:
             if self.config.mode == "colocated":
                 # In colocated mode, we initially trigger data fetch for step 1 since the rollouts are generated locally.
                 self.current_step += 1
+                if self.config.validation.enable and (
+                    self.current_step % self.config.validation.freq == 0
+                    or self.current_step == self.total_steps
+                ):
+                    self.data_fetcher.validation_activate_dataloader(self.current_step)
+
                 for replica in valid_replicas:
                     self.remain_samples_num -= self.config.train.train_batch_per_replica
                     command.DataFetchCommand.trigger(

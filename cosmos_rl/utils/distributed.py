@@ -750,12 +750,13 @@ class DistKVStore:
         # retry every 10 seconds
         timeout = 10
         n_max_retries = max(1, int(constant.COSMOS_TCP_STORE_TIMEOUT / timeout))
-        for _ in range(n_max_retries):
+        for i in range(n_max_retries):
             try:
                 self.local_store.wait(keys, timedelta(seconds=timeout))
                 return
             except Exception as e:
-                logger.debug(f"Failed to wait for kv store blocking wait: {e}")
+                if i % 10 == 0:
+                    logger.debug(f"Failed to wait for kv store blocking wait: {e}")
                 if self.shutdown_event is not None and self.shutdown_event.is_set():
                     raise RuntimeError("Stop signal received")
         raise RuntimeError("Failed to wait for kv store blocking wait")

@@ -15,6 +15,7 @@
 
 import time
 import threading
+import uuid
 import torch
 import atexit
 
@@ -129,6 +130,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         else:
             self.val_batch_size = None
         self.background_thread: threading.Thread | None = None
+        self.teacher_interact_thread: threading.Thread | None = None
+        self.teacher_interact_queue: Queue = Queue()
 
         # For Polocy to Rollout weight mapping
         hf_config = util.retry(AutoConfig.from_pretrained)(
@@ -176,6 +179,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_data_packer=kwargs.get("val_data_packer"),
             val_reward_fns=kwargs.get("val_reward_fns"),
         )
+        self.non_trainable_params_received = False
 
     def setup(
         self,
@@ -299,7 +303,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.background_thread is not None:
                 self.background_thread.join()
                 self.background_thread = None
-
+            if self.teacher_interact_thread is not None:
+                self.teacher_interact_thread.join()
+                self.teacher_interact_thread = None
             if self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -781,6 +787,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completions = rr.completions
                         p.completion_logprobs = rr.completion_logprobs
                         p.completion_token_ids = rr.completion_token_ids
+                        p.prompt_logprobs = rr.prompt_logprobs
                         p.weight_version = self.current_weight_version
                         p.cumulative_logprob = rr.cumulative_logprob
                         if self.config.rollout.multi_turn_config.enable:
@@ -817,22 +824,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
                     for i in range(len(payloads)):
-                        (
-                            payloads[i].completions,
-                            payloads[i].completed_conversations,
-                            payloads[i].completion_logprobs,
-                            payloads[i].completion_token_ids,
-                            _,
-                        ) = self.val_data_packer.get_rollout_output(
-                            payloads[i].completions,
-                            payloads[i].completed_conversations,
-                            payloads[i].completion_logprobs,
-                            payloads[i].completion_token_ids,
-                        )
-                        if self.config.train.train_policy.rollout_as_token_ids:
-                            payloads[i].completions = [""] * len(
-                                payloads[i].completions
-                            )
+                        # we don't need to upload completions, completed_conversations, completion_logprobs, completion_token_ids for validation.
+                        # some other fields are removed inside `report_rollouts` function.
+                        payloads[i].completions = None
+                        payloads[i].completed_conversations = None
+                        payloads[i].completion_logprobs = None
+                        payloads[i].completion_token_ids = None
 
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
@@ -908,9 +905,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
-            assert (
-                not command.trainable_only
-            ), "all params must be transferred at the first time P2R"
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
             )
@@ -958,7 +952,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 copy_stream.wait_event(recv_ready)
                 with torch.cuda.stream(copy_stream):
                     logger.debug(
-                        f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
+                        f"[Rollout] Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024} MB"
                     )
                     for completion in pending_completions:
                         completion()
@@ -1034,6 +1028,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
             if command.trainable_only:
+                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only P2R."
                 if not hasattr(self, "p2r_synced_trainable_params_cnt"):
                     self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
                 assert (
@@ -1041,6 +1036,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
 
             self.state.set_weight_synced()
+        if not command.trainable_only:
+            self.non_trainable_params_received = True
 
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand
@@ -1064,7 +1061,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.prepare_trainable_params()
             skipped_params_cnt = 0
             transferred_params_cnt = 0
-            logger.info("Starting broadcasting of parameters to all replicas.")
+            logger.info(
+                "[Rollout] Starting broadcasting of parameters to all replicas."
+            )
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
                 assert (
@@ -1108,7 +1107,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             logger.info(
                 f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
             )
+            if not broadcast_command.trainable_only:
+                self.non_trainable_params_received = True
+
             if broadcast_command.trainable_only:
+                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only R2R."
                 if not hasattr(self, "r2r_synced_trainable_params_cnt"):
                     self.r2r_synced_trainable_params_cnt = transferred_params_cnt
                 if hasattr(self, "p2r_synced_trainable_params_cnt"):
@@ -1146,6 +1149,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.validation_flag.set()
 
         if broadcast_command.replica_should_stop():
+            data = {
+                "is_end": True,
+                "prompt_idx": -1,
+                "completion_token_ids": [],
+            }
+            self.redis_controller.publish_teacher_request(data, self.replica_name)
+            logger.info("[Rollout] Published end event to reference")
             # Do validation if the flag is set before stopping.
             if self.validation_flag.is_set():
                 self.do_validation()
@@ -1168,6 +1178,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
                 self._command_queue.put(command)
+
+    def teacher_interact_loop(self):
+        """Background task to interact with teacher model for distillation"""
+        while not self.shutdown_signal.is_set():
+            if not self.teacher_interact_queue.empty():
+                data = self.teacher_interact_queue.get_nowait()
+                self.redis_controller.publish_teacher_request(data, self.replica_name)
+            time.sleep(0.01)
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
@@ -1225,16 +1243,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 #     len(prompts) % self.parallel_dims.mesh["dp"].size() == 0
                 # ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
                 ranks_to_scatter = self.parallel_dims.mesh["dp"].size()
-                prompts_per_rank = (
-                    len(prompts) + ranks_to_scatter - 1
-                ) // ranks_to_scatter
+
+                # Distribute prompts in an interleaved (round-robin) fashion
+                # Rank 0 gets indices [0, N, 2N, ...], Rank 1 gets [1, N+1, 2N+1, ...], etc.
                 scattered_prompts_and_is_end = []
                 for rank in range(ranks_to_scatter):
-                    start_idx = rank * prompts_per_rank
-                    end_idx = min(start_idx + prompts_per_rank, len(prompts))
+                    rank_prompts = prompts[rank::ranks_to_scatter]
                     scattered_prompts_and_is_end.append(
                         (
-                            prompts[start_idx:end_idx],
+                            rank_prompts,
                             is_end,
                         )
                     )
@@ -1550,6 +1567,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completions = result.completions
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
+                old_payload.prompt_logprobs = result.prompt_logprobs
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.config.rollout.multi_turn_config.enable:
@@ -1561,13 +1579,40 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         )
                     )
                 valid_payloads.append(old_payload)
-
+            valid_payloads = self.enqueue_teacher_calculation(valid_payloads)
             self.reward_dispatcher.enqueue_rewards_cal(
                 valid_payloads,
                 False,
                 self.current_weight_version,
             )
         return valid_payloads_list, valid_result
+
+    def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:
+        """
+        Enqueue the teacher calculation for the payloads.
+        Args:
+            payloads: The payloads to enqueue the teacher calculation for.
+        Returns:
+            The payloads with the teacher result uuid.
+        """
+        if not self.config.distillation.enable:
+            return payloads
+        assert all(
+            payload.completion_token_ids is not None for payload in payloads
+        ), "All payloads must have completion token ids"
+        for payload in payloads:
+            data = {
+                "prompt_idx": payload.prompt_idx,
+                "completion_token_ids": payload.completion_token_ids,
+            }
+            uuid_values = []
+            for _ in payload.completion_token_ids:
+                uuid_value = str(uuid.uuid4())
+                uuid_values.append(uuid_value)
+            data["teacher_result_uuid"] = uuid_values
+            self.teacher_interact_queue.put_nowait(data)
+            payload.teacher_result_uuids = uuid_values
+        return payloads
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.
@@ -1577,6 +1622,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
+        if self.config.distillation.enable:
+            # create a thread to interact with teacher model
+            self.teacher_interact_thread = threading.Thread(
+                target=self.teacher_interact_loop, daemon=True
+            )
+            self.teacher_interact_thread.start()
 
         self.main_loop()
         self.inference_stream.synchronize()

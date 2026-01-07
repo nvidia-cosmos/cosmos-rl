@@ -228,7 +228,7 @@ class QwenModel(VLMBaseModel):
 
                 for name in weights_of_ckpt.keys():
                     tensor = weights_of_ckpt[name]
-                    dest_name, shared_weight = convert_weight_from_hf(
+                    dest_name, sharded_weight = convert_weight_from_hf(
                         tensor, name, model_type, self.parallel_dims
                     )
                     if dest_name in lm_state_dict:
@@ -248,10 +248,10 @@ class QwenModel(VLMBaseModel):
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
                     assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                        local_view.shape == sharded_weight.shape
+                    ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
                     with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+                        local_view.data.copy_(sharded_weight)
 
     @property
     def cp_mesh(self):

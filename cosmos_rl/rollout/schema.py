@@ -37,6 +37,9 @@ class RolloutResult(BaseModel):
     # The logprobs of the generated completions
     completion_logprobs: Optional[List[List[float]]] = None
 
+    # The logprobs of the input prompt
+    prompt_logprobs: Optional[List[float]] = None
+
     # The token ids of the generated completions
     completion_token_ids: Optional[List[List[int]]] = None
 

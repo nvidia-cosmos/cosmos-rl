@@ -1,13 +1,26 @@
 # Cosmos RL Reward
 
-A service for calculating rewards of generated videos for world foundational model reinforcement learning.
+A service for calculating rewards of generated videos/images for world foundational model reinforcement learning.
 
 
-## Overview
+## 1. Overview
 
-`cosmos_rl_reward` is a Python package that provides a service architecture for computing rewards in world foundational model RL applications. It handles reward calculation requests from client, enabling efficient and scalable reward computation. Currently two types of reward are supported: `cosmos_reason1` and `dance_grpo`. `cosmos_reason1` uses [`nvidia/Cosmos-Reason1-7B-Reward`](https://huggingface.co/nvidia/Cosmos-Reason1-7B-Reward) as the reward model, while `dance_grpo` adopts the [`VideoAlign`](https://huggingface.co/KwaiVGI/VideoReward) based `VQ`, `MQ` and `TA` scores from [`DanceGRPO`](https://github.com/XueZeyue/DanceGRPO)
+`cosmos_rl_reward` is a Python package that provides a service architecture for computing rewards in world foundational model RL applications. It handles reward calculation requests from the client, enabling efficient and scalable reward computation.
 
-## Installation
+### Supported Reward Types
+
+**Video Rewards:**
+
+- `cosmos_reason1`: Uses [`nvidia/Cosmos-Reason1-7B-Reward`](https://huggingface.co/nvidia/Cosmos-Reason1-7B-Reward) as the reward model
+- `dance_grpo`: Adopts the [`VideoAlign`](https://huggingface.co/KwaiVGI/VideoReward) based `VQ`, `MQ` and `TA` scores from [`DanceGRPO`](https://github.com/XueZeyue/DanceGRPO)
+
+**Image Rewards:**
+- `hpsv2`: [HPSv2](https://github.com/tgxs002/HPSv2) - Human Preference Score v2 for text-to-image alignment
+- `image_reward`: [ImageReward](https://github.com/THUDM/ImageReward) - Image quality and prompt alignment scoring
+- `ocr`: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) based reward for text rendering accuracy
+- `gen_eval`: [GenEval](https://github.com/djghosh13/geneval) - Object detection based compositional generation evaluation
+
+## 2. Installation
 
 Install the package from source:
 
@@ -21,9 +34,9 @@ If in-place edition is needed, install with:
 python -m pip install -e .
 ```
 
-## Quick Start
+## 3. Quick Start
 
-### 1. Prepare the Environment
+### 3.1 Prepare the Environment
 
 Set up the required environment and dependencies:
 
@@ -41,7 +54,7 @@ This command will:
 
 The directories where to build the virtual environment and where to download the models are specified in the `toml` configuration file. For each reward type, its `venv_python` decides the virtual environment directory, while `download_path` decides the folder to download related models to.
 
-### 2. Start the Reward Service
+### 3.2 Start the Reward Service
 
 Launch the reward calculation service:
 
@@ -56,12 +69,15 @@ The configuration `toml` file specifies the basic setting of the service includi
 By modifying the settings in configuration `toml`, the properties of the service can be adjust.
 
 
-### 3. Test with Example Client
+### 3.3 Test with Example Client
 
 Run the example client to interact with the service:
 
 ```bash
-python cosmos_rl_reward/example/client.py
+# Video
+python cosmos_rl_reward/example/video_client.py
+# Image
+python cosmos_rl_reward/example/image_client.py
 ```
 
 This example demonstrates how to:
@@ -70,11 +86,11 @@ This example demonstrates how to:
 - Receive and process results
 - The host url in the example can be adjust accordingly.
 
-## Configuration
+## 4. Configuration
 
 The service is configured through `cosmos_rl_reward/configs/rewards.toml`. Key configuration options include:
 
-### Server Configuration
+### 4.1 Server Configuration
 The cosmos-rl-reward service is launched at the following `host:port` url. Clients will request to this url:
 
 | Field | Type | Description |
@@ -82,7 +98,7 @@ The cosmos-rl-reward service is launched at the following `host:port` url. Clien
 | `host` | string | The hostname or IP address where the service will listen |
 | `port` | integer | The port number for the service endpoint |
 
-### Redis Configuration
+### 4.2 Redis Configuration
 A Redis server is launched for recording the calculated scores inside the cosmos-rl-reward service. The following specifies the properties of the Redis service:
 
 | Field | Type | Description |
@@ -90,7 +106,7 @@ A Redis server is launched for recording the calculated scores inside the cosmos
 | `redis_host` | string | The hostname or IP address of the Redis server |
 | `redis_port` | integer | The port number of the Redis server |
 
-### Reward Arguments (`[[reward_args]]`)
+### 4.3 Reward Arguments (`[[reward_args]]`)
 
 Each `[[reward_args]]` block defines a reward calculation type. Multiple blocks can be specified.
 
@@ -104,19 +120,35 @@ Each `[[reward_args]]` block defines a reward calculation type. Multiple blocks 
 | `enable` | boolean | Whether this reward calculator is enabled (true/false) |
 
 
-## Service Interface
+## 5. Service Interface
 
-### POST /api/reward/enqueue
+### 5.1 POST /api/reward/pin
+
+#### Request Body
+
+The same as the following `/api/reward/enqueue`
+
+#### Response
+
+```json
+{'message': 'Ping request received'}
+```
+
+If you do not get this message and a 200 status code, please check your network and configuration.
+
+### 5.2 POST /api/reward/enqueue
 
 Submit a reward calculation request to the service queue.
 
-**Request Body**:
+#### Request Body
 
-The request body consists of JSON metadata followed by video bytes, they are combined as a whole chunk of bytes: `<JSON>\n<VIDEO_BYTES>`
-The sent video bytes are bytes of the latents encoded from the original videos to reduce the size. Inside the service the received video bytes are decoded back to normal video format first.
+The request body consists of JSON metadata followed by bytes of the videos/images, which are combined as a whole chunk of bytes: `<JSON>\n<MM_BYTES>`
+The sent videos' bytes are bytes of the latents encoded from the original videos to reduce the size, while images' bytes are directly a tensor. Inside the service, the received video bytes are decoded back to normal video format first.
 
-**JSON Metadata**:
+##### JSON Metadata
+
 ```json
+# Video (Cosmos-Reason1, DanceGRPO)
 {
   "prompts": ["prompt text"],
   "reward_fn": { 
@@ -129,20 +161,65 @@ The sent video bytes are bytes of the latents encoded from the original videos t
     }
   ]
 }
+
+# Image (HPSv2, ImageReward)
+{
+  "prompts": ["a photo of a cat", "a beautiful sunset"]
+  "reward_fn": {
+    "hpsv2": 1.0,
+    "image_reward": 1.0,
+  },
+  "media_type": "image",
+}
+ 
+# Image (OCR)
+{
+  "prompts": ["New York Skyline with 'Hello World' written with fireworks"],
+  "reward_fn": {"ocr": 1.0},
+  "media_type": "image",
+  "ocr_use_gpu": true,
+}
+
+# Image (GenEval)
+{
+  "prompt": "a photo of a brown giraffe and a white stop sign"
+  "reward_fn": {"gen_eval": 1.0},
+	"media_type": "image",
+  "tag": "single_object",
+  "include": [
+    {"class": "giraffe", "count": 1, "color": "brown"},
+    {"class": "stop sign", "count": 1, "color": "black"}
+  ],
+}
 ```
 | Field | Type | Description |
 |-------|------|-------------|
 | `prompts` | List[str] | List of text prompts corresponding to the videos |
 | `reward_fn` | Dict | Reward types with their weights, can specify one or multiple reward types required for the videos |
-| `video_infos` | List[Dict] | Video metadata including fps |
+| `video_infos` | List[Dict] | Video metadata, including fps, not used for images |
+| `media_type` | str | Default to `video`. The image reward should pass it as  `image`. |
+| `ocr_use_gpu` | bool | For OCR reward, whether to use GPU for OCR scorer. |
+| `prompt` | str | For GenEval reward, the description of the image. (GenEval does not support batched data currently; you can divide a batch into separate requests.) |
+| `tag` | str | For GenEval reward, choices in [`single_object`, `two_object`, `counting`, `colors`, `position`, `color_attr`], full definition can be found [here](https://github.com/djghosh13/geneval) |
+| `include` | List[Dict] | For GenEval reward, class, count, and color information of the input image. |
 
-**Response**:
+##### Bytes of MultiModal Data
+
+Images: [`B, H, W, C`]
+
+Videos: [`B, T, C, H, W`]
+
+Detailed loading and processing can be found in the example clients.
+
+#### Response
+
 ```json
 {
   "uuid": "1e29d4bd-51a9-4ee5-84ba-7e26b81ac79c"
 }
 ```
 **Response Fields**:
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `uuid` | string | Unique identifier for tracking this request |
@@ -151,11 +228,12 @@ The sent video bytes are bytes of the latents encoded from the original videos t
 - `200 OK`: Request successfully queued
 
 
-### POST /api/reward/pull
+### 5.3 POST /api/reward/pull
 
 Retrieve completed reward calculation results.
 
-**Request Body**:
+#### Request Body
+
 ```json
 {
   "uuid": "1e29d4bd-51a9-4ee5-84ba-7e26b81ac79c",
@@ -167,55 +245,126 @@ Retrieve completed reward calculation results.
 | `uuid` | str | Request UUID to retrieve returned by enqueue|
 | `type` | str | Reward type: the key string in `reward_fn` when enqueue |
 
-**Response (Cosmos Reason1)**:
-```json
-{
-  "scores": {
-    "prediction": ["Good"],
-    "no_score": [0.9997965693473816],
-    "yes_logit": [17.5],
-    "no_logit": [26.0]
-  },
-  "input_info": {
-    "shape": [1, 16, 24, 54, 96],
-    "dtype": "torch.bfloat16",
-    "min": "0.000",
-    "max": "1.000",
-    "video_infos": [
-      {
-        "video_fps": 16.0
-      }
-    ]
-  },
-  "duration": "2.23",
-  "decoded_duration": "2.02",
-  "type": "cosmos_reason1"
-}
-```
+#### Response
 
-**Response (Dance GRPO)**:
+Inside each field of the response, the values are lists corresponding to the batch size.  
+
 ```json
+# Video (Cosmos-Reason1)
 {
-  "scores": {
-    "vq_reward": [-0.5091875791549683],
-    "mq_reward": [-1.1062785387039185],
-    "ta_reward": [-2.6613192558288574],
-    "overall_reward": [-4.276785373687744]
-  },
-  "input_info": {
-    "shape": [1, 16, 24, 54, 96],
-    "dtype": "torch.bfloat16",
-    "min": "0.000",
-    "max": "1.000",
-    "video_infos": [
-      {
-        "video_fps": 16.0
-      }
-    ]
-  },
-  "duration": "0.77",
-  "decoded_duration": "2.02",
-  "type": "dance_grpo"
+    'scores': {
+        'prediction': ['Good'], 
+        'no_score': [0.9997965693473816], 
+        'yes_logit': [17.5], 
+        'no_logit': [26.0]
+    }, 
+    'input_info': {
+        'shape': [1, 16, 24, 54, 96], 
+        'dtype': 'torch.bfloat16', 
+        'min': '0.000', 
+        'max': '1.000', 
+        'video_infos': [
+            {'video_fps': 16.0}
+        ]
+    }, 
+    'duration': '2.23', 
+    'decoded_duration': '2.02', 
+    'type': 'cosmos_reason1'
+}
+
+# Video (DanceGRPO)
+{
+    'scores': {
+        'vq_reward': [-0.5091875791549683], 
+        'mq_reward': [-1.1062785387039185], 
+        'ta_reward': [-2.6613192558288574], 
+        'overall_reward': [-4.276785373687744]
+    }, 
+    'input_info': {
+        'shape': [1, 16, 24, 54, 96], 
+        'dtype': 'torch.bfloat16', 
+        'min': '0.000', 
+        'max': '1.000', 
+        'video_infos': [
+            {'video_fps': 16.0}
+        ]
+    }, 
+    'duration': '0.77', 
+    'decoded_duration': '2.02', 
+    'type': 'dance_grpo'
+}
+
+# Image (HPSv2)
+{
+    'scores': {
+        'hpsv2': [0.08438428491353989, 0.047684457153081894]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '0.35',
+    'decoded_duration': '0.00',
+    'type': 'hpsv2'
+}
+
+# Image (ImageReward)
+{
+    'scores':{
+        'image_reward': [-2.2803564071655273, -2.2761073112487793]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '0.30',
+    'decoded_duration': '0.00',
+    'type': 'image_reward'
+}
+
+# Image (OCR)
+{
+    'scores': {
+        'ocr_reward': [0.09090909090909094, 0.09999999999999998]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '0.12',
+    'decoded_duration': '0.00',
+    'type': 'ocr'
+}
+
+# Image (GenEval)
+{
+    'scores': {
+        'gen_eval_score': [0.0],
+        'gen_eval_reward': [0.0],
+        'gen_eval_strict': [0.0],
+        'gen_eval_group': {
+            'single_object': [0.0],
+            'two_object': [-10.0],
+            'counting': [-10.0],
+            'colors': [-10.0],
+            'position': [-10.0],
+            'color_attr': [-10.0]
+    },
+    'input_info': {
+        'shape': [1, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '1.07',
+    'decoded_duration': '0.00',
+    'type': 'gen_eval'
 }
 ```
 
@@ -239,7 +388,7 @@ Retrieve completed reward calculation results.
 
 For more detailed usage of the above interface apis, please refer to `cosmos_rl_reward/example/client.py`.
 
-## Building Distribution
+## 6. Building Distribution
 
 ```bash
 python -m build
@@ -248,7 +397,7 @@ ls dist/
 
 Built package wheel and tar files can be found in `dist`. 
 
-## Add New Reward Support
+## 7. Add New Reward Support
 
 To add a new reward support, a reward handler class based on `BaseRewardHandler` should be added like the classes in `cosmos_rl_reward/model/`. The following three interfaces are needed for each reward handler class and a registration is needed with the `reward_name` attribute. Detailed interface implementations and explanations can be found in existing reward examples in `cosmos_rl_reward/model/` and the base class `BaseRewardHandler` in `cosmos_rl_reward/handler/reward_base.py`.
 

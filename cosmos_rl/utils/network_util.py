@@ -56,6 +56,7 @@ def make_request_with_retry(
     requests: Union[Callable, List[Callable]],
     urls: List[str] = None,
     response_parser: Callable = status_check_for_response,
+    exception_parser: Callable = None,
     max_retries: int = COSMOS_HTTP_RETRY_CONFIG.max_retries,
     retries_per_delay: int = COSMOS_HTTP_RETRY_CONFIG.retries_per_delay,
     initial_delay: float = COSMOS_HTTP_RETRY_CONFIG.initial_delay,
@@ -69,6 +70,7 @@ def make_request_with_retry(
         requests (List[Callable]): The functions to make the request in an alternative way
         urls (List[str]): List of host URLs to try
         response_parser (Callable): Function to parse the response
+        exception_parser (Callable): Function to parse the exception
         max_retries (int): Maximum number of retry attempts
         retries_per_delay (int): Number of retries to attempt at each delay level
         initial_delay (float): Initial delay between retries in seconds
@@ -107,6 +109,8 @@ def make_request_with_retry(
                 return r
 
             except Exception as e:
+                if exception_parser is not None and exception_parser(e):
+                    return None
                 last_exception = e
                 url_index += 1
                 if url_index >= (1 if urls is None else len(urls)):

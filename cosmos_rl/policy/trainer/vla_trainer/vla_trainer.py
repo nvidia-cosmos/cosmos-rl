@@ -81,7 +81,15 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         policy_inputs = [
             self.data_packer.get_policy_input(r, self.device) for r in rollouts
         ]
-        max_chunks = max(p.input_ids.shape[0] for p in policy_inputs)
+
+        from cosmos_rl.simulators.libero.utils import LIBERO_MAX_STEPS_MAP
+        from cosmos_rl.dispatcher.data.packer.vla_data_packer import _get_vla_constants
+
+        NUM_ACTIONS_CHUNK, _, _ = _get_vla_constants()
+        max_chunks = (
+            LIBERO_MAX_STEPS_MAP.get(self.config.train.train_policy.dataset.subset, 512)
+            // NUM_ACTIONS_CHUNK
+        )
         for policy_input in policy_inputs:
             episode_data = self.data_packer.policy_collate_fn(policy_input, max_chunks)
             task_id = policy_input.task_id
@@ -95,8 +103,10 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                 max_chunks + TRAINING_CHUNK_SIZE - 1
             ) // TRAINING_CHUNK_SIZE
 
-            logger.info(
-                f"[VLA Train] Task {task_id}_{trial_id} finished @ {policy_input.finish_step}, weight version: {weight_version}"
+            logger.debug(
+                f"[VLA Train] Task {task_id}_{trial_id}, "
+                f"finished @ {policy_input.finish_step}, "
+                f"weight version: {weight_version}"
             )
             with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 for chunk_idx in range(num_training_chunks):
@@ -144,8 +154,8 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
                     # Logging
-                    logger.info(
-                        f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx+1}/{num_training_chunks}: "
+                    logger.debug(
+                        f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
                         f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
                         f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
                         f"mask_sum={chunk_valid_responses.item():.0f}"
@@ -157,10 +167,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
 
         end_event.record()
         logger.info(
-            f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event)/1000.0:.2f}s"
-        )
-        logger.info(
-            f"[VLA Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}"
+            f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event) / 1000.0:.2f}s"
         )
 
         report_data = {}

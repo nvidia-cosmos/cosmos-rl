@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import time
 import torch
 import types
 from functools import partial
@@ -21,7 +22,7 @@ import inspect
 import numpy as np
 import enum
 from functools import cached_property
-from typing import Optional, Dict, Any, Callable, List, Tuple
+from typing import Optional, Dict, Any, Callable, List, Tuple, Set
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -44,6 +45,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_logprobs,
     pack_sequences_info_collect,
     pack_sequences_for_masks,
+    pack_sequences_for_teacher_logprobs,
 )
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -51,6 +53,7 @@ from cosmos_rl.utils.ulysses import (
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
 import cosmos_rl.utils.distributed as dist_util
+import torch.distributed as dist
 
 
 class TrainerPhase(enum.Enum):
@@ -123,7 +126,12 @@ def compute_loss(
     **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
-    current_advantages = torch.masked_select(current_advantages, logprob_masks)
+    if current_advantages.shape == logprob_masks.shape:
+        current_advantages = torch.masked_select(current_advantages, logprob_masks)
+    else:
+        assert (
+            current_advantages.shape == current_token_logps.shape
+        ), f"current_advantages.shape: {current_advantages.shape} != current_token_logps.shape: {current_token_logps.shape}"
 
     assert (
         current_token_logps.shape == current_advantages.shape
@@ -202,10 +210,24 @@ def compute_loss(
         per_token_loss = -torch.clamp(importance_ratio, max=rho) * current_advantages
     else:
         # the standard grpo loss with dual-clip PPO: https://arxiv.org/pdf/1912.09729
-        importance_ratio_clipped = torch.clamp(
-            importance_ratio,
-            1 - config.train.train_policy.epsilon_low,
-            1 + config.train.train_policy.epsilon_high,
+        min_clipped = (
+            1 - config.train.train_policy.epsilon_low
+            if config.train.train_policy.epsilon_low >= 0
+            else None
+        )
+        max_clipped = (
+            1 + config.train.train_policy.epsilon_high
+            if config.train.train_policy.epsilon_high >= 0
+            else None
+        )
+        importance_ratio_clipped = (
+            torch.clamp(
+                importance_ratio,
+                min=min_clipped,
+                max=max_clipped,
+            )
+            if (min_clipped is not None or max_clipped is not None)
+            else importance_ratio
         )
         loss1 = importance_ratio * current_advantages
         loss2 = importance_ratio_clipped * current_advantages
@@ -317,6 +339,9 @@ def compute_loss(
             per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
         )
         kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
+    elif config.train.train_policy.loss_type == "token-sum":
+        per_token_loss = per_token_loss_seq_sum.sum()
+        kl_loss = kl_loss_seq_sum.sum()
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
     return (
@@ -383,7 +408,10 @@ def _swizzle_pp_grpo_forward(
     if "position_ids_before_cp" in kwargs:
         user_input["position_ids"] = kwargs["position_ids_before_cp"]
 
-    if config.train.train_policy.temperature > 1e-6:
+    if (
+        config.train.train_policy.temperature > 1e-6
+        and config.train.train_policy.temperature != 1.0
+    ):
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
     current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
@@ -442,7 +470,20 @@ def _swizzle_pp_grpo_forward(
             old_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
     else:
-        old_per_token_logprobs = current_per_token_logprobs.detach()
+        if config.train.train_policy.use_rollout_logprobs_for_loss:
+            assert (
+                "rollout_logprobs_as_old" in user_input
+            ), "rollout_logprobs_as_old is not found in user_input"
+            concatenated_rollout_logprobs = torch.cat(
+                [
+                    t.to(current_per_token_logprobs.device)
+                    for t in user_input["rollout_logprobs_as_old"]
+                ],
+                dim=0,
+            )
+            old_per_token_logprobs = concatenated_rollout_logprobs.detach()
+        else:
+            old_per_token_logprobs = current_per_token_logprobs.detach()
         # Following should only happen in the first iteration
         if micro_batch_id == 0:
             # assert trainer.old_per_token_logps[mini_batch_id] is None, f"old_per_token_logps[mini_batch_id] should be None"
@@ -549,6 +590,164 @@ class GRPOTrainer(LLMTrainer):
 
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
+        # For teacher model interaction
+        self.teacher_interact_results: Dict[str, Any] = {}
+        self.fetched_teacher_uuids: Set[str] = set()
+
+    def collate_teacher_logprobs(
+        self,
+        rollouts: List[Rollout],
+        processed_samples: List[Any],
+        computed_max_len: int,
+    ) -> List[List[float]]:
+        teacher_logprobs_list = []
+        assert (
+            len(processed_samples) == len(rollouts)
+        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        for i in range(len(rollouts)):
+            # get the teacher logprobs for current rollout
+            teacher_logprobs = rollouts[i].teacher_logprobs
+            if (
+                self.config.train.train_policy.collect_rollout_logprobs
+                and teacher_logprobs is not None
+            ):
+                sampled_completion_logprobs = rollouts[i].completion_logprobs
+                sampled_prompt_logprobs = rollouts[i].prompt_logprobs
+                sampled_logprobs = sampled_prompt_logprobs + sampled_completion_logprobs
+                assert (
+                    len(sampled_logprobs) == len(teacher_logprobs)
+                ), f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
+            if teacher_logprobs is None:
+                logger.warning(
+                    f"[Policy] Teacher logprobs is None for rollout {i}, using [0] * {computed_max_len} and set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs"
+                )
+                teacher_logprobs = [0] * computed_max_len
+                if hasattr(processed_samples[i], "logprob_masks"):
+                    # set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs
+                    processed_samples[i].logprob_masks = [
+                        0 for _ in processed_samples[i].logprob_masks
+                    ]
+                else:
+                    processed_samples[i]["logprob_masks"] = [
+                        0 for _ in processed_samples[i]["logprob_masks"]
+                    ]
+            teacher_logprobs = teacher_logprobs + [0]
+            teacher_logprobs_list.append(teacher_logprobs)
+            if self.config.distillation.include_prompt:
+                if hasattr(processed_samples[i], "logprob_masks"):
+                    processed_samples[i].logprob_masks = [
+                        1 for _ in range(len(processed_samples[i].logprob_masks))
+                    ]
+                    processed_samples[i].logprob_masks[-1] = 0  # exclude the last token
+                else:
+                    processed_samples[i]["logprob_masks"] = [
+                        1 for _ in range(len(processed_samples[i]["logprob_masks"]))
+                    ]
+                    processed_samples[i]["logprob_masks"][-1] = (
+                        0  # exclude the last token
+                    )
+
+        return torch.tensor(
+            [
+                x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
+                for x in teacher_logprobs_list
+            ]
+        )
+
+    def compute_teacher_kl_advantages(
+        self,
+        current_logprobs: torch.Tensor,
+        teacher_logprobs: torch.Tensor,
+        current_advantages: torch.Tensor,
+        logprob_masks: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        kl_penalty_coef = self.config.distillation.kl_penalty_coef
+        kl_discount_factor = self.config.distillation.kl_discount_factor
+        current_advantages = torch.masked_select(current_advantages, logprob_masks)
+        teacher_logprobs = torch.masked_select(teacher_logprobs, logprob_masks)
+        assert (
+            current_logprobs.shape == teacher_logprobs.shape == current_advantages.shape
+        ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
+        reversed_kl = current_logprobs - teacher_logprobs
+        kl_advantages = -kl_penalty_coef * reversed_kl  # [n_tokens]
+
+        def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
+            returns = [0] * len(x)
+            cumulative = 0
+            for i in range(len(x) - 1, -1, -1):
+                cumulative = x[i] + gamma * cumulative
+                returns[i] = cumulative
+            return returns
+
+        metrics = {
+            "teacher_reversed_kl": reversed_kl.sum() / logprob_masks.sum(),
+            "teacher_kl_advantages": kl_advantages.sum() / logprob_masks.sum(),
+        }
+
+        assert (
+            cu_seqlens[-1] == kl_advantages.shape[0]
+        ), f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
+        if kl_discount_factor != 0.0:
+            # Compute discounted future sum of kl_advantages for each sequence
+            # Only needed when kl_discount_factor != 0.0
+            for i in range(cu_seqlens.shape[0] - 1):
+                start_idx = cu_seqlens[i]
+                end_idx = cu_seqlens[i + 1]
+                kl_advantages_discounted = discounted_future_sum_loop(
+                    kl_advantages[start_idx:end_idx].tolist(), kl_discount_factor
+                )
+                kl_advantages[start_idx:end_idx] = torch.tensor(
+                    kl_advantages_discounted
+                ).to(self.device)
+        advantages = current_advantages + kl_advantages
+        metrics.update(
+            {
+                "teacher_kl_advantages_discounted": kl_advantages.sum()
+                / logprob_masks.sum(),
+            }
+        )
+        return advantages, metrics
+
+    def fetch_teacher_logprobs(
+        self,
+        rollouts: List[Rollout],
+        mini_batch_indices: List[int],
+    ):
+        all_uuids = [rollouts[i].teacher_result_uuid for i in mini_batch_indices]
+        all_rank_uuids = dist_util.all_gather_object_cpu(all_uuids)
+        scattered_teacher_logprobs = [[] for _ in range(self.world_size)]
+        teacher_logprobs = [[]]
+        if self.global_rank == 0:
+            for index, rank_uuids in enumerate(all_rank_uuids):
+                teacher_logprobs_needed = []
+                for id in rank_uuids:
+                    while id not in self.teacher_interact_results:
+                        time.sleep(0.01)
+                    self.fetched_teacher_uuids.add(id)
+                    teacher_logprobs_needed.append(self.teacher_interact_results[id])
+                scattered_teacher_logprobs[index] = teacher_logprobs_needed
+        dist.scatter_object_list(
+            teacher_logprobs,
+            scattered_teacher_logprobs,
+            src=0,
+        )
+        all_teacher_logprobs = teacher_logprobs[0]
+        assert (
+            len(all_teacher_logprobs) == len(mini_batch_indices)
+        ), f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
+        for teacher_logprobs, idx in zip(all_teacher_logprobs, mini_batch_indices):
+            rollouts[idx].teacher_logprobs = teacher_logprobs
+
+    def clear_teacher_result_cache(self):
+        # Clear the cached teacher interaction results to save memory
+        for id in self.fetched_teacher_uuids:
+            assert (
+                id in self.teacher_interact_results
+            ), f"Teacher result uuid {id} not found in teacher_interact_results"
+            del self.teacher_interact_results[id]
+        self.fetched_teacher_uuids.clear()
+
     def step_training(
         self,
         rollouts: List[Rollout],
@@ -602,7 +801,7 @@ class GRPOTrainer(LLMTrainer):
             else rollout.completion
             for rollout in rollouts
         ]
-        advantages_list = [rollout.advantage for rollout in rollouts]
+
         # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
         if pos_coef_global is not None and pos_coef_global > 0.0:
@@ -629,12 +828,18 @@ class GRPOTrainer(LLMTrainer):
             for i in range(len(samples))
         ]
 
+        # On-policy Distillation related computations
+        assert (
+            len(processed_samples) == len(rollouts) and len(samples) == len(rollouts)
+        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        advantages_list = [rollout.advantage for rollout in rollouts]
+        advantages_t = torch.tensor(advantages_list).to(self.device)
+
         self.metrics = {
             "entropy": 0.0,
             "effective_entropy": 0.0,
         }
         # user_info_keys = list(kwargs.keys())
-        advantages_t = torch.tensor(advantages_list).to(self.device)
         batch_size = len(rollouts)
         per_optimize_batch_size = (
             min(self.batch_size_per_optimize, batch_size)
@@ -665,7 +870,10 @@ class GRPOTrainer(LLMTrainer):
             ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
 
         need_compute_ref, kl_beta = self._swap_model_state_dict()
-        need_compute_old_ahead = batch_size > per_optimize_batch_size
+        need_compute_old_ahead = (
+            batch_size > per_optimize_batch_size
+            and not self.config.train.train_policy.use_rollout_logprobs_for_loss
+        )
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
         grad_norm_sum = torch.tensor(0.0, device=self.device)
@@ -804,6 +1012,28 @@ class GRPOTrainer(LLMTrainer):
                                     .to(self.device)
                                 )
 
+                                if self.config.distillation.enable:
+                                    self.fetch_teacher_logprobs(
+                                        rollouts=rollouts,
+                                        mini_batch_indices=mini_batch_indices,
+                                    )
+                                    if all(
+                                        [
+                                            rollouts[i].teacher_logprobs is None
+                                            for i in mini_batch_indices
+                                        ]
+                                    ):
+                                        logger.warning(
+                                            "[Policy] All teacher logprobs are None for current mini-batch, skipping distillation loss calculation."
+                                        )
+                                        continue
+                                    minibatched_teacher_logprobs = self.collate_teacher_logprobs(
+                                        rollouts=[
+                                            rollouts[i] for i in mini_batch_indices
+                                        ],
+                                        processed_samples=minibatched_processed_samples,
+                                        computed_max_len=computed_max_len,
+                                    )
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
                                         minibatched_processed_samples,
@@ -929,7 +1159,35 @@ class GRPOTrainer(LLMTrainer):
                                     user_mini_batch["cp_mesh"] = (
                                         self.parallel_dims.mesh["cp"]
                                     )
-
+                                if self.config.train.train_policy.use_rollout_logprobs_for_loss:
+                                    assert len(minibatched_processed_samples) == len(
+                                        mini_batch_indices
+                                    ), "Mismatch in mini-batch size."
+                                    rollout_effective_logprobs = []
+                                    for sample, index in zip(
+                                        minibatched_processed_samples,
+                                        mini_batch_indices,
+                                    ):
+                                        # Combine prompt and completion logprobs
+                                        sampled_logprobs = (
+                                            rollouts[index].prompt_logprobs
+                                            + rollouts[index].completion_logprobs
+                                            + [0.0]
+                                        )  # assuming 0.0 for the last token
+                                        mask = (
+                                            sample.logprob_masks
+                                            if hasattr(sample, "logprob_masks")
+                                            else sample["logprob_masks"]
+                                        )
+                                        assert (
+                                            len(sampled_logprobs) == len(mask)
+                                        ), "Mismatch in length between sampled_logprobs and mask"
+                                        rollout_effective_logprobs.append(
+                                            torch.tensor(
+                                                sampled_logprobs,
+                                                dtype=torch.float32,
+                                            )[torch.tensor(mask, dtype=torch.bool)]
+                                        )
                                 if self.parallel_dims.pp_enabled:
                                     if pp_last_stage:
                                         if (
@@ -1020,6 +1278,10 @@ class GRPOTrainer(LLMTrainer):
                                             user_mini_batch["positive_flags"] = (
                                                 is_pos_cpu
                                             )
+                                        if self.config.train.train_policy.use_rollout_logprobs_for_loss:
+                                            user_mini_batch[
+                                                "rollout_logprobs_as_old"
+                                            ] = rollout_effective_logprobs
                                     if pp_first_stage or pp_last_stage:
                                         # First/Last stage: pass all inputs
                                         kwargs = {}
@@ -1080,6 +1342,8 @@ class GRPOTrainer(LLMTrainer):
                                     if (
                                         self.config.train.train_policy.temperature
                                         > 1e-6
+                                        and self.config.train.train_policy.temperature
+                                        != 1.0
                                     ):
                                         raw_logits = (
                                             raw_logits
@@ -1109,11 +1373,6 @@ class GRPOTrainer(LLMTrainer):
                                         if raw_logits.ndim == 3
                                         else False,
                                     )
-                                    logprob_masks = user_mini_batch["logprob_masks"]
-                                    current_advantages = (
-                                        logprob_masks * minibatched_advantages
-                                    )
-
                                     # Compute ref per-token logprobs if needed
                                     if is_computing_ref:
                                         assert (
@@ -1142,13 +1401,55 @@ class GRPOTrainer(LLMTrainer):
                                             assert (
                                                 i_mu == 0 and not need_compute_old_ahead
                                             ), "Only first iteration should append `old_per_token_logps`"
-                                            self.old_per_token_logps[
-                                                local_mini_step
-                                            ] = current_per_token_logprobs.detach()
+                                            if self.config.train.train_policy.use_rollout_logprobs_for_loss:
+                                                concatenated_rollout_logprobs = torch.cat(
+                                                    [
+                                                        t.to(self.device)
+                                                        for t in rollout_effective_logprobs
+                                                    ],
+                                                    dim=0,
+                                                )
+                                                self.old_per_token_logps[
+                                                    local_mini_step
+                                                ] = concatenated_rollout_logprobs.detach()
+                                            else:
+                                                self.old_per_token_logps[
+                                                    local_mini_step
+                                                ] = current_per_token_logprobs.detach()
                                         else:
                                             assert (
                                                 i_mu > 0 or need_compute_old_ahead
                                             ), "Only inner iteration should reuse `old_per_token_logps`"
+
+                                        logprob_masks = user_mini_batch["logprob_masks"]
+                                        current_advantages = (
+                                            logprob_masks * minibatched_advantages
+                                        )
+                                        if self.config.distillation.enable:
+                                            if packing_seq:
+                                                minibatched_teacher_logprobs = (
+                                                    pack_sequences_for_teacher_logprobs(
+                                                        minibatched_teacher_logprobs.to(
+                                                            self.device
+                                                        ),
+                                                        user_mini_batch[
+                                                            "valid_input_len"
+                                                        ],
+                                                    )
+                                                )
+                                            current_advantages, teacher_metrics = (
+                                                self.compute_teacher_kl_advantages(
+                                                    current_logprobs=self.old_per_token_logps[
+                                                        local_mini_step
+                                                    ],
+                                                    teacher_logprobs=minibatched_teacher_logprobs.to(
+                                                        self.device
+                                                    ),
+                                                    current_advantages=current_advantages,
+                                                    logprob_masks=logprob_masks,
+                                                    cu_seqlens=cu_seqlens,
+                                                )
+                                            )
 
                                         compute_loss_fn = (
                                             self.loss_fn
@@ -1296,6 +1597,9 @@ class GRPOTrainer(LLMTrainer):
                         report_data[f"train/{k}"] = (
                             v.item() if isinstance(v, torch.Tensor) else v
                         ) / loss_count
+                if self.config.distillation.enable:
+                    for k, v in teacher_metrics.items():
+                        report_data[f"train/{k}"] = v.item()
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
@@ -1345,6 +1649,7 @@ class GRPOTrainer(LLMTrainer):
 
         self.reference_reset(current_step)
 
+        self.clear_teacher_result_cache()
         return report_data
 
     def reference_reset(self, current_step: int):
@@ -1465,17 +1770,17 @@ class GRPOTrainer(LLMTrainer):
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
                     logger.info(
-                        f"Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
+                        f"[Policy] Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
                     )
                 else:
                     logger.error(
-                        f"Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
+                        f"[Policy] Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
                     )
                 if not model_loaded:
                     self.model_load_from_hf()
                     model_loaded = True
         elif not model_loaded:
-            logger.info("Resume not set. Trying to load from HuggingFace...")
+            logger.info("[Policy] Resume not set. Trying to load from HuggingFace...")
             self.model_load_from_hf()
             model_loaded = True
 

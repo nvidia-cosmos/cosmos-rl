@@ -24,6 +24,7 @@ from functools import partial
 
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
 from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
     Qwen3_VL_DataPacker,
@@ -106,14 +107,6 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
         device,
     )
     return [model], pp_scheduler, parallel_dims, loss_fn
-
-
-class Config:
-    def __init__(self, config_dict):
-        for k, v in config_dict.items():
-            if isinstance(v, dict):
-                v = Config(v)
-            setattr(self, k, v)
 
 
 def create_assistant_tokens_mask(tokens, processor):  # Qwen2 based model
@@ -257,6 +250,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 "fp8": {"enable_fp8": False},
                 "async_tp_enabled": False,
                 "force_use_hf": False,
+                "output_dir": "./",
                 # "sequence_packing": True,
             },
             "rollout": {
@@ -266,7 +260,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 },
             },
         }
-        config = Config(config_dict)
+        config = Config.from_dict(config_dict)
 
         # ================================
         # create data packer

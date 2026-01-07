@@ -76,10 +76,6 @@ class RLPolicyWorker(PolicyWorkerBase):
         ), "config must be a CosmosConfig object for this trainer"
         super().__init__(config, parallel_dims=parallel_dims)
 
-        # For hooks and custom logger functions
-        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
-        self.hook_fns = kwargs.get("hook_fns", {})
-
         self.report_data = {}
         self.upload_thread = None
 
@@ -136,6 +132,10 @@ class RLPolicyWorker(PolicyWorkerBase):
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
+
+        # For teacher model interaction
+        self.teacher_interact_queue = Queue()
+        self.teacher_interact_thread: Optional[threading.Thread] = None
 
     def setup(
         self,
@@ -221,6 +221,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
+            if self.teacher_interact_thread is not None:
+                self.teacher_interact_thread.join()
+                self.teacher_interact_thread = None
+
             if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -246,15 +250,19 @@ class RLPolicyWorker(PolicyWorkerBase):
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
-            rollouts = []
+            rollouts: List[Rollout] = []
             try:
                 rollouts = [
                     Rollout.model_validate(msgpack.unpackb(x))
                     for x in self.redis_controller.subscribe_rollout(self.replica_name)
                 ]
             except Exception as e:
-                logger.debug(f"Failed to get rollouts: {e}, wait for next round")
+                logger.debug(
+                    f"[Policy] Failed to get rollouts: {e}, wait for next round"
+                )
             for rollout in rollouts:
+                if rollout.teacher_result_uuid:
+                    self.teacher_interact_queue.put_nowait(rollout.teacher_result_uuid)
                 self.data_queue.put_nowait(rollout)
 
     def pre_P2R_collect_parameters(self):
@@ -335,7 +343,7 @@ class RLPolicyWorker(PolicyWorkerBase):
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
-                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
             return False
 
@@ -562,7 +570,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
                 except Exception as e:
                     logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                        f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                     )
                 for x in commands:
                     command = Command.depack(x)
@@ -616,16 +624,22 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.command_buffer.put_nowait(c)
 
     def dispatch_rollouts(self) -> List[Rollout]:
-        def preprocess_rollouts(rollouts: List[Rollout]):
+        def preprocess_rollouts(rollouts: List[Rollout]) -> List[Rollout]:
+            """
+            Processing rollouts that retrieved from the controller,
+            including:
+            - Getting the prompt and conversation from the local dataset if local_dataset is enabled
+            - Getting the teacher result from the Redis if the teacher result uuid is not empty
+            """
             assert all(
                 rollout.prompt_idx >= 0 for rollout in rollouts
             ), "All rollouts from controller should have a valid prompt index"
-            if self.config.train.local_dataset:
-                for i in range(len(rollouts)):
+            for i in range(len(rollouts)):
+                if self.config.train.local_dataset:
+                    # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
                     )
-
                     rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx,
                         attr="conversation",
@@ -665,8 +679,37 @@ class RLPolicyWorker(PolicyWorkerBase):
             scattered_rollouts,
             src=0,
         )
-        rollouts = rollouts[0]
-        return preprocess_rollouts(rollouts)
+        return preprocess_rollouts(rollouts[0])
+
+    def teacher_interact_loop(self):
+        """Background task to interact with teacher model for distillation"""
+        assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
+        while not self.shutdown_signal.is_set():
+            if not self.teacher_interact_queue.empty():
+                teacher_result_uuid = self.teacher_interact_queue.get_nowait()
+                logger.debug(
+                    f"[Policy] Getting teacher result {teacher_result_uuid} from Redis"
+                )
+                # Interactive with teacher if the teacher result uuid is not empty
+                teacher_result = self.redis_controller.get_teacher_result(
+                    teacher_result_uuid
+                )
+                if teacher_result is None:
+                    teacher_logprobs = None
+                    logger.error(
+                        f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
+                    )
+                else:
+                    teacher_logprobs = teacher_result.get("teacher_logprobs", None)
+                logger.debug(
+                    f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
+                )
+                if not hasattr(self.trainer, "teacher_interact_results"):
+                    self.trainer.teacher_interact_results = {}
+                self.trainer.teacher_interact_results[teacher_result_uuid] = (
+                    teacher_logprobs
+                )
+            time.sleep(0.01)
 
     def main_loop(self):
         def fetch_command_helper(trainer: GRPOTrainer):
@@ -701,6 +744,11 @@ class RLPolicyWorker(PolicyWorkerBase):
                 args=(self,),
                 daemon=True,
                 name="fetch_rollouts_thread",
+            ).start()
+            self.teacher_interact_thread = threading.Thread(
+                target=self.teacher_interact_loop,
+                daemon=True,
+                name="teacher_interact_thread",
             ).start()
 
         abort = False

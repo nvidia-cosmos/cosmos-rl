@@ -73,7 +73,6 @@ info "Installing DanceGRPO from source..."
 # Step 8: Install additional dependencies
 info "Installing additional dependencies..."
 "$VENV_DIR/bin/pip" install ml-collections absl-py inflect==6.0.4 pydantic==1.10.9 huggingface_hub==0.24.0 protobuf==3.20.0 bitsandbytes==0.48.2 || warning "Failed to install additional dependencies"
-"$VENV_DIR/bin/pip" install cosmos_rl_reward || warning "Failed to install cosmos_rl_reward"
 
 # Step 9: Initialize git-lfs
 info "Initializing git-lfs..."

@@ -15,6 +15,7 @@
 
 from typing import Tuple, Optional, List, Dict, Any, Callable, Union
 import torch
+import torch.nn as nn
 import torch.distributed.pipelining
 from torch.distributed.pipelining import (
     PipelineStage as OriginalPipelineStage,
@@ -28,6 +29,7 @@ from torch.distributed.pipelining.stage import (
 )
 
 from cosmos_rl.utils.logging import logger
+import functools
 
 
 # Common functions for dynamic shape support
@@ -705,3 +707,90 @@ def patch_fsdp_foreach_reduce():
     import torch.distributed.fsdp._fully_shard._fsdp_param_group as pg
 
     pg.foreach_reduce = foreach_reduce
+
+
+def apply_preforward_postforward_patch():
+    from torch.distributed.utils import _apply_to_tensors
+
+    from torch.distributed.fsdp._fully_shard._fsdp_state import disable_if_config_true
+    from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
+    from torch.distributed.fsdp._fully_shard._fsdp_common import (
+        TrainingState,
+        _cast_fp_tensor,
+    )
+
+    def _pre_forward(
+        self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        # When composing with module-hook-based activation checkpointing, the
+        # the pre-backward hook is responsible for the unshard
+        if self._training_state == TrainingState.PRE_BACKWARD:
+            if self._mp_policy.cast_forward_inputs and self._mp_policy.param_dtype:
+                with torch.profiler.record_function("FSDP::cast_forward_inputs"):
+                    cast_fn = functools.partial(
+                        _cast_fp_tensor, self._mp_policy.param_dtype
+                    )
+                    args, kwargs = (
+                        _apply_to_tensors(cast_fn, args),
+                        _apply_to_tensors(cast_fn, kwargs),
+                    )
+            return args, kwargs
+        self._training_state = TrainingState.FORWARD
+        args, kwargs = self._root_pre_forward(module, args, kwargs)
+        if self._mp_policy.cast_forward_inputs and self._mp_policy.param_dtype:
+            with torch.profiler.record_function("FSDP::cast_forward_inputs"):
+                cast_fn = functools.partial(
+                    _cast_fp_tensor, self._mp_policy.param_dtype
+                )
+                args, kwargs = (
+                    _apply_to_tensors(cast_fn, args),
+                    _apply_to_tensors(cast_fn, kwargs),
+                )
+        if self._fsdp_param_group:
+            args, kwargs = self._fsdp_param_group.pre_forward(module, args, kwargs)
+        for fsdp_state in self._states_to_forward_prefetch:
+            if (target_param_group := fsdp_state._fsdp_param_group) is not None:
+                FSDPParamGroup._prefetch_unshard(target_param_group, "forward")
+        return args, kwargs
+
+    def _post_forward(self, module: nn.Module, input: Any, output: Any) -> Any:
+        # When composing with module-hook-based activation checkpointing, the
+        # post-backward hook is responsible for the reshard
+        if self._training_state == TrainingState.PRE_BACKWARD:
+            if self._mp_policy.output_dtype is not None:
+                with torch.profiler.record_function("FSDP::cast_forward_outputs"):
+                    output = _apply_to_tensors(
+                        functools.partial(
+                            _cast_fp_tensor, self._mp_policy.output_dtype
+                        ),
+                        output,
+                    )
+            return output
+        if self._fsdp_param_group:
+            output = self._fsdp_param_group.post_forward(module, input, output)
+        output = self._register_pre_backward_hook(output)
+        self._training_state = TrainingState.IDLE
+        if self._state_ctx.iter_forward_root is self:
+            if all_gather_state := self._comm_ctx.all_gather_state:
+                # Free the last all-gather result if needed; refer to
+                # [Note: Overlapping all-gather copy-in and all-gather]
+                self._comm_ctx.all_gather_copy_in_stream.wait_event(
+                    all_gather_state.event
+                )
+                self._comm_ctx.all_gather_stream.wait_event(all_gather_state.event)
+                self._comm_ctx.all_gather_state = None  # free the all-gather result
+            self._state_ctx.iter_forward_root = None
+        if self._mp_policy.output_dtype is not None:
+            with torch.profiler.record_function("FSDP::cast_forward_outputs"):
+                output = _apply_to_tensors(
+                    functools.partial(_cast_fp_tensor, self._mp_policy.output_dtype),
+                    output,
+                )
+        return output
+
+    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._pre_forward = (
+        disable_if_config_true(_pre_forward)
+    )
+    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._post_forward = (
+        disable_if_config_true(_post_forward)
+    )

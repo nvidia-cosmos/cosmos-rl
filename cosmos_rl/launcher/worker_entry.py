@@ -29,7 +29,12 @@ def main(
         logger.warning(f"Unused kwargs: {list(kwargs.keys())}")
 
     role = os.environ.get("COSMOS_ROLE")
-    assert role in ["Policy", "Rollout", "Controller"], f"Invalid role: {role}"
+    assert role in [
+        "Policy",
+        "Rollout",
+        "Controller",
+        "Reference",
+    ], f"Invalid role: {role}"
     if role == "Controller":
         from cosmos_rl.dispatcher.run_web_panel import main as controller_main
 
@@ -71,7 +76,7 @@ def main(
             val_batch_sampler=val_batch_sampler,
         )
         return
-    else:
+    elif role == "Rollout":
         from cosmos_rl.rollout.rollout_entry import run_rollout
 
         run_rollout(
@@ -83,6 +88,17 @@ def main(
             val_reward_fns=val_reward_fns,
             data_packer=data_packer,
             val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
+        )
+        return
+    elif role == "Reference":
+        from cosmos_rl.reference.reference_entry import reference_entry
+
+        reference_entry(
+            args=args,
+            dataset=dataset,
+            data_packer=data_packer,
             custom_logger_fns=custom_logger_fns,
             hook_fns=hook_fns,
         )

@@ -364,7 +364,10 @@ class GroupedExpertsDeepEP(nn.Module):
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
-                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=True
+                output1_,
+                self.down_projs.to_local(),
+                tokens_per_expert,
+                trans_b=True,
             )
         else:
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
