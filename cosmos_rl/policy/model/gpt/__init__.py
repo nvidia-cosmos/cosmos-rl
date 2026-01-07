@@ -622,7 +622,7 @@ class GPT(BaseModel):
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
             if dest_name not in self_state_dict and parallel_dims.pp_enabled:
@@ -633,10 +633,10 @@ class GPT(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight)
+                local_view.data.copy_(sharded_weight)
 
         # Handle weight tying: lm_head shares weights with embed_tokens
         if (
@@ -652,7 +652,7 @@ class GPT(BaseModel):
             )
             tensor = reserved[embed_tokens_weight_key]
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
             if dest_name in self_state_dict:
@@ -664,10 +664,10 @@ class GPT(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+                    local_view.data.copy_(sharded_weight)
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1
