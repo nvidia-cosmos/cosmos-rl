@@ -37,12 +37,16 @@ lora_alpha = 4
 init_lora_weights = "gaussian"
 target_modules = ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0", "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"]
 
-[policy.diffusers_config]
+[policy.diffusers]
 offload = true
 is_video = true
 max_prompt_length = 300
 weighting_scheme = "logit_normal"
 inference_size = [480, 832]
+
+[policy.diffusers.sample]
+num_steps = 50
+guidance_scale = 4.5
 
 [logging]
 logger = ['console', 'wandb']

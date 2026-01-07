@@ -127,6 +127,11 @@ class RLPayload(BaseModel):
         description="The cumulative logprob of the generated completions which indicates the total probability of the generated completions.",
     )
 
+    extra_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The extra information returned by the rollout engine.",
+    )
+
     report_metrics: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="The report_metrics for the rollout used for metrics collection and reporting.",
@@ -208,6 +213,11 @@ class Rollout(BaseModel):
 
     prompt_logprobs: Optional[List[float]] = Field(
         default=None, description="The logprobs of the input prompt."
+    )
+
+    extra_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The extra information returned by the rollout engine.",
     )
 
     weight_version: int = Field(

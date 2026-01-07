@@ -63,7 +63,7 @@ from cosmos_rl.dispatcher.data.schema import (
     ConversationType,
 )
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 import torch.distributed as dist
 
@@ -790,6 +790,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.prompt_logprobs = rr.prompt_logprobs
                         p.weight_version = self.current_weight_version
                         p.cumulative_logprob = rr.cumulative_logprob
+                        p.extra_info = rr.extra_info
                         if self.config.rollout.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
                         if self.config.train.local_dataset:
@@ -1570,6 +1571,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.prompt_logprobs = result.prompt_logprobs
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
+                old_payload.extra_info = result.extra_info
                 if self.config.rollout.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
                 if self.config.train.local_dataset:
