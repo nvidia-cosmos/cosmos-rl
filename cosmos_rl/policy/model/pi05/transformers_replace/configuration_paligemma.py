@@ -17,8 +17,12 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 # Import local configurations
-from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import GemmaConfig
-from cosmos_rl.policy.model.pi05.transformers_replace.configuration_siglip import SiglipVisionConfig
+from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import (
+    GemmaConfig,
+)
+from cosmos_rl.policy.model.pi05.transformers_replace.configuration_siglip import (
+    SiglipVisionConfig,
+)
 
 
 logger = logging.get_logger(__name__)
@@ -121,7 +125,9 @@ class PaliGemmaConfig(PretrainedConfig):
                 is_encoder_decoder=False,
                 vocab_size=vocab_size,
             )
-        self.text_config.num_image_tokens = (self.vision_config.image_size // self.vision_config.patch_size) ** 2
+        self.text_config.num_image_tokens = (
+            self.vision_config.image_size // self.vision_config.patch_size
+        ) ** 2
         self.vision_config.projection_dim = projection_dim
         super().__init__(**kwargs)
 

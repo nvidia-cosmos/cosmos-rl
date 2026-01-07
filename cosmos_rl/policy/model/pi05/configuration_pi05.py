@@ -40,4 +40,3 @@ class Pi05Config(PretrainedConfig):
         self.paligemma_variant = paligemma_variant
         self.action_expert_variant = action_expert_variant
         self.dtype = dtype
-

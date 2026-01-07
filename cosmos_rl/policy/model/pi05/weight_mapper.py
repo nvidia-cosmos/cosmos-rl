@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple
 from transformers import AutoConfig
 
 from cosmos_rl.policy.model.base import WeightMapper

@@ -453,7 +453,7 @@ class PI05(BaseModel):
             "attention_mask",
             "images",
             "image_masks",
-            "state",
+            "states",
         ]
         self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
@@ -724,8 +724,23 @@ class PI05(BaseModel):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
+    def forward(self, inputs, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
+        observation = SimpleNamespace(
+            images={
+                "base_0_rgb": inputs["images"][:, 0],
+                "left_wrist_0_rgb": inputs["images"][:, 1],
+                "right_wrist_0_rgb": inputs["images"][:, 2],
+            },
+            image_masks={
+                "base_0_rgb": inputs["image_masks"][:, 0],
+                "left_wrist_0_rgb": inputs["image_masks"][:, 1],
+                "right_wrist_0_rgb": inputs["image_masks"][:, 2],
+            },
+            tokenized_prompt=inputs["input_ids"],
+            tokenized_prompt_mask=inputs["attention_mask"],
+            state=inputs["states"],
+        )
         images, img_masks, lang_tokens, lang_masks, state = (
             self._preprocess_observation(observation, train=True)
         )
@@ -799,13 +814,12 @@ class PI05(BaseModel):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, inputs, noise=None, mode="train") -> dict:
+    def sample_actions(self, inputs, noise=None, mode="train") -> dict:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
 
         Matches RLinf's OpenPi0ForRLActionPrediction.sample_actions() interface.
 
         Args:
-            device: torch device
             observation: Observation object
             noise: Optional initial noise
             num_steps: Number of denoise steps
@@ -814,75 +828,30 @@ class PI05(BaseModel):
         Returns:
             dict with 'actions', 'chains', 'denoise_inds'
         """
-
         observation = SimpleNamespace(
-            images=inputs["images"],
-            img_masks=inputs["image_masks"],
+            images={
+                "base_0_rgb": inputs["images"][:, 0],
+                "left_wrist_0_rgb": inputs["images"][:, 1],
+                "right_wrist_0_rgb": inputs["images"][:, 2],
+            },
+            image_masks={
+                "base_0_rgb": inputs["image_masks"][:, 0],
+                "left_wrist_0_rgb": inputs["image_masks"][:, 1],
+                "right_wrist_0_rgb": inputs["image_masks"][:, 2],
+            },
             tokenized_prompt=inputs["input_ids"],
             tokenized_prompt_mask=inputs["attention_mask"],
-            state=inputs["state"],
+            state=inputs["states"],
         )
-        fp = os.path.expanduser("~/pi05_first_input.pt")
-        dbg = str(os.getenv("DEBUG", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-            "on",
-        }
-        fixed = (
-            torch.load(fp, map_location="cpu", weights_only=False)
-            if (dbg and os.path.exists(fp))
-            else None
+        device = observation.state.device
+
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.action_horizon, self.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
         )
-        if isinstance(fixed, dict) and all(
-            k in fixed
-            for k in ("images", "img_masks", "lang_tokens", "lang_masks", "state")
-        ):
-            images = [x.to(device=device) for x in fixed["images"]]
-            img_masks = [x.to(device=device) for x in fixed["img_masks"]]
-            lang_tokens = fixed["lang_tokens"].to(device=device)
-            lang_masks = fixed["lang_masks"].to(device=device)
-            state = fixed["state"].to(device=device)
-            bsize = int(state.shape[0])
-            if noise is None:
-                noise = fixed.get("noise_init", None)
-                if torch.is_tensor(noise):
-                    noise = noise.to(device=device)
-            if noise is None:
-                actions_shape = (bsize, self.action_horizon, self.action_dim)
-                noise = self.sample_noise(actions_shape, device)
-        else:
-            bsize = observation.state.shape[0]
-            if noise is None:
-                actions_shape = (bsize, self.action_horizon, self.action_dim)
-                noise = self.sample_noise(actions_shape, device)
-            images, img_masks, lang_tokens, lang_masks, state = (
-                self._preprocess_observation(observation, train=False)
-            )
-            if (
-                str(os.getenv("SAVE_FIRST_INPUT", os.getenv("save_first_input", "0")))
-                .strip()
-                .lower()
-                in {"1", "true", "yes", "y", "on"}
-                and int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")) or 0) == 0
-                and not getattr(self, "_pi05_first_input_saved", False)
-            ):
-                if not os.path.exists(fp):
-                    torch.save(
-                        {
-                            "images": [x.detach().cpu() for x in images],
-                            "img_masks": [x.detach().cpu() for x in img_masks],
-                            "lang_tokens": lang_tokens.detach().cpu(),
-                            "lang_masks": lang_masks.detach().cpu(),
-                            "state": state.detach().cpu(),
-                            "noise_init": noise.detach().cpu()
-                            if torch.is_tensor(noise)
-                            else None,
-                        },
-                        fp,
-                    )
-                setattr(self, "_pi05_first_input_saved", True)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
@@ -902,7 +871,7 @@ class PI05(BaseModel):
             use_cache=True,
         )
 
-        x_t = noise
+        x_t = noise.to(device)
         chains = [x_t]
         log_probs = []
 
@@ -915,20 +884,18 @@ class PI05(BaseModel):
         # RLinf-style denoise index selection
         if mode == "train":
             if self.joint_logprob:
-                denoise_inds = torch.arange(self.num_steps, device=device)
+                denoise_inds = torch.arange(self.num_steps)
             else:
                 if self.ignore_last:
                     denoise_inds = torch.tensor(
                         [random.randint(0, self.num_steps - 2)] * self.num_steps,
-                        device=device,
                     )
                 else:
                     denoise_inds = torch.tensor(
                         [random.randint(0, self.num_steps - 1)] * self.num_steps,
-                        device=device,
                     )
         else:
-            denoise_inds = torch.tensor([-1] * self.num_steps, device=device)
+            denoise_inds = torch.tensor([-1] * self.num_steps)
         denoise_inds = denoise_inds[None].repeat(bsize, 1)
 
         for idx in range(self.num_steps):
@@ -1053,7 +1020,7 @@ class PI05(BaseModel):
             else:
                 raise ValueError(f"Invalid noise method: {self.noise_method}")
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
-        return x_t_mean, x_t_std
+        return x_t_mean.to(device), x_t_std.to(device)
 
     def get_suffix_out(
         self,
@@ -1210,7 +1177,6 @@ class PI05(BaseModel):
             use_cache=True,
         )
         chains_log_probs = []
-        chains_values = []
         chains_entropy = []
 
         # get log prob
@@ -1356,8 +1322,7 @@ class PI05(BaseModel):
         raise ValueError("PI05 does not support tensor parallelism")
 
     def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        batch_size = len(inputs)
+        batch_size = inputs["full_images"].shape[0]
 
         def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
             # 1. Convert to PIL Image
@@ -1370,28 +1335,21 @@ class PI05(BaseModel):
         base_imgs = [_to_pi05_img(img) for img in inputs["full_images"]]
         wrist_imgs = [_to_pi05_img(img) for img in inputs["wrist_images"]]
 
-        base_imgs_t = torch.stack(base_imgs, 0).to(device)  # [B, H, W, C]
-        wrist_imgs_t = torch.stack(wrist_imgs, 0).to(device)
+        base_imgs_t = torch.stack(base_imgs, 0)
+        wrist_imgs_t = torch.stack(wrist_imgs, 0)
 
-        images = {
-            "base_0_rgb": base_imgs_t,
-            "left_wrist_0_rgb": wrist_imgs_t,
-            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
-        }
-        image_masks = {
-            "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
-            "left_wrist_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
-            "right_wrist_0_rgb": torch.zeros(
-                batch_size, dtype=torch.bool, device=device
-            ),
-        }
+        images = torch.stack(
+            [base_imgs_t, wrist_imgs_t, torch.zeros_like(wrist_imgs_t)], dim=1
+        )
+        image_masks = torch.tensor(
+            [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
+        )
 
         state = torch.stack(
             [
                 torch.as_tensor(
                     self._normalize_pi05_state(inputs["states"][i]),
                     dtype=torch.float32,
-                    device=device,
                 )
                 for i in range(batch_size)
             ],
@@ -1412,14 +1370,14 @@ class PI05(BaseModel):
 
             tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
             tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
-        tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
-        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0).to(device)
+        tokenized_prompt = torch.stack(tokenized_prompt, dim=0)
+        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0)
         return {
-            "images": images,
-            "image_masks": image_masks,
-            "state": state,
-            "input_ids": tokenized_prompt,
-            "attention_mask": tokenized_prompt_mask,
+            "images": images.cuda(),
+            "image_masks": image_masks.cuda(),
+            "states": state.cuda(),
+            "input_ids": tokenized_prompt.cuda(),
+            "attention_mask": tokenized_prompt_mask.cuda(),
         }
 
     def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
@@ -1467,26 +1425,29 @@ class PI05(BaseModel):
         q99 = q99[:dim]
         return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
 
-    def generate_action(self, inputs: Dict[str, torch.Tensor], is_valid: bool = False):
+    def generate_action(
+        self, inputs: Dict[str, torch.Tensor], is_valid: bool = False, **kwargs
+    ):
         """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
 
         Args:
             inputs: PI05 inputs object
             is_valid: Whether to generate in validation mode
         """
+
         mode = "eval" if is_valid else "train"
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            outputs = self.sample_actions(self.device, inputs, mode=mode)
+            outputs = self.sample_actions(inputs, mode=mode)
             actions = outputs["actions"]
 
         actions = actions[
             :, : self.hf_config.action_horizon, : self.hf_config.action_env_dim
         ].to(torch.float32)
         actions_np = actions.detach().cpu().numpy()
-        outputs["action"] = self._unnormalize_pi05_actions(actions_np)
+        outputs["action"] = torch.tensor(
+            self._unnormalize_pi05_actions(actions_np), device=actions.device
+        )
         # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
-        # outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
-
         return outputs
 
 

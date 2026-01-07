@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 
+
 def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
     """
     Center crop image with 0.9 scale then resize (matching SimpleVLA-RL)

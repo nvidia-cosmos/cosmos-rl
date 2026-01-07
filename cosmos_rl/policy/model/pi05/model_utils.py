@@ -4,11 +4,15 @@ import math
 import torch
 
 from torch import nn
-from cosmos_rl.policy.model.pi05.transformers_replace import GemmaForCausalLM, GemmaConfig
-from cosmos_rl.policy.model.pi05.transformers_replace import PaliGemmaForConditionalGeneration, PaliGemmaConfig
+from cosmos_rl.policy.model.pi05.transformers_replace import (
+    GemmaForCausalLM,
+    GemmaConfig,
+)
+from cosmos_rl.policy.model.pi05.transformers_replace import (
+    PaliGemmaForConditionalGeneration,
+    PaliGemmaConfig,
+)
 from cosmos_rl.policy.model.pi05.transformers_replace import modeling_gemma
-
-
 
 
 def _default_lora_init(t: torch.Tensor) -> None:

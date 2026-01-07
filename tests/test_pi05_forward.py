@@ -19,7 +19,7 @@ from contextlib import nullcontext
 import os
 import torch
 import safetensors.torch
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 
 
 def _inject_pi05_runtime_defaults(hf_config):

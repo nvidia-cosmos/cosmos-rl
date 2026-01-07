@@ -301,5 +301,3 @@ class PI05DataPacker(BaseDataPacker):
 
 # Register as the default data packer for PI05/PI0.
 BaseDataPacker.register(["pi05", "pi0"], PI05DataPacker)
-
-

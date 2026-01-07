@@ -32,13 +32,38 @@ from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils import util
 from cosmos_rl.simulators.libero.utils import (
-    obs_to_vla_input,
     LIBERO_MAX_STEPS_MAP,
 )
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
+
+
+def get_physical_gpu_id():
+    """Get the physical GPU ID, accounting for CUDA_VISIBLE_DEVICES.
+
+    When torchrun is used with CUDA_VISIBLE_DEVICES=[4,5,6,7], PyTorch sees
+    GPUs 0-3, but we want to return the actual physical IDs 4-7 for logging.
+
+    Returns:
+        int: Physical GPU ID
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # Parse CUDA_VISIBLE_DEVICES if set
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if cuda_visible:
+        # Handle formats: "4,5,6,7" or "[4,5,6,7]" or "4 5 6 7"
+        cuda_visible = cuda_visible.strip("[]").replace(" ", ",")
+        gpu_ids = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+
+        # Map local rank to physical GPU ID
+        if local_rank < len(gpu_ids):
+            return gpu_ids[local_rank]
+
+    # Fallback to local rank if CUDA_VISIBLE_DEVICES not set
+    return local_rank
 
 
 def extract_simulator_config(config: Config):
@@ -77,7 +102,7 @@ class OpenVLARollout(RolloutBase):
 
         self.env_manager = EnvManager(
             cfg=extract_simulator_config(self.config),
-            rank=torch.distributed.get_rank(),
+            rank=get_physical_gpu_id(),
             env_cls=LiberoEnvWrapper,
         )
         self.env_manager.start_simulator()
@@ -85,7 +110,7 @@ class OpenVLARollout(RolloutBase):
         # Initialize tracing system (if enabled via config)
         trace_verbosity = getattr(self.config.vla, "trace_verbosity", 0)
         self.tracing_manager = create_tracing_manager(
-            rank=torch.distributed.get_rank(),
+            rank=get_physical_gpu_id(),
             output_dir=self.config.train.output_dir,
             trace_verbosity=trace_verbosity,
         )
@@ -514,242 +539,3 @@ class OpenVLARollout(RolloutBase):
 
         results = [pack_trajectory(i) for i in range(n_payloads)]
         return results
-
-    @torch.no_grad()
-    def _generate_minibatch(
-        self, payloads: List[RLPayload], is_validation: bool = False
-    ):
-        """
-        Run parallel VLA inference and simulation for a minibatch
-
-        Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
-
-        Args:
-            payloads: List of RLPayload objects containing task information
-            is_validation: Whether to save validation videos
-
-        Returns:
-            Tuple of (vla_history, task_records)
-        """
-        # Extract task info from payloads (already available, no need to pass through initial_data)
-        task_suite_names = []
-        task_ids = []
-        max_steps = -1
-        for payload in payloads:
-            task_ids.append(payload.prompt.get("task_id", 0))
-            trial_ids.append(payload.prompt.get("trial_id", 0))
-            max_steps = max(
-                max_steps, MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
-            )
-        gen_indices = (
-            [0] * len(payloads) if is_validation else [i for i in range(len(payloads))]
-        )
-
-        # CRITICAL: Release GPU resources before spawning sim workers
-        # After NCCL broadcast, GPU SM resources may still be occupied by:
-        # - Lingering CUDA kernels from weight sync
-        # - VLA model occupying GPU memory
-        # - CUDA context fragmentation
-        # Without this, sim workers timeout trying to initialize rendering contexts
-        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
-        torch.cuda.empty_cache()  # Free up cached GPU memory
-        logger.debug(
-            f"Released GPU resources before spawning {len(payloads)} sim workers"
-        )
-
-        # Setup parallel environments (populates self.sim_processes, self.sim_input_queues, self.sim_output_queues)
-        initial_data = self._setup_parallel_envs(payloads, gen_indices, is_validation)
-
-        # Unpack initial data
-        task_descriptions = initial_data["task_descriptions"]
-        inputs = initial_data["inputs"]
-        task_records = initial_data["task_records"]
-        valid_video = initial_data["valid_video"]
-
-        # Use member variables for process/queue management
-        batch_size = len(self.sim_processes)
-
-        # Episode execution loop
-        step = 0
-        vla_history = []
-
-        from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
-
-        while step < max_steps:
-            # Find active environments
-            active_indices = [i for i, r in enumerate(task_records) if r["active"]]
-            if not active_indices:
-                break
-
-            # VLA model inference on all inputs
-            current_inputs = inputs
-            current_task_descriptions = task_descriptions
-
-            if self.model_type in ("pi05", "pi0"):
-                pi05_obs = self._process_input_pi05(
-                    current_inputs, current_task_descriptions
-                )
-                vla_output = self._generate_one_step_pi05(
-                    pi05_obs, mode="eval" if is_validation else "train"
-                )
-
-                image_keys = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-                step_data = {
-                    "action": vla_output["action"],
-                    "chains": vla_output["chains"],
-                    "denoise_inds": vla_output["denoise_inds"],
-                    "old_log_probs": vla_output["old_log_probs"],
-                    "images": torch.stack(
-                        [pi05_obs.images[k] for k in image_keys], dim=1
-                    ),
-                    "image_masks": torch.stack(
-                        [pi05_obs.image_masks[k] for k in image_keys], dim=1
-                    ),
-                    "state": pi05_obs.state,
-                    "tokenized_prompt": pi05_obs.tokenized_prompt,
-                    "tokenized_prompt_mask": pi05_obs.tokenized_prompt_mask,
-                }
-            else:
-                vla_input = self._process_input(
-                    current_inputs, current_task_descriptions
-                )
-                vla_output = self._generate_one_step_oft(vla_input, is_validation)
-                step_data = {
-                    "input_ids": vla_input["input_ids"],
-                    "attention_mask": vla_input["attention_mask"],
-                    "pixel_values": vla_input["pixel_values"],
-                    "responses": vla_output["responses"],
-                    "action": vla_output["action"],
-                }
-
-            vla_history.append(step_data)
-
-            if self.model_type in ("pi05", "pi0"):
-                replan_steps = self.config.custom["pi05"]["replan_steps"]
-                assert (
-                    replan_steps > 0 and replan_steps <= self.hf_config.action_horizon
-                )
-
-            # Send actions to active workers
-            for idx in active_indices:
-                if self.model_type in ("pi05", "pi0"):
-                    self.sim_input_queues[idx].put(
-                        step_data["action"][idx][:replan_steps]
-                    )
-                else:
-                    self.sim_input_queues[idx].put(step_data["action"][idx])
-
-            # Collect results from active workers
-            new_inputs = inputs.copy()
-            for idx in active_indices:
-                result = self.sim_output_queues[idx].get(timeout=30)
-                assert result["type"] == "step", (
-                    f"Expected 'step', got '{result['type']}'"
-                )
-
-                new_inputs[idx] = obs_to_vla_input(
-                    result["obs"],
-                    is_robotwin="robotwin" in task_suite_names[idx].lower(),
-                )
-                task_records[idx]["active"] = result["active"]
-                task_records[idx]["complete"] = result["complete"]
-                task_records[idx]["finish_step"] = result["finish_step"]
-
-                # Collect video frames
-                if is_validation and len(result["valid_images"]) > 0:
-                    valid_video[task_records[idx]["task_file_name"]].extend(
-                        result["valid_images"]
-                    )
-
-                if not result["active"]:
-                    status = "✅ SUCCESS" if result["complete"] else "❌ FAILED"
-                    logger.debug(
-                        f"Task {idx} [task_id={task_ids[idx]}, trial_id={trial_ids[idx]}, gen={gen_indices[idx]}]: {status} (steps={result['finish_step']})"
-                    )
-
-            inputs = new_inputs
-            if self.model_type in ("pi05", "pi0"):
-                step += replan_steps
-            else:
-                step += NUM_ACTIONS_CHUNK
-
-        # Save rollout videos
-        if valid_video:
-            rollout_dir = os.path.join(self.config.train.output_dir, "vla_rollouts")
-
-            for task_file, images in valid_video.items():
-                if len(images) > 0:
-                    complete = any(
-                        r["complete"]
-                        for r in task_records
-                        if r["task_file_name"] == task_file
-                    )
-
-                    try:
-                        save_rollout_video(images, rollout_dir, task_file, 0, complete)
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
-                        import traceback
-
-                        traceback.print_exc()
-
-        self._destroy_parallel_envs()
-
-        # PI05/PI0 path in grpo packing
-        if self.model_type in ("pi05", "pi0"):
-            if is_validation:
-                # Eval mode: no training data needed
-                completions = [
-                    {
-                        "complete": bool(task_records[i]["complete"]),
-                        "finish_step": int(task_records[i]["finish_step"]),
-                    }
-                    for i in range(group_size)
-                ]
-                return [RolloutResult(completions=[c]) for c in completions]
-
-            # Training mode: build trajectories for GRPO (RLinf-style chain replay)
-            keys = (
-                "chains",
-                "denoise_inds",
-                "old_log_probs",
-                "images",
-                "image_masks",
-                "state",
-                "tokenized_prompt",
-                "tokenized_prompt_mask",
-            )
-            if not vla_history:
-                raise RuntimeError(
-                    "PI05 rollout produced empty vla_history in training mode."
-                )
-            missing = [k for k in keys if k not in vla_history[0]]
-            if missing:
-                raise KeyError(
-                    f"PI05 rollout missing keys={missing} in step_data. Keys={list(vla_history[0].keys())}"
-                )
-
-            stacked = {
-                k: torch.stack([s[k] for s in vla_history], 0) for k in keys
-            }  # [T, B, ...]
-            trajectories = [
-                {k: stacked[k][:, i].detach().cpu() for k in keys}
-                for i in range(group_size)
-            ]
-
-            buffer_dir = os.path.join(self.config.train.output_dir, "replay_buffer")
-            completions = [
-                {
-                    "complete": bool(task_records[i]["complete"]),
-                    "finish_step": int(task_records[i]["finish_step"]),
-                    "trajectory_id": save_trajectory_to_buffer(
-                        trajectories[i], buffer_dir=buffer_dir
-                    ),
-                }
-                for i in range(group_size)
-            ]
-            return [RolloutResult(completions=completions)]
-
-        return self._pack_grpo_results(
-            vla_history, task_records, batch_size, is_validation
-        )

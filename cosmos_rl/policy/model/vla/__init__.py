@@ -942,7 +942,7 @@ class OpenVLA(BaseModel):
         is_valid: bool = False,
         temperature: float = 0.0,
         unnorm_key: str = "libero_10_no_noops",
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """Generate one step for OpenVLA-OFT (matching SimpleVLA-RL)"""
         input_ids = inputs["input_ids"]

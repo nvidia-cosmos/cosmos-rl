@@ -13,6 +13,7 @@ import os
 import torch
 import safetensors.torch
 import sys
+
 sys.path.append("/workspace/test_cosmos")  # Ensure openpi is in the path
 from cosmos_rl.policy.model.pi05 import PI05
 from transformers import AutoConfig
@@ -157,9 +158,9 @@ if __name__ == "__main__":
 
     # ========== Build model + load weights ==========
     print(f"\n[Loading PI05 from {model_id}]")
-    
+
     cosmos_model = PI05(model_id, hf_config).to(device)
-    
+
     # Load weights
     cosmos_model.load_hf_weights(model_id)
     # Some checkpoints/loaders may leave a subset of params on CPU; force-move after load.
@@ -169,7 +170,9 @@ if __name__ == "__main__":
     # Pick a safe autocast setting based on actual weight dtype to avoid
     # "Input type (CUDABFloat16Type) and weight type (torch.FloatTensor) should be the same".
     model_weight_dtype = next(cosmos_model.parameters()).dtype
-    use_cuda_amp = (device == "cuda") and (model_weight_dtype in (torch.float16, torch.bfloat16))
+    use_cuda_amp = (device == "cuda") and (
+        model_weight_dtype in (torch.float16, torch.bfloat16)
+    )
     amp_ctx = (
         torch.autocast(device_type="cuda", dtype=model_weight_dtype)
         if use_cuda_amp
@@ -205,7 +208,7 @@ if __name__ == "__main__":
     # with torch.no_grad():
     #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
     #         result = cosmos_model.sample_actions(device, obs, noise=None, mode="eval")
-    
+
     # print(f"  Actions shape: {result['actions'].shape}")
     # print(f"  Chains shape: {result['chains'].shape}")
     # print(f"  Denoise inds shape: {result['denoise_inds'].shape}")

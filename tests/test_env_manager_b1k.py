@@ -51,7 +51,6 @@ from dataclasses import dataclass
 import os
 import tempfile
 import shutil
-import atexit
 
 # Disable torch compilation before importing B1K wrapper to avoid typing_extensions issues
 torch._dynamo.config.disable = True

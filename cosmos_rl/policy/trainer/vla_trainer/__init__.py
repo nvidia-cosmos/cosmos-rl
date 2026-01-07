@@ -16,4 +16,3 @@
 from cosmos_rl.policy.trainer.vla_trainer.vla_trainer import OpenVLAGRPOTrainer
 
 __all__ = ["OpenVLAGRPOTrainer"]
-

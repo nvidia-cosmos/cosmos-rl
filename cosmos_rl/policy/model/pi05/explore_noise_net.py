@@ -56,11 +56,15 @@ class ExploreNoiseNet(nn.Module):
         noise_logvar_max = self.noise_logvar_range[1]
         self.register_buffer(
             "logvar_min",
-            torch.log(torch.tensor(noise_logvar_min**2, dtype=torch.float32)).unsqueeze(0),
+            torch.log(torch.tensor(noise_logvar_min**2, dtype=torch.float32)).unsqueeze(
+                0
+            ),
         )
         self.register_buffer(
             "logvar_max",
-            torch.log(torch.tensor(noise_logvar_max**2, dtype=torch.float32)).unsqueeze(0),
+            torch.log(torch.tensor(noise_logvar_max**2, dtype=torch.float32)).unsqueeze(
+                0
+            ),
         )
 
     def forward(self, noise_feature: torch.Tensor) -> torch.Tensor:
@@ -76,7 +80,7 @@ class ExploreNoiseNet(nn.Module):
     def post_process(self, noise_logvar: torch.Tensor) -> torch.Tensor:
         """
         Post-process raw logvar output to bounded std.
-        
+
         Input: torch.Tensor([B, Ta, Da])
         Output: torch.Tensor([B, Ta, Da])
         """
@@ -138,10 +142,10 @@ class MLP(nn.Module):
                 0
             ]  # Linear layer is first in the last Sequential # type: ignore
             nn.init.constant_(final_linear.bias, out_bias_init)
+
     def forward(self, x: torch.Tensor, append: torch.Tensor = None) -> torch.Tensor:
         for layer_ind, m in enumerate(self.moduleList):
             if append is not None and layer_ind in self.append_layers:
                 x = torch.cat((x, append), dim=-1)
             x = m(x)
         return x
-

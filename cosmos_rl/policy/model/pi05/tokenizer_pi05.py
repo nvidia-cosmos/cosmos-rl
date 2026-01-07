@@ -21,7 +21,9 @@ class PaligemmaTokenizer(PreTrainedTokenizer):
 
         self.vocab_file = vocab_file
         self._max_len = int(max_len)
-        self._tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(vocab_file))
+        self._tokenizer = sentencepiece.SentencePieceProcessor(
+            model_file=str(vocab_file)
+        )
         self.pad_token_id = 0
 
     # ---- minimal HF plumbing ----
@@ -56,21 +58,29 @@ class PaligemmaTokenizer(PreTrainedTokenizer):
         self, save_directory: str, filename_prefix: str | None = None
     ) -> tuple[str, ...]:
         os.makedirs(save_directory, exist_ok=True)
-        out_name = (filename_prefix + "-" if filename_prefix else "") + "tokenizer.model"
+        out_name = (
+            filename_prefix + "-" if filename_prefix else ""
+        ) + "tokenizer.model"
         out_path = os.path.join(save_directory, out_name)
         if os.path.abspath(self.vocab_file) != os.path.abspath(out_path):
             shutil.copyfile(self.vocab_file, out_path)
         return (out_path,)
 
-    def tokenize_openpi(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def tokenize_openpi(
+        self, prompt: str, state: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
         if state is not None:
-            discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            discretized_state = (
+                np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            )
             state_str = " ".join(map(str, discretized_state))
             full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
             tokens = self._tokenizer.encode(full_prompt, add_bos=True)
         else:
-            tokens = self._tokenizer.encode(cleaned_text, add_bos=True) + self._tokenizer.encode("\n")
+            tokens = self._tokenizer.encode(
+                cleaned_text, add_bos=True
+            ) + self._tokenizer.encode("\n")
 
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
@@ -79,10 +89,10 @@ class PaligemmaTokenizer(PreTrainedTokenizer):
             tokens = tokens + padding
         else:
             if tokens_len > self._max_len:
-                logging.warning(f"Token length ({tokens_len}) exceeds max ({self._max_len}), truncating.")
+                logging.warning(
+                    f"Token length ({tokens_len}) exceeds max ({self._max_len}), truncating."
+                )
             tokens = tokens[: self._max_len]
             mask = [True] * self._max_len
 
         return np.asarray(tokens), np.asarray(mask)
-
-

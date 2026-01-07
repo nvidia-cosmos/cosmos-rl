@@ -111,7 +111,9 @@ class PI05GRPOTrainer(GRPOTrainer):
                         :, :, : self.model.action_chunk, : self.model.action_env_dim
                     ]
                     log_probs = log_probs_full.mean(dim=1)  # [B, Ta, Da]
-                    entropy = entropy_full.mean(dim=[1, 2, 3], keepdim=False)[:, None]  # [B, 1]
+                    # entropy = entropy_full.mean(dim=[1, 2, 3], keepdim=False)[
+                    #     :, None
+                    # ]  # [B, 1]
 
                     # Flatten to "token" dimension for PPO-style math
                     B = log_probs.shape[0]
@@ -134,7 +136,9 @@ class PI05GRPOTrainer(GRPOTrainer):
                     # RLinf-style config parameters
                     clip_ratio_low = self.config.train.train_policy.epsilon_low
                     clip_ratio_high = self.config.train.train_policy.epsilon_high
-                    clip_ratio_c = getattr(self.config.train.train_policy, "clip_ratio_c", None)
+                    clip_ratio_c = getattr(
+                        self.config.train.train_policy, "clip_ratio_c", None
+                    )
 
                     # RLinf-style ratio computation with mask for numerical stability
                     ratio = torch.where(
@@ -143,10 +147,14 @@ class PI05GRPOTrainer(GRPOTrainer):
                         torch.zeros_like(log_probs),
                     )
                     approx_kl = torch.where(
-                        loss_mask, (log_probs - old_lp).detach(), torch.zeros_like(log_probs)
+                        loss_mask,
+                        (log_probs - old_lp).detach(),
+                        torch.zeros_like(log_probs),
                     )
 
-                    clipped_ratio = torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
+                    clipped_ratio = torch.clamp(
+                        ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high
+                    )
                     policy_loss1 = -advantage * ratio
                     policy_loss2 = -advantage * clipped_ratio
 
@@ -163,7 +171,10 @@ class PI05GRPOTrainer(GRPOTrainer):
 
                     # Metrics
                     clip_mask = policy_loss1.detach() < policy_loss2.detach()
-                    pg_clipfrac = clip_mask.logical_and_(loss_mask).count_nonzero() / loss_mask_count
+                    pg_clipfrac = (
+                        clip_mask.logical_and_(loss_mask).count_nonzero()
+                        / loss_mask_count
+                    )
                     ppo_kl = -approx_kl.sum() / loss_mask_count
 
                     loss = pg_loss / len(policy_inputs)
@@ -171,7 +182,9 @@ class PI05GRPOTrainer(GRPOTrainer):
 
                     # Optional debug: synchronize to surface the *real* CUDA error at the first
                     # failing kernel, instead of later at an unrelated call (e.g., cuda events).
-                    if str(os.getenv("COSMOS_CUDA_SYNC_DEBUG", "0")).strip().lower() in {
+                    if str(
+                        os.getenv("COSMOS_CUDA_SYNC_DEBUG", "0")
+                    ).strip().lower() in {
                         "1",
                         "true",
                         "yes",

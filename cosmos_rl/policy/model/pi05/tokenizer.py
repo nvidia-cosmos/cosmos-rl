@@ -18,7 +18,11 @@ import sentencepiece
 logger = logging.getLogger(__name__)
 
 _TOKENIZER_URL = "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
-_CACHE_DIR = pathlib.Path(os.environ.get("OPENPI_DATA_HOME", "~/.cache/openpi")).expanduser().resolve()
+_CACHE_DIR = (
+    pathlib.Path(os.environ.get("OPENPI_DATA_HOME", "~/.cache/openpi"))
+    .expanduser()
+    .resolve()
+)
 
 
 def _maybe_download(url: str) -> pathlib.Path:
@@ -53,15 +57,21 @@ class PaligemmaTokenizer:
         path = _maybe_download(_TOKENIZER_URL)
         self._tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(path))
 
-    def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def tokenize(
+        self, prompt: str, state: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
         if state is not None:
-            discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            discretized_state = (
+                np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            )
             state_str = " ".join(map(str, discretized_state))
             full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
             tokens = self._tokenizer.encode(full_prompt, add_bos=True)
         else:
-            tokens = self._tokenizer.encode(cleaned_text, add_bos=True) + self._tokenizer.encode("\n")
+            tokens = self._tokenizer.encode(
+                cleaned_text, add_bos=True
+            ) + self._tokenizer.encode("\n")
 
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
@@ -70,9 +80,10 @@ class PaligemmaTokenizer:
             tokens = tokens + padding
         else:
             if tokens_len > self._max_len:
-                logging.warning(f"Token length ({tokens_len}) exceeds max ({self._max_len}), truncating.")
+                logging.warning(
+                    f"Token length ({tokens_len}) exceeds max ({self._max_len}), truncating."
+                )
             tokens = tokens[: self._max_len]
             mask = [True] * self._max_len
 
         return np.asarray(tokens), np.asarray(mask)
-
