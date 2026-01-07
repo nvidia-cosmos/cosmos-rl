@@ -75,8 +75,8 @@ class Qwen3MoeArgs:
     gate_bias_update_factor: float = 0.0
     aux_loss_coeff: float = 0.0
     hf_config: AutoConfig = None
-    # moe_backend: "default" or "deepep"
-    moe_backend: str = "deepep"
+    # moe_backend: "grouped_gemm" as the default backend
+    moe_backend: str = "grouped_gemm"
 
 
 class RotaryEmbedding(nn.Module):
