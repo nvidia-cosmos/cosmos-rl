@@ -153,7 +153,6 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
 
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
-                    # Logging
                     logger.debug(
                         f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
                         f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "

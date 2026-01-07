@@ -5,25 +5,27 @@ from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 from cosmos_rl.policy.model.pi05.model_utils import get_config
 from cosmos_rl.policy.model.pi05.model_utils import PaliGemmaWithExpertModel
 from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
+from cosmos_rl.utils.util import resolve_model_path
 
 import logging
 import math
 import os
 import random
+import numpy as np
 
 import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
-from typing import Callable, List, Optional, Tuple, Literal
+from typing import Callable, List, Optional, Tuple, Dict, Any
+from PIL import Image
+from types import SimpleNamespace
 
 from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import resolve_model_path
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from safetensors import safe_open
-
 
 
 IMAGE_KEYS = (
@@ -33,6 +35,71 @@ IMAGE_KEYS = (
 )
 
 IMAGE_RESOLUTION = (224, 224)
+
+
+def convert_to_uint8(img: np.ndarray) -> np.ndarray:
+    """Converts an image to uint8 if it is a float image.
+
+    This is important for reducing the size of the image when sending it over the network.
+    """
+    if np.issubdtype(img.dtype, np.floating):
+        img = (255 * img).astype(np.uint8)
+    return img
+
+
+def resize_with_pad(
+    images: np.ndarray, height: int, width: int, method=Image.BILINEAR
+) -> np.ndarray:
+    """Replicates tf.image.resize_with_pad for multiple images using PIL. Resizes a batch of images to a target height.
+
+    Args:
+        images: A batch of images in [..., height, width, channel] format.
+        height: The target height of the image.
+        width: The target width of the image.
+        method: The interpolation method to use. Default is bilinear.
+
+    Returns:
+        The resized images in [..., height, width, channel].
+    """
+    # If the images are already the correct size, return them as is.
+    if images.shape[-3:-1] == (height, width):
+        return images
+
+    original_shape = images.shape
+
+    images = images.reshape(-1, *original_shape[-3:])
+    resized = np.stack(
+        [
+            _resize_with_pad_pil(Image.fromarray(im), height, width, method=method)
+            for im in images
+        ]
+    )
+    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
+
+
+def _resize_with_pad_pil(
+    image: Image.Image, height: int, width: int, method: int
+) -> Image.Image:
+    """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and
+    width without distortion by padding with zeros.
+
+    Unlike the jax version, note that PIL uses [width, height, channel] ordering instead of [batch, h, w, c].
+    """
+    cur_width, cur_height = image.size
+    if cur_width == width and cur_height == height:
+        return image  # No need to resize if the image is already the correct size.
+
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+    resized_image = image.resize((resized_width, resized_height), resample=method)
+
+    zero_image = Image.new(resized_image.mode, (width, height), 0)
+    pad_height = max(0, int((height - resized_height) / 2))
+    pad_width = max(0, int((width - resized_width) / 2))
+    zero_image.paste(resized_image, (pad_width, pad_height))
+    assert zero_image.size == (width, height)
+    return zero_image
 
 
 def preprocess_observation_pytorch(
@@ -358,7 +425,9 @@ class PI05(BaseModel):
 
         torch.set_float32_matmul_precision("high")
         if getattr(hf_config, "cosmos_compile", False):
-            self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+            self.sample_actions = torch.compile(
+                self.sample_actions, mode="max-autotune"
+            )
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -372,10 +441,22 @@ class PI05(BaseModel):
                 noise_logvar_range=self.noise_logvar_range,
                 noise_scheduler_type="learn",
             )
-        
+
         self.processor = None
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.norm_stats = self._load_pi05_norm_stats(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name_or_path, trust_remote_code=True
+        )
+        self.norm_stats = self._load_pi05_norm_stats(self.model_name_or_path)
+
+        self.model_input_keys = [
+            "input_ids",
+            "attention_mask",
+            "images",
+            "image_masks",
+            "state",
+        ]
+        self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
+        self.model_train_keys = self.model_input_keys + self.model_output_keys
 
     @staticmethod
     def preprocess_hf_config(config):
@@ -718,25 +799,46 @@ class PI05(BaseModel):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, mode="train") -> dict:
+    def sample_actions(self, device, inputs, noise=None, mode="train") -> dict:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
-        
+
         Matches RLinf's OpenPi0ForRLActionPrediction.sample_actions() interface.
-        
+
         Args:
             device: torch device
             observation: Observation object
             noise: Optional initial noise
             num_steps: Number of denoise steps
             mode: "train" or "eval" - controls whether to collect chains for GRPO
-            
+
         Returns:
             dict with 'actions', 'chains', 'denoise_inds'
         """
+
+        observation = SimpleNamespace(
+            images=inputs["images"],
+            img_masks=inputs["image_masks"],
+            tokenized_prompt=inputs["input_ids"],
+            tokenized_prompt_mask=inputs["attention_mask"],
+            state=inputs["state"],
+        )
         fp = os.path.expanduser("~/pi05_first_input.pt")
-        dbg = str(os.getenv("DEBUG", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
-        fixed = torch.load(fp, map_location="cpu", weights_only=False) if (dbg and os.path.exists(fp)) else None
-        if isinstance(fixed, dict) and all(k in fixed for k in ("images", "img_masks", "lang_tokens", "lang_masks", "state")):
+        dbg = str(os.getenv("DEBUG", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        fixed = (
+            torch.load(fp, map_location="cpu", weights_only=False)
+            if (dbg and os.path.exists(fp))
+            else None
+        )
+        if isinstance(fixed, dict) and all(
+            k in fixed
+            for k in ("images", "img_masks", "lang_tokens", "lang_masks", "state")
+        ):
             images = [x.to(device=device) for x in fixed["images"]]
             img_masks = [x.to(device=device) for x in fixed["img_masks"]]
             lang_tokens = fixed["lang_tokens"].to(device=device)
@@ -755,9 +857,13 @@ class PI05(BaseModel):
             if noise is None:
                 actions_shape = (bsize, self.action_horizon, self.action_dim)
                 noise = self.sample_noise(actions_shape, device)
-            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+            images, img_masks, lang_tokens, lang_masks, state = (
+                self._preprocess_observation(observation, train=False)
+            )
             if (
-                str(os.getenv("SAVE_FIRST_INPUT", os.getenv("save_first_input", "0"))).strip().lower()
+                str(os.getenv("SAVE_FIRST_INPUT", os.getenv("save_first_input", "0")))
+                .strip()
+                .lower()
                 in {"1", "true", "yes", "y", "on"}
                 and int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")) or 0) == 0
                 and not getattr(self, "_pi05_first_input_saved", False)
@@ -770,7 +876,9 @@ class PI05(BaseModel):
                             "lang_tokens": lang_tokens.detach().cpu(),
                             "lang_masks": lang_masks.detach().cpu(),
                             "state": state.detach().cpu(),
-                            "noise_init": noise.detach().cpu() if torch.is_tensor(noise) else None,
+                            "noise_init": noise.detach().cpu()
+                            if torch.is_tensor(noise)
+                            else None,
                         },
                         fp,
                     )
@@ -811,11 +919,13 @@ class PI05(BaseModel):
             else:
                 if self.ignore_last:
                     denoise_inds = torch.tensor(
-                        [random.randint(0, self.num_steps - 2)] * self.num_steps, device=device
+                        [random.randint(0, self.num_steps - 2)] * self.num_steps,
+                        device=device,
                     )
                 else:
                     denoise_inds = torch.tensor(
-                        [random.randint(0, self.num_steps - 1)] * self.num_steps, device=device
+                        [random.randint(0, self.num_steps - 1)] * self.num_steps,
+                        device=device,
                     )
         else:
             denoise_inds = torch.tensor([-1] * self.num_steps, device=device)
@@ -836,7 +946,7 @@ class PI05(BaseModel):
                 sample_mode,
                 self.num_steps,
             )
-            
+
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t_mean + self.sample_noise(x_t.shape, device) * x_t_std
             log_prob = self.get_logprob_norm(x_t, x_t_mean, x_t_std)
@@ -844,7 +954,9 @@ class PI05(BaseModel):
             log_probs.append(log_prob)
         x_0 = x_t
         chains = torch.stack(chains, dim=1)
-        log_probs = torch.stack(log_probs, dim=1)[:, :, : self.action_chunk, : self.action_env_dim]
+        log_probs = torch.stack(log_probs, dim=1)[
+            :, :, : self.action_chunk, : self.action_env_dim
+        ]
         if self.joint_logprob:
             log_probs = log_probs.mean(dim=1)
         else:
@@ -943,7 +1055,6 @@ class PI05(BaseModel):
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
         return x_t_mean, x_t_std
 
-
     def get_suffix_out(
         self,
         state,
@@ -993,7 +1104,9 @@ class PI05(BaseModel):
         return suffix_out
 
     def _set_fsdp_reshard_after_forward(self, policy_str):
-        logging.info("FSDP reshard_after_forward setting is not applicable for PI05 model.")
+        logging.info(
+            "FSDP reshard_after_forward setting is not applicable for PI05 model."
+        )
         pass
 
     def denoise_step(
@@ -1065,7 +1178,7 @@ class PI05(BaseModel):
         sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
         entropy = 0.5 * torch.log(2 * math.pi * math.e * (sigma_safe**2))
         return entropy
-    
+
     def get_log_prob_value(
         self,
         images,
@@ -1139,7 +1252,6 @@ class PI05(BaseModel):
             chains_entropy = torch.zeros_like(chains_log_probs)
         return chains_log_probs, chains_entropy
 
-
     @staticmethod
     def supported_model_types():
         return ["pi05", "pi0"]
@@ -1211,28 +1323,171 @@ class PI05(BaseModel):
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
-        with safe_open(weight_path, framework="pt", device=("cuda" if device.type == "cuda" else "cpu")) as f:
+        with safe_open(
+            weight_path,
+            framework="pt",
+            device=("cuda" if device.type == "cuda" else "cpu"),
+        ) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
         # logger.info(f'{state_dict.keys()}')
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
-        embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        embed_key = (
+            "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        )
         lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"
         if embed_key not in state_dict and lm_head_key in state_dict:
             state_dict[embed_key] = state_dict[lm_head_key]
 
         missing, unexpected = self.load_state_dict(state_dict, strict=True)
         if missing:
-            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
+            logger.warning(
+                f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}"
+            )
         if unexpected:
-            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)")
-
+            logger.info(
+                f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)"
+            )
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         raise ValueError("PI05 does not support context parallelism")
 
     def check_tp_compatible(self, tp_size: int):
         raise ValueError("PI05 does not support tensor parallelism")
+
+    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        batch_size = len(inputs)
+
+        def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
+            # 1. Convert to PIL Image
+            pil_img = np.ascontiguousarray(arr)
+            # 2. Resize with padding (matching official_openpi)
+            pil_img = convert_to_uint8(resize_with_pad(pil_img, 224, 224))
+            # 3. Convert to torch.Tensor
+            return torch.from_numpy(pil_img)  # [H, W, C], values in [0, 255]
+
+        base_imgs = [_to_pi05_img(img) for img in inputs["full_images"]]
+        wrist_imgs = [_to_pi05_img(img) for img in inputs["wrist_images"]]
+
+        base_imgs_t = torch.stack(base_imgs, 0).to(device)  # [B, H, W, C]
+        wrist_imgs_t = torch.stack(wrist_imgs, 0).to(device)
+
+        images = {
+            "base_0_rgb": base_imgs_t,
+            "left_wrist_0_rgb": wrist_imgs_t,
+            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
+        }
+        image_masks = {
+            "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
+            "left_wrist_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
+            "right_wrist_0_rgb": torch.zeros(
+                batch_size, dtype=torch.bool, device=device
+            ),
+        }
+
+        state = torch.stack(
+            [
+                torch.as_tensor(
+                    self._normalize_pi05_state(inputs["states"][i]),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                for i in range(batch_size)
+            ],
+            dim=0,
+        )
+
+        tokenized_prompt = []
+        tokenized_prompt_mask = []
+        for i in range(batch_size):
+            prompt = inputs["task_descriptions"][i]
+            # If discrete_state_input=False, pass None to tokenizer (state is used as continuous input)
+            # If discrete_state_input=True, pass state to tokenizer (state is discretized into tokens)
+            if self.hf_config.discrete_state_input:
+                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
+            else:
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=None)
+
+            tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
+            tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
+        tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
+        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0).to(device)
+        return {
+            "images": images,
+            "image_masks": image_masks,
+            "state": state,
+            "input_ids": tokenized_prompt,
+            "attention_mask": tokenized_prompt_mask,
+        }
+
+    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
+        """Load PI05 norm_stats from canonical OpenPI path."""
+        import json
+
+        resolved = resolve_model_path(model_path)
+        p = os.path.join(
+            resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
+        )
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r") as f:
+            raw = json.load(f)
+        return raw["norm_stats"]
+
+    def _normalize_pi05_state(self, state: np.ndarray) -> np.ndarray:
+        """official_openpi Normalize(use_quantiles=True): map state into [-1, 1] using q01/q99."""
+        s_stats = self.norm_stats.get("state") or self.norm_stats.get("proprio")
+        if (
+            not isinstance(s_stats, dict)
+            or ("q01" not in s_stats)
+            or ("q99" not in s_stats)
+        ):
+            raise ValueError(
+                "PI05 norm_stats must contain state.q01 and state.q99 (quantiles)."
+            )
+        x = np.asarray(state, dtype=np.float32).reshape(-1)
+        q01 = np.asarray(s_stats["q01"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        q99 = np.asarray(s_stats["q99"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+
+    def _unnormalize_pi05_actions(self, actions: np.ndarray) -> np.ndarray:
+        """official_openpi Unnormalize(use_quantiles=True): map actions from [-1, 1] back using q01/q99."""
+        a_stats = self.norm_stats.get("actions") or self.norm_stats.get("action")
+        x = np.asarray(actions, dtype=np.float32)
+        dim = x.shape[-1]
+        q01 = np.asarray(a_stats["q01"], dtype=np.float32).reshape(-1)
+        q99 = np.asarray(a_stats["q99"], dtype=np.float32).reshape(-1)
+        if q01.size < dim:
+            # official_openpi: apply to first dim(q01), keep the rest unchanged
+            y0 = (x[..., : q01.size] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+            return np.concatenate([y0, x[..., q01.size :]], axis=-1)
+        q01 = q01[:dim]
+        q99 = q99[:dim]
+        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+
+    def generate_action(self, inputs: Dict[str, torch.Tensor], is_valid: bool = False):
+        """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
+
+        Args:
+            inputs: PI05 inputs object
+            is_valid: Whether to generate in validation mode
+        """
+        mode = "eval" if is_valid else "train"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = self.sample_actions(self.device, inputs, mode=mode)
+            actions = outputs["actions"]
+
+        actions = actions[
+            :, : self.hf_config.action_horizon, : self.hf_config.action_env_dim
+        ].to(torch.float32)
+        actions_np = actions.detach().cpu().numpy()
+        outputs["action"] = self._unnormalize_pi05_actions(actions_np)
+        # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
+        # outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
+
+        return outputs
 
 
 def resize_with_pad_torch(
