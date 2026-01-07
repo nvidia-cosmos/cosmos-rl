@@ -695,19 +695,13 @@ class RLPolicyWorker(PolicyWorkerBase):
                     teacher_result_uuid
                 )
                 if teacher_result is None:
-                    teacher_logprobs = None
                     logger.error(
                         f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
                     )
-                else:
-                    teacher_logprobs = teacher_result.get("teacher_logprobs", None)
-                logger.debug(
-                    f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
-                )
                 if not hasattr(self.trainer, "teacher_interact_results"):
                     self.trainer.teacher_interact_results = {}
                 self.trainer.teacher_interact_results[teacher_result_uuid] = (
-                    teacher_logprobs
+                    teacher_result
                 )
             time.sleep(0.01)
 

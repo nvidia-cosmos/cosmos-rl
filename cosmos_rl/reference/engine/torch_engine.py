@@ -647,6 +647,13 @@ class TorchEngine(LLMTrainer):
                                                 ].teacher_result_uuid,
                                             }
                                         )
+                                        if self.config.distillation.trainer_token_ids_from_teacher:
+                                            data[-1]["completion_token_ids"] = rollouts[
+                                                mini_batch_indices[index]
+                                            ].completion_token_ids
+                                            data[-1]["prompt_token_ids"] = rollouts[
+                                                mini_batch_indices[index]
+                                            ].prompt_token_ids
                                         logger.debug(
                                             f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
                                         )
@@ -662,6 +669,13 @@ class TorchEngine(LLMTrainer):
                                             ].teacher_result_uuid,
                                         }
                                     )
+                                    if self.config.distillation.trainer_token_ids_from_teacher:
+                                        data[-1]["completion_token_ids"] = rollouts[
+                                            mini_batch_indices[i]
+                                        ].completion_token_ids
+                                        data[-1]["prompt_token_ids"] = rollouts[
+                                            mini_batch_indices[i]
+                                        ].prompt_token_ids
                                     logger.debug(
                                         f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
                                     )
