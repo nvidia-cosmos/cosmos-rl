@@ -89,7 +89,7 @@ class MoEArgs:
     enable_glu: bool = True
     act_fn: Optional[str] = None
     # moe_backend: "default" or "deepep"
-    moe_backend: str = "deepep"
+    moe_backend: str = "grouped_gemm"
 
     def __post_init__(self):
         if self.shared_inter_dim is None:
