@@ -123,7 +123,7 @@ class PI05DataPacker(BaseDataPacker):
                 denoise_inds,
                 images,
                 image_masks,
-                state,
+                states,
                 tokenized_prompt,
                 tokenized_prompt_mask,
                 old_log_probs,
@@ -139,7 +139,7 @@ class PI05DataPacker(BaseDataPacker):
                 self.denoise_inds = denoise_inds
                 self.images = images
                 self.image_masks = image_masks
-                self.state = state
+                self.states = states
                 self.tokenized_prompt = tokenized_prompt
                 self.tokenized_prompt_mask = tokenized_prompt_mask
                 self.old_log_probs = old_log_probs
@@ -155,7 +155,7 @@ class PI05DataPacker(BaseDataPacker):
             denoise_inds=trajectory["denoise_inds"].to(device),
             images=trajectory["images"].to(device),
             image_masks=trajectory["image_masks"].to(device),
-            state=trajectory["state"].to(device),
+            states=trajectory["states"].to(device),
             tokenized_prompt=trajectory["tokenized_prompt"].to(device),
             tokenized_prompt_mask=trajectory["tokenized_prompt_mask"].to(device),
             old_log_probs=trajectory["old_log_probs"].to(device),
@@ -166,7 +166,7 @@ class PI05DataPacker(BaseDataPacker):
         denoise_inds = policy_input.denoise_inds
         images = policy_input.images
         image_masks = policy_input.image_masks
-        state = policy_input.state
+        states = policy_input.states
         tokenized_prompt = policy_input.tokenized_prompt
         tokenized_prompt_mask = policy_input.tokenized_prompt_mask
         old_log_probs = policy_input.old_log_probs
@@ -219,13 +219,13 @@ class PI05DataPacker(BaseDataPacker):
             ),
             dim=0,
         )
-        state = torch.cat(
+        states = torch.cat(
             (
-                state,
+                states,
                 torch.zeros(
-                    (pad_chunks, *state.shape[1:]),
-                    dtype=state.dtype,
-                    device=state.device,
+                    (pad_chunks, *states.shape[1:]),
+                    dtype=states.dtype,
+                    device=states.device,
                 ),
             ),
             dim=0,
@@ -291,7 +291,7 @@ class PI05DataPacker(BaseDataPacker):
             "denoise_inds": denoise_inds,
             "images": images,
             "image_masks": image_masks,
-            "state": state,
+            "states": states,
             "tokenized_prompt": tokenized_prompt,
             "tokenized_prompt_mask": tokenized_prompt_mask,
             "old_log_probs": old_log_probs,

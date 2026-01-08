@@ -24,10 +24,11 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 
-from cosmos_rl.simulators.libero.utils import (
+from .processing_utils import (
     normalize_gripper_action,
     invert_gripper_action,
     obs_to_vla_input,
+    center_crop_image,
 )
 
 
@@ -38,8 +39,6 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import resolve_model_path
-
-from cosmos_rl.policy.model.vla.processing_utils import center_crop_image
 
 
 @ModelRegistry.register(VLAWeightMapper)
