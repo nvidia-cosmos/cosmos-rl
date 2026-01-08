@@ -161,7 +161,6 @@ class VLADataPacker(DataPacker):
             trajectory = load_trajectory_from_buffer(
                 trajectory_id,
                 buffer_dir=os.path.join(self.config.train.output_dir, "replay_buffer"),
-                remove_after_load=False,  # Don't remove yet, training uses it multiple times
             )
         except Exception as e:
             logger.error(

@@ -508,7 +508,7 @@ class OpenVLARollout(RolloutBase):
             start_idx = payload_idx * n_generation
             completions = []
             sr = success_rates[payload_idx]
-            filter = False #sr == 0 or sr == 1
+            filter = sr == 0 or sr == 1
 
             for i in range(n_generation):
                 record = task_records[start_idx + i]
