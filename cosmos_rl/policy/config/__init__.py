@@ -1466,6 +1466,9 @@ class Config(BaseModel):
             logger.info(
                 "Distillation is enabled, so rollout_as_token_ids is set to True."
             )
+        else:
+            self.distillation.top_k = 0  # disable top_k if distillation is not enabled
+            logger.info("Distillation is not enabled, so top_k is set to 0.")
         return self
 
 
