@@ -299,6 +299,10 @@ class GrpoConfig(BaseModel):
         default_factory=list,
         description="Reward function to filter in dynamic sampling for DAPO. If specified, only samples with different this rewards will be used for training. If None, no filtering will be applied.",
     )
+    bypass_reward: bool = Field(
+        default=False,
+        description="Bypass reward computation and use fixed reward of 0.0 for all samples. Useful for distillation or debugging.",
+    )
     temperature: float = Field(
         default=1.0,
         description="Temperature for sampling. The higher the temperature, the more random the completions.",
@@ -1327,7 +1331,12 @@ class DistillationConfig(BaseModel):
 
     trainer_token_ids_from_teacher: bool = Field(
         default=True,
-        description="Whether the trainer gets token ids from teacher model during distillation.",
+        description="Whether the trainer gets all top_k token ids directly from its redis interacted teacher model during distillation rather than from the rollout structure. This can simplify the rollout payload when being transferred in the framework.",
+    )
+
+    rollout_top_k_recompute: bool = Field(
+        default=True,
+        description="Whether to recompute all top-k logprobs with top-k token ids after the full sequence generated during rollout for distillation. This can ensure the completion generation process with no large top-k kept so that not degrade the generation efficiency.",
     )
 
     @model_validator(mode="after")
@@ -1471,6 +1480,11 @@ class Config(BaseModel):
             logger.info(
                 "Distillation is enabled, so rollout_as_token_ids is set to True."
             )
+            self.train.train_policy.bypass_reward = True
+            logger.info("Distillation is enabled, so bypass_reward is set to True.")
+        else:
+            self.distillation.top_k = 0  # disable top_k if distillation is not enabled
+            logger.info("Distillation is not enabled, so top_k is set to 0.")
         return self
 
 
