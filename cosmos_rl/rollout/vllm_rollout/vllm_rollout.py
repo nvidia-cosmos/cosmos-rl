@@ -59,6 +59,7 @@ from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
     COSMOS_ROLLOUT_REPORT_INTERVAL,
 )
+from cosmos_rl.patch.vllm_patch import apply_vllm_gather_logprobs_patch
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -703,6 +704,7 @@ class vLLMRollout(RolloutBase):
     ) -> List[RequestOutput]:
         topk_sampling_params = copy.deepcopy(sampling_params)
         topk_sampling_params.prompt_logprobs = self.config.distillation.top_k
+        topk_sampling_params.logprobs = None
         topk_sampling_params.max_tokens = (
             1  # only need prompt logprobs for distillation
         )
@@ -718,6 +720,9 @@ class vLLMRollout(RolloutBase):
                         prompt_token_ids=result.prompt_token_ids + output.token_ids
                     )
                 )
+
+        # Pacth vllm to simplify the prompt_logprobs handling and avoid detokenization
+        apply_vllm_gather_logprobs_patch()
         results_with_top_k = self.rollout_engine.generate(
             prompts=merged_sequences,
             sampling_params=topk_sampling_params,
