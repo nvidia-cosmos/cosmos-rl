@@ -39,6 +39,7 @@ target_modules = ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0", "a
 
 [policy.diffusers_config]
 offload = true
+onload_multistream = false
 is_video = true
 max_prompt_length = 300
 weighting_scheme = "logit_normal"

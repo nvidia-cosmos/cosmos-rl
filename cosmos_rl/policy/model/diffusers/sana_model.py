@@ -41,16 +41,10 @@ class SanaModel(DiffuserModel):
         super().__init__(config, **kwargs)
         self.set_scheduler_timestep(timestep=self.train_sampling_steps)
 
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def _text_embedding(self, prompt_list: List[str], device="cuda"):
         """
         Text embedding of list of prompts
         """
-        # Move all text encoder to cuda if offload is enabled
-        if self.offload:
-            for model_tuple in self.separate_model_parts():
-                if "text" in model_tuple[0]:
-                    model_tuple[1].to(device)
-
         with torch.no_grad():
             # Fetch all default value of pipeline.__call__ that used by encode_prompt
             ignore_args = ["prompt", "do_classifier_free_guidance"]
@@ -60,6 +54,7 @@ class SanaModel(DiffuserModel):
             for name, params in sig_encode_pompt.parameters.items():
                 if name not in ignore_args and name in sig_call.parameters:
                     kwargs[name] = sig_call.parameters[name].default
+
             # Training doesn't need to do cfg, only prompt embedding is needed
             (
                 prompt_embeds,
@@ -73,26 +68,19 @@ class SanaModel(DiffuserModel):
                 **kwargs,
             )
 
-        if self.offload:
-            for model_tuple in self.separate_model_parts():
-                if "text" in model_tuple[0]:
-                    model_tuple[1].to("cpu")
         return {
             "encoder_hidden_states": prompt_embeds,
             "encoder_attention_mask": prompt_attention_mask,
         }
 
-    def visual_embedding(
+    def _visual_embedding(
         self, input_visual_list, height=None, width=None, device="cuda"
     ):
         """
         Text embedding of list of preprocessed image tensor.
             input_visual_list: Only support List[torch.Tensor] now. Each tensor is [c,h,w] for image and [c,t,h,w] for video
         """
-        if self.offload:
-            self.vae.to("cuda")
-
-        input_samples = torch.stack(input_visual_list).to(self.vae.device)
+        input_samples = torch.stack(input_visual_list).to(device)
 
         if self.is_video:
             with torch.no_grad():
@@ -119,19 +107,16 @@ class SanaModel(DiffuserModel):
                     ).latent
                 ) * scaling_factor
 
-        if self.offload:
-            self.vae.to("cpu")
-            torch.cuda.empty_cache()
         return visual_embedding
 
-    def set_scheduler_timestep(self, timestep: int):
+    def _set_scheduler_timestep(self, timestep: int):
         """
         Set scheduler's timestep for nosie addition and noise removal process
         """
         self.scheduler.set_timesteps(num_inference_steps=timestep)
         self.timestep_map = torch.flip(self.scheduler.timesteps, dims=(0,)).to("cuda")
 
-    def add_noise(self, clean_latents, timestep=None, noise=None):
+    def _add_noise(self, clean_latents, timestep=None, noise=None):
         """
         Add random noise by random sampling timestep index
         """
