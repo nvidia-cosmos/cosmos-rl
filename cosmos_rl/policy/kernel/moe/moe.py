@@ -433,6 +433,7 @@ class GroupedExpertsDeepEP(nn.Module):
 def padding_wrapper_for_torch(
     input: torch.Tensor,
     tokens_per_expert: torch.Tensor,
+    permuted_probs: torch.Tensor,
     alignment: int,
     num_local_experts: int,
 ) -> torch.Tensor:
@@ -441,17 +442,10 @@ def padding_wrapper_for_torch(
     Args:
         tokens_per_expert: Number of tokens of each expert. [num_local_experts,]
         padded_max_len: length of tokens that needs to pad to.
+        permuted_probs: [total_dispatched_num_tokens]: probabilities of the selected expert for each dispatched token.
         alignment: length of tokens of input should be multiple of `alignment`.
         num_local_experts: Experts number of current ep rank.
     """
-    total_tokens_num_cur_group = input.size(0)
-    padded_total_tokens_num_cur_group = (
-        total_tokens_num_cur_group + num_local_experts * alignment
-    )
-    padded_total_tokens_num_cur_group = (
-        (padded_total_tokens_num_cur_group + alignment - 1) // alignment * alignment
-    )
-
     with torch.no_grad():
         # pad out empty experts to alignment requirement, at least one alignment
         padded_tokens_per_expert = torch.clamp_min(tokens_per_expert, alignment)
@@ -459,6 +453,8 @@ def padding_wrapper_for_torch(
         padded_tokens_per_expert = (
             (padded_tokens_per_expert + alignment - 1) // alignment * alignment
         ).to(torch.int32)  # [num_local_experts,]
+
+        padded_total_tokens_num_cur_group = padded_tokens_per_expert.sum().item()
 
         start_index_values = torch.cumsum(tokens_per_expert, 0) - tokens_per_expert
         padded_offsets = torch.cumsum(padded_tokens_per_expert, 0)
@@ -469,11 +465,8 @@ def padding_wrapper_for_torch(
             dtype=torch.int32,
             device=input.device,
         )
-
-        from cosmos_rl.utils.logging import logger
-
-        logger.info(
-            f"LMS: padded_total_tokens_num_cur_group: {padded_total_tokens_num_cur_group}, padded_tokens_per_expert.sum(): {padded_tokens_per_expert.sum()}"
+        padded_permuted_probs = permuted_probs.new_zeros(
+            (padded_total_tokens_num_cur_group,)
         )
         # fill the origin input row indices to padded_indices
         for expert_id in range(num_local_experts):
@@ -484,23 +477,28 @@ def padding_wrapper_for_torch(
                 padded_end = min(
                     padded_start + length, padded_total_tokens_num_cur_group
                 )
-                from cosmos_rl.utils.logging import logger
-
-                logger.info(
-                    f"LMS: padded_start: {padded_start}, padded_end: {padded_end}"
-                )
                 padded_indices[padded_start:padded_end] = torch.arange(
                     start_index,
                     start_index + (padded_end - padded_start),
                     dtype=torch.int32,
                     device=input.device,
                 )
-    input_shape = input.shape
+                padded_permuted_probs[padded_start:padded_end] = permuted_probs[
+                    start_index : start_index + (padded_end - padded_start)
+                ]
+
     # append one zero row
     input = torch.vstack((input, input.new_zeros(input.shape[-1])))
+    input_shape = input.shape
     input = input[padded_indices, :]
 
-    return input, input_shape, padded_tokens_per_expert, padded_indices
+    return (
+        input,
+        input_shape,
+        padded_tokens_per_expert,
+        padded_indices,
+        padded_permuted_probs,
+    )
 
 
 def unpadding_wrapper_for_torch(output: torch.Tensor, input_shape, padded_indices):
@@ -513,21 +511,55 @@ def unpadding_wrapper_for_torch(output: torch.Tensor, input_shape, padded_indice
     return out
 
 
+def run_grouped_gemm(
+    x: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    permuted_probs: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Run grouped gemm for the given weights and tokens.
+    Args:
+        x: [total_dispatched_num_tokens, hidden_size]
+        permuted_probs: [total_dispatched_num_tokens, topk]
+        tokens_per_expert: [num_local_experts]
+    Returns:
+        output2: [total_dispatched_num_tokens, hidden_size]
+    """
+    offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32).to(x.device)
+    output1 = torch._grouped_mm(
+        x,
+        w13,
+        offs=offsets,
+    )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
+    output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+
+    output2 = torch._grouped_mm(
+        output1_,
+        w2,
+        offs=offsets,
+    )  # [total_dispatched_num_tokens, hidden_size]
+    return output2
+
+
 def grouped_gemm_wrapper(
     input: torch.Tensor,
-    weight: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    permuted_probs: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     num_local_experts,
 ):
     # FIXME: (lms) adjust this alignment.
     alignment = 16
-    input, input_shape, tokens_per_expert, padded_indices = padding_wrapper_for_torch(
-        input, tokens_per_expert, alignment, num_local_experts
+    input, input_shape, tokens_per_expert, padded_indices, permuted_probs = (
+        padding_wrapper_for_torch(
+            input, tokens_per_expert, permuted_probs, alignment, num_local_experts
+        )
     )
-    offsets = torch.cumsum(
-        tokens_per_expert, dim=0, dtype=torch.int32, device=input.device
-    )
-    output = torch._grouped_mm(input, weight, offs=offsets)
+    permuted_probs = permuted_probs.unsqueeze(-1)
+    output = run_grouped_gemm(input, w13, w2, permuted_probs, tokens_per_expert)
     output = unpadding_wrapper_for_torch(output, input_shape, padded_indices)
     return output
 
@@ -539,49 +571,6 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
 
     def __init__(self, args: MoEArgs):
         super().__init__(args)
-
-    def run_grouped_gemm(
-        self,
-        x: torch.Tensor,
-        permuted_probs: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Run grouped gemm for the given weights and tokens.
-        Args:
-            x: [total_dispatched_num_tokens, hidden_size]
-            permuted_probs: [total_dispatched_num_tokens, topk]
-            tokens_per_expert: [num_local_experts]
-        Returns:
-            output2: [total_dispatched_num_tokens, hidden_size]
-        """
-        output1 = grouped_gemm_wrapper(
-            x,
-            self.gate_and_up_projs.to_local().transpose(-2, -1),
-            tokens_per_expert,
-            tokens_per_expert.numel(),
-        )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
-        # offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32).to(x.device)
-        # output1 = torch._grouped_mm(
-        #     x,
-        #     self.gate_and_up_projs.to_local().transpose(-2, -1),
-        #     offs=offsets,
-        # )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
-        output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-
-        output2 = grouped_gemm_wrapper(
-            output1_,
-            self.down_projs.to_local().transpose(-2, -1),
-            tokens_per_expert,
-            tokens_per_expert.numel(),
-        )  # [total_dispatched_num_tokens, hidden_size]
-
-        # output2 = torch._grouped_mm(
-        #     output1_,
-        #     self.down_projs.to_local().transpose(-2, -1),
-        #     offs=offsets,
-        # )  # [total_dispatched_num_tokens, hidden_size]
-        return output2
 
     def forward(
         self,
@@ -597,7 +586,7 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
         # permuted_local_hidden_states: [total_dispatched_num_tokens, hidden_size]: tokens that dispatched to current EP rank, grouped by the selected experts, split by `tokens_per_expert`.
         # tokens_per_expert: [num_local_experts]: number of tokens dispatched to each expert.
         #   The sum of tokens_per_expert is equal to the total number of tokens dispatched to the current EP rank, i.e., total_dispatched_num_tokens.
-        # permuted_probs: [total_dispatched_num_tokens, topk]: probabilities of the selected expert for each dispatched token.
+        # permuted_probs: [total_dispatched_num_tokens]: probabilities of the selected expert for each dispatched token.
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(
                 hidden_states=x,
@@ -606,18 +595,24 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
                 token_indices=indices,
             )
         )
-        permuted_probs = permuted_probs.unsqueeze(-1)
         if torch.count_nonzero(tokens_per_expert) > 0:
-            return self.run_grouped_gemm(x, permuted_probs, tokens_per_expert)
+            output = grouped_gemm_wrapper(
+                permuted_local_hidden_states,
+                self.gate_and_up_projs.to_local().transpose(-2, -1),
+                self.down_projs.to_local().transpose(-2, -1),
+                permuted_probs,
+                tokens_per_expert,
+                self.args.n_routed_experts // self.ep_size,
+            )
         else:
             # No tokens dispatched to the current EP rank
             output1 = torch.matmul(
                 x[0] * 0, self.gate_and_up_projs.to_local()[0].t()
             )  # [hidden_size] @ [hidden_size, moe_inter_dim * 2] = [moe_inter_dim * 2]
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
+            output = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
-        y = self.token_dispatcher.token_unpermutation(output2)
+        y = self.token_dispatcher.token_unpermutation(output)
 
         return y
 
@@ -1046,7 +1041,7 @@ class MoE(nn.Module):
         else:
             token_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
 
-        # weights: [num_tokens, topk], indices: [num_tokens, topk]
+        # weights: [num_tokens, topk], expert indices: [num_tokens, topk]
         weights, indices, aux_loss = self.gate(x, token_mask, cp_mesh)
 
         y = self.experts(x, token_mask, weights, indices)
