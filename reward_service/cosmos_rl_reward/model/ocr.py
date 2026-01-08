@@ -92,19 +92,35 @@ class OcrReward(BaseRewardHandler):
     def calculate_reward(self, images, metadata):
         import torch 
         time_start = time.time()
+        def _error(msg: str):
+            logger.error(msg)
+            return {
+                "error": msg,
+                "scores": None,
+                "input_info": metadata.get("input_info", {}),
+                "duration": f"{time.time() - time_start:.2f}",
+                "decoded_duration": metadata.get("decode_duration", "N/A"),
+                "type": self.reward_name,
+            }
         # Expect 4D image batch; client must provide BHWC/NHWC uint8 (B,H,W,C)
+        if images is None:
+            return _error("[ocr] images tensor is None.")
         if images.dim() != 4:
-            raise ValueError(
-                f"OCR expects 4D uint8 tensor in BHWC/NHWC layout (B,H,W,C); got shape={images.shape}, dtype={images.dtype}"
-            )
+            return _error(f"[ocr] expects 4D uint8 tensor in BHWC/NHWC layout (B,H,W,C); got shape={getattr(images,'shape',None)}, dtype={getattr(images,'dtype',None)}")
+        if images.shape[0] == 0:
+            return _error("[ocr] imagesbatch size is zero.")
         if images.dtype != torch.uint8:
             images = images.to(torch.uint8)
         images_np = images.contiguous().cpu().numpy()
         images_list = [frame for frame in images_np]
-        prompts = metadata.get("prompts", [""] * len(images_list))
+        prompts = metadata.get("prompts")
+        if prompts is None:
+            return _error("[ocr] prompts are required and cannot be None.")
         # If batch==1 and prompts is a string, wrap to list for scorer API
         if len(images_list) == 1 and isinstance(prompts, str):
             prompts = [prompts]
+        if len(prompts) != len(images_list):
+            return _error(f"[ocr] prompts length ({len(prompts)}) must match batch size ({len(images_list)}).")
         use_gpu = bool(metadata.get("ocr_use_gpu", self.use_gpu))
         scorer = self.scorers.get(use_gpu)
         if scorer is None:
