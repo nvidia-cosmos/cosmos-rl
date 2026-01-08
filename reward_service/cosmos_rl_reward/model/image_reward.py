@@ -53,10 +53,24 @@ class ImageReward(BaseRewardHandler):
         from PIL import Image
         start = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
         end = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        def _error(msg: str):
+            logger.error(msg)
+            return {
+                "error": msg,
+                "scores": None,
+                "input_info": metadata.get("input_info", {}),
+                "duration": "0.00",
+                "decoded_duration": metadata.get("decode_duration", "N/A"),
+                "type": self.reward_name,
+            }
         if start is not None:
             start.record()
+        if images is None:
+            return _error("[image_reward] images tensor is None.")
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
-            raise ValueError(f"image_reward expects 4D torch.Tensor, got {type(images)} {getattr(images,'shape',None)}")
+            return _error(f"[image_reward] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+        if images.shape[0] == 0:
+            return _error("[image_reward] images batch size is zero.")
         x = images
         if x.dtype != torch.uint8:
             x = x.to(torch.uint8)
@@ -67,11 +81,13 @@ class ImageReward(BaseRewardHandler):
         else:
             raise ValueError(f"channel dim must be 3, got shape {x.shape}")
         pil_images = [Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])]
-        prompts = metadata.get("prompts", [""] * len(pil_images))
+        prompts = metadata.get("prompts")
+        if prompts is None:
+            return _error("[image_reward] prompts are required and cannot be None.")
         if isinstance(prompts, str):
-            prompts = [prompts] * len(pil_images)
+            prompts = [prompts]
         if len(prompts) != len(pil_images):
-            prompts = [prompts[0]] * len(pil_images)
+            return _error(f"[image_reward] prompts length ({len(prompts)}) must match batch size ({len(pil_images)}).")
         _, m = self.model.inference_rank(prompts, pil_images)
         diag = torch.tensor(m, device=self.device, dtype=self.dtype).reshape(len(prompts), len(prompts)).diagonal(0).float().cpu().tolist()
         if end is not None:
