@@ -1674,6 +1674,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 valid_payloads,
                 False,
                 self.current_weight_version,
+                bypass_reward=self.config.train.train_policy.bypass_reward,
             )
         return valid_payloads_list, valid_result
 

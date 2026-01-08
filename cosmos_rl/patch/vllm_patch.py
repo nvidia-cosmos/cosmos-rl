@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+original_update_prompt_logprobs = None
+
 
 def apply_vllm_gather_logprobs_patch():
     """
@@ -81,6 +83,22 @@ def apply_vllm_gather_logprobs_patch():
                 )
             )
 
+    global original_update_prompt_logprobs
+    if original_update_prompt_logprobs is None:
+        original_update_prompt_logprobs = (
+            vllm.v1.engine.logprobs.LogprobsProcessor._update_prompt_logprobs
+        )
     vllm.v1.engine.logprobs.LogprobsProcessor._update_prompt_logprobs = (
         _update_prompt_logprobs
+    )
+
+
+def remove_vllm_gather_logprobs_patch():
+    """Remove the vLLM patch for gathering prompt logprobs."""
+    import vllm
+
+    global original_update_prompt_logprobs
+    assert original_update_prompt_logprobs is not None
+    vllm.v1.engine.logprobs.LogprobsProcessor._update_prompt_logprobs = (
+        original_update_prompt_logprobs
     )
