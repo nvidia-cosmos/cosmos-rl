@@ -84,7 +84,7 @@ class MoEArgs:
     fake_balanced_gate: bool = False
     enable_router_bias: bool = False
     # moe_backend: "default" or "deepep"
-    moe_backend: str = "deepep"
+    moe_backend: str = "grouped_gemm"
 
 
 class MLP(nn.Module):
