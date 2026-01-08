@@ -379,6 +379,7 @@ class OpenVLARollout(RolloutBase):
                 vla_input = self.model.process_input(active_sim_results)
                 vla_output = self.model.generate_action(
                     vla_input,
+                    is_valid=is_validation,
                     temperature=self.config.rollout.sampling_config.temperature,
                     unnorm_key="libero_10_no_noops",
                 )
@@ -507,7 +508,7 @@ class OpenVLARollout(RolloutBase):
             start_idx = payload_idx * n_generation
             completions = []
             sr = success_rates[payload_idx]
-            filter = sr == 0 or sr == 1
+            filter = False #sr == 0 or sr == 1
 
             for i in range(n_generation):
                 record = task_records[start_idx + i]
