@@ -25,6 +25,7 @@ from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.util as util
 from queue import Queue
+from concurrent.futures import Future
 
 
 class RolloutGroup:
@@ -534,14 +535,6 @@ class RewardDispatcher:
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
             num_workers (int): The number of worker processes for parallel reward calculation.
         """
-        if config.train.train_policy.bypass_reward:
-            self.bypass_reward = True
-            logger.info(
-                "[RewardDispatcher] Bypass reward computation is enabled. All rewards will be set to 0.0."
-            )
-            return
-        else:
-            self.bypass_reward = False
 
         def worker_init(
             config,
@@ -612,6 +605,7 @@ class RewardDispatcher:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
+        bypass_reward: bool = False,
     ) -> None:
         """
         Enqueue the reward calculation task.
@@ -621,9 +615,10 @@ class RewardDispatcher:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
+            bypass_reward (bool): Whether to bypass the reward calculation and set rewards to zero.
         """
         for i in range(0, len(payloads), self.payload_per_task):
-            if self.bypass_reward:
+            if bypass_reward:
                 # Directly return the payloads with zero rewards and advantages
                 for payload in payloads[i : i + self.payload_per_task]:
                     payload.rewards = [0.0 for _ in payload.completions]
@@ -677,7 +672,8 @@ class RewardDispatcher:
                 all_done: whether all pending tasks are done
         """
         if not self.task_queue.empty():
-            if self.bypass_reward:
+            if not isinstance(self.task_queue.queue[0], Future):
+                assert isinstance(self.task_queue.queue[0], tuple)
                 payloads, is_validation, step = self.task_queue.get()
                 return payloads, is_validation, step, False
             if self.task_queue.queue[0].done():

@@ -59,7 +59,10 @@ from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
     COSMOS_ROLLOUT_REPORT_INTERVAL,
 )
-from cosmos_rl.patch.vllm_patch import apply_vllm_gather_logprobs_patch
+from cosmos_rl.patch.vllm_patch import (
+    apply_vllm_gather_logprobs_patch,
+    remove_vllm_gather_logprobs_patch,
+)
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -575,8 +578,11 @@ class vLLMRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
-        sampling_params: SamplingParams,
+        is_validation: bool,
     ) -> List[RolloutResult]:
+        sampling_params = (
+            self.val_sampling_params if is_validation else self.sampling_params
+        )
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
@@ -621,6 +627,7 @@ class vLLMRollout(RolloutBase):
                 if (
                     self.config.distillation.top_k > 0
                     and self.config.distillation.rollout_top_k_recompute
+                    and not is_validation
                 ):
                     # Generate top_k logprobs with tokens for distillation after full sequence generation
                     # This is to avoid generating too slowly when top_k is large at each decoding step.
@@ -644,26 +651,34 @@ class vLLMRollout(RolloutBase):
                 for output_idx, output in enumerate(outputs):
                     if prompt_logprobs is None:
                         prompt_logprobs, prompt_token_ids = (
-                            self.get_prompt_logprobs_and_token_ids(
+                            (
+                                self.get_prompt_logprobs_and_token_ids(
+                                    output,
+                                    output_topk=results_with_top_k[
+                                        ((i + output_idx) * local_sampling_params.n)
+                                    ]
+                                    if self.config.distillation.top_k > 0
+                                    and self.config.distillation.rollout_top_k_recompute
+                                    else None,
+                                )
+                            )
+                            if not is_validation
+                            else ([], [])
+                        )
+                    for j in range(len(output.outputs)):
+                        logprob, token_id = (
+                            self.get_completion_logprobs_and_token_ids(
                                 output,
                                 output_topk=results_with_top_k[
-                                    ((i + output_idx) * local_sampling_params.n)
+                                    ((i + output_idx) * local_sampling_params.n + j)
                                 ]
                                 if self.config.distillation.top_k > 0
                                 and self.config.distillation.rollout_top_k_recompute
                                 else None,
+                                index_in_outputs=j,
                             )
-                        )
-                    for j in range(len(output.outputs)):
-                        logprob, token_id = self.get_completion_logprobs_and_token_ids(
-                            output,
-                            output_topk=results_with_top_k[
-                                ((i + output_idx) * local_sampling_params.n + j)
-                            ]
-                            if self.config.distillation.top_k > 0
-                            and self.config.distillation.rollout_top_k_recompute
-                            else None,
-                            index_in_outputs=j,
+                            if not is_validation
+                            else ([], [])
                         )
                         logprobs.append(logprob)
                         token_ids.append(token_id)
@@ -728,6 +743,7 @@ class vLLMRollout(RolloutBase):
             sampling_params=topk_sampling_params,
             use_tqdm=False,
         )
+        remove_vllm_gather_logprobs_patch()
         assert (
             len(results_with_top_k) == len(results) * sampling_params.n
         ), f"[Rollout] The number of results {len(results_with_top_k)} is not equal to the expected {len(results) * sampling_params.n}"
@@ -739,8 +755,11 @@ class vLLMRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
-        sampling_params: SamplingParams,
+        is_validation: bool,
     ) -> List[RolloutResult]:
+        sampling_params = (
+            self.val_sampling_params if is_validation else self.sampling_params
+        )
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
@@ -771,6 +790,7 @@ class vLLMRollout(RolloutBase):
                     if (
                         self.config.distillation.top_k > 0
                         and self.config.distillation.rollout_top_k_recompute
+                        and not is_validation
                     ):
                         # Generate top_k logprobs with tokens for distillation after full sequence generation
                         # This is to avoid generating too slowly when top_k is large at each decoding step.
@@ -793,21 +813,29 @@ class vLLMRollout(RolloutBase):
                 prompt_logprobs = []
                 prompt_token_ids = []
                 prompt_logprobs, prompt_token_ids = (
-                    self.get_prompt_logprobs_and_token_ids(
+                    (
+                        self.get_prompt_logprobs_and_token_ids(
+                            results[0],
+                            output_topk=results_with_top_k[0]
+                            if self.config.distillation.top_k > 0
+                            and self.config.distillation.rollout_top_k_recompute
+                            else None,
+                        )
+                    )
+                    if not is_validation
+                    else ([], [])
+                )
+                logprobs, token_ids = (
+                    self.get_completion_logprobs_and_token_ids(
                         results[0],
                         output_topk=results_with_top_k[0]
                         if self.config.distillation.top_k > 0
                         and self.config.distillation.rollout_top_k_recompute
                         else None,
+                        index_in_outputs=0,
                     )
-                )
-                logprobs, token_ids = self.get_completion_logprobs_and_token_ids(
-                    results[0],
-                    output_topk=results_with_top_k[0]
-                    if self.config.distillation.top_k > 0
-                    and self.config.distillation.rollout_top_k_recompute
-                    else None,
-                    index_in_outputs=0,
+                    if not is_validation
+                    else ([], [])
                 )
                 # Collect the cumulative logprob of the generated completions
                 # Used for reward calculation to find the most likely mode reward.
@@ -915,18 +943,14 @@ class vLLMRollout(RolloutBase):
                 payloads,
                 stream,
                 data_packer,
-                sampling_params=self.val_sampling_params
-                if is_validation
-                else self.sampling_params,
+                is_validation,
             )
         else:
             return self.rollout_generation_single_turn(
                 payloads,
                 stream,
                 data_packer,
-                sampling_params=self.val_sampling_params
-                if is_validation
-                else self.sampling_params,
+                is_validation,
             )
 
     def get_underlying_model(self):
