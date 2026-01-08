@@ -76,15 +76,15 @@ save_mode = "async"
 
 [rollout.parallelism]
 n_init_replicas = 1
-tp_size = 2
+tp_size = 4
 pp_size = 1
 
 
 [policy.parallelism]
 n_init_replicas = 1
-tp_size = 4
+tp_size = 1
 cp_size = 1
-dp_shard_size = 1
+dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
 
@@ -104,6 +104,7 @@ top_k = 256
 jsd_beta = 1
 include_prompt = false
 trainer_token_ids_from_teacher = true
+rollout_top_k_recompute = true
 
 [distillation.parallelism]
 n_init_replicas = 1

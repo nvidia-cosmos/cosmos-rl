@@ -534,6 +534,14 @@ class RewardDispatcher:
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
             num_workers (int): The number of worker processes for parallel reward calculation.
         """
+        if config.train.train_policy.bypass_reward:
+            self.bypass_reward = True
+            logger.info(
+                "[RewardDispatcher] Bypass reward computation is enabled. All rewards will be set to 0.0."
+            )
+            return
+        else:
+            self.bypass_reward = False
 
         def worker_init(
             config,
@@ -615,14 +623,41 @@ class RewardDispatcher:
             step (int): The weight step where the payloads are generated.
         """
         for i in range(0, len(payloads), self.payload_per_task):
-            self.task_queue.put(
-                self.executor.submit(
-                    RewardDispatcher.compute_rewards,
-                    payloads[i : i + self.payload_per_task],
-                    is_validation,
-                    step,
+            if self.bypass_reward:
+                # Directly return the payloads with zero rewards and advantages
+                for payload in payloads[i : i + self.payload_per_task]:
+                    payload.rewards = [0.0 for _ in payload.completions]
+                    payload.advantages = [0.0 for _ in payload.completions]
+                    payload.filter_rewards = [0.0 for _ in payload.completions]
+                    payload.report_metrics = [{} for _ in payload.completions]
+                    if payload.completed_conversations is None:
+                        payload.completed_conversations = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.completion_logprobs is None:
+                        payload.completion_logprobs = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.completion_token_ids is None:
+                        payload.completion_token_ids = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.n_ignore_prefix_tokens is None:
+                        payload.n_ignore_prefix_tokens = [
+                            0 for _ in payload.completions
+                        ]
+                self.task_queue.put(
+                    (payloads[i : i + self.payload_per_task], is_validation, step)
                 )
-            )
+            else:
+                self.task_queue.put(
+                    self.executor.submit(
+                        RewardDispatcher.compute_rewards,
+                        payloads[i : i + self.payload_per_task],
+                        is_validation,
+                        step,
+                    )
+                )
 
     def dequeue_rewards_cal(
         self,
@@ -642,6 +677,9 @@ class RewardDispatcher:
                 all_done: whether all pending tasks are done
         """
         if not self.task_queue.empty():
+            if self.bypass_reward:
+                payloads, is_validation, step = self.task_queue.get()
+                return payloads, is_validation, step, False
             if self.task_queue.queue[0].done():
                 payloads, is_validation, step = self.task_queue.get().result()
                 return payloads, is_validation, step, False
