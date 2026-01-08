@@ -105,7 +105,7 @@ class AIMEDataSet(Dataset):
         """
         This is mandatory for GRPO to get a reference answer for reward computation.
         """
-        response = self.dataset[idx]["answer"]
+        response = self.dataset[idx]["solution"]
         if "boxed" not in response:
             response = "$\\boxed{" + response + "}$"
         return response
