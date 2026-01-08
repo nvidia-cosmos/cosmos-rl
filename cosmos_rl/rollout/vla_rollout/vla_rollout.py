@@ -239,7 +239,7 @@ class OpenVLARollout(RolloutBase):
                     sim_results[key] = np.zeros(
                         data_shape, dtype=images_and_states[key].dtype
                     )
-            sim_results[key][wait_env_ids] = images_and_states[key].copy()
+                sim_results[key][wait_env_ids] = images_and_states[key].copy()
             for i, env_id in enumerate(wait_env_ids):
                 sim_results["task_descriptions"][env_id] = task_descriptions[i]
             for env_id in wait_env_ids:
