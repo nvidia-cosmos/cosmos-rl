@@ -1,0 +1,71 @@
+import torch
+import numpy as np
+from typing import Dict, List, Any
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
+
+
+class Observation:
+    """Observation class matching OpenPI's Observation structure."""
+    
+    def __init__(self, images, image_masks, state, tokenized_prompt, tokenized_prompt_mask):
+        self.images = images
+        self.image_masks = image_masks
+        self.state = state
+        self.tokenized_prompt = tokenized_prompt
+        self.tokenized_prompt_mask = tokenized_prompt_mask
+        self.token_ar_mask = None
+        self.token_loss_mask = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Observation":
+        """Create Observation from dict, matching OpenPI's Observation.from_dict()."""
+        return cls(
+            images=data["image"],
+            image_masks=data["image_mask"],
+            state=data["state"],
+            tokenized_prompt=data.get("tokenized_prompt"),
+            tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
+        )
+
+
+class PIDataPacker(BaseDataPacker):
+    """Data packer for PI0/PI05 models."""
+
+    def sft_compute_max_len(self, processed_samples):
+        pass
+
+    def sft_process_sample(self, sample):
+        return sample
+
+    def sft_collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Collate samples into batched format, matching OpenPI's data loader behavior.
+        """
+        # Stack each field across the batch
+        image_keys = list(batch[0]["image"].keys())
+        
+        images = {
+            key: torch.from_numpy(np.stack([s["image"][key] for s in batch]))
+            for key in image_keys
+        }
+        image_masks = {
+            key: torch.tensor([s["image_mask"][key] for s in batch])
+            for key in image_keys
+        }
+        
+        state = torch.from_numpy(np.stack([s["state"] for s in batch]))
+        tokenized_prompt = torch.from_numpy(np.stack([s["tokenized_prompt"] for s in batch]))
+        tokenized_prompt_mask = torch.from_numpy(np.stack([s["tokenized_prompt_mask"] for s in batch]))
+        actions = torch.from_numpy(np.stack([s["actions"] for s in batch]))
+
+        observation = Observation(
+            images=images,
+            image_masks=image_masks,
+            state=state,
+            tokenized_prompt=tokenized_prompt,
+            tokenized_prompt_mask=tokenized_prompt_mask,
+        )
+
+        return {"observation": observation, "actions": actions}
+
+
