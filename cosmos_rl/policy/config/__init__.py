@@ -1335,7 +1335,7 @@ class DistillationConfig(BaseModel):
     )
 
     rollout_top_k_recompute: bool = Field(
-        default=True,
+        default=False,
         description="Whether to recompute all top-k logprobs with top-k token ids after the full sequence generated during rollout for distillation. This can ensure the completion generation process with no large top-k kept so that not degrade the generation efficiency.",
     )
 

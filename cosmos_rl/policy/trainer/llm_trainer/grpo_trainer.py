@@ -54,7 +54,6 @@ from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
 from cosmos_rl.utils.util import compute_logprobs_for_top_k_indices
 import cosmos_rl.utils.distributed as dist_util
-import torch.distributed as dist
 import torch.nn.functional as F
 import msgpack
 
@@ -839,24 +838,21 @@ class GRPOTrainer(LLMTrainer):
         mini_batch_indices: List[int],
     ):
         all_uuids = [rollouts[i].teacher_result_uuid for i in mini_batch_indices]
-        all_rank_uuids = dist_util.all_gather_object_cpu(all_uuids)
-        scattered_teacher_logprobs = [[] for _ in range(self.world_size)]
-        teacher_logprobs = [[]]
-        if self.global_rank == 0:
-            for index, rank_uuids in enumerate(all_rank_uuids):
-                teacher_logprobs_needed = []
-                for id in rank_uuids:
-                    while id not in self.teacher_interact_results:
-                        time.sleep(0.01)
-                    self.fetched_teacher_uuids.add(id)
-                    teacher_logprobs_needed.append(self.teacher_interact_results[id])
-                scattered_teacher_logprobs[index] = teacher_logprobs_needed
-        dist.scatter_object_list(
-            teacher_logprobs,
-            scattered_teacher_logprobs,
-            src=0,
-        )
-        all_teacher_logprobs = teacher_logprobs[0]
+        teacher_logprobs_needed = []
+        if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+            for id in all_uuids:
+                while id not in self.teacher_interact_results:
+                    time.sleep(0.01)
+                self.fetched_teacher_uuids.add(id)
+                teacher_logprobs_needed.append(self.teacher_interact_results[id])
+        if self.parallel_dims.pp_cp_tp_coord[1] > 1:
+            all_teacher_logprobs = dist_util.broadcast_object_cpu(
+                teacher_logprobs_needed,
+                group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                group_src=0,
+            )
+        else:
+            all_teacher_logprobs = teacher_logprobs_needed
         assert (
             len(all_teacher_logprobs) == len(mini_batch_indices)
         ), f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
