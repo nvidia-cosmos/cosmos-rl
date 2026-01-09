@@ -474,6 +474,7 @@ class ModelRegistry:
     def build_model(cls, config: CosmosConfig, hf_config_args={}):
         model_name_or_path = config.policy.model_name_or_path
         model = None
+        hf_config_args["attn_implementation"] = "flash_attention_2"
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )
