@@ -14,17 +14,18 @@
 # limitations under the License.
 
 original_update_prompt_logprobs = None
+original_update_sample_logprobs = None
 
 
 def apply_vllm_gather_logprobs_patch():
     """
-    Patch vLLM's LogprobsProcessor to gather prompt logprobs without
+    Patch vLLM's LogprobsProcessor to gather logprobs without
     decoding tokens to save memory and reduce overhead.
     """
 
     import itertools
 
-    from vllm.v1.outputs import LogprobsTensors
+    from vllm.v1.outputs import LogprobsTensors, LogprobsLists
     import vllm
 
     NONES = itertools.repeat(None)
@@ -92,6 +93,53 @@ def apply_vllm_gather_logprobs_patch():
         _update_prompt_logprobs
     )
 
+    def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
+        """Update with sample logprobs from EngineCore.
+
+        Outer lists are only of len > 1 if EngineCore made
+        >1 tokens in prior step (e.g. in spec decoding).
+
+        Args:
+          logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
+
+        """
+
+        assert self.num_logprobs is not None
+        assert self.logprobs is not None
+        assert self.cumulative_logprob is not None
+
+        token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
+
+        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
+            # Detokenize (non-incrementally).
+            decoded_tokens = NONES
+            # if self.tokenizer is None else (
+            #     convert_ids_list_to_tokens(self.tokenizer, token_ids))
+
+            # Sampler puts the sampled logprob in first.
+            sampled_token_logprob = logprobs[0]
+            self.cumulative_logprob += sampled_token_logprob
+
+            # Update with the Logprob dictionary for this pos.
+            self.logprobs.append(
+                self._make_logprob_dict(
+                    logprobs,
+                    token_ids,
+                    decoded_tokens,
+                    rank,
+                    self.num_logprobs,
+                )
+            )
+
+    global original_update_sample_logprobs
+    if original_update_sample_logprobs is None:
+        original_update_sample_logprobs = (
+            vllm.v1.engine.logprobs.LogprobsProcessor._update_sample_logprobs
+        )
+    vllm.v1.engine.logprobs.LogprobsProcessor._update_sample_logprobs = (
+        _update_sample_logprobs
+    )
+
 
 def remove_vllm_gather_logprobs_patch():
     """Remove the vLLM patch for gathering prompt logprobs."""
@@ -101,4 +149,9 @@ def remove_vllm_gather_logprobs_patch():
     assert original_update_prompt_logprobs is not None
     vllm.v1.engine.logprobs.LogprobsProcessor._update_prompt_logprobs = (
         original_update_prompt_logprobs
+    )
+    global original_update_sample_logprobs
+    assert original_update_sample_logprobs is not None
+    vllm.v1.engine.logprobs.LogprobsProcessor._update_sample_logprobs = (
+        original_update_sample_logprobs
     )
