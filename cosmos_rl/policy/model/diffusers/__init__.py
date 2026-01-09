@@ -177,7 +177,7 @@ class DiffuserModel(BaseModel, ABC):
     @classmethod
     def from_pretrained(cls, config, diffusers_config_args):
         """
-        Model initialize entrypoiny
+        Model initialize entrypoint.
         """
         return cls(
             config.policy.diffusers_config,
