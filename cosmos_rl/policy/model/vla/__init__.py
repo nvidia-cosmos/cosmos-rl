@@ -18,9 +18,19 @@ import json
 import os
 import inspect
 from functools import cached_property
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 from transformers import AutoConfig
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
+from PIL import Image
+
+from .processing_utils import (
+    normalize_gripper_action,
+    invert_gripper_action,
+    obs_to_vla_input,
+    center_crop_image,
+)
+
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
@@ -89,6 +99,10 @@ class OpenVLA(BaseModel):
 
         self.is_vlm = True
         self.norm_stats = self.hf_config.norm_stats
+
+        self.model_input_keys = ["input_ids", "pixel_values", "attention_mask"]
+        self.model_output_keys = ["responses", "old_log_probs"]
+        self.model_train_keys = self.model_input_keys + self.model_output_keys
 
     @cached_property
     def model_forward_valid_kwargs(self):
@@ -215,36 +229,6 @@ class OpenVLA(BaseModel):
         outputs.entropy = entropy
         outputs.logprobs = logpy
         return outputs
-
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        pixel_values: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        max_length: int = 512,
-        do_sample: bool = True,
-        temperature: float = 1.0,
-        num_beams: int = 1,
-        num_return_sequences: int = 1,
-        **kwargs,
-    ):
-        """Generate sequences using VLA model"""
-        model_inputs = {
-            "input_ids": input_ids,
-            "pixel_values": pixel_values,
-            "attention_mask": attention_mask,
-            "max_length": max_length,
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "num_beams": num_beams,
-            "num_return_sequences": num_return_sequences,
-            **kwargs,
-        }
-
-        # Remove None values
-        model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
-
-        return self.model.generate(**model_inputs)
 
     def save_pretrained(self, save_directory: str, **kwargs):
         """Save VLA model to directory"""
@@ -822,3 +806,166 @@ class OpenVLA(BaseModel):
             f"VLA model stats: {nparams} params, {total_flops} FLOPs (seq_len={seq_len})"
         )
         return nparams, int(total_flops)
+
+    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """
+        Process inputs for VLA model (matching SimpleVLA-RL's process_input)
+
+        Args:
+            inputs: List of observation dictionaries
+            task_descriptions: List of task description strings
+
+        Returns:
+            Processed batch data for VLA model
+        """
+        full_images = inputs["full_images"]
+        wrist_images = inputs["wrist_images"]
+        task_descriptions = inputs["task_descriptions"]
+
+        vla_type = self.hf_config.vla_type
+
+        batchdata = {"input_ids": [], "attention_mask": [], "pixel_values": []}
+
+        batch_size = full_images.shape[0]
+        for i in range(batch_size):
+            full_image = obs_to_vla_input(full_images[i])
+            full_image = Image.fromarray(full_image).convert("RGB")
+            full_image = center_crop_image(full_image)
+            desp = task_descriptions[i]
+
+            prompt = f"In: What action should the robot take to {desp.lower()}?\nOut:"
+            batch_feature = self.processor(prompt, full_image)
+            input_ids = batch_feature["input_ids"]
+            attention_mask = batch_feature.get(
+                "attention_mask", torch.ones_like(input_ids)
+            )
+            pixel_values = batch_feature["pixel_values"]
+
+            if (
+                hasattr(self.hf_config, "use_wrist_camera")
+                and self.hf_config.use_wrist_camera
+            ):
+                wrist_image = obs_to_vla_input(wrist_images[i])
+                wrist_image = Image.fromarray(wrist_images[i]).convert("RGB")
+                wrist_image = center_crop_image(wrist_image)
+                wrist_feature = self.processor(prompt, wrist_image)
+                pixel_values = torch.cat(
+                    [pixel_values, wrist_feature["pixel_values"]], dim=1
+                )
+
+            # Handle OpenVLA-OFT specific formatting
+            if vla_type == "openvla-oft":
+                # Add space token if needed (matching SimpleVLA-RL)
+                space_token_id = 29871  # Space token for LLaMA-based models
+                if not torch.all(input_ids[:, -1] == space_token_id):
+                    input_ids = torch.cat(
+                        (
+                            input_ids,
+                            torch.tensor(
+                                [[space_token_id]],
+                                dtype=input_ids.dtype,
+                                device=input_ids.device,
+                            ),
+                        ),
+                        dim=1,
+                    )
+                    attention_mask = torch.cat(
+                        (
+                            attention_mask,
+                            torch.tensor(
+                                [[True]],
+                                dtype=attention_mask.dtype,
+                                device=attention_mask.device,
+                            ),
+                        ),
+                        dim=1,
+                    )
+
+            batchdata["input_ids"].append(input_ids)
+            batchdata["attention_mask"].append(attention_mask)
+            batchdata["pixel_values"].append(pixel_values)
+
+        # Device placement
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if vla_type == "openvla-oft":
+            # OpenVLA-OFT specific batch processing
+            batchdata["input_ids"] = [x.transpose(0, 1) for x in batchdata["input_ids"]]
+            batchdata["attention_mask"] = [
+                x.transpose(0, 1) for x in batchdata["attention_mask"]
+            ]
+
+            batchdata["input_ids"] = (
+                pad_sequence(
+                    batchdata["input_ids"],
+                    batch_first=True,
+                    padding_value=self.tokenizer.pad_token_id,
+                )
+                .squeeze(-1)
+                .to(device)
+            )
+            batchdata["attention_mask"] = (
+                pad_sequence(
+                    batchdata["attention_mask"], batch_first=True, padding_value=0
+                )
+                .squeeze(-1)
+                .to(device)
+            )
+
+            # Handle padding and sorting (matching SimpleVLA-RL)
+            padding_mask = batchdata["input_ids"].ne(self.tokenizer.pad_token_id)
+            padding_mask = ~padding_mask
+            padding_mask = padding_mask.int()
+            sorted_indices = torch.argsort(
+                padding_mask, dim=1, descending=True, stable=True
+            )
+            batchdata["input_ids"] = torch.gather(
+                batchdata["input_ids"], 1, sorted_indices
+            )
+            batchdata["attention_mask"] = torch.gather(
+                batchdata["attention_mask"], 1, sorted_indices
+            )
+
+            batchdata["pixel_values"] = torch.cat(batchdata["pixel_values"], dim=0).to(
+                device
+            )
+        else:
+            # Standard batch processing
+            for key in ["input_ids", "attention_mask", "pixel_values"]:
+                batchdata[key] = torch.cat(batchdata[key], dim=0).to(device)
+        return batchdata
+
+    def generate_action(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        is_valid: bool = False,
+        temperature: float = 0.0,
+        unnorm_key: str = "libero_10_no_noops",
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Generate one step for OpenVLA-OFT (matching SimpleVLA-RL)"""
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        pixel_values = inputs["pixel_values"]
+        proprio = inputs.get("proprio", None)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            actions, responses, logprobs = self.model.generate_action(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                proprio=proprio,
+                attention_mask=attention_mask,
+                padding_idx=self.tokenizer.pad_token_id,
+                do_sample=not is_valid,
+                unnorm_key=unnorm_key,
+                temperature=temperature,
+            )
+
+            actions = normalize_gripper_action(actions)
+            actions = invert_gripper_action(actions)
+
+            return {
+                "action": actions,
+                "responses": responses,
+                "old_log_probs": logprobs,
+            }

@@ -38,7 +38,6 @@ dependencies = [
     "diffusers",
     "peft",
     "flash-attn>=2.8.3",
-    "robosuite==1.4",
 ]
 
 [build-system]
@@ -99,7 +98,7 @@ vla = [
     "numpy<2",
     "opencv-python",
     "robomimic",
-    "robosuite",
+    "robosuite==1.4",
     "thop",
     "timm<1",
     "wandb>0.13.1",

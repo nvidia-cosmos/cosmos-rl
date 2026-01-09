@@ -16,6 +16,7 @@
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer.vla_trainer.vla_trainer import OpenVLAGRPOTrainer
+from cosmos_rl.policy.trainer.vla_trainer.pi05_trainer import PI05GRPOTrainer
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.base import Trainer
 from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
@@ -27,6 +28,7 @@ from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_sfttrainer import (
 
 __all__ = [
     "OpenVLAGRPOTrainer",
+    "PI05GRPOTrainer",
     "LLMTrainer",
     "GRPOTrainer",
     "SFTTrainer",

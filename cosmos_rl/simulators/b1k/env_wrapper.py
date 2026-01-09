@@ -203,17 +203,52 @@ class B1KEnvWrapper(gym.Env):
             )
 
     def close(self):
-        """Clean up the environment."""
+        """Clean up the environment and its scenes.
+
+        This performs proper cleanup by removing all objects and systems from scenes,
+        then stopping the simulator. We do this in close() where it belongs, but with
+        careful handling to avoid viewport race conditions.
+        """
         try:
             if hasattr(self, "env") and self.env is not None:
-                # Stop the simulator
-                if og.sim is not None:
-                    og.sim.stop()
-                # Clear environments
-                if hasattr(self.env, "envs"):
-                    for env in self.env.envs:
-                        if hasattr(env, "scene") and env.scene is not None:
-                            env.scene.clear()
+                # VectorEnvironment.close() is a no-op, but call it for consistency
+                if hasattr(self.env, "close"):
+                    self.env.close()
+
+                # Now clean up the scenes to prevent accumulation
+                if (
+                    og.sim is not None
+                    and hasattr(og.sim, "scenes")
+                    and len(og.sim.scenes) > 0
+                ):
+                    # Stop the simulator to halt rendering before cleanup
+                    if not og.sim.is_stopped():
+                        og.sim.stop()
+
+                    # Now safely clear all scenes
+                    for scene in og.sim.scenes:
+                        try:
+                            # Remove all objects from the scene
+                            if hasattr(scene, "objects") and len(scene.objects) > 0:
+                                og.sim.batch_remove_objects(list(scene.objects))
+
+                            # Clear all systems
+                            if (
+                                hasattr(scene, "active_systems")
+                                and len(scene.active_systems) > 0
+                            ):
+                                for system_name in list(scene.active_systems.keys()):
+                                    try:
+                                        scene.clear_system(system_name=system_name)
+                                    except Exception:
+                                        pass  # Some systems may already be cleared
+                        except Exception as e:
+                            print(f"Warning during scene cleanup: {e}")
+
+                    # Clear the scenes list
+                    og.sim.scenes.clear()
+
+                # Clear the reference to allow garbage collection
                 self.env = None
         except Exception as e:
             print(f"Warning: Error during environment cleanup: {e}")
