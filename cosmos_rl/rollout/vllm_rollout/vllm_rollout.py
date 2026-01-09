@@ -61,7 +61,6 @@ from cosmos_rl.utils.constant import (
 )
 from cosmos_rl.patch.vllm_patch import (
     apply_vllm_gather_logprobs_patch,
-    remove_vllm_gather_logprobs_patch,
 )
 
 
@@ -242,6 +241,9 @@ class vLLMRollout(RolloutBase):
         load_format: str = "dummy",
         **kwargs,
     ):
+        if self.config.distillation.top_k > 0:
+            # Pacth vllm to simplify the prompt_logprobs handling and avoid detokenization
+            apply_vllm_gather_logprobs_patch()
         if not self._engine_initialized:
             trust_remote_code = True  # set trust remote code default to True.
 
@@ -735,15 +737,11 @@ class vLLMRollout(RolloutBase):
                         prompt_token_ids=result.prompt_token_ids + output.token_ids
                     )
                 )
-
-        # Pacth vllm to simplify the prompt_logprobs handling and avoid detokenization
-        apply_vllm_gather_logprobs_patch()
         results_with_top_k = self.rollout_engine.generate(
             prompts=merged_sequences,
             sampling_params=topk_sampling_params,
             use_tqdm=False,
         )
-        remove_vllm_gather_logprobs_patch()
         assert (
             len(results_with_top_k) == len(results) * sampling_params.n
         ), f"[Rollout] The number of results {len(results_with_top_k)} is not equal to the expected {len(results) * sampling_params.n}"
@@ -757,6 +755,7 @@ class vLLMRollout(RolloutBase):
         data_packer: BaseDataPacker,
         is_validation: bool,
     ) -> List[RolloutResult]:
+        apply_vllm_gather_logprobs_patch()
         sampling_params = (
             self.val_sampling_params if is_validation else self.sampling_params
         )
