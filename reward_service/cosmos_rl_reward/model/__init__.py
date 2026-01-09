@@ -50,3 +50,10 @@ except ImportError as e:
     print("[DEBUG] HPSv2Reward not found")
     print(e)
     pass
+
+try:
+    from cosmos_rl_reward.model.pickscore import PickScoreReward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] PickScoreReward not found")
+    print(e)
+    pass
