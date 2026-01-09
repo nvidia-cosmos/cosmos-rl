@@ -567,7 +567,7 @@ class PI05(BaseModel):
 
     def _prepare_attention_masks_4d(self, att_2d_masks):
         """Helper method to prepare 4D attention masks for transformer."""
-        att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        att_2d_masks_4d = att_2d_masks[:, None, :, :].bool()
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
     def _preprocess_observation(self, observation, *, train=True):
