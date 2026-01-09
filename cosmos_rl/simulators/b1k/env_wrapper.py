@@ -39,7 +39,7 @@ gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_TRANSITION_RULES = True
 
 from cosmos_rl.simulators.utils import save_rollout_video
-
+from cosmos_rl.simulators.b1k.utils import get_b1k_tasks
 
 @dataclass
 class EnvStates:
@@ -65,17 +65,7 @@ class B1KEnvWrapper(gym.Env):
         with open(og_cfg_file, "r") as f:
             self.og_cfg = yaml.load(f, Loader=yaml.FullLoader)
 
-        task_description_path = os.path.join(
-            os.path.dirname(__file__), "behavior_task.jsonl"
-        )
-        with open(task_description_path, "r") as f:
-            text = f.read()
-            task_description = [json.loads(x) for x in text.strip().split("\n") if x]
-
-        self.task_description_map = {
-            task_description[i]["task_name"]: task_description[i]["task"]
-            for i in range(len(task_description))
-        }
+        self.task_description_map = get_b1k_tasks()
         self.task_description = self.task_description_map[self.cfg.task_name]
         self.og_cfg["task"]["activity_name"] = self.cfg.task_name
         self.og_cfg["robots"][0]["sensor_config"]["VisionSensor"]["sensor_kwargs"][
