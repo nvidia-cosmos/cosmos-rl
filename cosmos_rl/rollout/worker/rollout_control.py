@@ -1641,7 +1641,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         output_text if output_text != "" else self.eos_token
                     )
                 # Skip the output if there is one or zero non-empty completions
-                skip_output = (total_generation_count - empty_generation_count) <= 1
+                # We keep one completion case
+                skip_output = (total_generation_count - empty_generation_count) <= 0
                 if not skip_output:
                     rr.completions = output_texts
                     valid_result.append(rr)
