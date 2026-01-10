@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+import argparse
+import toml
 import torch
-import torch.nn.functional as F
 import json
+from types import SimpleNamespace
 from torch.utils.data import Dataset
 import os
 import einops
@@ -14,83 +16,48 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from omnigibson.learning.datas.lerobot_dataset import BehaviorLeRobotDataset
 from omnigibson.learning.utils.eval_utils import PROPRIOCEPTION_INDICES
+from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
+
+from PIL import Image
 
 
+def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> np.ndarray:
+    """Resize a single PIL image with padding to target size."""
+    cur_width, cur_height = image.size
+    if cur_width == width and cur_height == height:
+        return np.array(image)
 
-
-
-def resize_with_pad(
-    images: torch.Tensor,
-    height: int,
-    width: int,
-    mode: str = "bilinear",
-) -> torch.Tensor:
-    """PyTorch version of resize_with_pad. Resizes an image to a target height and width without distortion
-    by padding with black. If the image is float32, it must be in the range [-1, 1].
-
-    Args:
-        images: Tensor of shape [*b, h, w, c] or [*b, c, h, w]
-        height: Target height
-        width: Target width
-        mode: Interpolation mode ('bilinear', 'nearest', etc.)
-
-    Returns:
-        Resized and padded tensor with same shape format as input
-    """
-    # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
-    if images.shape[-1] <= 4:  # Assume channels-last format
-        channels_last = True
-        # Convert to channels-first for torch operations
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-        images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
-    else:
-        channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-
-    batch_size, channels, cur_height, cur_width = images.shape
-
-    # Calculate resize ratio
     ratio = max(cur_width / width, cur_height / height)
     resized_height = int(cur_height / ratio)
     resized_width = int(cur_width / ratio)
+    resized_image = image.resize((resized_width, resized_height), resample=method)
 
-    # Resize
-    resized_images = F.interpolate(
-        images, size=(resized_height, resized_width), mode=mode, align_corners=False if mode == "bilinear" else None
-    )
+    zero_image = Image.new(resized_image.mode, (width, height), 0)
+    pad_height = max(0, int((height - resized_height) / 2))
+    pad_width = max(0, int((width - resized_width) / 2))
+    zero_image.paste(resized_image, (pad_width, pad_height))
+    return np.array(zero_image)
 
-    # Handle dtype-specific clipping
-    if images.dtype == torch.uint8:
-        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
-    elif images.dtype == torch.float32:
-        resized_images = resized_images.clamp(-1.0, 1.0)
-    else:
-        raise ValueError(f"Unsupported image dtype: {images.dtype}")
 
-    # Calculate padding
-    pad_h0, remainder_h = divmod(height - resized_height, 2)
-    pad_h1 = pad_h0 + remainder_h
-    pad_w0, remainder_w = divmod(width - resized_width, 2)
-    pad_w1 = pad_w0 + remainder_w
+def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+    """Replicates tf.image.resize_with_pad for multiple images using PIL.
 
-    # Pad
-    constant_value = 0 if images.dtype == torch.uint8 else -1.0
-    padded_images = F.pad(
-        resized_images,
-        (pad_w0, pad_w1, pad_h0, pad_h1),  # left, right, top, bottom
-        mode="constant",
-        value=constant_value,
-    )
+    Args:
+        images: A batch of images in [..., height, width, channel] format.
+        height: The target height of the image.
+        width: The target width of the image.
+        method: The interpolation method to use. Default is bilinear.
 
-    # Convert back to original format if needed
-    if channels_last:
-        padded_images = padded_images.permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
-        if batch_size == 1 and images.shape[0] == 1:
-            padded_images = padded_images.squeeze(0)  # Remove batch dimension if it was added
+    Returns:
+        The resized images in [..., height, width, channel].
+    """
+    if images.shape[-3:-1] == (height, width):
+        return images
 
-    return padded_images
+    original_shape = images.shape
+    images = images.reshape(-1, *original_shape[-3:])
+    resized = np.stack([_resize_with_pad_pil(Image.fromarray(im), height, width, method) for im in images])
+    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
 
 
 class InjectDefaultPrompt:
@@ -130,7 +97,7 @@ class TokenizePrompt:
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        tokens, token_masks = self.tokenizer.tokenize_openpi(prompt, state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
 
 
@@ -153,14 +120,30 @@ class PadStatesAndActions:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
         return data
 
-def load_norm_stats(norm_stats_path):
-    """Load norm_stats.json and convert arrays to numpy."""
+
+def _convert_norm_stats_tree(obj: Any) -> Any:
+    """
+    Convert norm_stats json subtree into a tree whose leaves are *objects* (not dicts),
+    so `flatten_dict` / `apply_tree` treat them as leaves.
+    """
+    if isinstance(obj, dict) and "mean" in obj and "std" in obj:
+        return SimpleNamespace(
+            mean=np.asarray(obj["mean"]),
+            std=np.asarray(obj["std"]),
+            q01=np.asarray(obj["q01"]) if "q01" in obj else None,
+            q99=np.asarray(obj["q99"]) if "q99" in obj else None,
+        )
+    if isinstance(obj, dict):
+        return {k: _convert_norm_stats_tree(v) for k, v in obj.items()}
+    return obj
+
+
+def load_norm_stats(norm_stats_path: str) -> dict[str, Any]:
+    """Load norm_stats.json and convert leaf stats dicts into `NormStats`."""
     with open(norm_stats_path) as f:
         data = json.load(f)["norm_stats"]
-    return {
-        k: {field: np.array(v) for field, v in stats.items()}
-        for k, stats in data.items()
-    }
+    converted = _convert_norm_stats_tree(data)
+    return converted
 
 
 class PromptFromLeRobotTask:
@@ -186,6 +169,7 @@ class PromptFromLeRobotTask:
 
 
 class RepackTransform:
+    # filter out keys that are not in the structure, and rearrange the keys
     def __init__(self, structure: dict[str, str] | None = None):
         if structure is None:
             structure = {
@@ -213,7 +197,6 @@ class RepackTransform:
         return items
 
 
-# TODO: check if this is correct
 def flatten_dict(tree, parent_key: str = "", sep: str = "/") -> dict[str, Any]:
     """Flatten a nested dict. Uses '/' as the separator."""
     items: dict[str, Any] = {}
@@ -398,10 +381,10 @@ class BehaviorSFTDataset(Dataset):
             modalities=config.train.train_policy.dataset.modalities,
             local_only=True,
             delta_timestamps={
-                key: [t / 30.0 for t in range(config.custom.action_horizon)]
-                for key in config.custom.action_sequence_keys
+                key: [t / 30.0 for t in range(config.custom['action_horizon'])]
+                for key in config.custom['action_sequence_keys']
             },
-            episodes=config.custom.episodes_index,
+            episodes=config.custom['episodes_index'],
             chunk_streaming_using_keyframe=True,
             shuffle=True,
         )
@@ -411,7 +394,7 @@ class BehaviorSFTDataset(Dataset):
 
 
         # build tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(config.train.train_policy.dataset.model_name_or_path, max_len=config.custom.max_token_len)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path, max_len=config.custom['max_token_len'], trust_remote_code=True)
 
         # Load transforms
         self._transforms = []
@@ -423,15 +406,14 @@ class BehaviorSFTDataset(Dataset):
         # Add repack transform
         self._transforms.append(RepackTransform())
         # Convert into B1K-style model inputs (ported from openpi)
-        self._transforms.append(B1kInputsTransform(config.custom.action_dim, config.train.train_policy.dataset.model_type))
+        self._transforms.append(B1kInputsTransform(config.custom['action_dim'], config.train.train_policy.dataset.model_type))
         # openpi/src/openpi/transforms.py
         self._transforms.append(NormalizeTransform(self.norm_stats, use_quantiles=True))
         # openpi/src/openpi/training/config.py ModelTransformFactory.inputs
         self._transforms.append(InjectDefaultPrompt())
-        image_size = getattr(config.custom, "image_size", 224)
-        self._transforms.append(ResizeImages(image_size, image_size))
+        self._transforms.append(ResizeImages(config.custom['image_size'][0], config.custom['image_size'][1]))
         self._transforms.append(TokenizePrompt(self.tokenizer, discrete_state_input=config.train.train_policy.dataset.discrete_state_input))
-        self._transforms.append(PadStatesAndActions(config.custom.action_dim))
+        self._transforms.append(PadStatesAndActions(config.custom['action_dim']))
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -452,10 +434,23 @@ class BehaviorSFTDataset(Dataset):
         else:
             norm_stats_path = self.config.train.train_policy.dataset.norm_stats
             if norm_stats_path is None:
-                norm_stats_path = os.path.join(self.config.train.train_policy.dataset.root, "assets", self.config.train.train_policy.dataset.repo_id, "norm_stats.json")
+                norm_stats_path = os.path.join(self.config.policy.model_name_or_path, "assets", self.config.train.train_policy.dataset.repo_id, "norm_stats.json")
             if os.path.exists(norm_stats_path):
                 logger.info(f"Loading norm stats from {norm_stats_path}")
                 self.norm_stats = load_norm_stats(norm_stats_path)
             else:
                 logger.warning(f"Norm stats file not found at {norm_stats_path}")
                 self.norm_stats = None
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args, _ = parser.parse_known_args()
+    
+    with open(args.config, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(config_dict)
+    
+    dataset = BehaviorSFTDataset(config)
+    launch_dispatcher(dataset=dataset)

@@ -189,7 +189,7 @@ class PISFTTrainer(Trainer):
         return observation
 
     def build_optimizers(self):
-        self.optimizers = build_optimizers(self.model, self.config)
+        self.optimizers = build_optimizers([self.model], self.config)
 
     def checkpointing(
         self,

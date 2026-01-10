@@ -49,19 +49,16 @@ def parallelize(
         raise ValueError("PI05 does not support tensor parallelism")
     if parallel_dims.pp > 1:
         raise ValueError("PI05 does not support pipeline parallelism")
-    if parallel_dims.dp_shard > 1:
-        raise ValueError("PI05 does not support FSDP sharding, use DDP only")
 
     # Apply DDP
-    if parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
+    if world_mesh.ndim > 1:
+        raise RuntimeError("PI05 DDP only supports 1D parallelism")
 
-        apply_ddp(
-            model,
-            world_mesh,
-            enable_compile=config.train.compile,
-            enable_compiled_autograd=config.train.compile,
-        )
+    apply_ddp(
+        model,
+        world_mesh,
+        enable_compile=config.train.compile,
+        enable_compiled_autograd=config.train.compile,
+    )
 
     return None, None

@@ -313,15 +313,18 @@ class PI05(BaseModel):
         self.num_steps = hf_config.num_steps
         self.action_chunk = hf_config.action_chunk
         self.action_env_dim = hf_config.action_env_dim
-        self.noise_method = hf_config.noise_method
-        self.noise_level = hf_config.noise_level
-        self.noise_anneal = hf_config.noise_anneal
-        self.noise_params = hf_config.noise_params
-        self.noise_logvar_range = hf_config.noise_logvar_range
-        self.joint_logprob = hf_config.joint_logprob
-        self.safe_get_logprob = hf_config.safe_get_logprob
-        self.ignore_last = hf_config.ignore_last
+        # Optional knobs: if not specified in toml, fall back to code defaults.
+        self.noise_method = getattr(hf_config, "noise_method", "flow_sde")
+        self.noise_level = getattr(hf_config, "noise_level", 0.5)
+        self.noise_anneal = getattr(hf_config, "noise_anneal", False)
+        self.noise_params = getattr(hf_config, "noise_params", [0.7, 0.3, 400])
+        self.noise_logvar_range = getattr(hf_config, "noise_logvar_range", [0.08, 0.16])
+        self.joint_logprob = getattr(hf_config, "joint_logprob", False)
+        self.safe_get_logprob = getattr(hf_config, "safe_get_logprob", False)
+        self.ignore_last = getattr(hf_config, "ignore_last", False)
         self.train_expert_only = hf_config.train_expert_only
+        self.discrete_state_input = hf_config.discrete_state_input
+        self.max_token_len = hf_config.max_token_len
         self.global_step = 0  # Used for noise annealing
         paligemma_variant = hf_config.paligemma_variant
         action_expert_variant = hf_config.action_expert_variant
@@ -391,30 +394,10 @@ class PI05(BaseModel):
         )
         hf_config.cosmos_compile = bool(getattr(config.train, "compile", False))
 
-        # Runtime PI05 overrides live under `config.custom["pi05"]` (optional).
-        overrides = {}
+        # Unified assignment via the toml's custom field
         if hasattr(config, "custom") and isinstance(config.custom, dict):
-            overrides = config.custom.get("pi05", {}) or {}
-
-        # Defaults (RLinf-style)
-        defaults = {
-            "num_steps": 10,
-            "action_chunk": 5,
-            "action_env_dim": 7,
-            "noise_method": "flow_sde",
-            "noise_level": 0.5,
-            "noise_anneal": False,
-            "noise_params": [0.7, 0.3, 400],
-            "noise_logvar_range": [0.08, 0.16],
-            "joint_logprob": False,
-            "safe_get_logprob": False,
-            "ignore_last": False,
-            "train_expert_only": True,
-            "discrete_state_input": False,
-            "max_token_len": 200,
-        }
-        for k, v in defaults.items():
-            setattr(hf_config, k, overrides.get(k, getattr(hf_config, k, v)))
+            for k, v in config.custom.items():
+                setattr(hf_config, k, v)
 
         return hf_config
 

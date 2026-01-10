@@ -32,12 +32,24 @@ class PIDataPacker(BaseDataPacker):
     """Data packer for PI0/PI05 models."""
 
     def sft_compute_max_len(self, processed_samples):
-        pass
+        return 512
 
     def sft_process_sample(self, sample):
         return sample
+    
+    def get_policy_input(self, *args, **kwargs):
+        pass
 
-    def sft_collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def get_rollout_input(self, *args, **kwargs):
+        pass
+
+    def policy_compute_max_len(self, *args, **kwargs):
+        pass
+
+    def policy_collate_fn(self, *args, **kwargs):
+        pass
+
+    def sft_collate_fn(self, batch, *args, **kwargs) -> Dict[str, Any]:
         """
         Collate samples into batched format, matching OpenPI's data loader behavior.
         """
@@ -49,7 +61,9 @@ class PIDataPacker(BaseDataPacker):
             for key in image_keys
         }
         image_masks = {
-            key: torch.tensor([s["image_mask"][key] for s in batch])
+            key: torch.from_numpy(
+                np.asarray([bool(s["image_mask"][key]) for s in batch], dtype=np.bool_)
+            )
             for key in image_keys
         }
         

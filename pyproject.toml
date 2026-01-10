@@ -36,7 +36,7 @@ dependencies = [
     "kernels",
     "diffusers",
     "peft",
-    "flash-attn>=2.8.3",
+    # "flash-attn>=2.8.3",
     "robosuite==1.4",
 ]
 
