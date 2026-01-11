@@ -22,9 +22,11 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
 )
 
 import vllm
+from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 import torch
 import copy
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -56,6 +58,9 @@ from functools import partial
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
     COSMOS_ROLLOUT_REPORT_INTERVAL,
+)
+from cosmos_rl.patch.vllm_patch import (
+    apply_vllm_gather_logprobs_patch,
 )
 
 
@@ -213,7 +218,9 @@ class vLLMRollout(RolloutBase):
         )
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,
-            logprobs=0,
+            logprobs=0
+            if self.config.distillation.rollout_top_k_recompute
+            else self.config.distillation.top_k,
             top_p=self.config.rollout.sampling_config.top_p,
             top_k=self.config.rollout.sampling_config.top_k,
             temperature=self.config.rollout.sampling_config.temperature,
@@ -222,7 +229,9 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=0,
+            prompt_logprobs=0
+            if self.config.distillation.rollout_top_k_recompute
+            else self.config.distillation.top_k,
         )
 
     def init_engine(
@@ -232,6 +241,9 @@ class vLLMRollout(RolloutBase):
         load_format: str = "dummy",
         **kwargs,
     ):
+        if self.config.distillation.top_k > 0:
+            # Pacth vllm to simplify the prompt_logprobs handling and avoid detokenization
+            apply_vllm_gather_logprobs_patch()
         if not self._engine_initialized:
             trust_remote_code = True  # set trust remote code default to True.
 
@@ -295,6 +307,8 @@ class vLLMRollout(RolloutBase):
                 quantization=self.quantization,
                 seed=seed,
                 load_format=load_format,
+                # Set max_logprobs for distillation, default is 20
+                max_logprobs=max(self.config.distillation.top_k, 20),
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
@@ -398,18 +412,167 @@ class vLLMRollout(RolloutBase):
         return weight_view_map
 
     @staticmethod
-    def parse_logprobs(logprobs: List[dict]) -> List[float]:
+    def parse_logprobs(
+        logprobs: List[dict],
+        actual_token_ids: List[int],
+        top_k: int = 0,
+        is_completion: bool = False,
+    ) -> Tuple[List[float], List[int]]:
         if logprobs is None:
-            return []
+            return [], []
         ret_logprobs = []
         ret_token_ids = []
-        for logp in logprobs:
-            assert (
-                len(logp) == 1
-            ), f"[Rollout] logprobs length should be 1, but got {logp}."
-            ret_logprobs.append(list(logp.values())[0].logprob)
-            ret_token_ids.append(list(logp.keys())[0])
+        assert (
+            len(logprobs) == len(actual_token_ids)
+        ), f"[Rollout] The length of logprobs {len(logprobs)} should be equal to the length of actual_token_ids {len(actual_token_ids)}."
+        for logp, actual_id in zip(logprobs, actual_token_ids):
+            local_logprobs = []
+            local_token_ids = []
+            if top_k == 0:
+                assert (
+                    len(logp) == 1
+                ), f"[Rollout] logprobs length should be 1, but got {logp}."
+                for i, lp in logp.items():
+                    assert (
+                        i == actual_id
+                    ), f"[Rollout] The token id from logprobs {i} should be equal to the actual token id {actual_id}."
+                    local_token_ids.append(i)
+                    local_logprobs.append(lp.logprob)
+            else:
+                assert (
+                    len(logp) == top_k or len(logp) == top_k + 1
+                ), f"[Rollout] logprobs length should be {top_k} or {top_k+1}, but got {logp} for {actual_id}."
+                assert (
+                    actual_id in logp
+                ), f"[Rollout] actual token id {actual_id} should be in logprobs {logp.keys()}."
+                local_token_ids.append(actual_id)
+                local_logprobs.append(logp[actual_id].logprob)
+                for i, lp in logp.items():
+                    if i == actual_id:
+                        continue
+                    local_token_ids.append(i)
+                    # Currently we don't need other token logprobs except the actual token logprob by `local_logprobs.append(lp.logprob)`
+                    # Since in the current design, only the actual token logprob from rollout may be needed for loss and advantage calculation.
+                    # But we keep other token ids for potential future use such as topk level distillation at each position.
+            ret_logprobs.append(local_logprobs)
+            ret_token_ids.append(local_token_ids)
         return ret_logprobs, ret_token_ids
+
+    def get_prompt_logprobs_and_token_ids(
+        self,
+        output: RequestOutput,
+        output_topk: Optional[RequestOutput],
+    ) -> Tuple[List[float], List[int]]:
+        if not (
+            self.config.train.train_policy.collect_rollout_logprobs
+            or self.config.distillation.top_k > 0
+        ):
+            return [], []
+        assert (
+            output.prompt_logprobs is not None and len(output.prompt_logprobs) > 0
+        ), "Prompt logprobs should not be None or empty"
+        assert (
+            output.prompt_logprobs[0] is None
+        ), "Prompt logprobs should be None for the first token"
+        if (
+            self.config.distillation.top_k > 0
+            and self.config.distillation.rollout_top_k_recompute
+        ):
+            assert output_topk.prompt_logprobs is not None and len(
+                output_topk.prompt_logprobs
+            ) > len(
+                output.prompt_logprobs
+            ), "Prompt logprobs top_k should not be larger than prompt logprobs"
+            assert (
+                output_topk.prompt_logprobs[0] is None
+            ), "Prompt logprobs top_k should be None for the first token"
+            # The following logic is commented out because we have already checked the token ids and logprobs keys in get_completion_logprobs_and_token_ids
+            # but kept here for future reference and debug.
+            # for x in range(1, len(output.prompt_logprobs)):
+            #     assert (
+            #         output.prompt_token_ids[x] == output_topk.prompt_token_ids[x]
+            #     ), f"Prompt logprobs should have the same token ids, but got {output.prompt_token_ids[x]} and {output_topk.prompt_token_ids[x]}"
+            #     assert (
+            #         list(output.prompt_logprobs[x].keys())[0]
+            #         == list(output_topk.prompt_logprobs[x].keys())[0]
+            #     ), f"Prompt logprobs should have the same keys, but got {list(output.prompt_logprobs[x].keys())} and {list(output_topk.prompt_logprobs[x].keys())}"
+            input_prompt_logprobs = output_topk.prompt_logprobs[
+                1 : len(output.prompt_logprobs)
+            ]
+            input_prompt_token_ids = output_topk.prompt_token_ids[
+                1 : len(output.prompt_token_ids)
+            ]
+        else:
+            input_prompt_logprobs = output.prompt_logprobs[1:]
+            input_prompt_token_ids = output.prompt_token_ids[1:]
+        prompt_logprobs, prompt_token_ids = self.parse_logprobs(
+            input_prompt_logprobs,
+            input_prompt_token_ids,
+            self.config.distillation.top_k,
+            is_completion=False,
+        )
+        if not self.config.train.train_policy.collect_rollout_logprobs:
+            prompt_logprobs = []
+        return prompt_logprobs, prompt_token_ids
+
+    def get_completion_logprobs_and_token_ids(
+        self,
+        output: RequestOutput,
+        output_topk: Optional[RequestOutput],
+        index_in_outputs: int,
+    ) -> Tuple[List[float], List[int]]:
+        if (
+            self.config.train.train_policy.rollout_as_token_ids
+            or self.config.train.train_policy.collect_rollout_logprobs
+            or self.config.distillation.top_k > 0
+        ):
+            if (
+                self.config.distillation.top_k > 0
+                and self.config.distillation.rollout_top_k_recompute
+            ):
+                assert (
+                    len(output.outputs[index_in_outputs].logprobs)
+                    + len(output.prompt_logprobs)
+                    == len(output_topk.prompt_logprobs)
+                ), f"[Rollout] The length of logprobs {len(output.outputs[index_in_outputs].logprobs)} + prompt_logprobs {len(output.prompt_logprobs)} should be equal to the length of top_k prompt_logprobs {len(output_topk.prompt_logprobs)}"
+                # The following logic is commented out because we have already checked the token ids and logprobs keys in get_prompt_logprobs_and_token_ids
+                # but kept here for future reference and debug.
+                # for k in range(len(output.outputs[index_in_outputs].logprobs)):
+                #     assert (
+                #         output.outputs[index_in_outputs].token_ids[k]
+                #         == output_topk.prompt_token_ids[
+                #             len(output.prompt_token_ids) + k
+                #         ]
+                #     ), f"[Rollout] The token ids should be the same, but got {output.outputs[index_in_outputs].token_ids[k]} and {output_topk.prompt_token_ids[len(output.prompt_token_ids) + k]}"
+                #     assert (
+                #         list(output.outputs[index_in_outputs].logprobs[k].keys())[0]
+                #         == list(
+                #             output_topk.prompt_logprobs[
+                #                 len(output.prompt_logprobs) + k
+                #             ].keys()
+                #         )[0]
+                #     ), f"[Rollout] The logprobs keys should be the same, but got {output.outputs[index_in_outputs].logprobs[k].keys()} and {output_topk.prompt_logprobs[len(output.prompt_logprobs) + k].keys()}"
+                input_logprobs = output_topk.prompt_logprobs[
+                    len(output.prompt_logprobs) :
+                ]
+                input_token_ids = output_topk.prompt_token_ids[
+                    len(output.prompt_token_ids) :
+                ]
+            else:
+                input_logprobs = output.outputs[index_in_outputs].logprobs
+                input_token_ids = output.outputs[index_in_outputs].token_ids
+            logprob, token_id = self.parse_logprobs(
+                input_logprobs,
+                input_token_ids,
+                self.config.distillation.top_k,
+                is_completion=True,
+            )
+            if not self.config.train.train_policy.collect_rollout_logprobs:
+                logprob = []
+        else:
+            logprob = []
+            token_id = []
+        return logprob, token_id
 
     @torch.no_grad()
     def rollout_generation_single_turn(
@@ -417,8 +580,11 @@ class vLLMRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
-        sampling_params: SamplingParams,
+        is_validation: bool,
     ) -> List[RolloutResult]:
+        sampling_params = (
+            self.val_sampling_params if is_validation else self.sampling_params
+        )
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
@@ -460,6 +626,19 @@ class vLLMRollout(RolloutBase):
                     sampling_params=local_sampling_params,
                     use_tqdm=False,
                 )
+                if (
+                    self.config.distillation.top_k > 0
+                    and self.config.distillation.rollout_top_k_recompute
+                    and not is_validation
+                ):
+                    # Generate top_k logprobs with tokens for distillation after full sequence generation
+                    # This is to avoid generating too slowly when top_k is large at each decoding step.
+                    results_with_top_k = (
+                        self.generation_for_get_topk_logprobs_and_tokens_ids(
+                            results, local_sampling_params
+                        )
+                    )
+
             assert len(results) % n_repeats == 0, (
                 "[Rollout] The number of results %d is not divisible by n_repeats %d"
                 % (len(results), n_repeats)
@@ -469,35 +648,40 @@ class vLLMRollout(RolloutBase):
                 logprobs = []
                 token_ids = []
                 prompt_logprobs = None
+                prompt_token_ids = None
                 # collect logprobs
-                for output in outputs:
-                    if self.config.train.train_policy.collect_rollout_logprobs:
-                        if prompt_logprobs is None:
-                            assert (
-                                output.prompt_logprobs is not None
-                                and len(output.prompt_logprobs) > 0
-                            ), "Prompt logprobs should not be None or empty"
-                            assert (
-                                output.prompt_logprobs[0] is None
-                            ), "Prompt logprobs should be None for the first token"
-                            prompt_logprob, _ = self.parse_logprobs(
-                                output.prompt_logprobs[1:]
+                for output_idx, output in enumerate(outputs):
+                    if prompt_logprobs is None:
+                        prompt_logprobs, prompt_token_ids = (
+                            (
+                                self.get_prompt_logprobs_and_token_ids(
+                                    output,
+                                    output_topk=results_with_top_k[
+                                        ((i + output_idx) * local_sampling_params.n)
+                                    ]
+                                    if self.config.distillation.top_k > 0
+                                    and self.config.distillation.rollout_top_k_recompute
+                                    else None,
+                                )
                             )
-                            prompt_logprobs = prompt_logprob
-
+                            if not is_validation
+                            else ([], [])
+                        )
                     for j in range(len(output.outputs)):
-                        if (
-                            self.config.train.train_policy.rollout_as_token_ids
-                            or self.config.train.train_policy.collect_rollout_logprobs
-                        ):
-                            logprob, token_id = self.parse_logprobs(
-                                output.outputs[j].logprobs
+                        logprob, token_id = (
+                            self.get_completion_logprobs_and_token_ids(
+                                output,
+                                output_topk=results_with_top_k[
+                                    ((i + output_idx) * local_sampling_params.n + j)
+                                ]
+                                if self.config.distillation.top_k > 0
+                                and self.config.distillation.rollout_top_k_recompute
+                                else None,
+                                index_in_outputs=j,
                             )
-                            if not self.config.train.train_policy.collect_rollout_logprobs:
-                                logprob = []
-                        else:
-                            logprob = []
-                            token_id = []
+                            if not is_validation
+                            else ([], [])
+                        )
                         logprobs.append(logprob)
                         token_ids.append(token_id)
                 response.append(
@@ -519,6 +703,7 @@ class vLLMRollout(RolloutBase):
                             for j in range(len(output.outputs))
                         ],
                         prompt_logprobs=prompt_logprobs,
+                        prompt_token_ids=prompt_token_ids,
                     )
                 )
         except Exception as e:
@@ -529,14 +714,51 @@ class vLLMRollout(RolloutBase):
             return []
         return response
 
+    def generation_for_get_topk_logprobs_and_tokens_ids(
+        self,
+        results: List[RequestOutput],
+        sampling_params: SamplingParams,
+    ) -> List[RequestOutput]:
+        topk_sampling_params = copy.deepcopy(sampling_params)
+        topk_sampling_params.prompt_logprobs = self.config.distillation.top_k
+        topk_sampling_params.logprobs = None
+        topk_sampling_params.max_tokens = (
+            1  # only need prompt logprobs for distillation
+        )
+        topk_sampling_params.n = 1  # only need one generation for top_k logprobs
+        topk_sampling_params.top_p = 1.0
+        topk_sampling_params.temperature = 1.0
+        topk_sampling_params.min_p = 0.0
+        merged_sequences: List[TokensPrompt] = []
+        for result in results:
+            for output in result.outputs:
+                merged_sequences.append(
+                    TokensPrompt(
+                        prompt_token_ids=result.prompt_token_ids + output.token_ids
+                    )
+                )
+        results_with_top_k = self.rollout_engine.generate(
+            prompts=merged_sequences,
+            sampling_params=topk_sampling_params,
+            use_tqdm=False,
+        )
+        assert (
+            len(results_with_top_k) == len(results) * sampling_params.n
+        ), f"[Rollout] The number of results {len(results_with_top_k)} is not equal to the expected {len(results) * sampling_params.n}"
+        return results_with_top_k
+
     @torch.no_grad()
     def rollout_generation_multi_turn(
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
-        sampling_params: SamplingParams,
+        is_validation: bool,
     ) -> List[RolloutResult]:
+        apply_vllm_gather_logprobs_patch()
+        sampling_params = (
+            self.val_sampling_params if is_validation else self.sampling_params
+        )
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
@@ -564,7 +786,18 @@ class vLLMRollout(RolloutBase):
                         sampling_params=sampling_params,
                         use_tqdm=False,
                     )
-
+                    if (
+                        self.config.distillation.top_k > 0
+                        and self.config.distillation.rollout_top_k_recompute
+                        and not is_validation
+                    ):
+                        # Generate top_k logprobs with tokens for distillation after full sequence generation
+                        # This is to avoid generating too slowly when top_k is large at each decoding step.
+                        results_with_top_k = (
+                            self.generation_for_get_topk_logprobs_and_tokens_ids(
+                                results, sampling_params
+                            )
+                        )
                 assert (
                     len(results) == 1
                 ), "[Rollout] Expected single result for multi-turn rollout generation"
@@ -577,31 +810,32 @@ class vLLMRollout(RolloutBase):
                 logprobs = []
                 token_ids = []
                 prompt_logprobs = []
-                if self.config.train.train_policy.collect_rollout_logprobs:
-                    assert (
-                        results[0].prompt_logprobs is not None
-                        and len(results[0].prompt_logprobs) > 0
-                    ), "Prompt logprobs should not be None or empty"
-                    assert (
-                        results[0].prompt_logprobs[0] is None
-                    ), "Prompt logprobs should be None for the first token"
-                    prompt_logprob, _ = self.parse_logprobs(
-                        results[0].prompt_logprobs[1:]
+                prompt_token_ids = []
+                prompt_logprobs, prompt_token_ids = (
+                    (
+                        self.get_prompt_logprobs_and_token_ids(
+                            results[0],
+                            output_topk=results_with_top_k[0]
+                            if self.config.distillation.top_k > 0
+                            and self.config.distillation.rollout_top_k_recompute
+                            else None,
+                        )
                     )
-                    prompt_logprobs = prompt_logprob
-
-                if (
-                    self.config.train.train_policy.rollout_as_token_ids
-                    or not self.config.train.train_policy.collect_rollout_logprobs
-                ):
-                    assert (
-                        len(results[0].outputs) == 1
-                    ), "Expected single output for token ID extraction"
-                    for output in results[0].outputs:
-                        logprob, token_ids = self.parse_logprobs(output.logprobs)
-                        if self.config.train.train_policy.collect_rollout_logprobs:
-                            logprobs = logprob
-
+                    if not is_validation
+                    else ([], [])
+                )
+                logprobs, token_ids = (
+                    self.get_completion_logprobs_and_token_ids(
+                        results[0],
+                        output_topk=results_with_top_k[0]
+                        if self.config.distillation.top_k > 0
+                        and self.config.distillation.rollout_top_k_recompute
+                        else None,
+                        index_in_outputs=0,
+                    )
+                    if not is_validation
+                    else ([], [])
+                )
                 # Collect the cumulative logprob of the generated completions
                 # Used for reward calculation to find the most likely mode reward.
                 # This can indicate the most likelyhood of a generated completion.
@@ -637,6 +871,7 @@ class vLLMRollout(RolloutBase):
                 token_ids,
                 cumulative_logprob,
                 prompt_logprobs,
+                prompt_token_ids,
             )
 
         n_generation = sampling_params.n
@@ -650,6 +885,7 @@ class vLLMRollout(RolloutBase):
             token_ids_list = []
             cumulative_logprob_list = []
             prompt_logprobs_list = None
+            prompt_token_ids_list = None
             for _ in range(n_generation):
                 (
                     new_conversation,
@@ -658,6 +894,7 @@ class vLLMRollout(RolloutBase):
                     token_ids,
                     cumulative_logprob,
                     prompt_logprobs,
+                    prompt_token_ids,
                 ) = generation_multi_turn_for_one_payload(
                     copy.deepcopy(payload.conversation)
                 )
@@ -668,10 +905,14 @@ class vLLMRollout(RolloutBase):
                 cumulative_logprob_list.extend(cumulative_logprob)
                 if prompt_logprobs_list is None:
                     prompt_logprobs_list = prompt_logprobs
+                    prompt_token_ids_list = prompt_token_ids
                 else:
                     assert (
                         prompt_logprobs_list == prompt_logprobs
                     ), "Prompt logprobs should be the same for all generations"
+                    assert (
+                        prompt_token_ids_list == prompt_token_ids
+                    ), "Prompt token ids should be the same for all generations"
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,
@@ -681,6 +922,7 @@ class vLLMRollout(RolloutBase):
                     completion_token_ids=token_ids_list,
                     cumulative_logprob=cumulative_logprob_list,
                     prompt_logprobs=prompt_logprobs_list,
+                    prompt_token_ids=prompt_token_ids_list,
                 )
             )
 
@@ -700,18 +942,14 @@ class vLLMRollout(RolloutBase):
                 payloads,
                 stream,
                 data_packer,
-                sampling_params=self.val_sampling_params
-                if is_validation
-                else self.sampling_params,
+                is_validation,
             )
         else:
             return self.rollout_generation_single_turn(
                 payloads,
                 stream,
                 data_packer,
-                sampling_params=self.val_sampling_params
-                if is_validation
-                else self.sampling_params,
+                is_validation,
             )
 
     def get_underlying_model(self):

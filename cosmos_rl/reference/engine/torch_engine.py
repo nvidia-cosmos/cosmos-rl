@@ -35,12 +35,15 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_logprobs,
     pack_sequences_info_collect,
     pack_sequences_for_masks,
+    pack_sequences_for_extra_tensor,
 )
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
 from cosmos_rl.utils.util import str2torch_dtype
-from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.util import (
+    compute_logprobs_for_top_k_indices as logprobs_computing,
+)
 from transformers import AutoTokenizer
 
 
@@ -83,11 +86,18 @@ def _swizzle_pp_grpo_forward(
     if config.train.train_policy.temperature > 1e-6:
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
-    current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
+    if config.distillation.top_k > 0:
+        minibatched_topk_indices = kwargs["topk_indices"]
+    else:
+        minibatched_topk_indices = user_input["input_ids"].unsqueeze(
+            -1
+        )  # [n_tokens, 1]
+    current_per_token_logprobs, cu_seqlens = trainer.compute_logprobs(
         minibatch={
             **user_input,
         },
         logits=raw_logits,
+        minibatched_topk_indices=minibatched_topk_indices.to(raw_logits.device),
         is_full_logits=True if raw_logits.ndim == 3 else False,
     )
     current_per_token_logprobs = current_per_token_logprobs.cpu()
@@ -199,6 +209,34 @@ class TorchEngine(LLMTrainer):
         ), f"Input ids mapped: {input_ids_mapped} != input ids new: {input_ids_new}"
         return input_ids
 
+    def collate_topk_indices(self, rollouts: List[Rollout], computed_max_len: int):
+        updated_token_ids_list = []
+        for rollout in rollouts:
+            token_ids = rollout.prompt_token_ids + rollout.completion_token_ids
+            updated_token_ids = []
+            for token_id in token_ids:
+                assert len(token_id) > 0, "Token ids should not be empty"
+                if len(token_id) > self.config.distillation.top_k:
+                    assert (
+                        len(token_id) == self.config.distillation.top_k + 1
+                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    if self.config.distillation.top_k > 0:
+                        token_id = token_id[
+                            1:
+                        ]  # remove the first token id which is the selected token only keep top_k token ids
+                else:
+                    assert (
+                        len(token_id) == self.config.distillation.top_k
+                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
+                token_id = self.map_student_token_ids_to_tokenizer_token_ids(token_id)
+                updated_token_ids.append(token_id)
+            updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
+            updated_token_ids = updated_token_ids[:computed_max_len] + [
+                [-100] * len(updated_token_ids[0])
+            ] * (max(0, computed_max_len - len(updated_token_ids)))
+            updated_token_ids_list.append(updated_token_ids)
+        return torch.tensor(updated_token_ids_list)
+
     def step_forward(
         self,
         rollouts: List[Rollout],
@@ -246,7 +284,8 @@ class TorchEngine(LLMTrainer):
         ]
         completions_list = [
             self.map_student_token_ids_to_tokenizer_token_ids(
-                rollout.completion_token_ids
+                # The first element is the selected completion from the rollout generation
+                [t[0] for t in rollout.completion_token_ids]
             )
             for rollout in rollouts
         ]
@@ -364,6 +403,11 @@ class TorchEngine(LLMTrainer):
                             computed_max_len=computed_max_len,
                         )
                     )
+                    if self.config.distillation.top_k > 0:
+                        minibatched_topk_indices = self.collate_topk_indices(
+                            [rollouts[i] for i in mini_batch_indices],
+                            computed_max_len=computed_max_len,
+                        )
                     packing_seq = self.config.distillation.sequence_packing
                     if packing_seq:
                         if self.parallel_dims.pp_enabled:
@@ -476,6 +520,8 @@ class TorchEngine(LLMTrainer):
                         if pp_first_stage or pp_last_stage:
                             # First/Last stage: pass all inputs
                             kwargs = {}
+                            if self.config.distillation.top_k > 0:
+                                kwargs["topk_indices"] = minibatched_topk_indices
                             if self.parallel_dims.cp_enabled:
                                 # This is for recover these two tensors after ulysses
                                 kwargs["input_ids_before_cp"] = input_ids_before_cp
@@ -536,14 +582,35 @@ class TorchEngine(LLMTrainer):
                             )
                             user_mini_batch["input_ids"] = packed_args["inputs"]
 
-                        (
-                            current_per_token_logprobs,
-                            cu_seqlens,
-                            metrics,
-                        ) = self.compute_logprobs(
-                            user_mini_batch,
-                            logits=raw_logits,
-                            is_full_logits=True if raw_logits.ndim == 3 else False,
+                            if self.config.distillation.top_k > 0:
+                                minibatched_topk_indices = (
+                                    pack_sequences_for_extra_tensor(
+                                        minibatched_topk_indices.to(self.device),
+                                        user_mini_batch["valid_input_len"],
+                                    )
+                                )
+                        if self.config.distillation.top_k <= 0:
+                            minibatched_topk_indices = user_mini_batch[
+                                "input_ids"
+                            ].unsqueeze(-1)
+                        # Using the same temperature as student model for better distillation performance
+                        if (
+                            self.config.train.train_policy.temperature > 1e-6
+                            and self.config.train.train_policy.temperature != 1.0
+                        ):
+                            raw_logits = (
+                                raw_logits / self.config.train.train_policy.temperature
+                            )
+
+                        (current_per_token_logprobs, cu_seqlens) = (
+                            self.compute_logprobs(
+                                user_mini_batch,
+                                logits=raw_logits,
+                                minibatched_topk_indices=minibatched_topk_indices.to(
+                                    self.device
+                                ),
+                                is_full_logits=True if raw_logits.ndim == 3 else False,
+                            )
                         )
                         logger.debug(
                             f"[Reference] Computed current_per_token_logprobs of shape {current_per_token_logprobs.shape} for mini-batch size {len(minibatched_processed_samples)}"
@@ -580,6 +647,13 @@ class TorchEngine(LLMTrainer):
                                                 ].teacher_result_uuid,
                                             }
                                         )
+                                        if self.config.distillation.trainer_token_ids_from_teacher:
+                                            data[-1]["completion_token_ids"] = rollouts[
+                                                mini_batch_indices[index]
+                                            ].completion_token_ids
+                                            data[-1]["prompt_token_ids"] = rollouts[
+                                                mini_batch_indices[index]
+                                            ].prompt_token_ids
                                         logger.debug(
                                             f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
                                         )
@@ -595,15 +669,23 @@ class TorchEngine(LLMTrainer):
                                             ].teacher_result_uuid,
                                         }
                                     )
-                                logger.debug(
-                                    f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
-                                )
+                                    if self.config.distillation.trainer_token_ids_from_teacher:
+                                        data[-1]["completion_token_ids"] = rollouts[
+                                            mini_batch_indices[i]
+                                        ].completion_token_ids
+                                        data[-1]["prompt_token_ids"] = rollouts[
+                                            mini_batch_indices[i]
+                                        ].prompt_token_ids
+                                    logger.debug(
+                                        f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
+                                    )
         return data
 
     def compute_logprobs(
         self,
         minibatch: Dict[str, Any],
         logits: torch.Tensor,
+        minibatched_topk_indices: torch.Tensor,
         is_full_logits: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
@@ -625,7 +707,7 @@ class TorchEngine(LLMTrainer):
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
         return logprobs_computing(
-            minibatch["input_ids"],
+            minibatched_topk_indices,
             minibatch["logprob_masks"],
             logits.to(dtype=str2torch_dtype(self.config.distillation.logprob_dtype)),
             is_full_logits=is_full_logits,

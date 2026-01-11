@@ -856,6 +856,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     p.completion_logprobs = rr.completion_logprobs
                     p.completion_token_ids = rr.completion_token_ids
                     p.prompt_logprobs = rr.prompt_logprobs
+                    p.prompt_token_ids = rr.prompt_token_ids
                     p.weight_version = self.current_weight_version
                     p.cumulative_logprob = rr.cumulative_logprob
                     if self.config.rollout.multi_turn_config.enable:
@@ -1640,7 +1641,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         output_text if output_text != "" else self.eos_token
                     )
                 # Skip the output if there is one or zero non-empty completions
-                skip_output = (total_generation_count - empty_generation_count) <= 1
+                # We keep one completion case
+                skip_output = (total_generation_count - empty_generation_count) <= 0
                 if not skip_output:
                     rr.completions = output_texts
                     valid_result.append(rr)
@@ -1656,6 +1658,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
                 old_payload.prompt_logprobs = result.prompt_logprobs
+                old_payload.prompt_token_ids = result.prompt_token_ids
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.config.rollout.multi_turn_config.enable:
@@ -1672,6 +1675,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 valid_payloads,
                 False,
                 self.current_weight_version,
+                bypass_reward=self.config.train.train_policy.bypass_reward,
             )
         return valid_payloads_list, valid_result
 
@@ -1848,6 +1852,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 "prompt_idx": payload.prompt_idx,
                 "completion_token_ids": payload.completion_token_ids,
             }
+            if payload.prompt_token_ids is not None:
+                data["prompt_token_ids"] = payload.prompt_token_ids
             uuid_values = []
             for _ in payload.completion_token_ids:
                 uuid_value = str(uuid.uuid4())
@@ -1855,6 +1861,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             data["teacher_result_uuid"] = uuid_values
             self.teacher_interact_queue.put_nowait(data)
             payload.teacher_result_uuids = uuid_values
+            if self.config.distillation.trainer_token_ids_from_teacher:
+                # offload the verbose token ids out of the payload for efficient communication
+                # only keep the first token id which is selected
+                # the full token ids will be fetched from teacher model during distillation
+                payload.completion_token_ids = [
+                    [t[0:1] for t in compl] for compl in payload.completion_token_ids
+                ]
+                payload.prompt_token_ids = [t[0:1] for t in payload.prompt_token_ids]
         return payloads
 
     def work(self):
