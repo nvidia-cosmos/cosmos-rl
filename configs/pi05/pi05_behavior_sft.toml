@@ -2,11 +2,11 @@ redis = "12800"
 
 [train]
 resume = false
-max_num_steps = 20000
+max_num_steps = 15000
 epoch = 9999999
 output_dir = "./outputs/pi05/behavior_sft"
 optm_name = "AdamW"
-optm_lr = 2.5e-6
+optm_lr = 1e-6
 optm_impl = "fused"
 optm_weight_decay = 1e-10
 optm_betas = [0.9, 0.95]
@@ -27,7 +27,7 @@ save_freq = 5000
 save_mode = "async"
 
 [policy]
-model_name_or_path = "/workspace/comet_weights_pytorch_2/pi05-b1kpt12-cs32"
+model_name_or_path = "/workspace/comet_weights_pytorch_2/pi05-b1kpt50-cs32"
 model_gradient_checkpointing = true
 
 [policy.parallelism]
@@ -56,7 +56,7 @@ tasks = ["setting_the_fire"]
 model_type = "PI05"
 prompt_from_task = true
 skip_norm_stats = false
-# norm_stats="/workspace/comet_weights_pytorch_2/pi05-b1kpt12-cs32/assets/behavior-1k/2025-challenge-demos/norm_stats.json"
+# norm_stats="/workspace/comet_weights_pytorch_2/pi05-b1kpt50-cs32/assets/behavior-1k/2025-challenge-demos/norm_stats.json" # default use json from resumed weights
 modalities = ["rgb"]
 
 [validation]

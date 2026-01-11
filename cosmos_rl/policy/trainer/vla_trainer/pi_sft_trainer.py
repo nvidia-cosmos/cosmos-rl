@@ -28,7 +28,11 @@ from cosmos_rl.utils.logging import logger
 
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
-from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+import math
+
+from cosmos_rl.policy.trainer.optm import LRSchedulersContainer
+
+
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers
 from cosmos_rl.policy.trainer.base import Trainer, TrainerRegistry
@@ -96,9 +100,7 @@ class PISFTTrainer(Trainer):
             assert (
                 train_step == 0
             ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
-            self.lr_schedulers = build_lr_schedulers(
-                self.optimizers, self.config, total_steps
-            )
+            self.lr_schedulers = self.build_lr_schedulers(total_steps)
         
         # split global_batch into mini_batches
         global_batch_size = len(global_batch)
@@ -258,9 +260,7 @@ class PISFTTrainer(Trainer):
                 ):
                     # Initialize lr_schedulers on non-zero dp_replicate ranks when resuming training
                     # only when ckpt_total_steps > 0, means a checkpoint is loaded
-                    self.lr_schedulers = build_lr_schedulers(
-                        self.optimizers, self.config, ckpt_total_steps
-                    )
+                    self.lr_schedulers = self.build_lr_schedulers(ckpt_total_steps)
                 if ckpt_total_steps is not None:
                     assert (
                         self.lr_schedulers is not None
@@ -301,7 +301,7 @@ class PISFTTrainer(Trainer):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model,
             optimizer=self.optimizers,
-            scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
+            scheduler=self.build_lr_schedulers,
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
         )
@@ -311,8 +311,19 @@ class PISFTTrainer(Trainer):
     def step_validation(self, *args, **kwargs):
         pass
 
-    def build_lr_schedulers(self, *args, **kwargs):
-        pass
+    def build_lr_schedulers(self, total_steps):
+        """OpenPI-aligned warmup + cosine LR scheduler."""
+        warmup_steps = int(self.config.train.optm_warmup_steps)
+        decay_steps = total_steps
+
+        def lr_factor(step: int) -> float:
+            if step < warmup_steps:
+                init_factor = 1.0 / (warmup_steps + 1)
+                return init_factor + (1.0 - init_factor) * step / warmup_steps
+            progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return LRSchedulersContainer(self.optimizers, lr_factor)
 
     def export_safetensors(self, *args, **kwargs):
         pass
