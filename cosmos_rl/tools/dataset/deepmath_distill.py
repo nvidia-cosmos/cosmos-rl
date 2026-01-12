@@ -133,9 +133,9 @@ def evaluate_amc23_or_aime24_zeroshot(
         pattern4_re = re.compile(pattern4, re.DOTALL)
         pattern5_re = re.compile(pattern5, re.DOTALL)
 
-        logger.info(
-            f"Evaluating model output: {to_be_evaluated} against reference: {reference}"
-        )
+        # logger.info(
+        #     f"Evaluating model output: {to_be_evaluated} against reference: {reference}"
+        # )
         line = to_be_evaluated
         gold = reference
 
@@ -205,6 +205,10 @@ class AIMEDataSet(Dataset):
         logger.info(f"Final AIME validation dataset size = {len(self.dataset)}")
 
     def __len__(self):
+        if isinstance(self.config.validation.dataset.test_size, float):
+            return int(len(self.dataset) * self.config.validation.dataset.test_size)
+        elif isinstance(self.config.validation.dataset.test_size, int):
+            return min(self.config.validation.dataset.test_size, len(self.dataset))
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> RLPayload:
