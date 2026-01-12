@@ -207,7 +207,7 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
 
 Images: [`B, H, W, C`]
 
-Videos: [`B, T, C, H, W`]
+Videos: [`B, C, T, H, W`]
 
 Detailed loading and processing can be found in the example clients.
 
