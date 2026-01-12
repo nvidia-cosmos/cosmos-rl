@@ -19,6 +19,7 @@ outputs/
 results/
 checkpoints/*
 !checkpoints/README.md
+reward_service/Qwen2-VL-2B-Instruct
 
 # Data types
 *.jit
@@ -183,6 +184,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+uv.lock
 
 # Spyder project settings
 .spyderproject
@@ -245,3 +247,4 @@ onelogger.log
 
 # Version file of cosmos-rl
 cosmos_rl/_version.py
+reward_service/cosmos_rl_reward/_version.py

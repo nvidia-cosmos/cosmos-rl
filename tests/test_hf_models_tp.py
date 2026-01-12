@@ -26,9 +26,10 @@ from functools import partial
 from contextlib import contextmanager
 from qwen_vl_utils import process_vision_info
 
+from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.trainer.sft_trainer import async_safe_ce
+from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
 from transformers import (
     AutoConfig,
     AutoProcessor,
@@ -82,25 +83,13 @@ def pp_loss_fn(config, parallel_dims):
 
 
 def init_cosmos_rl_model(config, is_train=True, device="cuda"):
-    if config.policy.parallelism.dp_replicate_size == -1:
-        # recompute it
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-        config.policy.parallelism.dp_replicate_size = (
-            world_size // config.policy.parallelism.dp_shard_size
-        )
-        print(
-            f"Recomputed dp_replicate_size: {config.policy.parallelism.dp_replicate_size} given world_size: {world_size} and dp_shard_size: {config.policy.parallelism.dp_shard_size}"
-        )
-
     model = ModelRegistry.build_model(config)
 
-    # if config.policy.model_gradient_checkpointing:
-    #     apply_ac(model, config.policy.model_name_or_path)
     # init parallel_dims
     parallel_dims: ParallelDims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    parallel_dims.build_mesh(device_type=device)
+    parallel_dims.build_mesh(device_type=device.type)
 
     print(f"parallel_dims: {parallel_dims}")
 
@@ -116,9 +105,9 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device="cuda")
+            lambda t: torch.empty_like(t, device=device)
             if t.device.type == "meta"
-            else t.to("cuda"),
+            else t.to(device),
             recurse=True,
         )
     model.post_to_empty_hook(config)
@@ -130,14 +119,6 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
         device,
     )
     return [model], pp_scheduler, parallel_dims, loss_fn
-
-
-class Config:
-    def __init__(self, config_dict):
-        for k, v in config_dict.items():
-            if isinstance(v, dict):
-                v = Config(v)
-            setattr(self, k, v)
 
 
 # ================================
@@ -164,6 +145,7 @@ config_dict = {
     },
     "train": {
         "fsdp_offload": False,
+        "output_dir": "./",
         "compile": False,
         "master_dtype": "bfloat16",
         "param_dtype": "bfloat16",
@@ -198,7 +180,7 @@ class TestHFModelTP(unittest.TestCase):
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
         # Load cosmos config
-        cosmos_config = Config(config_dict)
+        cosmos_config = Config.from_dict(config_dict)
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -228,7 +210,8 @@ class TestHFModelTP(unittest.TestCase):
                 config.torch_dtype = dtype
 
                 cosmos_model_list, _, _, _ = init_cosmos_rl_model(
-                    cosmos_config, device="cuda"
+                    cosmos_config,
+                    device=torch.device(f"cuda:{torch.distributed.get_rank()}"),
                 )
                 cosmos_hf_model = cosmos_model_list[0]
                 cosmos_named_buffers = {
@@ -274,12 +257,11 @@ class TestHFModelTP(unittest.TestCase):
                     timeout=timedelta(seconds=300),  # 5 minutes timeout
                 )
                 torch.cuda.set_device(torch.distributed.get_rank())
-
+        device = torch.device(f"cuda:{torch.distributed.get_rank()}")
         max_position_embeddings = 4096
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
         # Load cosmos config
-        cosmos_config = Config(config_dict)
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -290,7 +272,8 @@ class TestHFModelTP(unittest.TestCase):
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
             config.max_position_embeddings = max_position_embeddings
 
-            cosmos_config.policy.model_name_or_path = model_id
+            config_dict["policy"]["model_name_or_path"] = model_id
+            cosmos_config = Config.from_dict(config_dict)
             # Remove the model type from the model registry, so that the model will run in the hfmodel path.
             if ModelRegistry.check_model_type_supported(config.model_type):
                 ModelRegistry._MODEL_REGISTRY.pop(config.model_type)
@@ -302,7 +285,7 @@ class TestHFModelTP(unittest.TestCase):
 
             # Load cosmos model
             cosmos_model_list, _, _, _ = init_cosmos_rl_model(
-                cosmos_config, device="cuda"
+                cosmos_config, device=device
             )
             cosmos_hf_model = cosmos_model_list[0]
 
@@ -392,7 +375,7 @@ class TestHFModelTP(unittest.TestCase):
                 print(f"Rank {torch.distributed.get_rank()} - Error: {e}")
 
             # Synchronize error state across all ranks to avoid hanging
-            error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device="cuda")
+            error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device=device)
             torch.distributed.all_reduce(
                 error_tensor, op=torch.distributed.ReduceOp.MAX
             )
@@ -403,7 +386,7 @@ class TestHFModelTP(unittest.TestCase):
                 exit(-1)
 
 
-# torchrun --nproc_per_node=2 test_hf_models_tp.py
+# torchrun --nproc_per_node=2 tests/test_hf_models_tp.py
 if __name__ == "__main__":
     unittest.main()
 

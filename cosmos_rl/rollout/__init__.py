@@ -14,12 +14,13 @@
 # limitations under the License.
 
 import os
+from cosmos_rl.rollout.rollout_base import RolloutBase
 import torch
 from typing import Union
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-
+from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.logging import logger
@@ -39,6 +40,12 @@ except ImportError as e:
     logger.debug(
         f"Failed to import example HF Rollout. Please make sure transformers is installed. Error: {e}"
     )
+    pass
+
+try:
+    import cosmos_rl.rollout.vla_rollout.vla_rollout as vla_rollout_dummy  # noqa: F401
+except ImportError as e:
+    logger.debug(f"Failed to import OpenVLA Rollout. Error: {e}")
     pass
 
 
@@ -78,7 +85,7 @@ class State:
 class RolloutWorkerBase(CommMixin):
     def __init__(
         self,
-        config: Union[CosmosConfig],
+        config: Union[CosmosConfig, CosmosVisionGenConfig],
         parallel_dims: ParallelDims,
     ) -> None:
         super().__init__()
@@ -99,6 +106,9 @@ class RolloutWorkerBase(CommMixin):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()
+
+    def set_rollout(self, rollout: RolloutBase):
+        self.rollout = rollout
 
 
 class TRTLLMRolloutWorkerBase(CommMixin):

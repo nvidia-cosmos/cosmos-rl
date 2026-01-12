@@ -17,7 +17,7 @@ import re
 import torch
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 from functools import cached_property
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism_registry import (
@@ -38,7 +38,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             // self.config.text_config.num_attention_heads
         )
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         converted_name = None
 
         if rollout_weight_name.startswith("language_model.model."):
@@ -102,64 +102,41 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         up_proj_weight = weight[:, split_size:, :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(
-        self,
-        vllm_model,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[List[Tuple[str, torch.Size]]],
-    ]:
-        recv_key_n_rank_list = []
-        vllm_weight_inplace_view_map = {}
-        for param_name, param in vllm_model.named_parameters():
-            group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> List[Tuple[str, torch.Tensor]]:
+        group_keys = []
+        compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
+        if "qkv_proj" in compatible_key:
+            q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
+                compatible_key, param
+            )
+            q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
+            k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
+            v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
+            group_keys.append((q_proj_weight_key, q_weight))
+            group_keys.append((k_proj_weight_key, k_weight))
+            group_keys.append((v_proj_weight_key, v_weight))
+        elif "qkv" in compatible_key and "visual" in compatible_key:
+            q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
+                compatible_key, param
+            )
+            q_visual_proj_weight_key = compatible_key.replace("qkv", "q")
+            k_visual_proj_weight_key = compatible_key.replace("qkv", "k")
+            v_visual_proj_weight_key = compatible_key.replace("qkv", "v")
+            group_keys.append((q_visual_proj_weight_key, q_weight))
+            group_keys.append((k_visual_proj_weight_key, k_weight))
+            group_keys.append((v_visual_proj_weight_key, v_weight))
+        else:
+            group_keys.append((compatible_key, param))
+        return group_keys
 
-            if "qkv_proj" in compatible_key:
-                q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
-                    compatible_key, param
-                )
-                q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                group_keys.append((q_proj_weight_key, q_weight.ndim))
-                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                group_keys.append((k_proj_weight_key, k_weight.ndim))
-                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                group_keys.append((v_proj_weight_key, v_weight.ndim))
-            # elif "gate_up_proj" in compatible_key:
-            #     # split gate and up proj
-            #     gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-            #         compatible_key, param
-            #     )
-            #     gate_proj_weight_key = compatible_key.replace(
-            #         "gate_up_proj", "gate_proj"
-            #     )
-            #     vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-            #     group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
-
-            #     up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-            #     vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-            #     group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
-            elif "qkv" in compatible_key and "visual" in compatible_key:
-                q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
-                    compatible_key, param
-                )
-                q_visual_proj_weight_key = compatible_key.replace("qkv", "q")
-                k_visual_proj_weight_key = compatible_key.replace("qkv", "k")
-                v_visual_proj_weight_key = compatible_key.replace("qkv", "v")
-                vllm_weight_inplace_view_map[q_visual_proj_weight_key] = q_weight
-                group_keys.append((q_visual_proj_weight_key, q_weight.ndim))
-                vllm_weight_inplace_view_map[k_visual_proj_weight_key] = k_weight
-                group_keys.append((k_visual_proj_weight_key, k_weight.ndim))
-                vllm_weight_inplace_view_map[v_visual_proj_weight_key] = v_weight
-                group_keys.append((v_visual_proj_weight_key, v_weight.ndim))
-            else:
-                vllm_weight_inplace_view_map[compatible_key] = param
-                group_keys.append((compatible_key, param.ndim))
-            recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+    @torch.no_grad()
+    def policy_map_local_key_for_export_tensor(self, name, weight: torch.Tensor):
+        if "mlp.experts.gate_up_proj" in name or "mlp.experts.down_proj" in name:
+            yield name, weight.transpose(1, 2).contiguous()
+        else:
+            yield name, weight
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
@@ -249,15 +226,3 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_vl_moe")]
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_and_up_proj")
-        for key in ["q", "k", "v"]:
-            if "visual" in weight_key and key in weight_key:
-                return weight_key.replace(key, "qkv")
-        return weight_key  # return full weight key

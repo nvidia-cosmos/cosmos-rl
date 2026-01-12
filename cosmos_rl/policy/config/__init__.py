@@ -102,6 +102,11 @@ class DatasetConfig(BaseModel):
 class SFTDataConfig(BaseModel):
     type: Literal["sft"]
 
+    trainer_type: str = Field(
+        default="sft",
+        description="Type of the trainer for SFT.",
+    )
+
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
         description="Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.",
@@ -237,6 +242,12 @@ class OverlongRewardConfig(BaseModel):
 
 class GrpoConfig(BaseModel):
     type: Literal["grpo"]
+
+    trainer_type: str = Field(
+        default="grpo",
+        description="Type of the trainer for GRPO.",
+    )
+
     variant: str = Field(
         default="grpo",
         description="Variant of the GRPO, currently support `grpo`, `gspo`, `dapo`",
@@ -301,7 +312,10 @@ class GrpoConfig(BaseModel):
 
     positive_nll_coef: Optional[float] = Field(
         default=None,
-        description="Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables the feature.",
+        description=(
+            "[Optional] Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables.\n"
+            "Ref: VAPO Sec. 4.3 (Positive Example LM Loss): https://arxiv.org/pdf/2504.05118"
+        ),
     )
 
     lower_bound_ratio: float = Field(
@@ -335,6 +349,26 @@ class GrpoConfig(BaseModel):
         default=0.0,
         description="KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
         "training speed, but may be numerically unstable for long training runs.",
+    )
+
+    unbiased_kl_estimate: bool = Field(
+        default=False,
+        description=(
+            "[Optional] Unbiased K3 with IS: D_KL ≈ E_{π_old}[ w · ( r − log r − 1 ) ], w=π_θ/π_old, r=π_ref/π_θ.\n"
+            "Note: This option is ignored when `kl_beta` is 0.0.\n"
+            "Ref: DeepSeek-V3.2 Sec.3.1 (Unbiased KL Estimate): https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf"
+        ),
+    )
+
+    off_policy_masking_delta: Optional[float] = Field(
+        default=None,
+        description=(
+            "Off-Policy Sequence Masking threshold δ (None disables). "
+            "Per-sequence mask:"
+            " M_i = 0 if Â_i < 0 and (1/|o_i|)∑_t log[π_old(o_{i,t}|·)/π_θ(o_{i,t}|·)] > δ; "
+            "else M_i = 1."
+            "Ref: DeepSeek-V3.2 Sec.3.1 Off-Policy Sequence Masking : https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf."
+        ),
     )
 
     aipo_rho: Optional[float] = Field(
@@ -381,7 +415,7 @@ class GrpoConfig(BaseModel):
     )
 
     outdated_rollout_fetch_batch_size: int = Field(
-        default=1,
+        default=0,
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 
@@ -428,6 +462,16 @@ class GrpoConfig(BaseModel):
         description="Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.",
     )
 
+    collect_rollout_logprobs: bool = Field(
+        default=False,
+        description="Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.",
+    )
+
+    use_rollout_logprobs_for_loss: bool = Field(
+        default=False,
+        description="Whether to use collected logprobs from rollouts for loss calculation. This is an alternative to calculating logprobs during training as old logprobs for importance sampling.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -454,9 +498,18 @@ class GrpoConfig(BaseModel):
             self.dataloader_batch_size = None
         if self.use_decoupled_loss:
             self.rollout_as_token_ids = True
+            self.collect_rollout_logprobs = True
             logger.warning(
                 "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
             )
+        if self.use_rollout_logprobs_for_loss:
+            self.collect_rollout_logprobs = True
+            logger.warning(
+                "use_rollout_logprobs_for_loss is enabled, so collect_rollout_logprobs is set to True."
+            )
+        assert not (
+            self.use_rollout_logprobs_for_loss and self.use_decoupled_loss
+        ), "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
 
         return self
 
@@ -585,6 +638,11 @@ class TrainingConfig(BaseModel):
         description="The data type for transfer parameters between Policy and Rollout.",
         choices=["bfloat16", "float16", "float32"],
     )
+    logprob_dtype: str = Field(
+        default="float32",
+        description="The data type for logprobs calculation.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -653,6 +711,16 @@ class TrainingConfig(BaseModel):
     local_dataset: Optional[bool] = Field(
         default=True,
         description="Whether to use local dataset to query sample. If set to True, will use the local dataset.",
+    )
+
+    force_use_hf: Optional[bool] = Field(
+        default=False,
+        description="Whether to force using Huggingface dataset even if local dataset is available.",
+    )
+
+    non_text: bool = Field(
+        default=False,
+        description="Whether train in non-text mode. If set to True, the inputs and outputs are not pure text, but may contain other modalities like images, videos, tensors, etc.",
     )
 
     # --------- smoke-test helpers ---------
@@ -738,6 +806,10 @@ class ParallelismConfig(BaseModel):
         return int(local_world_size)
 
 
+class RolloutParallelismConfig(ParallelismConfig):
+    pass
+
+
 class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
@@ -787,8 +859,57 @@ class LoraConfig(BaseModel):
         return self
 
 
+class DiffusersConfig(BaseModel):
+    is_video: bool = Field(
+        default=False, description="True if this model is video generate model"
+    )
+    max_prompt_length: int = Field(
+        default=300, description="Maximum sequence length to use for the prompt"
+    )
+    weighting_scheme: str = Field(
+        default="logit_normal", description="Method used to sample timestep"
+    )
+    train_flow_shift: float = Field(
+        default=3.0, description="flow shift used for training"
+    )
+    offload: bool = Field(
+        default=True,
+        description="Whether to dynamic offload model parts from cuda to cpu",
+    )
+    logit_mean: float = Field(
+        default=0.0,
+        description="random sampling timestep logits mean for noise addition",
+    )
+    logit_std: float = Field(
+        default=1.0,
+        description="random sampling timestep logits std for noise addition",
+    )
+    inference_size: List[int] = Field(
+        default=[1024, 1024],
+        description="Image/video size for generation, [height, width]",
+    )
+    inference_frames: int = Field(
+        default=41, description="Total frame of video size for generation"
+    )
+    train_frames: int = Field(
+        default=41, description="Total frame of video size for training"
+    )
+    inference_step: int = Field(
+        default=50, description="Total denoise step used for validation generation"
+    )
+    guidance_scale: float = Field(
+        default=4.5, description="CFG guidance scale for validation generation"
+    )
+
+
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
+    diffusers_config: Optional[DiffusersConfig] = Field(default_factory=DiffusersConfig)
+
+    is_diffusers: bool = Field(
+        default=False, description="Whether this model is diffusers or not"
+    )
 
     model_name_or_path: str = Field(
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
@@ -817,6 +938,14 @@ class PolicyConfig(BaseModel):
         "- exact parameter names (from model.named_parameters()) "
         "- exact module paths (from model.named_modules()) ",
     )
+    freeze_pattern: Optional[List[str]] = Field(
+        default=None,
+        description="Pattern-based configuration to freeze parts of the model. "
+        "A list of regex patterns that match against parameter names; "
+        "matched parameters will be frozen (requires_grad=False). "
+        "Example: freeze_pattern = ['^visual\\..*'] freezes all visual components; "
+        "freeze_pattern = ['^model\\.layers\\.[0-9]+\\.'] freezes layers 0-9.",
+    )
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
@@ -834,25 +963,6 @@ class PolicyConfig(BaseModel):
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
         return self
-
-
-class RolloutParallelismConfig(ParallelismConfig):
-    n_init_replicas: int = Field(
-        default=1, description="Number of initial replicas to be created"
-    )
-    tp_size: int = Field(default=2, description="Tensor parallelism size")
-    pp_size: int = Field(default=1, description="Pipeline parallelism size")
-
-    # Fields below are that we do not want user to config it.
-    dp_replicate_size: int = Field(
-        default=1,
-        description="Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.",
-        choices=[1],
-    )
-    cp_size: int = Field(default=1, description="Context parallelism size")
-    dp_shard_size: int = Field(
-        default=-1, description="Data Parallelism size in sharded mode"
-    )
 
 
 class SamplingConfig(BaseModel):
@@ -900,10 +1010,21 @@ class MultiTurnRolloutConfig(BaseModel):
         return self
 
 
+class RolloutAsyncConfig(BaseModel):
+    max_concurrent_requests: int = Field(
+        default=10,
+        description="Maximum number of concurrent requests for rollout engine.",
+    )
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
         description="Enable validation during training.",
+    )
+    val_before_train: bool = Field(
+        default=False,
+        description="Enable validation before training starts (at step 0, after weight initialization).",
     )
     freq: int = Field(
         default=20,
@@ -1019,8 +1140,8 @@ class RolloutConfig(BaseModel):
 
     backend: str = Field(
         default="vllm",
-        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
-        choices=["vllm", "trtllm"],
+        description="Backend for rollout. Currently support `vllm`, `vllm_async` and `trtllm`, and other custom backends.",
+        choices=["vllm", "vllm_async", "trtllm"],
     )
 
     multi_turn_config: MultiTurnRolloutConfig = Field(
@@ -1028,10 +1149,33 @@ class RolloutConfig(BaseModel):
         description="Configuration for multi-turn rollout.",
     )
 
+    mode: str = Field(
+        default="sync",
+        description="Rollout mode, could be 'sync' or 'async'.",
+        choices=["sync", "async"],
+    )
+
+    async_config: RolloutAsyncConfig = Field(
+        default_factory=RolloutAsyncConfig,
+        description="Configuration for async rollout.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.parallelism, dict):
             self.parallelism = RolloutParallelismConfig(**self.parallelism)
+
+        backends_to_check = ["vllm", "trtllm", "vllm_async"]
+        if self.backend in backends_to_check:
+            _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
+            for field_name, field_info in RolloutParallelismConfig.model_fields.items():
+                if field_name not in _fields_no_need_to_check:
+                    default_value = field_info.default
+                    actual_value = getattr(self.parallelism, field_name)
+                    if actual_value != default_value:
+                        raise ValueError(
+                            f"Only {_fields_no_need_to_check} fields can be set for rollout parallelism."
+                        )
         return self
 
 
@@ -1043,6 +1187,10 @@ class LoggingConfig(BaseModel):
     project_name: str = Field(
         default="cosmos_rl",
         description="Wandb project name for logging. If set, the training will be logged to this project.",
+    )
+    group_name: Optional[str] = Field(
+        default=None,
+        description="Wandb group name for logging. If set, the training will be logged to this group.",
     )
     experiment_name: Optional[str] = Field(
         default=None,
@@ -1061,6 +1209,156 @@ class LoggingConfig(BaseModel):
         return self
 
 
+class VLAConfig(BaseModel):
+    vla_type: str = Field(
+        default="openvla-oft",
+        description="VLA type, could be 'openvla-oft' or 'openvla'",
+        choices=["openvla-oft", "openvla"],
+    )
+
+    num_envs: int = Field(default=1, description="Number of environments to rollout.")
+
+    use_proprio: bool = Field(
+        default=False, description="Whether to use proprioceptive information."
+    )
+
+    proprio_dim: int = Field(
+        default=7, description="Dimension of proprioceptive information."
+    )
+
+    num_images_in_input: int = Field(
+        default=1, description="Number of images in input."
+    )
+
+    training_chunk_size: int = Field(
+        default=16, description="Number of chunks to train in one iteration."
+    )
+
+    save_video: bool = Field(
+        default=False, description="Whether to save video of validation rollout."
+    )
+
+    continuous: bool = Field(
+        default=False, description="Whether to enable continuous simulation + rollout."
+    )
+
+    trace_verbosity: int = Field(
+        default=1,
+        description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        return self
+
+
+class DistillationConfig(BaseModel):
+    enable: bool = Field(default=False, description="Whether to enable distillation.")
+
+    parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
+    model_name_or_path: str = Field(
+        # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        description="The teacher model name or path, compatible with huggingface model name or local path",
+    )
+
+    model_revision: Optional[str] = Field(
+        default=None,
+        description="The revision of the teacher model to use",
+    )
+
+    compile: bool = Field(
+        default=True, description="Whether to use torch.compile for teacher model."
+    )
+    # --------- FSDP ---------
+
+    master_dtype: str = Field(
+        default="float32",
+        description="The master weight data type for teacher model, is orthognal to `param_dtype`. Should be high precision for convergence consideration",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    param_dtype: str = Field(
+        default="bfloat16",
+        description="The data type for forward/backward of teacher model. Outside forward/backward, params are in `master_dtype`",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    logprob_dtype: str = Field(
+        default="float32",
+        description="The data type for logprobs calculation of teacher model.",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    fsdp_reduce_dtype: str = Field(
+        default="float32",
+        description="The data type for reduction in FSDP for teacher model.",
+        choices=["float32"],
+    )
+
+    fsdp_offload: bool = Field(
+        default=False,
+        description="Whether to offload the teacher model to CPU if using FSDP",
+    )
+
+    fsdp_reshard_after_forward: str = Field(
+        default="never",
+        description="Reshard the param after forward pass in FSDP for teacher model. Default to 'never' to avoid unnecessary overhead.",
+        choices=["always", "never", "default"],
+    )
+
+    batch_size_per_replica: int = Field(
+        default=1, description="Batch size for teacher model per replica."
+    )
+
+    max_token_len_per_mini_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum token length per mini batch. If set, dynamic mini-batch sizing will be applied based on this limit for teacher model.",
+    )
+
+    sequence_packing: bool = Field(
+        default=False,
+        description="Whether to enable sequence packing for teacher model. If set to True, the input sequences will be packed into a single tensor for training stability.",
+    )
+
+    mini_batch: int = Field(
+        default=2,
+        description="mini batch size for teacher model in each replica.",
+    )
+
+    seed: Optional[int] = Field(
+        default=None, description="Random seed for teacher model."
+    )
+
+    kl_penalty_coef: float = Field(
+        default=1.0, description="The coefficient for KL penalty."
+    )
+
+    kl_discount_factor: float = Field(
+        default=0.0, description="The discount factor for KL penalty."
+    )
+
+    include_prompt: bool = Field(
+        default=False,
+        description="Whether to include prompt in the teacher model KL calculation.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        assert (
+            self.model_name_or_path is not None and self.model_name_or_path != ""
+        ), "model_name_or_path is required"
+        assert self.parallelism.tp_size > 0, "tp_size must be greater than 0"
+        assert self.parallelism.ep_size > 0, "ep_size must be greater than 0"
+        assert self.parallelism.cp_size > 0, "cp_size must be greater than 0"
+        assert self.parallelism.pp_size > 0, "pp_size must be greater than 0"
+        assert (
+            self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
+        ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        return self
+
+
 class Config(BaseModel):
     custom: Dict[str, Any] = Field(
         default_factory=dict, description="Custom script configuration."
@@ -1071,6 +1369,8 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    distillation: DistillationConfig = Field(default_factory=DistillationConfig)
+    vla: VLAConfig = Field(default_factory=VLAConfig)
     redis: str = Field(
         default="",
         description="Redis server address port, format: port",
@@ -1080,6 +1380,11 @@ class Config(BaseModel):
         default="",
         description="List of eth ip addresses, format: ip1;ip2;ip3",
         json_schema_extra={"hide_in_doc": True},
+    )
+    mode: str = Field(
+        default="disaggregated",
+        description="Running mode, could be 'disaggregated' or 'colocated'",
+        choices=["disaggregated", "colocated"],
     )
 
     @classmethod
@@ -1167,8 +1472,14 @@ class Config(BaseModel):
             self.validation.dataset.split = [self.validation.dataset.split]
 
         if self.train.transfer_dtype is None:
-            # Default use param_dtype as transfer_dtype
-            self.train.transfer_dtype = self.train.param_dtype
+            # Default use master_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.master_dtype
+
+        if self.distillation.enable:
+            self.train.train_policy.rollout_as_token_ids = True
+            logger.info(
+                "Distillation is enabled, so rollout_as_token_ids is set to True."
+            )
         return self
 
 

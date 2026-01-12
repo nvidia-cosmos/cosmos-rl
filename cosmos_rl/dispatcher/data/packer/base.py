@@ -120,9 +120,17 @@ class BaseDataPacker(ABC):
     ) -> List[Any]:
         """
         Post-process to get the rollout outputs from the rollout engine
-        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, and the token ids of completions
+        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, the token ids of completions, etc.
+        Can combine all these together to put in some external storage and return the corresponding uuids, replace the completions with the uuids and return
+        Later in `get_policy_input`, we can fetch all the datas from the external storage using the uuids located at `rollout_output` argument
         """
-        return completions, completed_conversations, logprobs, token_ids, kwargs
+        return (
+            completions,
+            completed_conversations,
+            logprobs,
+            token_ids,
+            kwargs,
+        )
 
     @abstractmethod
     def get_policy_input(
@@ -133,6 +141,10 @@ class BaseDataPacker(ABC):
     ) -> Any:
         """
         Stage for processing samples & rollout output before collating them into a mini-batch
+        If replacing all generated datas with uuids in `get_rollout_output`, here we need to fetch the actual data using the uuids
+        The uuids previously set on `completions` in `get_rollout_output` will be passed here as `rollout_output`
+        Combining `get_rollout_output` and `get_policy_input`, we can support where all the datas from the rollout are passed to policy without going through the framework message passing system
+        External storage or more efficient methods can be used to store and transfer the datas temporarily between rollout and policy
         """
         raise NotImplementedError("This method should be implemented by the subclass")
 
@@ -194,7 +206,7 @@ class BaseDataPacker(ABC):
         Extend the conversation by models response.
         """
         # By default, we always add response as assistant message
-        return add_assistant_message(conversation, "" if responses else responses[0])
+        return add_assistant_message(conversation, responses[0] if responses else "")
 
     def save_state(self, dest_path: str) -> None:
         pass

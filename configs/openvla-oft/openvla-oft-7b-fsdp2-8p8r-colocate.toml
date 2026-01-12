@@ -1,0 +1,113 @@
+redis = "12800"
+mode = "colocated"
+
+[train]
+resume = false
+epoch = 1024
+output_dir = "./outputs/openvla-oft-7b-8p8r-colocate"
+epsilon = 1e-8
+optm_name = "AdamW"
+optm_lr = 5e-6
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_betas = [ 0.9, 0.999,]
+optm_warmup_steps = 0  # Short warmup for validation
+optm_grad_norm_clip = 1.0
+async_tp_enabled = false
+compile = true
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+master_dtype = "float32"
+transfer_dtype = "float32"
+fsdp_offload = true
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 128
+non_text = true
+
+[policy]
+model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
+model_max_length = 4096
+model_gradient_checkpointing = true
+
+[logging]
+logger = ['console', 'wandb']
+project_name = "cosmos-rl-vla"
+experiment_name = "openvla-oft-7b-8p8r"
+
+[train.train_policy]
+type = "grpo"
+trainer_type = "grpo_vla"
+variant = "dapo"
+dataset.name = "libero"
+dataset.subset = "libero_10"
+dataset.split = "train"
+dataset.test_size = 496
+enable_dataset_cache = false
+dataloader_num_workers = 4
+dataloader_prefetch_factor = 4
+conversation_column_name = "messages"
+max_retry_for_on_policy = -1 # try infinitely
+temperature = 1.6
+epsilon_low = 0.2
+epsilon_high = 0.28
+lower_bound_ratio = 10.0
+kl_beta = 0.0
+mu_iterations = 1
+mini_batch = 16
+min_filter_prefix_tokens = 1
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 80
+save_mode = "async"
+
+[rollout]
+backend = "vla"
+gpu_memory_utilization = 0.7
+enable_chunked_prefill = true
+n_generation = 8
+batch_size = 4
+quantization = "none"
+max_response_length = 1024
+enforce_eager = false
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 8
+pp_size = 1
+dp_replicate_size = 1
+cp_rotate_method = "allgather"
+
+[rollout.parallelism]
+n_init_replicas = 1  # 4 rollout workers
+tp_size = 1
+cp_size = 1
+dp_shard_size = 8
+pp_size = 1
+dp_replicate_size = 1
+
+[rollout.sampling_config]
+temperature = 1.6
+top_p = 1.0
+top_k = 0
+
+[validation]
+enable = true
+freq = 16
+val_before_train = true
+batch_size = 64
+dataset.name = "libero"
+dataset.subset = "libero_10"
+dataset.split = "val"
+
+[vla]
+vla_type = "openvla-oft"
+use_proprio = false
+proprio_dim = 7
+num_images_in_input = 1
+training_chunk_size = 16
+num_envs = 8
+save_video = false
+continuous = true

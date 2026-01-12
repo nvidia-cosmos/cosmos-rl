@@ -18,7 +18,6 @@ import re
 import torch
 import inspect
 from torch import nn
-from safetensors import safe_open
 from transformers.utils import quantization_config as transformers_quantization_config
 from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
@@ -38,6 +37,7 @@ from cosmos_rl.policy.model.hf_models.weight_converter import convert_weight_fro
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.hf_models.patch import (
     pre_hf_models_patch,
     post_hf_models_patch,
@@ -363,11 +363,14 @@ class HFModel(BaseModel):
         device: torch.device,
         revision: Optional[str] = None,
     ):
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
         model_type = self.hf_config.model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
@@ -386,68 +389,86 @@ class HFModel(BaseModel):
         assert (
             lm_head_weight_key is not None and embed_tokens_weight_key is not None
         ), "lm_head and embed_tokens weight keys not found in the state dict"
-        weights_of_ckpt_names = set()
-        reserved = {}
+
         hf_checkpoint_conversion_mapping = getattr(
             self.model, "_checkpoint_conversion_mapping", None
         )
-        for f in safetensors_files:
-            weights_of_ckpt = {}
-            ckpt = safe_open(
-                os.path.join(model_path, f), framework="pt", device=str(device)
+
+        # Name converter function for checkpoint conversion mapping
+        def name_converter(name: str) -> str:
+            if hf_checkpoint_conversion_mapping is not None:
+                for pattern, replacement in hf_checkpoint_conversion_mapping.items():
+                    if re.match(pattern, name):
+                        return re.sub(pattern, replacement, name)
+            return name
+
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(
+                model_path,
+                device,
+                safetensors_files,
+                name_converter=name_converter,
             )
-            keys = ckpt.keys()
-            for name in keys:
-                ckpt_tensor = ckpt.get_tensor(name)
-                if hf_checkpoint_conversion_mapping is not None:
-                    for (
-                        pattern,
-                        replacement,
-                    ) in hf_checkpoint_conversion_mapping.items():
-                        if re.match(pattern, name):
-                            name = re.sub(pattern, replacement, name)
-                            break
-                weights_of_ckpt[name] = ckpt_tensor
-                weights_of_ckpt_names.add(name)
-                if name == embed_tokens_weight_key:
-                    reserved[name] = ckpt_tensor
+        )
 
-            for name in weights_of_ckpt.keys():
-                if name in self.tensor_names_to_skip:
-                    logger.info(f"Skipping {name} because it is in the skip list")
-                    continue
-                tensor = weights_of_ckpt[name]
-                tp_slice_dim = None
-                if self.tp_slice_dim_map is not None:
-                    tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
-                )
-                target_tensor = self_state_dict[dest_name]
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                local_view = (
-                    target_tensor.to_local() if is_dist_tensor else target_tensor
-                )
-                assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
 
-        if (
-            lm_head_weight_key not in weights_of_ckpt_names
-            and embed_tokens_weight_key in weights_of_ckpt_names
+        # Step 3: Process each tensor
+        reserved = {}
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
         ):
-            # Handle weight tying: lm_head shares weights with embed_tokens
-            name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
-            tensor = reserved[embed_tokens_weight_key]
+            # Skip tensors in the skip list
+            if name in self.tensor_names_to_skip:
+                logger.info(f"Skipping {name} because it is in the skip list")
+                continue
+
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
+
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+            )
+            target_tensor = self_state_dict[dest_name]
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            assert (
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight)
+
+        # Handle weight tying: lm_head shares weights with embed_tokens
+        if (
+            lm_head_weight_key not in all_tensor_names
+            and embed_tokens_weight_key in all_tensor_names
+        ):
+            name = lm_head_weight_key
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
+            tensor = reserved[embed_tokens_weight_key]
+
+            tp_slice_dim = None
+            if self.tp_slice_dim_map is not None:
+                tp_slice_dim = self.tp_slice_dim_map.get(name, None)
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
             if dest_name in self_state_dict:
@@ -459,10 +480,10 @@ class HFModel(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight.to(device))
+                    local_view.data.copy_(sharded_weight.to(device))
 
     def load_hf_weights(
         self,
@@ -527,7 +548,7 @@ class HFModel(BaseModel):
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
 
@@ -535,10 +556,10 @@ class HFModel(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight.to(device))
+                local_view.data.copy_(sharded_weight.to(device))
 
         del hf_model
 

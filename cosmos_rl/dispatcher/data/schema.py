@@ -51,8 +51,9 @@ class RLPayload(BaseModel):
     The payload schema of RL sample.
     """
 
-    prompt: Optional[Union[ConversationType, str]] = Field(
-        default=None, description="The input prompt for the rollout."
+    prompt: Optional[Union[ConversationType, str, Any]] = Field(
+        default=None,
+        description="The input prompt for the rollout, can be a conversation type, a string, or any other type of objects.",
     )
 
     prompt_idx: int = Field(
@@ -72,7 +73,10 @@ class RLPayload(BaseModel):
     )
 
     # For rollout generation result, we add following fields:
-    completions: Optional[List[str]] = Field(
+    # In tensor native, video, or any other mode, it can be a list of any type of objects.
+    # The object type can be defined by the `rollout_generation` implementation.
+    # For non-text objects, it will be converted by the `get_rollout_output` of `data_packer` into final serializable format.
+    completions: Optional[List[Union[str, Any]]] = Field(
         default=None,
         description="The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.",
     )
@@ -113,6 +117,25 @@ class RLPayload(BaseModel):
         default=None, description="The logprobs of each completion."
     )
 
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
+    )
+
+    # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
+    cumulative_logprob: Optional[List[float]] = Field(
+        default=None,
+        description="The cumulative logprob of the generated completions which indicates the total probability of the generated completions.",
+    )
+
+    report_metrics: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="The report_metrics for the rollout used for metrics collection and reporting.",
+    )
+
+    teacher_result_uuids: Optional[List[str]] = Field(
+        default=None, description="The uuids for the teacher results."
+    )
+
     @staticmethod
     def collate_fn(
         batch: List["IdxAndRLPayload"],
@@ -132,8 +155,9 @@ IdxAndRLPayload = Tuple[int, RLPayload]
 
 
 class Rollout(BaseModel):
-    prompt: Optional[Union[ConversationType, str]] = Field(
-        default=None, description="The input prompt for the rollout."
+    prompt: Optional[Union[ConversationType, str, Any]] = Field(
+        default=None,
+        description="The input prompt for the rollout, can be a conversation type, a string, or any other type of objects.",
     )
 
     prompt_idx: int = Field(
@@ -144,8 +168,16 @@ class Rollout(BaseModel):
         default=None, description="The input conversation for the rollout."
     )
 
-    completion: str = Field(
+    completion: Union[str, Any] = Field(
         default="", description="The generated completion for the rollout."
+    )
+
+    teacher_result_uuid: str = Field(
+        default="", description="The uuid of the teacher result."
+    )
+
+    teacher_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the teacher for the current rollout."
     )
 
     completed_conversation: Optional[ConversationType] = Field(
@@ -167,9 +199,22 @@ class Rollout(BaseModel):
     )
 
     completion_token_ids: Optional[List[int]] = Field(
-        default=None, description="The token ids of each completion."
+        default=None, description="The token ids of current rollout's completion."
     )
 
     completion_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of each completion."
+        default=None, description="The logprobs of current rollout's completion."
+    )
+
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
+    )
+
+    weight_version: int = Field(
+        default=0, description="The weight version for the rollout."
+    )
+
+    report_metrics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The report_metrics for the rollout used for metrics collection and reporting.",
     )

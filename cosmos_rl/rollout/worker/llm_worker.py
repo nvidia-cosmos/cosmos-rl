@@ -21,7 +21,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
-from cosmos_rl.rollout.worker.rollout_control_worker import (
+from cosmos_rl.utils.async_utils import unsafe_enable_nest_asyncio
+from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 
@@ -29,10 +30,8 @@ from cosmos_rl.rollout.worker.rollout_control_worker import (
 class LLMRolloutWorker(WorkerBase):
     def __init__(self, **kwargs):
         # For LLM, config is retrieved from controller, so we pass None to the base class.
-        # self.config will be set in worker_init.
-        super().__init__(None, **kwargs)
+        super().__init__(None)
 
-    def worker_init(self, **kwargs):
         api_client = APIClient(role="ROLLOUT")
         metadata = api_client.get_controller_metadata()
 
@@ -80,6 +79,9 @@ class LLMRolloutWorker(WorkerBase):
             )
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")
+            if self.config.rollout.mode == "async":
+                # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.
+                unsafe_enable_nest_asyncio()
             self.rollout_worker = DisaggregatedRolloutControlWorker(
                 self.config, parallel_dims, **kwargs
             )

@@ -34,6 +34,7 @@ from cosmos_rl.utils.tao_status_logger import log_tao_status
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from transformers import AutoTokenizer
 import numpy as np
+from cosmos_rl.utils.util import aggregate_report_data
 
 
 class ReplicaScalingEnum(StrEnum):
@@ -141,6 +142,7 @@ class PolicyStatusManager:
         current_step: int = 0,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        hook_fns: Optional[Dict[str, Callable]] = None,
         val_datasize: Optional[int] = None,
     ):
         self.redis_handler = redis_handler
@@ -153,6 +155,7 @@ class PolicyStatusManager:
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
+        self.hook_fns = hook_fns if hook_fns is not None else {}
         self.data_fetcher = data_fetcher
 
         self.recompute_total_steps()
@@ -466,6 +469,9 @@ class PolicyStatusManager:
     ):
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
 
+        if config.validation.enable and config.validation.val_before_train:
+            self.data_fetcher.validation_activate_dataloader(0)
+
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas
@@ -502,6 +508,33 @@ class PolicyStatusManager:
             # Set all policy replicas to `ready`
             for replica in valid_replicas:
                 self.set_status(replica.name, PolicyStatus.READY)
+
+            if self.config.mode == "colocated":
+                # In colocated mode, we initially trigger data fetch for step 1 since the rollouts are generated locally.
+                self.current_step += 1
+                if self.config.validation.enable and (
+                    self.current_step % self.config.validation.freq == 0
+                    or self.current_step == self.total_steps
+                ):
+                    self.data_fetcher.validation_activate_dataloader(self.current_step)
+
+                for replica in valid_replicas:
+                    self.remain_samples_num -= self.config.train.train_batch_per_replica
+                    command.DataFetchCommand.trigger(
+                        replica=replica,
+                        items_count=self.config.train.train_batch_per_replica,
+                        global_step=self.current_step,
+                        total_steps=self.total_steps,
+                        # `remain_samples_num` is just for checkpointing the training progress
+                        remain_samples_num=self.remain_samples_num,
+                        # Only `do_save` when checkpointing is enabled
+                        do_save=False,
+                        redis_handler=self.redis_handler,
+                    )
+                    self.set_status(replica.name, PolicyStatus.RUNNING)
+                    logger.info(
+                        f"[Controller] Policy Replica {replica.name} is ready in colocated mode."
+                    )
         elif (
             not self.policy_init_done
             and len(valid_replicas) < config.policy.parallelism.n_init_replicas
@@ -590,15 +623,42 @@ class PolicyStatusManager:
                         "val/reward_min": min_reward,
                         "val/rollout_count": len(rewards),
                         "val/step": validation_step,
+                        "val/train_total_steps": self.total_steps,  # the total steps of the training when current validation step is triggered. This total_steps may change due to dynamic sampling.
                     }
                     logger.info(
                         f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
+                    )
+                    report_data_list = [
+                        rollout.report_metrics
+                        if rollout.report_metrics is not None
+                        else {}
+                        for rollouts in all_rollouts_lists
+                        for rollout in rollouts
+                    ]
+                    report_data = aggregate_report_data(
+                        report_data_list, report_data, prefix="val/"
+                    )
+                    report_data_str = ", ".join(
+                        [f"{k}: {v}" for k, v in report_data.items()]
+                    )
+                    logger.info(
+                        f"[Controller] Validation report data from total {sum(len(rollouts) for rollouts in all_rollouts_lists)} rollouts: {report_data_str}"
                     )
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
                             step=validation_step,
                         )
+
+                    # call custom logger fns
+                    for custom_logger_fn in self.custom_logger_fns:
+                        try:
+                            custom_logger_fn(report_data, validation_step)
+                        except Exception as e:
+                            logger.warning(
+                                f"[Controller] Error calling custom logger function: {e}"
+                            )
+
                     if "tao" in self.config.logging.logger:
                         log_tao_status(
                             data=report_data,
@@ -659,19 +719,21 @@ class PolicyStatusManager:
             and self.on_policy_rollout_completed
         ):
             # On-policy training has already completed the required samples for this policy step
+            # Filter out all these rollouts directly in remaining samples number
+            self.remain_samples_num -= len(rollouts)
             return completion_tokens_count, n_samples
 
         for rollout in rollouts:
             if self.config.train.train_policy.rollout_as_token_ids:
                 completion_tokens_count += len(rollout.completion_token_ids)
-            else:
+            elif not self.config.train.non_text:
                 completion_tokens_count += len(
                     self.tokenizer.encode(rollout.completion)
                 )
             n_samples += 1
             self.put_rollout(rollout)
+            self.consumed_samples_num += 1
             if self.config.train.train_policy.on_policy:
-                self.consumed_samples_num += 1
                 if self.total_pending_rollouts() == 0:
                     self.on_policy_rollout_completed = True
                     break
@@ -691,6 +753,41 @@ class PolicyStatusManager:
         self.remain_samples_num -= filter_records.get("filtered_positive", 0)
         self.remain_samples_num -= filter_records.get("filtered_negative", 0)
 
+    def filter_outdated_rollouts(self, rollouts: List[Rollout]) -> List[Rollout]:
+        """
+        Filter out the outdated rollouts based on the current step.
+        """
+        filtered_rollouts = []
+        for idx, rollout in enumerate(rollouts):
+            assert (
+                rollout.weight_version <= self.current_step
+            ), f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
+            # Estimate the step when this rollout will be used for training
+            # This is estimated based on the current step, the number of pending rollouts,
+            # and the number of rollouts before this rollout in the current batch.
+            estimated_step = self.current_step + (
+                idx + self.total_pending_rollouts()
+            ) // (
+                self.config.train.train_batch_per_replica
+                * max(len(self.get_all_atoms_arrived_replicas()), 1)
+            )
+            if (
+                estimated_step - rollout.weight_version
+                <= self.config.train.train_policy.allowed_outdated_steps
+            ):
+                filtered_rollouts.append(rollout)
+            else:
+                logger.debug(
+                    f"[Controller] Filtered out outdated rollout with version {rollout.weight_version}, current step {self.current_step}, estimated step {estimated_step}, pending rollouts {self.total_pending_rollouts()}, preceeding rollouts in this batch {idx}, allowed_outdated_steps {self.config.train.train_policy.allowed_outdated_steps}"
+                )
+        # Update remaining samples number
+        self.remain_samples_num -= len(rollouts) - len(filtered_rollouts)
+        k = "outdated"
+        self.filter_records[k] = (
+            self.filter_records.get(k, 0) + len(rollouts) - len(filtered_rollouts)
+        )
+        return filtered_rollouts
+
     def train_ack(
         self,
         replica_name: str,
@@ -707,6 +804,7 @@ class PolicyStatusManager:
 
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
+
         self.report_data_list.append(report_data)
         if self.all_reduced():
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
@@ -777,8 +875,6 @@ class PolicyStatusManager:
                         ]
                     )
                     train_step = self.report_data_list[0]["train_step"]
-                    self.report_data_list = []
-
                     policy_report_data = {
                         "train/loss_avg": total_loss_avg,
                         "train/loss_max": total_loss_max,
@@ -789,18 +885,41 @@ class PolicyStatusManager:
                         "train/grad_norm": total_grad_norm,
                         "train/entropy": total_entropy,
                         "train/effective_entropy": total_effective_entropy,
+                        "train/total_steps": total_steps,
                     }
+                    policy_report_data = aggregate_report_data(
+                        self.report_data_list, policy_report_data
+                    )
+                    if self.config.mode == "colocated":
+                        for data in self.report_data_list:
+                            # Handle dynamic sampling statistics update in colocated mode
+                            self.update_dynamic_sampling_statistics(data)
 
                     if len(self.filter_records) > 0:
                         total_samples_for_filtering = sum(
                             v for v in self.filter_records.values()
                         )
-                        for k, v in self.filter_records.items():
-                            policy_report_data.update(
-                                {f"rollout/{k}_ratio": v / total_samples_for_filtering}
-                            )
+                        if total_samples_for_filtering > 0:
+                            for k, v in self.filter_records.items():
+                                policy_report_data.update(
+                                    {
+                                        f"rollout/{k}_ratio": v
+                                        / total_samples_for_filtering
+                                    }
+                                )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
+                    )
+                    self.report_data_list = []
+
+                    report_data_str = ", ".join(
+                        [
+                            f"{k}: {v}"
+                            for k, v in self.train_report_data[train_step].items()
+                        ]
+                    )
+                    logger.info(
+                        f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} rollouts: {report_data_str}"
                     )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
@@ -824,12 +943,16 @@ class PolicyStatusManager:
                                 f"Dynamic sampling rewards distribution so far: {self.filter_records}."
                             )
                     self.filter_records = {}
-                    for logger_fn in self.custom_logger_fns:
+                    for custom_logger_fn in self.custom_logger_fns:
+                        # We add a separate try-except block to handle the error of custom logger function.
+                        # This is to avoid the error of custom logger function affecting the fundamental logging system.
                         try:
-                            logger_fn(self.train_report_data[train_step], train_step)
+                            custom_logger_fn(
+                                self.train_report_data[train_step], train_step
+                            )
                         except Exception as e:
                             logger.warning(
-                                f"[Controller] Warning reporting customized training results: {e}"
+                                f"[Controller] [Controller] Error calling custom logger function: {e}"
                             )
                 except Exception as e:
                     import traceback
@@ -900,6 +1023,10 @@ class PolicyStatusManager:
         """
         Check if the rollouts are enough.
         """
+        if self.config.mode == "colocated":
+            # Colocated mode always has enough rollouts since they are locally prepared.
+            return True
+
         return self.total_pending_rollouts() >= (
             self.config.train.train_batch_per_replica
             * len(self.get_all_atoms_arrived_replicas())
@@ -973,11 +1100,13 @@ class PolicyStatusManager:
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
             # Interleave-style data dispatch
-            for _ in range(items_count):
-                for replica in arrived_replicas:
-                    rollout = self.rollout_buffer.get()
-                    replica.put_rollout(rollout, self.redis_handler)
-                    rollouts_of_this_step.append(rollout)
+            if not self.config.mode == "colocated":
+                # Colocated mode no need real rollout dispatching since they are all local.
+                for _ in range(items_count):
+                    for replica in arrived_replicas:
+                        rollout = self.rollout_buffer.get()
+                        replica.put_rollout(rollout, self.redis_handler)
+                        rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
@@ -1052,9 +1181,13 @@ class PolicyStatusManager:
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
                     completion_length = (
-                        len(rollout.completion_token_ids)
-                        if self.config.train.train_policy.rollout_as_token_ids
-                        else len(self.tokenizer.encode(rollout.completion))
+                        (
+                            len(rollout.completion_token_ids)
+                            if self.config.train.train_policy.rollout_as_token_ids
+                            else len(self.tokenizer.encode(rollout.completion))
+                        )
+                        if not self.config.train.non_text
+                        else 1
                     )
                     advantages.extend([rollout.advantage] * completion_length)
                     filter_rewards.append(rollout.filter_reward)
@@ -1077,6 +1210,14 @@ class PolicyStatusManager:
                     "rollout/filter_reward_max": np.max(filter_rewards),
                     "rollout/filter_reward_min": np.min(filter_rewards),
                 }
+
+                report_data_list = [
+                    rollout.report_metrics if rollout.report_metrics is not None else {}
+                    for rollout in rollouts_of_this_step
+                ]
+                report_data = aggregate_report_data(
+                    report_data_list, report_data, prefix="train/"
+                )
                 self.train_report_data[self.current_step] = report_data
 
 

@@ -10,6 +10,19 @@ cosmos-rl is fully compatible with PyTorch and is designed for the future of dis
 
 Main Features
 -------------
+- **Natively Designed for Physical AI**
+   - Cosmos-RL supports training serveral physical AI paradigms, e.g., LLM/VLM, world foundational models, VLA (coming soon), etc.
+   - **Multi-training Algorithms**
+         - Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), and RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, etc.).
+         - Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.
+   - **Diversified Model Support**
+         - For LLM/VLM:
+            - Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models.
+            - Compatible with all Huggingface LLMs.
+         - For world foundational models:
+            - Natively supports Cosmos-Predict2.5, and Wan2.1 (coming soon).
+            - Compatible with mainstream Huggingface world foundational models (coming soon).
+         - Easily extensible to other model architectures by customizing interface.
 - **6D Parallelism**: Sequence, Tensor, Context, Pipeline, FSDP, DDP.
 
 - **Elastic & Fault Tolerance**: A set of techniques to improve the robustness of distributed training.
@@ -25,13 +38,6 @@ Main Features
    - **Robust**
       - Support `AIPO <https://arxiv.org/pdf/2505.24034>`_ for stable off-policy training.
       - Async/Sync strategy can be selected upon to user's choice.
-- **Multi-training Algorithms**
-      - Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.).
-      - Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.
-- **Diversified Model Support**
-      - Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models.
-      - Compatible with all Huggingface LLMs.
-      - Easily extensible to other model architectures by customizing interface.
 
 .. note::
    6D Parallelism is fully supported by Policy Model.
@@ -81,3 +87,8 @@ Main Features
    :caption: Quantization
 
    quantization/fp8
+
+.. toctree::
+   :caption: World Foundational Models
+
+   wfm/overview

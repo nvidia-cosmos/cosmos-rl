@@ -23,11 +23,14 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
+from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
+
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
 from typing import Mapping
 from accelerate import init_on_device
+from contextlib import nullcontext
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
 from cosmos_rl.utils.dim_slice_info import (
     DimSliceInfo,
@@ -39,11 +42,12 @@ from cosmos_rl.utils.dim_slice_info import (
 class BaseModel(torch.nn.Module, ABC):
     _gradient_checkpointing_enabled = False
 
-    def __init__(self, hf_config: AutoConfig):
+    def __init__(self, hf_config: Optional[AutoConfig] = None):
         super().__init__()
-        self.weight_mapper = WeightMapper.get_weight_mapper(
-            self.supported_model_types()[0]
-        )(hf_config)
+        if hf_config is not None:
+            self.weight_mapper = WeightMapper.get_weight_mapper(
+                self.supported_model_types()[0]
+            )(hf_config)
 
     def current_device(self):
         """
@@ -316,6 +320,52 @@ class BaseModel(torch.nn.Module, ABC):
             raise KeyError(f"Path '{name}' not found among parameters or modules.")
         return {"touched_params": touched_params, "touched_modules": touched_modules}
 
+    def apply_freeze_pattern(self, freeze_pattern: List[str]) -> dict:
+        """
+        Apply pattern-based freezing to parameters using regex matching.
+
+        Args:
+            freeze_pattern: List of regex patterns to match against parameter names.
+                    Matched parameters will be frozen (requires_grad=False).
+
+        Returns:
+            A dict with pattern match counts.
+        """
+        import re
+
+        compiled_patterns = [(p, re.compile(p)) for p in freeze_pattern if p]
+
+        pattern_counts: Dict[str, int] = {p: 0 for p in freeze_pattern if p}
+        total_params = 0
+        frozen_params = 0
+
+        for param_name, param in self.named_parameters():
+            total_params += param.numel()
+
+            for pattern_str, pattern_re in compiled_patterns:
+                if pattern_re.search(param_name):
+                    param.requires_grad = False
+                    pattern_counts[pattern_str] += 1
+                    util.rank0_print(
+                        f"[freeze_pattern] freeze '{param_name}' (matched '{pattern_str}')"
+                    )
+                    break
+
+            if not param.requires_grad:
+                frozen_params += param.numel()
+
+        # Log summary
+        for pattern, count in pattern_counts.items():
+            if count > 0:
+                util.rank0_print(f"[freeze_pattern] '{pattern}' matched {count} params")
+
+        util.rank0_print(
+            f"[freeze_pattern] Total={total_params / 1e9:.2f}B, "
+            f"Frozen={frozen_params:,}, Trainable={total_params - frozen_params:,}"
+        )
+
+        return {"pattern_counts": pattern_counts}
+
     """
     Abstract methods
     """
@@ -470,29 +520,28 @@ class ModelRegistry:
     def check_model_type_supported(cls, model_type: str) -> bool:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
-    @classmethod
-    def build_model(cls, config: CosmosConfig):
+    def build_hf_model(self, config, hf_config_args={}):
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
-            model_name_or_path, trust_remote_code=True
+            model_name_or_path, trust_remote_code=True, **hf_config_args
         )
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
-        if not is_supported_model_type:
+        if not is_supported_model_type or config.train.force_use_hf:
             logger.info(
-                f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead."
+                f"Model type {hf_config.model_type} not registered or force using HF, using {COSMOS_HF_MODEL_TYPES} instead."
             )
             model_type = COSMOS_HF_MODEL_TYPES
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
-        hf_config.torch_dtype = util.str2torch_dtype(config.train.param_dtype)
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
             else config.train.param_dtype
         )
+        hf_config.torch_dtype = cosmos_default_dtype
 
         def _apply_model_post_processing(model, config):
             """Apply LoRA, liger kernel, and trainable map configurations to the model."""
@@ -525,6 +574,11 @@ class ModelRegistry:
                         )
                 model.apply_trainable(config.policy.trainable_map)
 
+            # Apply pattern-based freeze configuration
+            freeze_pattern = getattr(config.policy, "freeze_pattern", None)
+            if freeze_pattern is not None:
+                model.apply_freeze_pattern(freeze_pattern)
+
             return model
 
         def _load_model_with_config(model_cls, hf_config, model_name_or_path, config):
@@ -545,8 +599,16 @@ class ModelRegistry:
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
                 return torch.device("cuda")
+            elif hf_config.model_type == "openvla" and hasattr(
+                hf_config, "timm_model_ids"
+            ):
+                # VLA models with TIMM vision backbone, use CUDA for initialization
+                return torch.device("cuda")
             else:
                 return init_on_device("meta", include_buffers=False)
+
+        if hasattr(model_cls, "preprocess_hf_config"):
+            hf_config = model_cls.preprocess_hf_config(config)
 
         init_context = _get_init_context_for_model_build(hf_config)
         with init_context:
@@ -579,6 +641,54 @@ class ModelRegistry:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
 
+    def build_diffusers_model(self, config, diffusers_config_args={}):
+        # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
+        model_name_or_path = config.policy.model_name_or_path
+        model = None
+        model_type = util.retry(diffusers_config_fn)(model_name_or_path)["_class_name"]
+
+        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+
+        cosmos_default_dtype = util.str2torch_dtype(
+            config.train.master_dtype
+            if config.train.master_dtype is not None
+            else config.train.param_dtype
+        )
+
+        def _load_model_with_config(model_cls, config, model_name_or_path):
+            """Load model and apply post-processing configurations."""
+            model = model_cls.from_pretrained(config, model_name_or_path)
+            return model
+
+        def _get_init_context_for_model_build(device):
+            # TODO(yy): support meta init for diffusers model
+            # Cannot use torch.device('cuda') here, conflict with scheduler's initialization
+            # Control device inside model
+            return nullcontext()
+
+        init_context = _get_init_context_for_model_build("cuda")
+        with init_context:
+            with util.cosmos_default_dtype(cosmos_default_dtype):
+                try:
+                    model = _load_model_with_config(
+                        model_cls, config, model_name_or_path
+                    )
+
+                except Exception as e:
+                    # TODO (yy): Add exception handle
+                    raise e
+
+        if model is None:
+            raise ValueError(f"Model {model_name_or_path} not supported.")
+        return model
+
+    @classmethod
+    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+        if not config.policy.is_diffusers:
+            return cls.build_hf_model(cls, config, hf_config_args)
+        else:
+            return cls.build_diffusers_model(cls, config, hf_config_args)
+
 
 class WeightMapper(ABC):
     _WEIGHT_MAPPER_BACKEND_SUPPORTED = ["vllm", "trtllm"]
@@ -590,7 +700,7 @@ class WeightMapper(ABC):
         self.backend = "vllm"  # default rollout backend is vllm.
 
     @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
+    def policy_map_local_key_for_export_tensor(self, name, param):
         """
         Transform the weight to the Huggingface weight store and naming convention.
         For example, Qwen3 MoE experts' weight of `gate_and_up_proj` are stacked in the 0th dimension(expert dimension) in cosmos-rl,
@@ -599,21 +709,88 @@ class WeightMapper(ABC):
         """
         yield name, param
 
-    @abstractmethod
     def rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: torch.nn.Module,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
+        Prepare the rollout receive list for P2R weight synchronization.
+        It does the splitting of weights if needed, maps the weight names to consistent naming convention with policy side,
+        and create the inplace view tensors for vllm model weights to be written by P2R weight sync.
+        The final mapped name from this function should be consistent with the name from `policy_map_local_key_to_hf_key` for the same parameter.
         Rollout prepare recv list for P2R weight sync:
-            - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
+            - rollout_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
+        It call `rollout_split_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
         """
-        pass
+        recv_key_n_shape_list = []
+        rollout_weight_inplace_view_map = {}
+        self.map_to_unsplited_weight_name = {}
+        for param_name, param in rollout_model.named_parameters():
+            unsplited_weight_name = self.rollout_map_local_key_to_hf_key(param_name)
+            group_keys_n_params = (
+                self.rollout_split_local_key_n_param_to_hf_key_n_param(
+                    param_name, param
+                )
+            )
+            recv_key_n_shape_list.append([(k, w.ndim) for k, w in group_keys_n_params])
+            rollout_weight_inplace_view_map.update(
+                {k: w for k, w in group_keys_n_params}
+            )
+            if len(group_keys_n_params) > 1:
+                self.map_to_unsplited_weight_name.update(
+                    {k: unsplited_weight_name for k, w in group_keys_n_params}
+                )
+        return rollout_weight_inplace_view_map, recv_key_n_shape_list
 
-    @abstractmethod
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> List[Tuple[str, torch.Tensor]]:
+        """
+        Map the local parameter name and param to the Huggingface parameter name and param at rollout side with splitting if needed.
+        It does the splitting of weights if needed.
+        The returned names should be consistent with the final names in `policy_map_local_key_to_hf_key` for the same parameters.
+        This is to make sure the mapped names are consistent between policy and rollout side.
+        It can call `rollout_map_local_key_to_hf_key` to transform the base name format alongside the splitting logic.
+        Returns the list of splitted weight names and params.
+        """
+        raise NotImplementedError
+
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
-        pass
+        """
+        Map the local parameter name to the Huggingface parameter name at policy side.
+        The name should be consistent with the final name in `rollout_prepare_recv` and `rollout_split_local_key_n_param_to_hf_key_n_param` for the same parameter.
+        This is to make sure the mapped name is consistent between policy and rollout side.
+        """
+        return name
+
+    def rollout_map_local_key_to_hf_key(self, name: str) -> str:
+        """
+        Map the local parameter name to the Huggingface parameter name format at rollout side.
+        It only transforms the name format without splitting. `rollout_split_local_key_n_param_to_hf_key_n_param` will do the splitting if needed.
+        This can be called by `rollout_split_local_key_n_param_to_hf_key_n_param` to transform the base name format alongside the splitting logic.
+        The name format should be consistent with the final name in `policy_map_local_key_to_hf_key`.
+        This is to make sure the mapped name format is consistent between policy and rollout side.
+        """
+        return name
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        """
+        Get the unsplited weight name for a given weight key.
+        This method is used to map the splitted weight names back to their original unsplitted names.
+        It is inverse of the split operations in function `rollout_prepare_recv` and only do for name tranferring.
+        If no split in the weight key, return the original weight key.
+        """
+        assert hasattr(
+            self, "map_to_unsplited_weight_name"
+        ), "map_to_unsplited_weight_name is not set. Please call rollout_prepare_recv first."
+        if (
+            hasattr(self, "map_to_unsplited_weight_name")
+            and weight_key in self.map_to_unsplited_weight_name
+        ):
+            return self.map_to_unsplited_weight_name[weight_key]
+        else:
+            return weight_key
 
     def get_policy_parallelism_strategy(self):
         return []
@@ -745,17 +922,17 @@ class WeightMapper(ABC):
 
     def cosmos_rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: Any,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
-        vllm_weight_inplace_view_map, recv_key_n_shape_list = self.rollout_prepare_recv(
-            vllm_model
+        rollout_weight_inplace_view_map, recv_key_n_shape_list = (
+            self.rollout_prepare_recv(rollout_model)
         )
-        final_vllm_weight_inplace_view_map = {}
+        final_rollout_weight_inplace_view_map = {}
         final_recv_key_n_shape_list = []
-        for key, value in vllm_weight_inplace_view_map.items():
+        for key, value in rollout_weight_inplace_view_map.items():
             if self.rollout_prepare_recv_filter(key):
                 continue
-            final_vllm_weight_inplace_view_map[key] = value
+            final_rollout_weight_inplace_view_map[key] = value
         total_count = 0
         for group_keys in recv_key_n_shape_list:
             group_key = group_keys[0][0]
@@ -764,9 +941,9 @@ class WeightMapper(ABC):
             final_recv_key_n_shape_list.append(group_keys)
             total_count += len(group_keys)
         assert (
-            len(final_vllm_weight_inplace_view_map) == total_count
-        ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
-        return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
+            len(final_rollout_weight_inplace_view_map) == total_count
+        ), f"{len(final_rollout_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        return final_rollout_weight_inplace_view_map, final_recv_key_n_shape_list
 
     def update_tensor_view(
         self,

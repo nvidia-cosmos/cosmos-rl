@@ -1,9 +1,44 @@
 [project]
-name = "cosmos_rl"
+name = "cosmos-rl"
 description = "Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications."
 readme = "README.md"
-requires-python = ">=3.9"
-dynamic = ["dependencies", "version"]
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "transformers>=4.51.1,!=4.52.*,!=4.53.*", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+    "datasets>=4.4.1",
+    "pydantic",
+    "math_verify",
+    "nest_asyncio",
+    "pybind11[global]",
+    "vllm>=0.8.5",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "torchao>=0.10.0",
+    "tensordict==0.7.2",
+    "toml",
+    "StrEnum",
+    "redis",
+    "msgpack",
+    "qwen_vl_utils",
+    "pynvml",
+    "boto3",
+    "modelscope",
+    "cloudpickle",
+    "click",
+    "rich",
+    "pyyaml",
+    "blobfile",
+    "nvidia-nccl-cu12>=2.26.2",
+    "liger_kernel",
+    "accelerate",
+    "kernels",
+    "diffusers",
+    "peft",
+    "flash-attn>=2.8.3",
+]
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]
@@ -35,8 +70,44 @@ cosmos_rl = [
     "tools/chat_templates/*.jinja2"
 ]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
+
 [tool.setuptools.packages.find]
 include = ["cosmos_rl*"]
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+[project.optional-dependencies]
+wfm = [
+    "termcolor",
+    "aioboto3",
+    "aiobotocore",
+    "imageio",
+    "imageio-ffmpeg",
+    "webdataset",
+    "decord",
+    "trimesh",
+]
+vla = [
+    "bddl",
+    "easydict",
+    "einops",
+    "future",
+    "gym",
+    "hydra-core",
+    "libero",
+    "math-verify",
+    "matplotlib",
+    "numpy<2",
+    "opencv-python",
+    "robomimic",
+    "robosuite==1.4",
+    "thop",
+    "timm<1",
+    "wandb>0.13.1",
+]
+all = [
+    "cosmos_rl[wfm,vla]",
+]
+
+[tool.uv.sources]
+libero = { git = "https://github.com/fwd4/LIBERO.git" }

@@ -18,7 +18,6 @@
 import socket
 import subprocess
 import sys
-import logging
 import time
 import os
 import shutil
@@ -27,66 +26,21 @@ import argparse
 from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
-import tempfile
-import copy
-
+from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
+from cosmos_rl.launcher.launch_vision import launch_vision_gen
+from cosmos_rl.launcher.utility import (
+    get_available_gpus,
+    get_non_lepton_args,
+    NUM_PRIORITY_MAPPING,
+    set_lepton_job,
+    get_worker_ip,
+    resolve_host_blocking,
+    launch_lepton_job,
+    launch_processes,
+    dump_config_with_literal_patterns_to_tmpfile,
+)
+from cosmos_rl.utils.logging import logger
 from nvidia_tao_core.loggers.decorators import monitor_status
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("cosmos")
-
-
-def dump_config_with_literal_patterns_to_tmpfile(config: Dict[str, Any]) -> str:
-    """
-    Write config to TOML, while emitting legacy dict-based
-    policy.lora.{alpha_pattern,r_pattern} as literal sections to avoid
-    backslash-escaping of regex keys.
-    """
-    with tempfile.NamedTemporaryFile(
-        mode="w+", suffix=".toml", delete=False
-    ) as tmp_file:
-        config_for_dump = copy.deepcopy(config)
-        lora_config = (config_for_dump.get("policy", {})).get("lora", {})
-        alpha_pattern_table = lora_config.pop("alpha_pattern", None)
-        r_pattern_table = lora_config.pop("r_pattern", None)
-
-        toml.dump(config_for_dump, tmp_file)
-
-        if isinstance(alpha_pattern_table, dict) and alpha_pattern_table:
-            tmp_file.write("\n[policy.lora.alpha_pattern]\n")
-            for key, value in alpha_pattern_table.items():
-                tmp_file.write(f"'{key}' = {value}\n")
-
-        if isinstance(r_pattern_table, dict) and r_pattern_table:
-            tmp_file.write("\n[policy.lora.r_pattern]\n")
-            for key, value in r_pattern_table.items():
-                tmp_file.write(f"'{key}' = {value}\n")
-
-        return tmp_file.name
-
-
-# ---------------------------------------------------------------------------
-# Queue priority helper
-# ---------------------------------------------------------------------------
-# Map numeric queue-priority (1-9) to the corresponding Lepton priority_class
-# string expected by the backend API.
-#
-# 1-3  → low-1000 / 2000 / 3000
-# 4-6  → mid-4000 / 5000 / 6000
-# 7-9  → high-7000 / 8000 / 9000
-#
-# Note: keep in sync with lepton-cli definitions.
-NUM_PRIORITY_MAPPING = {
-    1: "low-1000",
-    2: "low-2000",
-    3: "low-3000",
-    4: "mid-4000",
-    5: "mid-5000",
-    6: "mid-6000",
-    7: "high-7000",
-    8: "high-8000",
-    9: "high-9000",
-}
 
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
@@ -144,100 +98,6 @@ def read_config(config_file: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-def get_available_gpus() -> List[str]:
-    """
-    Detect available GPUs using nvidia-smi and return their IDs.
-
-    Returns:
-        List of GPU IDs as strings
-    """
-    try:
-        cmd = ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"]
-        cvd = os.getenv("CUDA_VISIBLE_DEVICES", None)
-        if cvd is not None:
-            # Add the GPU IDs to the command
-            cmd += ["--id=" + cvd]
-        # Run nvidia-smi to get GPU information
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-
-        # Parse the output to get GPU IDs
-        gpu_ids = [line.strip() for line in result.stdout.splitlines()]
-
-        if not gpu_ids:
-            logger.error("Warning: No GPUs detected")
-            return []
-
-        logger.info(f"Detected {len(gpu_ids)} GPUs: {', '.join(gpu_ids)}")
-        return gpu_ids
-
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running nvidia-smi: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Error detecting GPUs: {e}")
-        return []
-
-
-def launch_processes(
-    commands: List[str],
-    gpu_devices: Optional[List[str]],
-    control_urls: Optional[List[str]],
-    output_files: Optional[List[str]],
-    extra_env: Optional[Dict[str, str]] = None,
-) -> List[subprocess.Popen]:
-    """
-    Launch multiple subprocesses and return their process objects.
-
-    Args:
-        commands: List of command strings to execute
-        gpu_devices: List of GPU device IDs to assign to each process (e.g., ["0", "1", "2"])
-        control_urls: List of controller URLs to assign to each process (e.g., ["localhost:8000"])
-        output_files: List of output files to redirect process output to (e.g., ["output1.log", "output2.log"])
-
-    Returns:
-        List of Popen objects for the launched processes
-    """
-    processes = []
-
-    if gpu_devices is None:
-        gpu_devices = [None] * len(commands)
-    elif len(gpu_devices) != len(commands):
-        raise ValueError("Number of GPU devices must match number of commands")
-
-    for cmd, gpu_id, url, ofile in zip(
-        commands, gpu_devices, control_urls, output_files
-    ):
-        try:
-            # Prepare environment variables
-            env = dict(os.environ)
-            if gpu_id is not None:
-                env["CUDA_VISIBLE_DEVICES"] = gpu_id
-            if url is not None:
-                env["COSMOS_CONTROLLER_HOST"] = url
-            if extra_env is not None:
-                env.update(extra_env)
-            if ofile is not None:
-                f = open(ofile, "wb")
-                cout = f
-                cerr = f
-            else:
-                cout = sys.stdout
-                cerr = sys.stderr
-
-            # Launch process and capture output
-            logger.info(f"Launching process with command: {cmd}")
-            process = subprocess.Popen(
-                cmd, shell=True, stdout=cout, stderr=cerr, env=env
-            )
-            processes.append(process)
-            if ofile is not None:
-                f.close()
-        except Exception as e:
-            logger.error(f"Error launching process for command '{cmd}': {e}")
-
-    return processes
-
-
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -272,6 +132,12 @@ def parse_args():
         type=int,
         default=None,
         help="Total number of rollout replicas to launch in the whole system. If not provided, the number of rollout replicas will be obtained from TOML configuration file.",
+    )
+    parser.add_argument(
+        "--reference",
+        type=int,
+        default=None,
+        help="Total number of reference replicas to launch in the whole system. If not provided, the number of reference replicas will be obtained from TOML configuration file.",
     )
     parser.add_argument(
         "--p2r-ratio",
@@ -456,8 +322,16 @@ def parse_args():
         help="Reservation ID for dedicated node groups",
     )
 
-    # Positional arguments
+    wfm_group = parser.add_argument_group("World foundational model mode options")
+    wfm_group.add_argument(
+        "--wfm-mode",
+        "-dfg",
+        action="store_true",
+        default=False,
+        help="In World foundational model mode.",
+    )
 
+    # Positional arguments
     parser.add_argument(
         "script",
         nargs="?",  # “?” means 0 or 1 occurrences
@@ -498,15 +372,146 @@ def get_local_ip():
         return None
 
 
+def replica_placement_per_role(
+    # Dynamically updated arguments
+    commands: List[str],
+    gpu_devices: List[str],
+    control_urls: List[str],
+    output_files: List[str],
+    global_launch_settings: List[List[str]],
+    global_worker_idx: int,
+    global_available_gpus: List[List[int]],
+    available_gpus: List[int],
+    gpu_idx: int,
+    # Fixed arguments
+    n_replicas: int,
+    min_n_gpus_replica: int,
+    role: str,
+    replica_script: str,
+    control_url: str,
+    args: argparse.Namespace,
+    rdzv_port: int,
+    check_last_state: bool,
+    output_dir: Optional[str] = None,
+    get_worker_ip: Optional[Callable] = None,
+    script: Optional[str] = None,
+    backend: str = "vllm",
+    config_path: Optional[str] = None,
+    script_args: Optional[List[Any]] = None,
+):
+    if check_last_state and min_n_gpus_replica > len(
+        global_available_gpus[global_worker_idx]
+    ):
+        # If the number of GPUs needed for one replica of this role is more than available GPUs, we need to allocate a new worker
+        if gpu_idx > 0:
+            global_launch_settings.append(
+                [commands, gpu_devices, control_urls, output_files]
+            )
+            commands = []
+            gpu_devices = []
+            control_urls = []
+            output_files = []
+            gpu_idx = 0
+            global_worker_idx += 1
+            global_available_gpus.append(available_gpus)
+
+    for i in range(n_replicas):
+        if min_n_gpus_replica > len(global_available_gpus[global_worker_idx]):
+            assert (
+                min_n_gpus_replica % len(global_available_gpus[global_worker_idx]) == 0
+            ), f"min_n_gpus_replica {min_n_gpus_replica} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            nodes_needed = min_n_gpus_replica // len(
+                global_available_gpus[global_worker_idx]
+            )
+            rdzv_ip = "localhost"
+            for node_in_replica in range(nodes_needed):
+                gpu_devices.append(
+                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
+                )
+                commands.append(
+                    f"{replica_script} --type {role} --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
+                )
+                if script is not None:
+                    commands[-1] += f" --script {script}"
+                if node_in_replica == 0:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                    if get_worker_ip is not None:
+                        rdzv_ip = get_worker_ip(global_worker_idx, args)
+                else:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
+
+                control_urls.append(control_url)
+                output_files.append(
+                    os.path.join(output_dir, f"{role}_{i}.log")
+                    if output_dir is not None
+                    else None
+                )
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+        else:
+            if gpu_idx + min_n_gpus_replica > len(
+                global_available_gpus[global_worker_idx]
+            ):
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
+                gpu_idx = 0
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+
+            gpu_devices.append(
+                ",".join(
+                    [
+                        str(g)
+                        for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_replica]
+                    ]
+                )
+            )
+            commands.append(
+                f"{replica_script} --type {role} --ngpus {min_n_gpus_replica} --backend {backend} --config {config_path}"
+            )
+            if script is not None:
+                commands[-1] += f" --script {script}"
+
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
+
+            control_urls.append(control_url)
+            output_files.append(
+                os.path.join(output_dir, f"{role}_{i}.log")
+                if output_dir is not None
+                else None
+            )
+            gpu_idx += min_n_gpus_replica
+    return gpu_idx, global_worker_idx, commands, gpu_devices, control_urls, output_files
+
+
 def replica_placement(
     available_gpus: List[int],
     n_policy: int,
     n_rollouts: int,
+    n_reference: int,
     min_n_gpus_policy: int,
     min_n_gpus_rollout: int,
+    min_n_gpus_reference: int,
     replica_script: str,
     control_url: str,
     output_dir: Optional[str],
+    args: argparse.Namespace,
     get_worker_ip: Optional[Callable] = None,
     rdzv_port: Optional[int] = None,
     script: Optional[str] = None,
@@ -531,185 +536,44 @@ def replica_placement(
     global_worker_idx = 0
     global_launch_settings = []
     # Assign launch settings for each worker
-    for i in range(n_policy):
-        if min_n_gpus_policy > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_policy % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus_policy {min_n_gpus_policy} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_policy // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
-                )
-                commands.append(
-                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
-                if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        rdzv_ip = get_worker_ip(global_worker_idx)
-                else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
-                control_urls.append(control_url)
-                output_files.append(
-                    os.path.join(output_dir, f"policy_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_policy > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices.append(
-                ",".join(
-                    [
-                        str(g)
-                        for g in global_available_gpus[global_worker_idx][
-                            gpu_idx : gpu_idx + min_n_gpus_policy
-                        ]
-                    ]
-                )
-            )
-            commands.append(
-                f"{replica_script} --type policy --ngpus {min_n_gpus_policy} --backend {backend} --config {config_path}"
-            )
-            if script is not None:
-                commands[-1] += f" --script {script}"
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-            control_urls.append(control_url)
-            output_files.append(
-                os.path.join(output_dir, f"policy_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            gpu_idx += min_n_gpus_policy
-
-    if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
-        # If the number of GPUs needed for rollout is more than available GPUs, we need to allocate a new worker
-        if gpu_idx > 0:
-            global_launch_settings.append(
-                [commands, gpu_devices, control_urls, output_files]
-            )
-            commands = []
-            gpu_devices = []
-            control_urls = []
-            output_files = []
-            gpu_idx = 0
-            global_worker_idx += 1
-            global_available_gpus.append(available_gpus)
-
-    for i in range(n_rollouts):
-        if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_rollout % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus_rollout {min_n_gpus_rollout} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_rollout // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
-                )
-                commands.append(
-                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
-                if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        rdzv_ip = get_worker_ip(global_worker_idx)
-                else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
-                control_urls.append(control_url)
-                output_files.append(
-                    os.path.join(output_dir, f"rollout_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_rollout > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices.append(
-                ",".join(
-                    [
-                        str(g)
-                        for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_rollout]
-                    ]
-                )
-            )
-            commands.append(
-                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout} --backend {backend} --config {config_path}"
-            )
-            if script is not None:
-                commands[-1] += f" --script {script}"
-
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-
-            control_urls.append(control_url)
-            output_files.append(
-                os.path.join(output_dir, f"rollout_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            gpu_idx += min_n_gpus_rollout
+    for role, n_replicas, min_n_gpus_replica in zip(
+        ["policy", "rollout", "reference"],
+        [n_policy, n_rollouts, n_reference],
+        [min_n_gpus_policy, min_n_gpus_rollout, min_n_gpus_reference],
+    ):
+        (
+            gpu_idx,
+            global_worker_idx,
+            commands,
+            gpu_devices,
+            control_urls,
+            output_files,
+        ) = replica_placement_per_role(
+            commands=commands,
+            gpu_devices=gpu_devices,
+            control_urls=control_urls,
+            output_files=output_files,
+            global_launch_settings=global_launch_settings,
+            global_worker_idx=global_worker_idx,
+            global_available_gpus=global_available_gpus,
+            available_gpus=available_gpus,
+            gpu_idx=gpu_idx,
+            n_replicas=n_replicas,
+            min_n_gpus_replica=min_n_gpus_replica,
+            role=role,
+            replica_script=replica_script,
+            control_url=control_url,
+            args=args,
+            rdzv_port=rdzv_port,
+            check_last_state=role != "policy",
+            output_dir=output_dir,
+            get_worker_ip=get_worker_ip,
+            script=script,
+            backend=backend,
+            config_path=config_path,
+            script_args=script_args,
+        )
 
     if len(commands) > 0:
         global_launch_settings.append(
@@ -748,6 +612,7 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
+
     if args.script is not None and args.script.endswith(".py"):
         # If the script is a Python file, we need to make sure it is absolute path
         # so that it can be found by the launched processes
@@ -755,10 +620,19 @@ def main():
     else:
         script = args.script if args.script is not None else None
 
+    if args.wfm_mode:
+        # launcher for vision gen task
+        cosmos_config = CosmosVisionGenConfig.from_dict(read_config(args.config))
+        logger.info(
+            f"Launching vision gen task with config: {cosmos_config.model_dump()}"
+        )
+        return launch_vision_gen(cosmos_config, args, parser, script=script)
+
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
     rollout_parallelism = cosmos_config.get("rollout", {}).get("parallelism", {})
+    reference_parallelism = cosmos_config.get("distillation", {}).get("parallelism", {})
     # Calculate the minimum number of GPUs required for policy and rollout
     # based on the parallelism settings in the configuration
     # Treat dp_shard_size as 1 if it is not set
@@ -774,12 +648,22 @@ def main():
         * rollout_parallelism.get("pp_size", 1)
         * rollout_parallelism.get("cp_size", 1)
     )
+    min_n_gpus_reference = (
+        reference_parallelism.get("tp_size", 1)
+        * reference_parallelism.get("dp_replicate_size", 1)
+        * reference_parallelism.get("pp_size", 1)
+        * reference_parallelism.get("cp_size", 1)
+    )
     if policy_parallelism.get("dp_shard_size", 1) >= 1:
         min_n_gpus_policy = min_n_gpus_policy * policy_parallelism.get(
             "dp_shard_size", 1
         )
     if rollout_parallelism.get("dp_shard_size", 1) >= 1:
         min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
+            "dp_shard_size", 1
+        )
+    if reference_parallelism.get("dp_shard_size", 1) >= 1:
+        min_n_gpus_reference = min_n_gpus_reference * reference_parallelism.get(
             "dp_shard_size", 1
         )
     backend = cosmos_config.get("rollout", {}).get("backend", "vllm")
@@ -812,6 +696,10 @@ def main():
         )
         args.policy = int(num_per_ratio * p_ratio)
         args.rollout = int(num_per_ratio * r_ratio)
+        args.reference = 0
+        logger.warning(
+            "Reference training is not supported yet in P2R ratio mode, set number of reference replicas to 0"
+        )
         assert args.policy >= 1, "Number of policy replicas must be at least 1"
         assert (
             args.policy * min_n_gpus_policy + args.rollout * min_n_gpus_rollout
@@ -826,6 +714,10 @@ def main():
         n_rollouts = rollout_parallelism.get("n_init_replicas", 1)
     else:
         n_rollouts = args.rollout
+    if args.reference is None:
+        n_reference = reference_parallelism.get("n_init_replicas", 1)
+    else:
+        n_reference = args.reference
 
     # If the training type is SFT, set n_rollouts to 0
     if (
@@ -833,6 +725,7 @@ def main():
         == "sft"
     ):
         n_rollouts = 0
+        n_reference = 0
         if n_policy > 1:
             logger.warning(
                 "Warning: n_init_replicas for rollout is set to 0 for SFT training, but n_init_replicas for policy is more than 1."
@@ -846,34 +739,21 @@ def main():
             )
             min_n_gpus_policy = min_n_gpus_policy * n_policy
             n_policy = 1
+    if not cosmos_config.get("distillation", {}).get("enable", False):
+        n_reference = 0
+
+    is_colocated = cosmos_config.get("mode", "disaggregated") == "colocated"
+    if is_colocated:
+        assert (
+            n_policy == n_rollouts
+        ), "Colocated mode only supports equal number of policy and rollout replicas"
+        assert (
+            min_n_gpus_policy == min_n_gpus_rollout
+        ), "Colocated mode requires policy and rollout to have the same GPU requirements"
 
     # Handle Lepton mode
     if args.lepton_mode:
-        from leptonai.api.v2.client import APIClient
-        from leptonai.config import BASE_IMAGE, VALID_SHAPES
-        from leptonai.api.v1.types.job import (
-            LeptonJob,
-            LeptonJobUserSpec,
-            LeptonResourceAffinity,
-            ReservationConfig,
-        )
-        from leptonai.api.v1.types.deployment import (
-            LeptonLog,
-            QueueConfig,
-        )
-        from leptonai.api.v1.types.common import Metadata, LeptonVisibility
-        from leptonai.api.v1.photon import (
-            make_env_vars_from_strings,
-            make_mounts_from_strings,
-        )
-        from leptonai.cli.util import (
-            _get_valid_nodegroup_ids,
-            _get_valid_node_ids,
-            make_container_port_from_string,
-        )
-
-        # Initialize Lepton client
-        client = APIClient()
+        from leptonai.api.v1.types.job import LeptonJobUserSpec
 
         # Create job specification
         job_spec = LeptonJobUserSpec()
@@ -884,6 +764,13 @@ def main():
             cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        if (
+            "distillation" in cosmos_config
+            and "parallelism" in cosmos_config["distillation"]
+        ):
+            cosmos_config["distillation"]["parallelism"]["n_init_replicas"] = (
+                n_reference
+            )
         config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
 cat >config.toml <<EOF
@@ -891,217 +778,35 @@ cat >config.toml <<EOF
 EOF
 
 cosmos-rl --config config.toml"""
-
-        # Get all non-Lepton arguments
-        non_lepton_args = []
-        for action in parser._actions:
-            if hasattr(action, "option_strings") and action.option_strings:
-                # Skip help action, lepton related arguments, and worker-idx
-                if (
-                    action.dest == "help"
-                    or any(
-                        opt.startswith("--lepton-") or opt == "--lepton-mode"
-                        for opt in action.option_strings
-                    )
-                    or action.dest == "worker_idx"
-                    or action.dest == "config"
-                ):  # skip worker-idx
-                    continue
-
-                value = getattr(args, action.dest)
-                if value is not None:
-                    if isinstance(value, bool):
-                        if value:
-                            non_lepton_args.append(action.option_strings[0])
-                    else:
-                        non_lepton_args.append(f"{action.option_strings[0]} {value}")
-
+        non_lepton_args = get_non_lepton_args(args, parser)
         # Add all non-Lepton arguments to the command
         launch_cmd += " " + " ".join(non_lepton_args)
         if script is not None:
             launch_cmd += f" {script}"
 
-        # Handle node groups, queue priority and preemption flags
-        if (
-            args.lepton_node_group
-            or args.lepton_queue_priority is not None
-            or args.lepton_can_be_preempted is not None
-            or args.lepton_can_preempt is not None
-        ):
-            if (
-                args.lepton_queue_priority is not None
-                or args.lepton_can_be_preempted is not None
-                or args.lepton_can_preempt is not None
-            ) and not args.lepton_node_group:
-                logger.error(
-                    "Error: Queue priority is only available for dedicated node groups"
-                )
-                logger.error(
-                    "Please use --lepton-queue-priority with --lepton-node-group"
-                )
-                sys.exit(1)
+        set_lepton_job(args, job_spec)
 
-            node_group_ids = _get_valid_nodegroup_ids(
-                args.lepton_node_group,
-                need_queue_priority=(
-                    args.lepton_queue_priority is not None
-                    or args.lepton_can_be_preempted is not None
-                    or args.lepton_can_preempt is not None
-                ),
-            )
-            valid_node_ids = (
-                _get_valid_node_ids(node_group_ids, args.lepton_node_id)
-                if args.lepton_node_id
-                else None
-            )
-
-            job_spec.affinity = LeptonResourceAffinity(
-                allowed_dedicated_node_groups=node_group_ids,
-                allowed_nodes_in_node_group=valid_node_ids,
-            )
-
-            if (
-                args.lepton_queue_priority is not None
-                or args.lepton_can_be_preempted is not None
-                or args.lepton_can_preempt is not None
-            ):
-                # Ensure queue_config exists
-                if job_spec.queue_config is None:
-                    job_spec.queue_config = QueueConfig()
-
-                priority_class = None
-                if args.lepton_queue_priority is not None:
-                    # Convert numeric priority to the Lepton priority_class string.
-                    priority_class = NUM_PRIORITY_MAPPING[args.lepton_queue_priority]
-
-                job_spec.queue_config.priority_class = priority_class or "mid-4000"
-
-                if args.lepton_can_be_preempted is not None:
-                    job_spec.queue_config.can_be_preempted = bool(
-                        args.lepton_can_be_preempted
-                    )
-
-                if args.lepton_can_preempt is not None:
-                    job_spec.queue_config.can_preempt = bool(args.lepton_can_preempt)
-
-        # Set resource shape
-        if args.lepton_resource_shape:
-            job_spec.resource_shape = args.lepton_resource_shape
-        else:
-            available_types = "\n      ".join(VALID_SHAPES)
-            logger.error(
-                "Error: Missing option '--lepton-resource-shape'.\n"
-                f"Available types are:\n      {available_types}.\n"
-            )
-            sys.exit(1)
-
-        # Only for calculating the number of nodes needed.
-        # Use this to replace the args.num_workers to calculate the number of nodes needed rather than specifying it using --num-workers
-        # example
-
-        match = re.search(r"(8|4|2)x", args.lepton_resource_shape)
-        if match:
-            num_gpus_per_node = int(match.group(1))
-        else:
-            num_gpus_per_node = 1
         global_launch_settings = replica_placement(
             list(range(num_gpus_per_node)),
             n_policy,
-            n_rollouts,
+            0 if is_colocated else n_rollouts,
+            n_reference,
             min_n_gpus_policy,
             min_n_gpus_rollout,
+            min_n_gpus_reference,
             replica_script="",
             control_url="",
             output_dir=None,
             script=script,
             backend=backend,
+            args=args,
         )
         if args.num_workers is not None:
             assert args.num_workers >= len(global_launch_settings)
         num_workers = len(global_launch_settings)
         logger.info(f"Number of workers required: {num_workers}")
 
-        # Handle workers and communication
-        if num_workers > 0:
-            job_spec.completions = num_workers
-            job_spec.parallelism = num_workers
-            job_spec.intra_job_communication = True
-        elif args.lepton_intra_job_communication is not None:
-            job_spec.intra_job_communication = args.lepton_intra_job_communication
-
-        # Set failure retry settings
-        if args.lepton_max_failure_retry:
-            job_spec.max_failure_retry = args.lepton_max_failure_retry
-        if args.lepton_max_job_failure_retry:
-            job_spec.max_job_failure_retry = args.lepton_max_job_failure_retry
-
-        # Handle command
-        job_spec.container.command = ["/bin/bash", "-c", launch_cmd]
-
-        # Set container image
-        if args.lepton_container_image:
-            job_spec.container.image = args.lepton_container_image
-        else:
-            job_spec.container.image = BASE_IMAGE
-
-        # Handle ports
-        if args.lepton_container_port:
-            job_spec.container.ports = [
-                make_container_port_from_string(p) for p in args.lepton_container_port
-            ]
-
-        # Handle environment variables and secrets
-        if args.lepton_env or args.lepton_secret:
-            job_spec.envs = make_env_vars_from_strings(
-                args.lepton_env, args.lepton_secret
-            )
-
-        # Handle mounts
-        if args.lepton_mount:
-            job_spec.mounts = make_mounts_from_strings(args.lepton_mount)
-
-        # Set other configurations
-        if args.lepton_image_pull_secrets:
-            job_spec.image_pull_secrets = args.lepton_image_pull_secrets
-        if args.lepton_privileged:
-            job_spec.privileged = args.lepton_privileged
-        if args.lepton_ttl_seconds_after_finished:
-            job_spec.ttl_seconds_after_finished = args.lepton_ttl_seconds_after_finished
-        if args.lepton_log_collection is not None:
-            job_spec.log = LeptonLog(enable_collection=args.lepton_log_collection)
-        if args.lepton_shared_memory_size is not None:
-            job_spec.shared_memory_size = args.lepton_shared_memory_size
-
-        # Handle reservation
-        if args.lepton_with_reservation:
-            if not args.lepton_node_group:
-                logger.error(
-                    "Error: --lepton-with-reservation is only supported for dedicated node groups"
-                )
-                sys.exit(1)
-            job_spec.reservation_config = ReservationConfig(
-                reservation_id=args.lepton_with_reservation
-            )
-
-        # Create job
-        job = LeptonJob(
-            spec=job_spec,
-            metadata=Metadata(
-                id=args.lepton_job_name,
-                visibility=LeptonVisibility(args.lepton_visibility)
-                if args.lepton_visibility
-                else None,
-            ),
-        )
-
-        # Create the job
-        created_job = client.job.create(job)
-        new_job_id = created_job.metadata.id_
-        logger.info("🎉 Job Created Successfully!")
-        logger.info(f"Name: {args.lepton_job_name}")
-        logger.info(f"ID: {new_job_id}")
-
-        return
+        return launch_lepton_job(job_spec, num_workers, args, launch_cmd)
 
     import cosmos_rl.utils.util as util
 
@@ -1110,6 +815,9 @@ cosmos-rl --config config.toml"""
     )
     logger.info(
         f"Number of rollout replicas: {n_rollouts} with {min_n_gpus_rollout} gpus each"
+    )
+    logger.info(
+        f"Number of reference replicas: {n_reference} with {min_n_gpus_reference} gpus each"
     )
 
     # Get available GPUs
@@ -1142,43 +850,16 @@ cosmos-rl --config config.toml"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
+        latest_dir = os.path.join(output_dir, "logs_latest")
         output_dir = os.path.join(output_dir, f"logs_{timestamp}")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
+        # create a symlink to the output_dir in the latest_dir
+        if os.path.exists(latest_dir):
+            os.remove(latest_dir)
+        os.symlink(os.path.basename(output_dir), latest_dir)
     else:
         output_dir = None
-
-    def resolve_host(host):
-        try:
-            result = subprocess.run(
-                ["getent", "hosts", "--", host],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            if result.returncode == 0:
-                if len(result.stdout.strip().split()) > 0:
-                    return result.stdout.strip().split()[0]
-                else:
-                    return None
-            else:
-                raise RuntimeError(f"Resolution failed: {result.stderr}")
-        except subprocess.TimeoutExpired:
-            raise TimeoutError("DNS resolution timed out")
-
-    def resolve_host_blocking(hostname):
-        try:
-            while True:
-                new_hostname = resolve_host(hostname)
-                if new_hostname is not None:
-                    hostname = new_hostname
-                    logger.info(f"Resolved hostname: {hostname}")
-                    break
-                time.sleep(1)
-        except Exception:
-            pass
-        return hostname
 
     if (
         "LEPTON_JOB_WORKER_INDEX" in os.environ
@@ -1228,13 +909,20 @@ cosmos-rl --config config.toml"""
 
     controller_cmd = None
     tmpfile_toml = None
-    if n_policy > 0 or n_rollouts > 0:
+    if n_policy > 0 or n_rollouts > 0 or n_reference > 0:
         # Do not update the config if no replicas are needed which means launch controller only.
         if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
             cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             # Only available for RL.
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        if (
+            "distillation" in cosmos_config
+            and "parallelism" in cosmos_config["distillation"]
+        ):
+            cosmos_config["distillation"]["parallelism"]["n_init_replicas"] = (
+                n_reference
+            )
     # Create a temporary file and write to it
     tmpfile_toml = dump_config_with_literal_patterns_to_tmpfile(cosmos_config)
 
@@ -1248,51 +936,14 @@ cosmos-rl --config config.toml"""
             controller_cmd += f" {' '.join(args.script_args)}"
         control_url = f"localhost:{port}"
 
-    def get_lepton_ip(worker_idx: int) -> str:
-        if "LEPTON_JOB_WORKER_INDEX" in os.environ:
-            # For non-primary workers, connect to the primary worker (index 0) using its hostname
-            prefix = os.environ.get(
-                "LEPTON_JOB_SERVICE_PREFIX", os.environ.get("LEPTON_JOB_NAME")
-            )
-            subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
-            hostname = f"{prefix}-{worker_idx}.{subdomain}"
-            hostname = resolve_host_blocking(hostname)
-        else:
-            raise RuntimeError(
-                "Lepton job worker index not found in environment variables"
-            )
-        return hostname
-
-    def get_ip_from_list(worker_idx: int) -> str:
-        if args.node_ip_list is not None:
-            logger.info(f"Node IP list provided: {args.node_ip_list}")
-            ip_list = args.node_ip_list.split(";")
-            logger.info(f"Node IP list: {ip_list}")
-            if worker_idx < len(ip_list):
-                return ip_list[worker_idx]
-            else:
-                raise RuntimeError(
-                    f"Worker index {worker_idx} exceeds the length of the IP list"
-                )
-        else:
-            raise RuntimeError("Node IP list not provided")
-
-    def get_worker_ip(worker_idx: int) -> str:
-        if "LEPTON_JOB_WORKER_INDEX" in os.environ:
-            return get_lepton_ip(worker_idx)
-        elif args.node_ip_list is not None:
-            return get_ip_from_list(worker_idx)
-        else:
-            raise RuntimeError(
-                "Replica with GPUs larger than 8 occurs but not on Lepton job, please specify --node-ip-list to provide the IPs of all nodes to enable conenctions to each Rendezvous head node."
-            )
-
     global_launch_settings = replica_placement(
         available_gpus,
         n_policy,
-        n_rollouts,
+        0 if is_colocated else n_rollouts,
+        n_reference,
         min_n_gpus_policy,
         min_n_gpus_rollout,
+        min_n_gpus_reference,
         replica_script,
         control_url,
         output_dir,
@@ -1302,6 +953,7 @@ cosmos-rl --config config.toml"""
         backend=backend,
         config_path=tmpfile_toml,
         script_args=args.script_args,
+        args=args,
     )
 
     num_workers = len(global_launch_settings)
@@ -1312,8 +964,10 @@ cosmos-rl --config config.toml"""
         )
     assert (
         len(available_gpus) * num_workers
-        >= min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts
-    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts}, Available: {len(available_gpus)}"
+        >= min_n_gpus_policy * n_policy
+        + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)
+        + min_n_gpus_reference * n_reference
+    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts) + min_n_gpus_reference * n_reference}, Available: {len(available_gpus)}"
 
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         prefix = os.environ.get(

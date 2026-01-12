@@ -26,13 +26,13 @@ from cosmos_rl.utils.util import (
     sync_model_vocab,
     retry,
 )
-from safetensors import safe_open
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
@@ -582,63 +582,77 @@ class GPT(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
-        weights_of_ckpt_names = set()
-        reserved = {}
-        for f in safetensors_files:
-            weights_of_ckpt = {}
-            ckpt = safe_open(
-                os.path.join(model_path, f), framework="pt", device=str(device)
+
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
+        )
+
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
             )
-            keys = ckpt.keys()
-            for name in keys:
-                ckpt_tensor = ckpt.get_tensor(name)
-                weights_of_ckpt[name] = ckpt_tensor
-                weights_of_ckpt_names.add(name)
-                if name == embed_tokens_weight_key:
-                    reserved[name] = ckpt_tensor
+        )
 
-            for name in weights_of_ckpt.keys():
-                tensor = weights_of_ckpt[name]
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor, name, model_type, parallel_dims
-                )
-                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                    # logger.info(f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism. Skipping this weight checking")
-                    continue
+        # Step 3: Process each tensor
+        reserved = {}
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
+        ):
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
 
-                target_tensor = self_state_dict[dest_name]
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                local_view = (
-                    target_tensor.to_local() if is_dist_tensor else target_tensor
-                )
-                assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims
+            )
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                # logger.info(f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism. Skipping this weight checking")
+                continue
 
+            target_tensor = self_state_dict[dest_name]
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            assert (
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight)
+
+        # Handle weight tying: lm_head shares weights with embed_tokens
         if (
-            lm_head_weight_key not in weights_of_ckpt_names
-            and embed_tokens_weight_key in weights_of_ckpt_names
+            lm_head_weight_key not in all_tensor_names
+            and embed_tokens_weight_key in all_tensor_names
         ):
             # tied with embed_tokens.weight
             name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
             tensor = reserved[embed_tokens_weight_key]
-            dest_name, shared_weight = convert_weight_from_hf(
+
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
             if dest_name in self_state_dict:
@@ -650,10 +664,10 @@ class GPT(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+                    local_view.data.copy_(sharded_weight)
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1

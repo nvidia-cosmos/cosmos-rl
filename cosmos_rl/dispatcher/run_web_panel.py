@@ -25,7 +25,7 @@ import threading
 
 
 from fastapi.responses import HTMLResponse, JSONResponse
-from typing import Dict, List, Optional, Callable, Union
+from typing import Dict, List, Optional, Callable, Union, Iterable
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
@@ -190,6 +190,7 @@ async def unregister(request: UnregisterRequest):
             )
             and len(controller.policy_status_manager) == 0
             and len(controller.rollout_status_manager) == 0
+            and len(controller.teacher_result_manager) == 0
         ):
             logger.info("[Controller] All replicas are finished, finalizing...")
             global server
@@ -391,7 +392,7 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list = extract_rollouts(request.payloads, True)
+    rollouts_list = extract_rollouts(request.payloads, True, is_validation=True)
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
@@ -463,6 +464,8 @@ async def put_rollout_group(rollout: RolloutRequest):
             for rollouts_group in rollouts_list
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
+        # Filter out outdated rollouts
+        rollouts = controller.policy_status_manager.filter_outdated_rollouts(rollouts)
         if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
@@ -510,6 +513,7 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+    dataloader: Optional[Callable[[CosmosConfig], Iterable]] = None,
     data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
@@ -517,6 +521,7 @@ def main(
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[BaseDataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
+    hook_fns: Optional[Dict[str, Callable]] = None,
     sampler: Optional[Callable] = None,
     batch_sampler: Optional[Callable] = None,
     val_sampler: Optional[Callable] = None,
@@ -527,6 +532,10 @@ def main(
     if kwargs:
         logger.warning(
             f"Params: {list(kwargs.keys())} are not being used in controller initialization."
+        )
+    if dataloader is not None:
+        raise NotImplementedError(
+            "Customized dataloader is not supported inside controller now."
         )
 
     # Deprecated: The following code is to ensure backward compatibility:
@@ -543,22 +552,26 @@ def main(
             from cosmos_rl.policy.train import main as policy_main
 
             policy_main(
+                args=args,
                 dataset=dataset,
                 data_packer=data_packer,
                 val_dataset=val_dataset,
                 val_data_packer=val_data_packer,
                 sampler=sampler,
+                hook_fns=hook_fns,
                 batch_sampler=batch_sampler,
                 val_sampler=val_sampler,
                 val_batch_sampler=val_batch_sampler,
             )
         else:
-            from cosmos_rl.rollout.rollout_entrance import run_rollout
+            from cosmos_rl.rollout.rollout_entry import run_rollout
 
             run_rollout(
+                args=args,
                 dataset=dataset,
                 reward_fns=reward_fns,
                 filter_reward_fns=filter_reward_fns,
+                hook_fns=hook_fns,
                 val_dataset=val_dataset,
                 val_reward_fns=val_reward_fns,
                 data_packer=data_packer,
@@ -617,6 +630,7 @@ def main(
             dataset=dataset,
             val_dataset=val_dataset,
             custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
             sampler=sampler,
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
@@ -628,7 +642,6 @@ def main(
     except Exception as e:
         raise RuntimeError(
             f"Failed to load or parse config file {args.config}: {e}.",
-            exc_info=True,
         )
 
     config = uvicorn.Config(

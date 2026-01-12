@@ -30,13 +30,13 @@ from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
 from cosmos_rl.utils.logging import logger
-from safetensors import safe_open
 from cosmos_rl.policy.model.internvl.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.policy.model.internvl.weight_mapper import InternVLWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
@@ -472,13 +472,16 @@ class InternVLChatModel(BaseModel):
             model_path (str): Path to the HuggingFace model.
             parallel_dims (ParallelDims): Parallel dimensions definition.
         """
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
         # Load all safetensors from `model_path`
         model_type = self.hf_config.model_type
         lm_type = self.hf_config.llm_config.model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         # Load LM weights
         lm_state_dict = self.model.state_dict()
@@ -489,7 +492,6 @@ class InternVLChatModel(BaseModel):
                 new_state_dict[k.replace("projs", "proj.weight")] = v
                 del new_state_dict[k]
         lm_state_dict = new_state_dict
-        # print(f"lm_state_dict: {lm_state_dict.keys()}")
         # Rename dict to remove all `._orig_mod` in keys
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -504,89 +506,88 @@ class InternVLChatModel(BaseModel):
             clear_weight_name(k): v for k, v in multi_modal_projector_state_dict.items()
         }
 
-        with torch.device(device):
-            for f in safetensors_files:
-                weights_of_ckpt = {}
-                ckpt = safe_open(
-                    os.path.join(model_path, f), framework="pt", device=str(device)
+        n_experts = self.config.lm_args.n_experts if lm_type == "qwen3_moe" else 0
+
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
+        )
+
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
+
+        # Step 3: Process each tensor
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
+        ):
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, lm_type, n_experts, parallel_dims
+            )
+            if dest_name is None:
+                # This is due to the expert parallelism grouping
+                continue
+            # For MoE LM
+            expert_id = None
+            if match := re.search(  # noqa: F841
+                r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                dest_name,
+            ):
+                # remove `experts.$ID.` from dest_name
+                expert_id = int(match.group(2))
+                dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
+                # Convert expert_id to local_expert_id
+                n_local_experts = (
+                    n_experts
+                    // parallel_dims.tp
+                    // (parallel_dims.dp_shard * parallel_dims.cp)
                 )
-                keys = ckpt.keys()
-                for name in keys:
-                    ckpt_tensor = ckpt.get_tensor(name)
-                    weights_of_ckpt[name] = ckpt_tensor
+                expert_id = expert_id % n_local_experts
 
-                n_experts = (
-                    self.config.lm_args.n_experts if lm_type == "qwen3_moe" else 0
-                )
+            slice_range = None
+            if "gate_proj" in dest_name:
+                dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
+                slice_range = slice(0, self.model.model_args.ffn_dim)
+            elif "up_proj" in dest_name:
+                dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
+                slice_range = slice(self.model.model_args.ffn_dim, None)
 
-                for name in weights_of_ckpt.keys():
-                    tensor = weights_of_ckpt[name]
-                    dest_name, shared_weight = convert_weight_from_hf(
-                        tensor, name, model_type, lm_type, n_experts, parallel_dims
-                    )
-                    if dest_name is None:
-                        # This is due to the expert parallelism grouping
-                        continue
-                    # For MoE LM
-                    expert_id = None
-                    if match := re.search(  # noqa: F841
-                        r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
-                        dest_name,
-                    ):
-                        # remove `experts.$ID.` from dest_name
-                        expert_id = int(match.group(2))
-                        dest_name = dest_name.replace(
-                            f"experts.{expert_id}.", "experts."
-                        )
-                        # Convert expert_id to local_expert_id
-                        n_local_experts = (
-                            n_experts
-                            // parallel_dims.tp
-                            // (parallel_dims.dp_shard * parallel_dims.cp)
-                        )
-                        expert_id = expert_id % n_local_experts
+            if dest_name in lm_state_dict:
+                target_tensor = lm_state_dict[dest_name]
+            elif dest_name in visual_state_dict:
+                target_tensor = visual_state_dict[dest_name]
+            elif dest_name in multi_modal_projector_state_dict:
+                target_tensor = multi_modal_projector_state_dict[dest_name]
+            elif parallel_dims.pp_enabled:
+                # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
+                continue
+            else:
+                raise ValueError(f"Unsupported weight: {dest_name}")
 
-                    slice_range = None
-                    if "gate_proj" in dest_name:
-                        dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
-                        slice_range = slice(0, self.model.model_args.ffn_dim)
-                    elif "up_proj" in dest_name:
-                        dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
-                        slice_range = slice(self.model.model_args.ffn_dim, None)
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
 
-                    if dest_name in lm_state_dict:
-                        target_tensor = lm_state_dict[dest_name]
-                    elif dest_name in visual_state_dict:
-                        target_tensor = visual_state_dict[dest_name]
-                    elif dest_name in multi_modal_projector_state_dict:
-                        target_tensor = multi_modal_projector_state_dict[dest_name]
-                    elif parallel_dims.pp_enabled:
-                        # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
-                        continue
-                    else:
-                        raise ValueError(f"Unsupported weight: {dest_name}")
+            # Write to the correct expert of the target tensor
+            if expert_id is not None:
+                local_view = local_view[expert_id]
+            if slice_range is not None:
+                assert (
+                    local_view.shape[0] == 2 * self.model.model_args.ffn_dim
+                ), f"Shape mismatch: {local_view.shape[0]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                local_view = local_view[slice_range]
 
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None:
-                        local_view = local_view[expert_id]
-                    if slice_range is not None:
-                        assert (
-                            local_view.shape[0] == 2 * self.model.model_args.ffn_dim
-                        ), f"Shape mismatch: {local_view.shape} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
-                        local_view = local_view[slice_range]
-
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+            assert (
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual, self.mlp1]

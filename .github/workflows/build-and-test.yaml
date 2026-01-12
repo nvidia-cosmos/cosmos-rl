@@ -27,7 +27,26 @@ jobs:
       - name: Build image
         run: |
           docker build -t ${{ steps.vars.outputs.image_tag }} .
+          docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla .
+      
+      - name: Run vla tests
+        id: vla-tests
+        run: |
+          set -ex
 
+          container_id=$(docker run -t -d --rm \
+            --gpus all \
+            --shm-size=24G \
+            -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
+            -v /tmp/cache:/root/.cache \
+            -e PYTHONPYCACHEPREFIX=/tmp/pycache \
+            -w /workspace/cosmos-rl \
+            ${{ steps.vars.outputs.image_tag }}-vla /bin/bash)
+
+          echo "container_id=${container_id}" >> $GITHUB_OUTPUT
+          DOCKER_RUN="timeout 10m docker exec ${container_id}"
+          ${DOCKER_RUN} python tests/test_env_manager_libero.py
+        
       - name: Run tests
         id: tests
         run: |
@@ -49,12 +68,14 @@ jobs:
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
           # run tests
+          ${DOCKER_RUN} python tests/test_apex.py
           ${DOCKER_RUN} python tests/test_cosmos_hf_precision.py
           ${DOCKER_RUN} /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
           ${DOCKER_RUN} python tests/test_cache.py
           ${DOCKER_RUN} python tests/test_comm.py
           ${DOCKER_RUN} python tests/test_fp8.py
           ${DOCKER_RUN} python tests/test_lora.py
+          ${DOCKER_RUN} python tests/test_freeze_pattern.py
           # ${DOCKER_RUN} python tests/test_grad_allreduce.py
           ${DOCKER_RUN} python tests/test_high_availability_nccl.py
           ${DOCKER_RUN} python tests/test_nccl_collectives.py
@@ -75,10 +96,15 @@ jobs:
           ${DOCKER_RUN} python tests/test_activation_offload.py
           ${DOCKER_RUN} python tests/test_policy_variant.py
           ${DOCKER_RUN} python tests/test_deepep.py
+          ${DOCKER_RUN} python tests/test_colocated.py
+          ${DOCKER_RUN} python tests/test_teacher_model.py
           ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py"
+          ${DOCKER_RUN} python tests/test_vllm_rollout_async.py
 
       - name: Cleanup
         if: always()
         run: |
           docker stop "${{ steps.tests.outputs.container_id }}" || true
+          docker stop "${{ steps.vla-tests.outputs.container_id }}" || true
           docker rmi -f "${{ steps.vars.outputs.image_tag }}" || true
+          docker rmi -f "${{ steps.vars.outputs.image_tag }}-vla" || true

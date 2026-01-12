@@ -21,7 +21,10 @@ from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
 import multiprocessing as mp
 
-from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+from cosmos_rl.utils.constant import (
+    COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
+    COSMOS_REWARD_DISPATCHER_CONCURRENCY,
+)
 
 
 from cosmos_rl.utils.logging import logger
@@ -159,7 +162,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        num_workers: int = 8,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -179,15 +181,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         self.reward_dispatcher.setup(
             config=self.config,
-            data_fetcher=self.data_fetcher,
-            dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
-            val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            num_workers=num_workers,
+            num_workers=COSMOS_REWARD_DISPATCHER_CONCURRENCY,
         )
 
     def report_rollouts(self, block=False):
@@ -310,6 +309,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions: List[List[str]] = self.rollout.rollout_generation(
                             payloads=payloads_list,
                             data_packer=self.val_data_packer,
+                            data_fetcher=self.data_fetcher,
                             sampling_params=self.val_sampling_params,
                         )
                         if completions:
@@ -388,6 +388,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     payloads=payloads,
                     data_packer=self.data_packer,
+                    data_fetcher=self.data_fetcher,
                     sampling_params=self.sampling_params,
                 )
 

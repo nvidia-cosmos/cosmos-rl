@@ -10,23 +10,23 @@ SCRIPT=""
 SCRIPT_ARGS=()
 CONFIG=""
 BACKEND="vllm"
-DIFFUSION_MODE="False"
+WFM_MODE="False"
 
 print_help() {
   echo ""
   echo "Usage: ./launch_replica.sh [OPTIONS]"
   echo ""
   echo "Options:"
-  echo "  --type <rollout|policy>            Required. Type of replica to launch."
-  echo "  --nnodes <int>                     Number of nodes to launch. Default: 1"
-  echo "  --ngpus <int>                      Number of GPUs per node. Default: 2"
-  echo "  --log-rank <comma-separated ints>  Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
-  echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
-  echo "  --script <script>                  The user script to run before launch."
-  echo "  --config <path>                    The path to the config file."
-  echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
-  echo "  --diffusion-mode <True|False>      Whether to launch in diffusion mode. Default: False"
-  echo "  --help                             Show this help message"
+  echo "  --type <rollout|policy|reference>     Required. Type of replica to launch."
+  echo "  --nnodes <int>                        Number of nodes to launch. Default: 1"
+  echo "  --ngpus <int>                         Number of GPUs per node. Default: 2"
+  echo "  --log-rank <comma-separated ints>     Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
+  echo "  --rdzv-endpoint <host:port>           Rendezvous endpoint for distributed training. Default: localhost:0"
+  echo "  --script <script>                     The user script to run before launch."
+  echo "  --config <path>                       The path to the config file."
+  echo "  --backend <vllm|vllm_async|trtllm>    The backend to use for the job. Default: vllm"
+  echo "  --wfm-mode <True|False>               Whether to launch in wfm mode. Default: False"
+  echo "  --help                                Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
   echo "  ./launch_replica.sh --type policy --ngpus 8 --log-rank 0"
@@ -75,8 +75,8 @@ while [[ $# -gt 0 ]]; do
     BACKEND="$2"
     shift 2
     ;;
-  --diffusion-mode)
-    DIFFUSION_MODE="$2"
+  --wfm-mode)
+    WFM_MODE="$2"
     shift 2
     ;;
   --help)
@@ -109,14 +109,14 @@ fi
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
-if [ "$DIFFUSION_MODE" == "True" ]; then
-  set_env "COSMOS_IS_DIFFUSION" "True"
+if [ "$WFM_MODE" == "True" ]; then
+  set_env "COSMOS_IS_WFM" "True"
 fi
 
 LAUNCH_BINARY="torchrun"
 
 if [ "$TYPE" == "rollout" ]; then
-  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
+  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entry"
   export COSMOS_ROLE="Rollout"
   if [ "$BACKEND" == "trtllm" ]; then
     LAUNCH_BINARY="mpirun"
@@ -125,8 +125,15 @@ elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
   export COSMOS_ROLE="Policy"
   set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
+elif [ "$TYPE" == "reference" ]; then
+  DEFAULT_MODULE="cosmos_rl.reference.reference_entry"
+  export COSMOS_ROLE="Reference"
+  # Set a longer timeout for reference to avoid timeout when waiting for teacher requests
+  # when reference is not used such as in validation mode.
+  export COSMOS_GLOO_TIMEOUT="6000"
+  set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
 else
-  echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
+  echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy' or 'reference'."
   print_help
   exit 1
 fi
@@ -183,6 +190,19 @@ elif [ "$TYPE" == "rollout" ]; then
     if [ -n "$LOG_RANKS" ]; then
       LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
     fi
+  fi
+elif [ "$TYPE" == "reference" ]; then
+  LAUNCH_CMD+=(
+    --nproc-per-node="$NGPU"
+    --nnodes="$NNODES"
+    --role rank
+    --tee 3
+    --rdzv_backend c10d
+    --rdzv_endpoint="$RDZV_ENDPOINT"
+  )
+
+  if [ -n "$LOG_RANKS" ]; then
+    LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 fi
 

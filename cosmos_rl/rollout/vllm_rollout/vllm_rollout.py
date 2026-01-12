@@ -14,8 +14,12 @@
 # limitations under the License.
 import os
 
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    apply_fp8_linear_patch,
+    simplify_process_weights_after_loading,
+)
 
 import vllm
 import torch
@@ -205,6 +209,7 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
+            prompt_logprobs=0,
         )
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,
@@ -217,6 +222,7 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
+            prompt_logprobs=0,
         )
 
     def init_engine(
@@ -241,7 +247,7 @@ class vLLMRollout(RolloutBase):
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
-            moe_model_type = {"qwen3_moe", "qwen3_vl_moe"}
+            moe_model_type = {"qwen3_moe", "qwen3_vl_moe", "deepseek_v3"}
             multimodal_type = {"qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
 
             model_type = self.model_config.model_type
@@ -301,6 +307,7 @@ class vLLMRollout(RolloutBase):
                 vllm_config = self.rollout_engine.llm_engine.vllm_config
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
+                simplify_process_weights_after_loading()
 
     def post_init_engine_hook(
         self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
@@ -397,7 +404,9 @@ class vLLMRollout(RolloutBase):
         ret_logprobs = []
         ret_token_ids = []
         for logp in logprobs:
-            assert len(logp) == 1, "[Rollout] logprobs length should be 1."
+            assert (
+                len(logp) == 1
+            ), f"[Rollout] logprobs length should be 1, but got {logp}."
             ret_logprobs.append(list(logp.values())[0].logprob)
             ret_token_ids.append(list(logp.keys())[0])
         return ret_logprobs, ret_token_ids
@@ -459,14 +468,32 @@ class vLLMRollout(RolloutBase):
                 outputs = results[i : i + n_repeats]
                 logprobs = []
                 token_ids = []
+                prompt_logprobs = None
                 # collect logprobs
                 for output in outputs:
+                    if self.config.train.train_policy.collect_rollout_logprobs:
+                        if prompt_logprobs is None:
+                            assert (
+                                output.prompt_logprobs is not None
+                                and len(output.prompt_logprobs) > 0
+                            ), "Prompt logprobs should not be None or empty"
+                            assert (
+                                output.prompt_logprobs[0] is None
+                            ), "Prompt logprobs should be None for the first token"
+                            prompt_logprob, _ = self.parse_logprobs(
+                                output.prompt_logprobs[1:]
+                            )
+                            prompt_logprobs = prompt_logprob
+
                     for j in range(len(output.outputs)):
-                        if self.config.train.train_policy.rollout_as_token_ids:
+                        if (
+                            self.config.train.train_policy.rollout_as_token_ids
+                            or self.config.train.train_policy.collect_rollout_logprobs
+                        ):
                             logprob, token_id = self.parse_logprobs(
                                 output.outputs[j].logprobs
                             )
-                            if not self.config.train.train_policy.use_decoupled_loss:
+                            if not self.config.train.train_policy.collect_rollout_logprobs:
                                 logprob = []
                         else:
                             logprob = []
@@ -483,6 +510,15 @@ class vLLMRollout(RolloutBase):
                         ],
                         completion_logprobs=logprobs,
                         completion_token_ids=token_ids,
+                        # Collect the cumulative logprob of the generated completions
+                        # Used for reward calculation to find the most likely mode reward.
+                        # This can indicate the most likelyhood of a generated completion.
+                        cumulative_logprob=[
+                            output.outputs[j].cumulative_logprob
+                            for output in outputs
+                            for j in range(len(output.outputs))
+                        ],
+                        prompt_logprobs=prompt_logprobs,
                     )
                 )
         except Exception as e:
@@ -529,6 +565,9 @@ class vLLMRollout(RolloutBase):
                         use_tqdm=False,
                     )
 
+                assert (
+                    len(results) == 1
+                ), "[Rollout] Expected single result for multi-turn rollout generation"
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
                 responses = [output.text for output in results[0].outputs]
@@ -537,14 +576,38 @@ class vLLMRollout(RolloutBase):
                 # Manually decode to string
                 logprobs = []
                 token_ids = []
-                if self.config.train.train_policy.rollout_as_token_ids:
+                prompt_logprobs = []
+                if self.config.train.train_policy.collect_rollout_logprobs:
+                    assert (
+                        results[0].prompt_logprobs is not None
+                        and len(results[0].prompt_logprobs) > 0
+                    ), "Prompt logprobs should not be None or empty"
+                    assert (
+                        results[0].prompt_logprobs[0] is None
+                    ), "Prompt logprobs should be None for the first token"
+                    prompt_logprob, _ = self.parse_logprobs(
+                        results[0].prompt_logprobs[1:]
+                    )
+                    prompt_logprobs = prompt_logprob
+
+                if (
+                    self.config.train.train_policy.rollout_as_token_ids
+                    or not self.config.train.train_policy.collect_rollout_logprobs
+                ):
                     assert (
                         len(results[0].outputs) == 1
                     ), "Expected single output for token ID extraction"
                     for output in results[0].outputs:
                         logprob, token_ids = self.parse_logprobs(output.logprobs)
-                        if self.config.train.train_policy.use_decoupled_loss:
+                        if self.config.train.train_policy.collect_rollout_logprobs:
                             logprobs = logprob
+
+                # Collect the cumulative logprob of the generated completions
+                # Used for reward calculation to find the most likely mode reward.
+                # This can indicate the most likelyhood of a generated completion.
+                cumulative_logprob = [
+                    output.cumulative_logprob for output in results[0].outputs
+                ]
 
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
@@ -567,7 +630,14 @@ class vLLMRollout(RolloutBase):
 
             # return the last assistant message as the completion to compute the reward in controller
             completion = current_conversation[-1].content
-            return current_conversation, completion, logprobs, token_ids
+            return (
+                current_conversation,
+                completion,
+                logprobs,
+                token_ids,
+                cumulative_logprob,
+                prompt_logprobs,
+            )
 
         n_generation = sampling_params.n
         sampling_params = copy.deepcopy(sampling_params)
@@ -578,16 +648,30 @@ class vLLMRollout(RolloutBase):
             completions = []
             logprobs_list = []
             token_ids_list = []
+            cumulative_logprob_list = []
+            prompt_logprobs_list = None
             for _ in range(n_generation):
-                new_conversation, completion, logprobs, token_ids = (
-                    generation_multi_turn_for_one_payload(
-                        copy.deepcopy(payload.conversation)
-                    )
+                (
+                    new_conversation,
+                    completion,
+                    logprobs,
+                    token_ids,
+                    cumulative_logprob,
+                    prompt_logprobs,
+                ) = generation_multi_turn_for_one_payload(
+                    copy.deepcopy(payload.conversation)
                 )
                 conversations.append(new_conversation)
                 completions.append(completion)
                 logprobs_list.append(logprobs)
                 token_ids_list.append(token_ids)
+                cumulative_logprob_list.extend(cumulative_logprob)
+                if prompt_logprobs_list is None:
+                    prompt_logprobs_list = prompt_logprobs
+                else:
+                    assert (
+                        prompt_logprobs_list == prompt_logprobs
+                    ), "Prompt logprobs should be the same for all generations"
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,
@@ -595,6 +679,8 @@ class vLLMRollout(RolloutBase):
                     completed_conversations=conversations,
                     completion_logprobs=logprobs_list,
                     completion_token_ids=token_ids_list,
+                    cumulative_logprob=cumulative_logprob_list,
+                    prompt_logprobs=prompt_logprobs_list,
                 )
             )
 
@@ -605,6 +691,7 @@ class vLLMRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         is_validation: bool = False,
         **kwargs,
     ) -> List[RolloutResult]:
@@ -764,10 +851,10 @@ class vLLMRollout(RolloutBase):
                     # this is a mxfp4 quant layer
                     w13_weight_name = f"{module_name}.w13_weight"
                     w2_weight_name = f"{module_name}.w2_weight"
-                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                    w13_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
                         w13_weight_name
                     )
-                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                    w2_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
                         w2_weight_name
                     )
                     quantized_tensors[w13_compatible_name] = (

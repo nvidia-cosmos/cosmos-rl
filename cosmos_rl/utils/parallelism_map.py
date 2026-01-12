@@ -350,7 +350,7 @@ class ParallelTopoMapper:
         if self.is_policy:
             self.parallelism_info_for_dtensor_params()
         else:
-            if self.backend == "vllm":
+            if "vllm" in self.backend:
                 self.parallelism_info_for_vllm_params()
             else:
                 logger.warning(
@@ -482,6 +482,12 @@ class ParallelTopoMapper:
             remove_duplicate=False
         ):
             # `local_name` is local key, not hf key
+            if (
+                isinstance(param, torch.distributed.tensor.DTensor)
+                and param.to_local().numel() == 0
+            ):
+                # empty tensor should skip
+                continue
             global_shape = tuple(param.shape)
             dims_rank_info, dims_map = extract_infomation_from_dtensor(
                 param, local_name
@@ -551,7 +557,7 @@ class ParallelTopoMapper:
         packed_modules_mapping = self.weight_mapper.packed_modules_mapping
         dims_rank_info = None
         tp_dim = None
-        if self.backend == "vllm":
+        if "vllm" in self.backend:
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any(
@@ -565,8 +571,8 @@ class ParallelTopoMapper:
                 ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
                 tp_dim = output_dim
             elif isinstance(part, (RowParallelLinear)):
+                input_dim = getattr(param, "input_dim", 1)
                 if not is_bias:
-                    input_dim = getattr(param, "input_dim", 1)
                     assert (
                         input_dim is not None
                     ), f"RowParallelLinear {param_name} has no input_dim attribute."
@@ -603,14 +609,14 @@ class ParallelTopoMapper:
                         assert (
                             "Parallel" not in part.__class__.__name__
                         ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                        logger.warning(
+                        logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
                 else:
                     assert (
                         "Parallel" not in part.__class__.__name__
                     ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                    logger.warning(
+                    logger.debug(
                         f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                     )
         elif self.backend == "trtllm":
@@ -711,7 +717,7 @@ class ParallelTopoMapper:
             self.insert_to_parallelism_info(
                 param_name,
                 dims_map,
-                self.weight_mapper._rollout_vllm_name_to_hf,
+                self.weight_mapper.rollout_map_local_key_to_hf_key,
                 packed_modules_mapping=packed_modules_mapping,
                 dims_rank_info=dims_rank_info,
             )

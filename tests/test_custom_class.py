@@ -111,7 +111,13 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     id = uuid.uuid4()
                     self.kv_store[str(id)] = item
                     uuids.append(str(id))
-                return uuids, completed_conversations, logprobs, token_ids, kwargs
+                return (
+                    uuids,
+                    completed_conversations,
+                    logprobs,
+                    token_ids,
+                    kwargs,
+                )
 
         data_packer = TestDataPacker()
 
@@ -132,7 +138,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     prompt=dataset[i]["prompt"],
                     prompt_idx=0,  # Mock the prompt index
                     completions=[dataset[i]["result"] for _ in range(16)],
-                    completed_conversations=[[]] * 16,
+                    completed_conversations=[[] for _ in range(16)],
                     rewards=[0.5] * 16,
                     advantages=[0.5] * 16,
                     filter_rewards=[0.5] * 16,

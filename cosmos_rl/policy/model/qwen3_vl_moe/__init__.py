@@ -32,7 +32,6 @@ from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
 from cosmos_rl.utils.logging import logger
-from safetensors import safe_open
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_converter import (
     convert_weight_from_hf,
 )
@@ -42,6 +41,7 @@ from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_mapper import Qwen3VLMoeWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.policy.kernel.moe.moe import MoEArgs
@@ -712,160 +712,198 @@ class Qwen3VLMoeModel(BaseModel):
             model_path (str): Path to the HuggingFace model.
             parallel_dims (ParallelDims): Parallel dimensions definition.
         """
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
         # Load all safetensors from `model_path`
         model_type = self.hf_config.model_type
         lm_type = self.hf_config.text_config.model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         # Load LM weights
         lm_state_dict = self.model.state_dict()
         lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
-        # print(f"lm_state_dict: {lm_state_dict.keys()}")
         # Rename dict to remove all `._orig_mod` in keys
         visual_state_dict = self.visual.state_dict()
         visual_state_dict = {
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
 
-        with torch.device(device):
-            for f in safetensors_files:
-                weights_of_ckpt = {}
-                ckpt = safe_open(
-                    os.path.join(model_path, f), framework="pt", device=str(device)
-                )
-                keys = ckpt.keys()
-                for name in keys:
-                    ckpt_tensor = ckpt.get_tensor(name)
-                    weights_of_ckpt[name] = ckpt_tensor
+        n_experts = self.config.lm_args.n_experts
+        lm_head_weight_key = "lm_head.weight"
+        embed_tokens_weight_key = "model.language_model.embed_tokens.weight"
 
-                n_experts = self.config.lm_args.n_experts
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
+        )
 
-                for name in weights_of_ckpt.keys():
-                    tensor = weights_of_ckpt[name]
-                    dest_name, shared_weight = convert_weight_from_hf(
-                        tensor, name, model_type, lm_type, n_experts, parallel_dims
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
+
+        # Step 3: Process each tensor
+        reserved = {}
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
+        ):
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
+
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, lm_type, n_experts, parallel_dims
+            )
+
+            if dest_name is None:
+                # This is due to the expert parallelism grouping
+                continue
+
+            # For MoE LM - expert weights are already fused, so we handle them differently
+            if match := re.search(  # noqa: F841
+                r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
+                dest_name,
+            ):
+                tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
+                assert (
+                    n_experts % tp_ep_size == 0
+                ), "n_experts must be divisible by tp_ep_size"
+
+                if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+                    dp_shard_rank = parallel_dims.mesh[
+                        tuple(("dp_shard_cp",))
+                    ].get_local_rank()
+                    dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+                else:
+                    dp_shard_rank = 0
+                    dp_shard_size = 1
+
+                n_expert_per_ep = n_experts // tp_ep_size
+
+                for expert_id in range(n_experts):
+                    belongs_to_current_ep = (
+                        tp_ep_rank * n_expert_per_ep
+                        <= expert_id  # Expert index
+                        < (tp_ep_rank + 1) * n_expert_per_ep
                     )
-                    if dest_name is None:
-                        # This is due to the expert parallelism grouping
-                        continue
 
-                    # For MoE LM
-                    if match := re.search(  # noqa: F841
-                        r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
-                        dest_name,
-                    ):
-                        tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
-                        assert (
-                            n_experts % tp_ep_size == 0
-                        ), "n_experts must be divisible by tp_ep_size"
+                    belongs_to_current_dp_shard = (
+                        expert_id - tp_ep_rank * n_expert_per_ep
+                    ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
 
-                        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                            dp_shard_rank = parallel_dims.mesh[
-                                tuple(("dp_shard_cp",))
-                            ].get_local_rank()
-                            dp_shard_size = parallel_dims.mesh[
-                                tuple(("dp_shard_cp",))
-                            ].size()
-                        else:
-                            dp_shard_rank = 0
-                            dp_shard_size = 1
-
-                        n_expert_per_ep = n_experts // tp_ep_size
-
-                        for expert_id in range(n_experts):
-                            belongs_to_current_ep = (
-                                tp_ep_rank * n_expert_per_ep
-                                <= expert_id  # Expert index
-                                < (tp_ep_rank + 1) * n_expert_per_ep
+                    if belongs_to_current_ep and belongs_to_current_dp_shard:
+                        expert_shard_weight = sharded_weight[expert_id]
+                        # Convert expert_id to local_expert_id
+                        n_local_experts = (
+                            n_experts
+                            // parallel_dims.tp
+                            // (parallel_dims.dp_shard * parallel_dims.cp)
+                        )
+                        expert_id = expert_id % n_local_experts
+                        tensor_to_copy = []
+                        if "gate_up_proj" in dest_name:
+                            # gate_and_up_projs
+                            gate_proj_name = dest_name.replace(
+                                "gate_up_proj", "gate_and_up_projs"
+                            )
+                            target_gate_proj_tensor = lm_state_dict[gate_proj_name]
+                            tensor_to_copy.append(
+                                (
+                                    target_gate_proj_tensor,
+                                    expert_shard_weight,
+                                )
+                            )
+                        elif "down_proj" in dest_name:
+                            # layers.0.mlp.experts.down_projs
+                            down_proj_name = dest_name.replace(
+                                "down_proj", "down_projs"
+                            )
+                            target_down_proj_tensor = lm_state_dict[down_proj_name]
+                            tensor_to_copy.append(
+                                (target_down_proj_tensor, expert_shard_weight)
                             )
 
-                            belongs_to_current_dp_shard = (
-                                expert_id - tp_ep_rank * n_expert_per_ep
-                            ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
+                        for target_tensor, expert_weight in tensor_to_copy:
+                            is_dist_tensor = isinstance(
+                                target_tensor, torch.distributed.tensor.DTensor
+                            )
+                            local_view = (
+                                target_tensor.to_local()
+                                if is_dist_tensor
+                                else target_tensor
+                            )
 
-                            if belongs_to_current_ep and belongs_to_current_dp_shard:
-                                expert_shard_weight = shared_weight[expert_id]
-                                # Convert expert_id to local_expert_id
-                                n_local_experts = (
-                                    n_experts
-                                    // parallel_dims.tp
-                                    // (parallel_dims.dp_shard * parallel_dims.cp)
-                                )
-                                expert_id = expert_id % n_local_experts
-                                tensor_to_copy = []
-                                if "gate_up_proj" in dest_name:
-                                    # gate_and_up_projs
-                                    gate_proj_name = dest_name.replace(
-                                        "gate_up_proj", "gate_and_up_projs"
-                                    )
-                                    target_gate_proj_tensor = lm_state_dict[
-                                        gate_proj_name
-                                    ]
-                                    tensor_to_copy.append(
-                                        (
-                                            target_gate_proj_tensor,
-                                            expert_shard_weight,
-                                        )
-                                    )
-                                elif "down_proj" in dest_name:
-                                    # layers.0.mlp.experts.down_projs
-                                    down_proj_name = dest_name.replace(
-                                        "down_proj", "down_projs"
-                                    )
-                                    target_down_proj_tensor = lm_state_dict[
-                                        down_proj_name
-                                    ]
-                                    tensor_to_copy.append(
-                                        (target_down_proj_tensor, expert_shard_weight)
-                                    )
+                            local_view = local_view[expert_id]
+                            expert_weight = expert_weight.transpose(0, 1)
 
-                                for target_tensor, expert_weight in tensor_to_copy:
-                                    is_dist_tensor = isinstance(
-                                        target_tensor, torch.distributed.tensor.DTensor
-                                    )
-                                    local_view = (
-                                        target_tensor.to_local()
-                                        if is_dist_tensor
-                                        else target_tensor
-                                    )
-
-                                    local_view = local_view[expert_id]
-                                    expert_weight = expert_weight.transpose(0, 1)
-
-                                    assert (
-                                        local_view.shape == expert_weight.shape
-                                    ), f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                                    with torch.no_grad():
-                                        local_view.data.copy_(expert_weight)
-                            else:
-                                continue
-                        continue
-
-                    if dest_name in lm_state_dict:
-                        target_tensor = lm_state_dict[dest_name]
-                    elif dest_name in visual_state_dict:
-                        target_tensor = visual_state_dict[dest_name]
-                    elif parallel_dims.pp_enabled:
-                        # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
-                        continue
+                            assert (
+                                local_view.shape == expert_weight.shape
+                            ), f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                            with torch.no_grad():
+                                local_view.data.copy_(expert_weight)
                     else:
-                        raise ValueError(f"Unsupported weight: {dest_name}")
+                        continue
+                continue
 
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
+            if dest_name in lm_state_dict:
+                target_tensor = lm_state_dict[dest_name]
+            elif dest_name in visual_state_dict:
+                target_tensor = visual_state_dict[dest_name]
+            elif parallel_dims.pp_enabled:
+                # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
+                continue
+            else:
+                raise ValueError(f"Unsupported weight: {dest_name}")
 
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+
+            assert (
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight)
+
+        # Handle tied lm_head weight
+        if (
+            lm_head_weight_key not in all_tensor_names
+            and embed_tokens_weight_key in all_tensor_names
+        ):
+            # tied with embed_tokens.weight
+            name = lm_head_weight_key
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
+            tensor = reserved[embed_tokens_weight_key]
+
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, lm_type, n_experts, parallel_dims
+            )
+            if dest_name in lm_state_dict:
+                target_tensor = lm_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]

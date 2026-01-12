@@ -65,6 +65,7 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
+        self.teacher_result_manager = set()
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
         self.stat_n_samples = 0
@@ -88,6 +89,7 @@ class Controller:
         dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        hook_fns: Optional[Dict[str, Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -136,8 +138,16 @@ class Controller:
         config_file_path = tempfile.NamedTemporaryFile(
             delete=False, suffix=".redis_config.conf"
         )
+
+        custom_config = """
+maxmemory 500G
+maxmemory-policy allkeys-lfu
+"""
         redis_cfg_path = util.write_redis_config(
-            redis_free_port, redis_logfile_path, file_path=config_file_path.name
+            redis_free_port,
+            redis_logfile_path,
+            file_path=config_file_path.name,
+            custom_config=custom_config,
         )
         redis_server_cmd = f'redis-server {redis_cfg_path} --dbfilename {random_db_file_name} --save ""'
 
@@ -177,6 +187,7 @@ class Controller:
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
         )
         self.rollout_status_manager.setup(config, self.redis_controller)
 
@@ -222,8 +233,19 @@ class Controller:
         validation_step: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
+        rollouts_per_global_batch = self.config.train.train_batch_per_replica * len(
+            self.policy_status_manager
+        )
+        global_batch_size = math.ceil(
+            rollouts_per_global_batch / self.config.rollout.n_generation
+        )  # global_batch_size: number of prompts needed for single policy step.
+        rollouts_per_global_batch = rollouts_per_global_batch or 1
+        weight_version_for_current_batch = (
+            self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
+        )
 
-        if not is_validation:
+        if not is_validation and not self.config.mode == "colocated":
             # Throttle the generation speed:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
@@ -231,10 +253,11 @@ class Controller:
             current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
             if (
                 current_pending_rollouts
-                > (self.config.train.train_policy.allowed_outdated_steps + 1)
-                * len(self.policy_status_manager)
-                * self.config.train.train_batch_per_replica
-            ):
+                >= (self.config.train.train_policy.allowed_outdated_steps + 1)
+                * rollouts_per_global_batch
+            ) and self.config.train.train_policy.variant != "dapo":
+                # For non dapo variant, we only need to control the number of outdated weight versions when fetching new prompts.
+                # Since the number of fetched prompts is directly related to the number of rollouts to be trained.
                 n = min(
                     n,
                     self.config.train.train_policy.outdated_rollout_fetch_batch_size,
@@ -244,26 +267,47 @@ class Controller:
                     logger.warning(
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
+            if (
+                self.config.train.train_policy.variant == "dapo"
+                and self.config.train.train_policy.max_retry_for_on_policy > 0
+            ):
+                # In DAPO, we also need to control the number of outdated weight versions when fetching new prompts.
+                # Estimating the number of outdated weight versions when the generation results of these fetched prompts start training based on the total pending rollouts
+                estimated_delta_weight_version = (
+                    self.policy_status_manager.total_pending_rollouts()
+                    // rollouts_per_global_batch
+                )
+                allowed_unfinished_weight_versions = (
+                    self.config.train.train_policy.allowed_outdated_steps
+                    - estimated_delta_weight_version
+                )
+                # Estimating the number of unfinished rollouts based on the samples on the fly and the pending rollouts
+                estimated_unfinished_rollouts = max(
+                    self.policy_status_manager.samples_on_the_fly
+                    - self.policy_status_manager.total_pending_rollouts(),
+                    0,
+                )
+                if (
+                    estimated_unfinished_rollouts
+                    >= (1 + allowed_unfinished_weight_versions)
+                    * self.config.train.train_policy.max_retry_for_on_policy
+                    * rollouts_per_global_batch
+                ):
+                    n = min(
+                        n,
+                        self.config.train.train_policy.outdated_rollout_fetch_batch_size,
+                    )
+                    if n > 0:
+                        # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
+                        logger.warning(
+                            f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
+                        )
 
         if (
             (not is_validation)
-            and self.config.train.train_policy.on_policy
             and len(self.rollout_status_manager.replica_scaling_log) == 0
+            and not self.config.mode == "colocated"
         ):
-            # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version
-            global_batch_size = (
-                self.config.train.train_batch_per_replica
-                * len(self.policy_status_manager)
-                // self.config.rollout.n_generation
-            )  # global_batch_size: number of prompts needed for single policy step.
-            num_of_valid_prompts_consumed = (
-                self.policy_status_manager.consumed_samples_num
-                // self.config.rollout.n_generation
-            )
-            weight_version_for_current_batch = (
-                num_of_valid_prompts_consumed // global_batch_size
-            )
-
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
                 if (
@@ -323,10 +367,10 @@ class Controller:
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
                 payloads_list[i].weight_version = 0
-
-        self.policy_status_manager.samples_on_the_fly += (
-            current_fetch_count * self.config.rollout.n_generation
-        )
+        if not is_validation:
+            self.policy_status_manager.samples_on_the_fly += (
+                current_fetch_count * self.config.rollout.n_generation
+            )
 
         return payloads_list, is_end
 
@@ -420,6 +464,8 @@ class Controller:
             self.policy_status_manager.heartbeat(replica_name)
         elif replica_name in self.rollout_status_manager:
             self.rollout_status_manager.heartbeat(replica_name)
+        elif replica_name in self.teacher_result_manager:
+            pass
         else:
             logger.error(f"[Controller] Replica {replica_name} not found")
 
@@ -437,6 +483,11 @@ class Controller:
                 self.rollout_status_manager.register(
                     atom, self.config, self.policy_status_manager
                 )
+            elif role == Role.REFERENCE:
+                self.teacher_result_manager.add(atom.replica_name)
+                logger.info(
+                    f"[Controller] Registering reference replica {atom.replica_name}"
+                )
             else:
                 raise Exception(f"[Controller] Unknown role: {role}")
 
@@ -449,8 +500,17 @@ class Controller:
                 self.rollout_status_manager.unregister(
                     replica_name, self.policy_status_manager
                 )
+            elif replica_name in self.teacher_result_manager:
+                self.teacher_result_manager.remove(replica_name)
+                if len(self.teacher_result_manager) > 0:
+                    await self.end_reference_replica()
             else:
                 raise Exception(f"[Controller] Replica {replica_name} not found")
+
+    async def end_reference_replica(self):
+        self.redis_controller.publish_teacher_request(
+            {"is_end": True, "prompt_idx": -1, "completion_token_ids": []}, "controller"
+        )
 
     async def set_replica_ncclerror(self, replica_name: str, error: str):
         if replica_name in self.policy_status_manager:

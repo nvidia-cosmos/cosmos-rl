@@ -1,0 +1,59 @@
+host="localhost"
+port=8080
+redis_host="localhost"
+redis_port=6379
+
+[[reward_args]]
+reward_type = "cosmos_reason1"
+# cosmos_reason1 reward can share the base cosmos_rl_reward environment so just the basic python is used as its venv_python
+venv_python = "python"
+model_path = "nvidia/Cosmos-Reason1-7B-Reward"
+dtype = "float16"
+enable = true
+
+[[reward_args]]
+reward_type = "dance_grpo"
+venv_python = "/root/dance_grpo/bin/python"
+model_path = "/workspace/VideoReward"
+download_path = "/workspace"
+dtype = "float16"
+enable = true
+
+[[reward_args]]
+reward_type = "ocr"
+venv_python = "/root/ocr/bin/python"
+device = "cpu"
+enable = false
+
+[[reward_args]]
+reward_type  = "image_reward"
+venv_python = "/root/image_reward/bin/python"
+dtype = "float32"
+device = "cuda"
+enable = false
+
+[[reward_args]]
+reward_type = "gen_eval"
+venv_python = "/root/gen_eval/bin/python"
+# model_path: unused for gen_eval; paths are resolved from download_path
+model_path = ""
+download_path = "/workspace"
+device = "cuda"
+enable = false
+
+[[reward_args]]
+reward_type = "hpsv2"
+venv_python = "/root/hpsv2/bin/python"
+# model_path: unused for hpsv2; ckpt is derived from download_path/hpsv2/ckpts/HPS_v2.1_compressed.pt
+model_path = ""
+download_path = "/workspace"
+device = "cuda"
+enable = false
+
+[[reward_args]]
+reward_type = "pickscore"
+venv_python = "/root/pickscore/bin/python"
+model_path = ""  # not used; HF hub paths are inside the scorer
+device = "cuda"
+dtype = "float32"
+enable = false 

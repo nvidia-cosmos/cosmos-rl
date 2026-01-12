@@ -24,6 +24,7 @@ from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
 class RolloutBase(ABC):
@@ -61,6 +62,7 @@ class RolloutBase(ABC):
         payloads: List[RLPayload] | List[Dict[str, torch.Tensor]],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         is_validation: bool = False,
         *args,
         **kwargs,
@@ -71,6 +73,7 @@ class RolloutBase(ABC):
             payloads: The list of payloads for generation or the list of dictionaries of tensors as input in tensor native mode.
             stream: The CUDA stream for generation.
             data_packer: The data packer for packing the data.
+            data_fetcher: The data fetcher for fetching the data, can access dataset and validation dataset from it.
             is_validation: Whether the rollout is for validation.
 
         Returns:
@@ -91,9 +94,23 @@ class RolloutBase(ABC):
         raise NotImplementedError("init_engine is not implemented yet.")
 
     @abstractmethod
-    def get_underlying_model(self):
-        """Get the underlying model"""
+    def get_underlying_model(self) -> torch.nn.Module:
+        """
+        Get the underlying model
+        Returns:
+            model: The underlying model instance.
+        """
         raise NotImplementedError("get_underlying_model is not implemented yet.")
+
+    def set_underlying_model(self, model: torch.nn.Module):
+        """
+        Set the underlying model
+        Only used in where model instance is shared between rollout and policy.
+        For instance sharing colocated rollout and policy case.
+        Args:
+            model: The underlying model instance to set.
+        """
+        raise NotImplementedError("set_underlying_model is not implemented yet.")
 
     def post_init_engine_hook(
         self,
@@ -109,6 +126,13 @@ class RolloutBase(ABC):
             report_rollouts_hook: The hook function to report the rollouts to the controller.
             validation_flag: Whether the rollout is for validation.
         """
+        pass
+
+    def shutdown(self):
+        """
+        Shutdown the engine and release the resources.
+        """
+        # In some case, the engine may create a child thread to run the generation, Rollout should release the resources before shutting down.
         pass
 
     def pre_get_params_for_sync_hook(
@@ -175,7 +199,7 @@ class RolloutBase(ABC):
         model = self.get_underlying_model()
         param_map = {}
         for name, param in model.state_dict().items():
-            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
+            compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(name)
             param_map[compatible_name] = param
 
         quantized_tensors = self.get_quantized_tensors(weight_mapper)

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import boto3
 import os
 import re
 import json
@@ -23,62 +22,12 @@ import random
 import shutil
 import numpy as np
 import concurrent.futures as futures
-from botocore.exceptions import ClientError
-from botocore.config import Config as BotoConfig
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.s3_utils import upload_file_to_s3
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import List, Callable, Union, Optional
-
-
-def upload_file_to_s3(
-    local_file_path: str,
-    bucket_name: str,
-    s3_file_path: str,
-    max_retries: int = 3,
-):
-    config = BotoConfig(retries={"max_attempts": 10, "mode": "standard"})
-    s3_client = boto3.client("s3", config=config)
-    retry = 0
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-    except ClientError:
-        logger.info(f"Bucket {bucket_name} does not exist, creating it now.")
-        s3_client.create_bucket(Bucket=bucket_name)
-    while retry < max_retries:
-        try:
-            s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-            logger.info(
-                f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}"
-            )
-            return
-        except ClientError as e:
-            retry += 1
-            logger.error(
-                f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path}. "
-                f"Retry {retry}/{max_retries}. Error: {e}"
-            )
-    logger.error(
-        f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path} "
-        f"after {max_retries} retries."
-    )
-
-
-def upload_folder_to_s3(
-    local_folder: str,
-    bucket_name: str,
-    s3_folder: str,
-    max_retries: int = 3,
-):
-    for root, _, files in os.walk(local_folder):
-        for file in files:
-            local_file_path = os.path.join(root, file)
-            relative_path = os.path.relpath(local_file_path, local_folder)
-            s3_file_path = os.path.join(s3_folder, relative_path)
-            upload_file_to_s3(
-                local_file_path, bucket_name, s3_file_path, max_retries=max_retries
-            )
+from typing import List, Callable, Union, Optional, Dict
 
 
 class CheckpointMananger:
@@ -174,7 +123,7 @@ class CheckpointMananger:
 
     def save_checkpoint(
         self,
-        model: torch.nn.Module,
+        model: Union[torch.nn.Module, Dict],
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         step: int,
@@ -186,7 +135,7 @@ class CheckpointMananger:
         Save the model, optimizer, scheduler state dicts and extra info to disk.
         Also upload the checkpoint to S3 if configured.
         Args:
-            model (torch.nn.Module): The model to save.
+            model (Union[torch.nn.Module, Dict]): The model or state_dict to save.
             optimizer (torch.optim.Optimizer): The optimizer to save.
             scheduler (torch.optim.lr_scheduler._LRScheduler): The scheduler to save.
             step (int): The current training step.
@@ -256,6 +205,15 @@ class CheckpointMananger:
             cur_ckpt_dir, f"extra_info_rank_{self.global_rank}.pth"
         )
 
+        if isinstance(model, torch.nn.Module):
+            state_dict = model.state_dict()
+        elif isinstance(model, dict):
+            state_dict = model
+        else:
+            raise ValueError(
+                "Unsupport model type, should either be a torch.nn.Module or dict"
+            )
+
         if self.save_mode == "async":
             # wait for the previous save to finish
             if len(self.pre_save_futures) > 0:
@@ -264,7 +222,7 @@ class CheckpointMananger:
                 self.pre_save_futures = []
 
             # offload the state dict to CPU
-            model_state_dict_cpu = self.offload_state_dict_cpu(model.state_dict())
+            model_state_dict_cpu = self.offload_state_dict_cpu(state_dict)
             optimizer_state_dict_cpu = self.offload_state_dict_cpu(
                 optimizer.state_dict()
             )
@@ -308,7 +266,7 @@ class CheckpointMananger:
                 futures.wait(self.pre_save_futures)
                 self.pre_save_futures = []
         else:  # sync
-            _save_upload(model.state_dict(), model_ckpt_path, is_final)
+            _save_upload(state_dict, model_ckpt_path, is_final)
             _save_upload(optimizer.state_dict(), optimizer_ckpt_path, is_final)
             _save_upload(scheduler.state_dict(), scheduler_ckpt_path, is_final)
             _save_upload(extra_info, extra_info_ckpt_path, is_final)
@@ -324,6 +282,7 @@ class CheckpointMananger:
         scheduler: Union[torch.optim.lr_scheduler._LRScheduler, Callable],
         model_name_or_path: str,
         revision: Optional[str] = None,
+        strict: bool = True,
     ):
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
@@ -360,7 +319,9 @@ class CheckpointMananger:
                         scheduler = scheduler(training_steps=extra_vars["total_steps"])
                         outputs.append(scheduler)
 
-                    model.load_state_dict(torch.load(model_path, weights_only=False))
+                    model.load_state_dict(
+                        torch.load(model_path, weights_only=False), strict=strict
+                    )
                     optimizer.load_state_dict(
                         torch.load(optimizer_path, weights_only=False)
                     )

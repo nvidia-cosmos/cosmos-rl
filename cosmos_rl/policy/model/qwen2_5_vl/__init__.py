@@ -31,7 +31,6 @@ from cosmos_rl.utils.util import (
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
-from safetensors import safe_open
 from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
     convert_weight_from_hf,
 )
@@ -41,6 +40,7 @@ from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
 from cosmos_rl.policy.model.qwen2_5_vl.weight_mapper import QwenVL25WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
@@ -935,12 +935,15 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             model_path (str): Path to the HuggingFace model.
             parallel_dims (ParallelDims): Parallel dimensions definition.
         """
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         # Load LM weights
         # model.safetensors.index.json
@@ -955,42 +958,45 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         else:
             visual_state_dict = {}
 
-        with torch.device(self.current_device()):
-            for f in safetensors_files:
-                weights_of_ckpt = {}
-                ckpt = safe_open(
-                    os.path.join(model_path, f), framework="pt", device=str(device)
-                )
-                keys = ckpt.keys()
-                for name in keys:
-                    ckpt_tensor = ckpt.get_tensor(name)
-                    weights_of_ckpt[name] = ckpt_tensor
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
+        )
 
-                for name in weights_of_ckpt.keys():
-                    tensor = weights_of_ckpt[name]
-                    dest_name, shared_weight = convert_weight_from_hf(
-                        tensor, name, model_type, parallel_dims
-                    )
-                    if dest_name in lm_state_dict:
-                        target_tensor = lm_state_dict[dest_name]
-                    elif dest_name in visual_state_dict:
-                        target_tensor = visual_state_dict[dest_name]
-                    elif parallel_dims.pp_enabled:
-                        # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
-                        continue
-                    else:
-                        raise ValueError(f"Unsupported weight: {dest_name}")
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
+
+        # Step 3: Process each tensor
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
+        ):
+            dest_name, sharded_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims
+            )
+            if dest_name in lm_state_dict:
+                target_tensor = lm_state_dict[dest_name]
+            elif dest_name in visual_state_dict:
+                target_tensor = visual_state_dict[dest_name]
+            elif parallel_dims.pp_enabled:
+                # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
+                continue
+            else:
+                raise ValueError(f"Unsupported weight: {dest_name}")
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            assert (
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]

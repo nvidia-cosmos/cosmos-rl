@@ -41,6 +41,7 @@ import cosmos_rl.utils.util as util
 from transformers import AutoConfig
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.colocated.api_client import ColocatedAPIClient
 
 
 class CommMixin:
@@ -85,7 +86,17 @@ class CommMixin:
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
         )
 
-        self.api_client = APIClient(self.role)
+        self.api_client = (
+            ColocatedAPIClient(self.role)
+            if hasattr(self, "colocated")
+            else APIClient(self.role)
+        )
+
+        policy_type = self.config.train.train_policy.type
+        if policy_type != "sft":
+            # if not sft, we have to init redis
+            self.init_redis()
+
         self.register_to_controller()
 
     def init_data_packer(
@@ -93,11 +104,14 @@ class CommMixin:
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
     ):
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path, trust_remote_code=True
-        )
-        is_vlm = getattr(hf_config, "vision_config", None) is not None
-        model_type = hf_config.model_type
+        if not self.config.policy.is_diffusers:
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path, trust_remote_code=True
+            )
+            is_vlm = getattr(hf_config, "vision_config", None) is not None
+            model_type = hf_config.model_type
+        else:
+            model_type = "diffusers"
 
         if data_packer:
             assert isinstance(
@@ -262,14 +276,8 @@ class CommMixin:
 
 
 class WorkerBase(ABC):
-    def __init__(self, config: Any, **kwargs):
+    def __init__(self, config: Any):
         self.config = config
-        # Forward the args and kwargs to the worker_init method.
-        self.worker_init(**kwargs)
-
-    @abstractmethod
-    def worker_init(self, **kwargs):
-        raise RuntimeError("worker_init method must be implemented")
 
     @abstractmethod
     def execute(self):

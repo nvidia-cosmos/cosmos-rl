@@ -9,8 +9,12 @@
 #   docker buildx build --platform linux/arm64 --build-arg COSMOS_RL_BUILD_MODE=no-efa -t cosmos_rl:arm64 .
 # To build with AWS-EFA:
 #   docker buildx build --platform linux/arm64 --build-arg COSMOS_RL_BUILD_MODE=efa -t cosmos_rl:arm64 .
+# To build with specific dependency groups:
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=all .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=wfm,vla .
 
 ARG COSMOS_RL_BUILD_MODE=no-efa
+ARG COSMOS_RL_EXTRAS=""
 ARG CUDA_VERSION=12.8.1
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS no-efa-base
 
@@ -123,6 +127,10 @@ RUN pip install --no-cache-dir \
     flashinfer-python \
     transformer_engine[pytorch] --no-build-isolation
 
+# install apex
+RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
+
+
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
         apt-get update && \
         apt-get upgrade -y && \
@@ -231,6 +239,11 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 # Image target: cosmos_rl
 FROM ${COSMOS_RL_BUILD_MODE}-base AS pre-package
 
+
+ARG COSMOS_RL_EXTRAS
+
+COPY . /workspace/cosmos_rl
+
 # # install fa3 only on Hopper machine
 # COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
 # RUN pip install /workspace/*.whl
@@ -268,6 +281,14 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
         pip cache purge ; \
     fi
 
+RUN if [ "$COSMOS_RL_EXTRAS" != "" ]; then \
+    apt install -y cmake && \
+    pip install /workspace/cosmos_rl${COSMOS_RL_EXTRAS:+[$COSMOS_RL_EXTRAS]} && \
+    if [[ ",$COSMOS_RL_EXTRAS," == *,vla,* ]]; then \
+        bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \
+    fi; \
+    fi
+RUN pip uninstall -y xformers
 RUN pip uninstall -y ray
 
 
