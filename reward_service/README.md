@@ -16,6 +16,8 @@ A service for calculating rewards of generated videos/images for world foundatio
 
 **Image Rewards:**
 - `hpsv2`: [HPSv2](https://github.com/tgxs002/HPSv2) - Human Preference Score v2 for text-to-image alignment
+- `pickscore`: [PickScore](https://github.com/yuvalkirstain/PickScore) - CLIP-based text-image preference scoring
+- `hpsv3`: [HPSv3](https://github.com/MizzenAI/HPSv3) - Human Preference Score v3 for image quality and prompt alignment
 - `image_reward`: [ImageReward](https://github.com/THUDM/ImageReward) - Image quality and prompt alignment scoring
 - `ocr`: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) based reward for text rendering accuracy
 - `gen_eval`: [GenEval](https://github.com/djghosh13/geneval) - Object detection based compositional generation evaluation

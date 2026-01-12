@@ -57,3 +57,13 @@ model_path = ""  # not used; HF hub paths are inside the scorer
 device = "cuda"
 dtype = "float32"
 enable = false 
+
+[[reward_args]]
+reward_type = "hpsv3"
+venv_python = "/root/hpsv3/bin/python"
+# model_path: unused for hpsv3; weights are downloaded from HF (or cached) by setup/inferencer
+model_path = ""
+download_path = "/workspace"
+device = "cuda"
+dtype = "float16"
+enable = true
