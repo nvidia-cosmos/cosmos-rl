@@ -32,8 +32,8 @@ from cosmos_rl.utils.ipc import (
     named_tensors_from_serialize,
 )
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
+    monkey_patch_for_fp8,
+    simplify_process_weights_after_loading_for_fp8,
 )
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
@@ -74,16 +74,7 @@ class VLLMColocateWorkerExtension:
         """
         Apply the fp8 linear patch to the model when initialize the rollout engine.
         """
-        from vllm.config import set_current_vllm_config
-
-        with set_current_vllm_config(self.vllm_config):
-            apply_fp8_linear_patch(self._get_model())
-
-    def simplify_process_weights_after_loading(self):
-        """
-        Simplify the process weights after loading to quantize the weight of linear only in `rowwise` mode.
-        """
-        simplify_process_weights_after_loading()
+        monkey_patch_for_fp8(self.vllm_config, self._get_model())
 
     def _test_get_parameters_mean(self, param_name: str) -> float:
         """
@@ -134,7 +125,7 @@ class vLLMRolloutAsync(vLLMRollout):
             pp_size = rollout_parallelism.pp_size
 
             enable_ep_parallelism = False
-            disable_mm_preprocessor_cache = False
+            llm_additional_kwargs = {}
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
@@ -145,8 +136,7 @@ class vLLMRolloutAsync(vLLMRollout):
             if model_type in moe_model_type:
                 enable_ep_parallelism = True
             if model_type in multimodal_type:
-                # for vllm nightly, this is only True for multimodal models, check here
-                disable_mm_preprocessor_cache = True
+                llm_additional_kwargs["mm_processor_cache_gb"] = 0
             assert tp_size * pp_size == rollout_parallelism.world_size, (
                 "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
                 % (tp_size, pp_size, rollout_parallelism.world_size)
@@ -155,6 +145,11 @@ class vLLMRolloutAsync(vLLMRollout):
             self.quantization = quantization
 
             policy_config = self.config.policy
+
+            if self.quantization == "fp8":
+                # patch for weight quantization. [weight loading]
+                # patch must happen before `rollout_engine` is initialized.
+                simplify_process_weights_after_loading_for_fp8()
 
             engine_args = AsyncEngineArgs(
                 model=model_path,
@@ -168,7 +163,6 @@ class vLLMRolloutAsync(vLLMRollout):
                 enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
                 gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
                 disable_custom_all_reduce=True,
-                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
                 skip_tokenizer_init=False,
                 max_model_len=policy_config.model_max_length,
                 disable_log_stats=True,
@@ -184,6 +178,7 @@ class vLLMRolloutAsync(vLLMRollout):
                 quantization=self.quantization,
                 seed=seed or 42,
                 load_format=load_format,
+                **llm_additional_kwargs,
             )
 
             self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -198,11 +193,6 @@ class vLLMRolloutAsync(vLLMRollout):
             if self.quantization == "fp8":
                 asyncio.run(
                     self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
-                )
-                asyncio.run(
-                    self.rollout_engine.collective_rpc(
-                        "simplify_process_weights_after_loading"
-                    )
                 )
 
     def post_init_engine_hook(

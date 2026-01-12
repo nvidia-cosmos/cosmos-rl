@@ -298,7 +298,6 @@ class vLLMRollout(RolloutBase):
             if self.quantization == "fp8":
                 # patch for weight quantization. [weight loading]
                 # patch must happen before `rollout_engine` is initialized.
-                # vllm_config = self.rollout_engine.llm_engine.vllm_config
                 simplify_process_weights_after_loading_for_fp8()
                 logger.info(
                     f"[Rollout] Initializing vLLM engine with quantization: {self.quantization}"
