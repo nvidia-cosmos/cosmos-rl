@@ -163,6 +163,10 @@ def evaluate_amc23_or_aime24_zeroshot(
         if gold is None:
             score = 0.0
 
+        # logger.info(
+        #     f"Raw extracted answer: {extracted_answer}, Raw gold answer: {gold}"
+        # )
+
         extracted_answer = math_answer_cleaning(extracted_answer)
         gold = math_answer_cleaning(gold)
 
@@ -175,6 +179,9 @@ def evaluate_amc23_or_aime24_zeroshot(
             score = 1.0
         # logger.info(f"Evaluation score: {score}")
     except Exception:
+        # import traceback
+
+        # logger.error(traceback.format_exc())
         # logger.warning(f"Error in evaluate_amc23_or_aime24_zeroshot: {e}")
         score = 0.0
     return score
