@@ -109,9 +109,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.current_weight_version = 0
 
         # determine the quantization type
-        self.quantization_type = None
-        if self.config.rollout.quantization != "none":
-            self.quantization_type = self.config.rollout.quantization
+        self.quantization_type = (
+            self.config.rollout.quantization
+        )  # ["none", "fp8", "fp4"]
 
         self.rollout: RolloutBase = RolloutRegistry.get_rollout_cls(
             self.config.rollout.backend
@@ -432,7 +432,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 )
 
             # Add weight scale of quantized weights to trainable params
-            if self.quantization_type is not None:
+            if self.quantization_type != "none":
                 # Trivial params:
                 # including tensors that need to be synced but not trainable in R2R. These
                 # tensors will not be synced from P2R, so we have to add them to trainable params.
@@ -455,7 +455,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     ):
         target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
         check_inside_group = do_weight_sync_check
-        if self.quantization_type is not None:
+        if self.quantization_type != "none":
             inst_group_weight_name = (
                 insts_group.param_instructions[0].param_name
             )  # take a name from the inst group to determine the full weight name
@@ -595,7 +595,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         post_process_list_for_lowp = []
 
-        if not check_inside_group and self.quantization_type is not None:
+        if not check_inside_group and self.quantization_type != "none":
             post_process_list_for_lowp.append(inst_group_full_weight_name)
 
         def completion_lambda(
@@ -631,7 +631,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             tensors_to_check.clear()
 
             # here we got one full weight tensor sync done, if it is fp8/mxfp4 weight, we should do the quantization and check the numerical error.
-            if self.quantization_type is not None:
+            if self.quantization_type != "none":
                 for inst_group_full_weight_name in post_process_list_for_lowp:
                     if self.quantization_type == "fp8":
                         if inst_group_full_weight_name in self.hp_weight_map:

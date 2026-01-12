@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 import asyncio
 import torch
 import copy
@@ -142,11 +144,16 @@ class vLLMRolloutAsync(vLLMRollout):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            self.quantization = quantization
+            self.quantization = quantization  # ["none", "fp8", "fp4"]
 
             policy_config = self.config.policy
 
-            if self.quantization == "fp8":
+            if self.quantization != "none":
+                # FIXME: (lms/jxz) Find a way to support calling `simplify_process_weights_after_loading_for_fp8`
+                # inside worker processes that vLLM created before weight loading.
+                raise NotImplementedError(
+                    "Quantization is not supported in vLLM async rollout yet."
+                )
                 # patch for weight quantization. [weight loading]
                 # patch must happen before `rollout_engine` is initialized.
                 simplify_process_weights_after_loading_for_fp8()

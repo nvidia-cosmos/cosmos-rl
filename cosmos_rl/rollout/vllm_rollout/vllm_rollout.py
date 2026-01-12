@@ -290,7 +290,7 @@ class vLLMRollout(RolloutBase):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            self.quantization = quantization
+            self.quantization = quantization  # ["none", "fp8", "fp4"]
 
             policy_config = self.config.policy
 
