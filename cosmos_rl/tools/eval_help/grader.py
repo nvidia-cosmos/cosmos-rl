@@ -15,7 +15,9 @@ from typing import Union
 from sympy import simplify, N
 from sympy.parsing.sympy_parser import parse_expr
 from sympy.parsing.latex import parse_latex
-from .latex2sympy.latex2sympy2 import latex2sympy
+
+# from .latex2sympy.latex2sympy2 import latex2sympy
+from latex2sympy import latex2sympy
 
 # from .parser import choice_answer_clean, strip_string
 # from parser import choice_answer_clean
