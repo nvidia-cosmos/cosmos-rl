@@ -310,7 +310,9 @@ class HFVLMDataPacker(DataPacker):
                             assistant_contents.append(content["text"])
                         elif isinstance(content, list):
                             for _, item in enumerate(content):
-                                assert "text" in item, f"text not in content of assistant: {item}"
+                                assert (
+                                    "text" in item
+                                ), f"text not in content of assistant: {item}"
                                 assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
