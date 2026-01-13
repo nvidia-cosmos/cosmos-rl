@@ -16,7 +16,8 @@
 import os
 import json
 
-def get_b1k_tasks():
+
+def get_b1k_task_descriptions():
     task_description_path = os.path.join(
         os.path.dirname(__file__), "behavior_task.jsonl"
     )
