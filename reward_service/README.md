@@ -174,6 +174,28 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
   "media_type": "image",
 }
  
+# Image (HPSv3)
+{
+  "prompts": [
+    "cute chibi anime cartoon fox, smiling wagging tail with a small cartoon heart above sticker"
+  ],
+  "reward_fn": {
+    "hpsv3": 1.0,
+  },
+  "media_type": "image",
+}
+
+# Image (PickScore)
+{
+  "prompts": [
+    "An astronaut's glove floating in zero-g with \"NASA 2049\" on the wrist"
+  ],
+  "reward_fn": {
+    "pickscore": 1.0,
+  },
+  "media_type": "image",
+}
+ 
 # Image (OCR)
 {
   "prompts": ["New York Skyline with 'Hello World' written with fireworks"],
@@ -326,6 +348,38 @@ Inside each field of the response, the values are lists corresponding to the bat
     'duration': '0.30',
     'decoded_duration': '0.00',
     'type': 'image_reward'
+}
+
+# Image (HPSv3)
+{
+    'scores': {
+        'hpsv3': [10.937397003173828,7.130317211151123]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '0.30',
+    'decoded_duration': '0.00',
+    'type': 'hpsv3'
+}
+
+# Image (PickScore)
+{
+    'scores': {
+        'pickscore': [0.9090837836265564,0.8901391625404358]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '0.30',
+    'decoded_duration': '0.00',
+    'type': 'pickscore'
 }
 
 # Image (OCR)
