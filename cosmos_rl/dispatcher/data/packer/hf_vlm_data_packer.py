@@ -10,6 +10,11 @@ from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
+from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
+    QwenVLDataArgs,
+    update_processor_pixels,
+)
 
 IGNORE_LABEL_ID = -100
 
@@ -49,6 +54,17 @@ class HFVLMDataPacker(DataPacker):
         def __init__(self, input_ids: List[int], logprob_masks: List[int]):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
+
+    def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
+        super().__init__(tool_agent, *args, **kwargs)
+        if "data_args" in kwargs:
+            assert isinstance(
+                kwargs["data_args"], dict
+            ), f"data_args must be a dictionary, but got {type(kwargs['data_args'])}"
+            self.data_args = QwenVLDataArgs(**kwargs["data_args"])
+        else:
+            # default
+            self.data_args = QwenVLDataArgs()
 
     def setup(self, config: Config, *args, **kwargs):
         super().setup(config, *args, **kwargs)
@@ -92,6 +108,12 @@ class HFVLMDataPacker(DataPacker):
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
         self.use_qwen_vl_process = self.model_type == "qwen3_vl"
+
+        # update HF processor.
+        if self.use_qwen_vl_process and self.data_args is not None:
+            self.hf_processor = update_processor_pixels(
+                self.hf_processor, self.data_args
+            )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
