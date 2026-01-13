@@ -571,7 +571,6 @@ def main(
                 val_data_packer=val_data_packer,
             )
         return
-
     if args is None:
         # This means that args are not parsed in dataset entry script
         # So we need to parse the args manually

@@ -52,6 +52,7 @@ def main(
         from cosmos_rl.policy.train import main as policy_main
 
         policy_main(
+            args=args,
             dataset=dataset,
             data_packer=data_packer,
             val_dataset=val_dataset,
@@ -68,6 +69,7 @@ def main(
         from cosmos_rl.rollout.rollout_entry import run_rollout
 
         run_rollout(
+            args=args,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
