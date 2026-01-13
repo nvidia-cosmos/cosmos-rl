@@ -395,7 +395,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
-                    drop_last=self.config.train.train_policy.dataloader_drop_last,
                 )
             else:
                 data_loader = DataLoader(
@@ -493,7 +492,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
-                drop_last=False,
+                drop_last=self.config.train.train_policy.dataloader_drop_last,
             )
 
         steps_by_dataset = (
