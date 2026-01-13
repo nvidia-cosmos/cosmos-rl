@@ -16,19 +16,15 @@
 import io
 import base64
 import torch
-
-from dataclasses import dataclass
 from PIL import Image
 from typing import List, Any, Dict, Optional, Tuple, Union
 from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
-from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from cosmos_rl.utils.logging import logger
 
 IGNORE_LABEL_ID = -100
 
@@ -54,129 +50,6 @@ def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     return new_image_inputs
 
 
-@dataclass
-class QwenVLDataArgs:
-    """Helper class to adapt config to update_processor_pixels expectation, keep alignment with:
-    https://github.com/QwenLM/Qwen3-VL/blob/e5c7e5c26af6a8bd65aec9388f3642cf6ea9d75c/qwen-vl-finetune/qwenvl/train/argument.py#L14
-    """
-
-    min_pixels: int = 28 * 28 * 16
-    max_pixels: int = 28 * 28 * 576
-    video_min_pixels: int = 1024 * 28 * 28
-    video_max_pixels: int = 256 * 28 * 28
-    video_min_frames: int = 4
-    video_max_frames: int = 8
-    video_fps: float = 2
-
-
-def update_processor_pixels(processor, data_args):
-    """
-    From: https://github.com/QwenLM/Qwen3-VL/blob/e5c7e5c26af6a8bd65aec9388f3642cf6ea9d75c/qwen-vl-finetune/qwenvl/data/data_processor.py#L44
-    """
-    logger.info("Updating processor pixels...")
-
-    # --- Image Processor ---
-    ip = processor.image_processor
-    logger.info("=== BEFORE IMAGE PROCESSOR PARAMETERS ===")
-    logger.info(f"Image min_pixels: {getattr(ip, 'min_pixels', 'N/A')}")
-    logger.info(f"Image max_pixels: {getattr(ip, 'max_pixels', 'N/A')}")
-    logger.info(f"ip.size: {ip.size}")
-    logger.info(f"Image size (shortest_edge): {ip.size.get('shortest_edge', 'N/A')}")
-    logger.info(f"Image size (longest_edge):  {ip.size.get('longest_edge', 'N/A')}")
-
-    if hasattr(ip, "min_pixels") and hasattr(ip, "max_pixels"):
-        ip.min_pixels = data_args.min_pixels
-        ip.max_pixels = data_args.max_pixels
-        logger.info(f"✅ Updated image_processor min_pixels to {data_args.min_pixels}")
-        logger.info(f"✅ Updated image_processor max_pixels to {data_args.max_pixels}")
-
-    if hasattr(ip, "size") and isinstance(ip.size, dict):
-        ip.size["shortest_edge"] = data_args.min_pixels
-        ip.size["longest_edge"] = data_args.max_pixels
-        logger.info(
-            f"✅ Updated image_processor size['shortest_edge'] to {data_args.min_pixels}"
-        )
-        logger.info(
-            f"✅ Updated image_processor size['longest_edge'] to {data_args.max_pixels}"
-        )
-
-    logger.info("=== AFTER IMAGE PROCESSOR PARAMETERS ===")
-    logger.info(f"Image min_pixels: {getattr(ip, 'min_pixels', 'N/A')}")
-    logger.info(f"Image max_pixels: {getattr(ip, 'max_pixels', 'N/A')}")
-    logger.info(f"Image size (shortest_edge): {ip.size.get('shortest_edge', 'N/A')}")
-    logger.info(f"Image size (longest_edge):  {ip.size.get('longest_edge', 'N/A')}")
-
-    # --- Video Processor ---
-    if hasattr(processor, "video_processor") and processor.video_processor is not None:
-        vp = processor.video_processor
-        logger.info("\n=== BEFORE VIDEO PROCESSOR PARAMETERS ===")
-        logger.info(f"Video min_pixels: {getattr(vp, 'min_pixels', 'N/A')}")
-        logger.info(f"Video max_pixels: {getattr(vp, 'max_pixels', 'N/A')}")
-        logger.info(f"Video min_frames: {getattr(vp, 'min_frames', 'N/A')}")
-        logger.info(f"Video max_frames: {getattr(vp, 'max_frames', 'N/A')}")
-        logger.info(f"Video fps: {getattr(vp, 'fps', 'N/A')}")
-        logger.info(
-            f"Video size (shortest_edge): {vp.size.get('shortest_edge', 'N/A')}"
-        )
-        logger.info(f"Video size (longest_edge):  {vp.size.get('longest_edge', 'N/A')}")
-
-        if hasattr(vp, "min_pixels") and hasattr(vp, "max_pixels"):
-            vp.min_pixels = data_args.video_min_pixels
-            vp.max_pixels = data_args.video_max_pixels
-            logger.info(
-                f"✅ Updated Qwen2-VL video_processor min_pixels to {data_args.video_min_pixels}"
-            )
-            logger.info(
-                f"✅ Updated Qwen2-VL video_processor max_pixels to {data_args.video_max_pixels}"
-            )
-
-        if hasattr(vp, "min_frames") and hasattr(vp, "max_frames"):
-            vp.min_frames = data_args.video_min_frames
-            vp.max_frames = data_args.video_max_frames
-            logger.info(
-                f"✅ Updated video_processor min_frames to {data_args.video_min_frames}"
-            )
-            logger.info(
-                f"✅ Updated video_processor max_frames to {data_args.video_max_frames}"
-            )
-
-        if hasattr(vp, "fps"):
-            vp.fps = data_args.video_fps
-            logger.info(f"✅ Updated video_processor fps to {data_args.video_fps}")
-
-        if hasattr(vp, "size") and isinstance(vp.size, dict):
-            vp.size["shortest_edge"] = data_args.video_min_pixels
-            vp.size["longest_edge"] = data_args.video_max_pixels
-            logger.info(
-                f"✅ Updated Video size (shortest_edge): {vp.size.get('shortest_edge', 'N/A')}"
-            )
-            logger.info(
-                f"✅ Updated Video size (longest_edge):  {vp.size.get('longest_edge', 'N/A')}"
-            )
-
-        logger.info("=== AFTER VIDEO PROCESSOR PARAMETERS ===")
-        logger.info(f"Video min_pixels: {getattr(vp, 'min_pixels', 'N/A')}")
-        logger.info(f"Video max_pixels: {getattr(vp, 'max_pixels', 'N/A')}")
-        logger.info(f"Video min_frames: {getattr(vp, 'min_frames', 'N/A')}")
-        logger.info(f"Video max_frames: {getattr(vp, 'max_frames', 'N/A')}")
-        logger.info(f"Video fps: {getattr(vp, 'fps', 'N/A')}")
-        logger.info(
-            f"Video size (shortest_edge): {vp.size.get('shortest_edge', 'N/A')}"
-        )
-        logger.info(f"Video size (longest_edge):  {vp.size.get('longest_edge', 'N/A')}")
-
-    logger.info("Video process parameters:")
-    logger.info(f"Video min_pixels: {getattr(vp, 'min_pixels', 'N/A')}")
-    logger.info(f"Video max_pixels: {getattr(vp, 'max_pixels', 'N/A')}")
-    logger.info(f"Video min_frames: {getattr(vp, 'min_frames', 'N/A')}")
-    logger.info(f"Video max_frames: {getattr(vp, 'max_frames', 'N/A')}")
-    logger.info(f"Video fps: {getattr(vp, 'fps', 'N/A')}")
-    logger.info(f"Video size (shortest_edge): {vp.size.get('shortest_edge', 'N/A')}")
-    logger.info(f"Video size (longest_edge):  {vp.size.get('longest_edge', 'N/A')}")
-
-    return processor
-
-
 class Qwen3_VL_DataPacker(DataPacker):
     """
     Data protocol & processing logic for the Qwen3.5 VLMs for SFT and RL training.
@@ -191,17 +64,6 @@ class Qwen3_VL_DataPacker(DataPacker):
         def __init__(self, input_ids: List[int], logprob_masks: List[int]):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
-
-    def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
-        super().__init__(tool_agent, *args, **kwargs)
-        if "data_args" in kwargs:
-            assert isinstance(
-                kwargs["data_args"], dict
-            ), f"data_args must be a dictionary, but got {type(kwargs['data_args'])}"
-            self.data_args = QwenVLDataArgs(**kwargs["data_args"])
-        else:
-            # default
-            self.data_args = QwenVLDataArgs()
 
     def setup(self, config: Config, *args, **kwargs):
         super().setup(config, *args, **kwargs)
@@ -238,12 +100,6 @@ class Qwen3_VL_DataPacker(DataPacker):
             self.video_token_id = video_token_id
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
-
-        # update HF processor.
-        if self.data_args is not None:
-            self.hf_processor = update_processor_pixels(
-                self.hf_processor, self.data_args
-            )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -372,10 +228,10 @@ class Qwen3_VL_DataPacker(DataPacker):
         input_ids: Optional[torch.LongTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
-        second_per_grid_ts: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Different from the original implementation, Qwen3VL use timestamps rather than absolute time position ids."""
+        """Different from the original implementation, Qwen3VLMoe use timestamps rather than absolute time position ids."""
+
         # Since we use timestamps to seperate videos, like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>, the video_grid_thw should also be split
         if video_grid_thw is not None:
             video_grid_thw = torch.repeat_interleave(
@@ -383,18 +239,11 @@ class Qwen3_VL_DataPacker(DataPacker):
             )
             video_grid_thw[:, 0] = 1
 
-        # Qwen3-VL repo uses fixed config:
-        # image_token_id = 151655
-        # video_token_id = 151656
-        # vision_start_token_id = 151652
-
         spatial_merge_size = self.hf_config.vision_config.spatial_merge_size
         image_token_id = self.hf_config.image_token_id
         video_token_id = self.hf_config.video_token_id
         vision_start_token_id = self.hf_config.vision_start_token_id
-
         mrope_position_deltas = []
-
         if input_ids is not None and (
             image_grid_thw is not None or video_grid_thw is not None
         ):
@@ -692,38 +541,12 @@ class Qwen3_VL_DataPacker(DataPacker):
             "input_ids": input_ids,
             "label_ids": label_ids,
         }
-
         if "pixel_values_videos" in inputs:
             result_dict["pixel_values_videos"] = inputs["pixel_values_videos"]
             if "video_grid_thw" in inputs:
                 result_dict["video_grid_thw"] = inputs["video_grid_thw"]
             else:
                 result_dict["video_grid_thw"] = None
-            if "pixel_values_videos_lengths_per_sample" in inputs:
-                result_dict["pixel_values_videos_lengths_per_sample"] = inputs[
-                    "pixel_values_videos"
-                ].shape[0]
-            else:
-                result_dict["pixel_values_videos_lengths_per_sample"] = None
-
-            if result_dict["video_grid_thw"] is not None:
-                # Use getattr for safety if processor structure varies, but data_processor assumes these exist
-                video_processor = getattr(self.hf_processor, "video_processor", None)
-                if video_processor:
-                    second_per_grid_ts = [
-                        video_processor.temporal_patch_size / video_processor.fps
-                    ] * len(result_dict["video_grid_thw"])
-                else:
-                    second_per_grid_ts = None
-            else:
-                second_per_grid_ts = None
-
-            if second_per_grid_ts is not None:
-                result_dict["second_per_grid_ts"] = torch.tensor(
-                    second_per_grid_ts, dtype=torch.float
-                )
-            else:
-                result_dict["second_per_grid_ts"] = None
 
         if "pixel_values" in inputs:
             result_dict["pixel_values"] = inputs["pixel_values"]
@@ -731,13 +554,6 @@ class Qwen3_VL_DataPacker(DataPacker):
                 result_dict["image_grid_thw"] = inputs["image_grid_thw"]
             else:
                 result_dict["image_grid_thw"] = None
-
-            if "pixel_values_lengths_per_sample" in inputs:
-                result_dict["pixel_values_lengths_per_sample"] = inputs[
-                    "pixel_values"
-                ].shape[0]
-            else:
-                result_dict["pixel_values_lengths_per_sample"] = None
 
         # position_ids: (3, 1, seq_len)
         # Only for Qwen3VLMOE
@@ -750,11 +566,7 @@ class Qwen3_VL_DataPacker(DataPacker):
             if "video_grid_thw" in result_dict
             else None,
             attention_mask=None,
-            second_per_grid_ts=result_dict.get("second_per_grid_ts")
-            if "second_per_grid_ts" in result_dict
-            else None,
         )
-
         result_dict["position_ids"] = position_ids.clone()
 
         return result_dict
@@ -929,9 +741,6 @@ class Qwen3_VL_DataPacker(DataPacker):
                 if "video_grid_thw" in x
                 else None,
                 attention_mask=None,
-                second_per_grid_ts=x.get("second_per_grid_ts")
-                if "second_per_grid_ts" in x
-                else None,
             )
             return_dict["position_ids"] = position_ids.clone()
         return_dict["input_ids"] = input_ids + completion_ids
