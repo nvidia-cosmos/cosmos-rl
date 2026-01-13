@@ -112,7 +112,7 @@ def evaluate_amc23_or_aime24_zeroshot(
     Returns:
         float: Accuracy score
     """
-    from cosmos_rl.tools.eval_help.grader import (
+    from cosmos_rl.tools.eval_utils.grader import (
         math_equal,
         math_answer_cleaning,
         round_number,

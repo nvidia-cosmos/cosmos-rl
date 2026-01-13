@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ast
 import json
 import sys
@@ -143,7 +158,7 @@ def clean_if_name(code: str) -> str:
                 code = (
                     ast.unparse(astree.body[:-1]) + "\n" + ast.unparse(last_block.body)  # type: ignore
                 )
-    except:
+    except Exception:
         pass
 
     return code
@@ -237,7 +252,7 @@ def compile_code(code: str, timeout: int):
 def convert_line_to_decimals(line: str):
     try:
         decimal_line = [float(elem) for elem in line.split()]
-    except:
+    except Exception:
         return False, []
     return True, decimal_line
 
@@ -337,13 +352,10 @@ def grade_call_based(
                     if len(prediction) == len(gt_out):
                         all_matched = True
                         for i in range(len(prediction)):
-                            if (
-                                np.allclose(float(prediction[i]), float(gt_out[i]))
-                                == False
-                            ):
+                            if not np.allclose(float(prediction[i]), float(gt_out[i])):
                                 all_matched = False
                                 break
-                        tmp_result = tmp.result or all_matched
+                        tmp_result = tmp_result or all_matched
                 except Exception:
                     pass
 
@@ -543,7 +555,7 @@ def run_test(problem_to_check, debug=False, timeout=6):
         which_type = CODE_TYPE.standard_input  # Standard input
         method_name = None
     else:
-        starter = problem_to_check["starter_code"]
+        _ = problem_to_check["starter_code"]
         which_type = CODE_TYPE.call_based  # Call-based
         method_name = problem_to_check["starter_code"]
 
