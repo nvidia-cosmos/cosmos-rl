@@ -352,6 +352,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             user_provided_val_dataset=val_dataset,
         )
+        # For sampler, we won't drop data for un-even distribution DP.
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
             if isinstance(sampler, Callable):
@@ -404,7 +405,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
-                    drop_last=False,
+                    drop_last=self.config.train.train_policy.dataloader_drop_last,
                 )
             return data_loader
 
@@ -491,7 +492,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
-                drop_last=False,
+                drop_last=self.config.train.train_policy.dataloader_drop_last,
             )
 
         steps_by_dataset = (

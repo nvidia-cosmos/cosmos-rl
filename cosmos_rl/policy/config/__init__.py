@@ -132,6 +132,11 @@ class SFTDataConfig(BaseModel):
         default=None,
         description="Number of batches loaded in advance by each worker.",
     )
+    dataloader_drop_last: bool = Field(
+        default=True,
+        description="Whether to drop the last batch of the dataloader if it is not complete.",
+    )
+
     conversation_column_name: str = Field(
         default="conversations",  # "conversation",
         description="Column name for formated conversation json",
