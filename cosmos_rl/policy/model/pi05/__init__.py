@@ -9,7 +9,9 @@ from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
 import logging
 import math
 import os
+import pickle
 import random
+from types import SimpleNamespace
 
 import torch
 from torch import Tensor
@@ -21,6 +23,7 @@ from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
+from cosmos_rl.utils.wfm.distributed import get_rank
 from transformers import AutoConfig
 from safetensors import safe_open
 
@@ -34,6 +37,87 @@ IMAGE_KEYS = (
 
 IMAGE_RESOLUTION = (224, 224)
 
+
+
+def resize_with_pad_torch(
+    images: torch.Tensor,
+    height: int,
+    width: int,
+    mode: str = "bilinear",
+) -> torch.Tensor:
+    """PyTorch version of resize_with_pad. Resizes an image to a target height and width without distortion
+    by padding with black. If the image is float32, it must be in the range [-1, 1].
+
+    Args:
+        images: Tensor of shape [*b, h, w, c] or [*b, c, h, w]
+        height: Target height
+        width: Target width
+        mode: Interpolation mode ('bilinear', 'nearest', etc.)
+
+    Returns:
+        Resized and padded tensor with same shape format as input
+    """
+    # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
+    if images.shape[-1] <= 4:  # Assume channels-last format
+        channels_last = True
+        # Convert to channels-first for torch operations
+        if images.dim() == 3:
+            images = images.unsqueeze(0)  # Add batch dimension
+        images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
+    else:
+        channels_last = False
+        if images.dim() == 3:
+            images = images.unsqueeze(0)  # Add batch dimension
+
+    batch_size, channels, cur_height, cur_width = images.shape
+
+    # Calculate resize ratio
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+
+    # Resize
+    resized_images = F.interpolate(
+        images,
+        size=(resized_height, resized_width),
+        mode=mode,
+        align_corners=False if mode == "bilinear" else None,
+    )
+
+    # Handle dtype-specific clipping
+    if images.dtype == torch.uint8:
+        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
+    elif images.dtype == torch.float32:
+        resized_images = resized_images.clamp(-1.0, 1.0)
+    else:
+        raise ValueError(f"Unsupported image dtype: {images.dtype}")
+
+    # Calculate padding
+    pad_h0, remainder_h = divmod(height - resized_height, 2)
+    pad_h1 = pad_h0 + remainder_h
+    pad_w0, remainder_w = divmod(width - resized_width, 2)
+    pad_w1 = pad_w0 + remainder_w
+
+    # Pad
+    constant_value = 0 if images.dtype == torch.uint8 else -1.0
+    padded_images = F.pad(
+        resized_images,
+        (pad_w0, pad_w1, pad_h0, pad_h1),  # left, right, top, bottom
+        mode="constant",
+        value=constant_value,
+    )
+
+    # Convert back to original format if needed
+    if channels_last:
+        padded_images = padded_images.permute(
+            0, 2, 3, 1
+        )  # [b, c, h, w] -> [b, h, w, c]
+        if batch_size == 1 and images.shape[0] == 1:
+            padded_images = padded_images.squeeze(
+                0
+            )  # Remove batch dimension if it was added
+
+    return padded_images
 
 def preprocess_observation_pytorch(
     observation,
@@ -53,10 +137,17 @@ def preprocess_observation_pytorch(
 
     batch_shape = observation.state.shape[:-1]
 
+    meta_image_keys = [k for k in observation.images if k not in image_keys]
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
 
+        if key == "base_0_rgb":
+            image = torch.cat(
+                [image, *(observation.images[k] for k in meta_image_keys)], dim=0
+            )  # b + m * b
+
+        # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
         # Handle both [B, C, H, W] and [B, H, W, C] formats
         is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
 
@@ -64,15 +155,8 @@ def preprocess_observation_pytorch(
             # Convert [B, C, H, W] to [B, H, W, C] for processing
             image = image.permute(0, 2, 3, 1)
 
-        # Align with OpenPI Observation.from_dict(): if image is uint8 in [0,255],
-        # convert to float32 in [-1, 1] before any resizing/augmentations.
-        if image.dtype == torch.uint8:
-            image = image.to(torch.float32) / 255.0 * 2.0 - 1.0
-
         if image.shape[1:3] != image_resolution:
-            logging.info(
-                f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}"
-            )
+            logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = resize_with_pad_torch(image, *image_resolution)
 
         if train:
@@ -80,9 +164,9 @@ def preprocess_observation_pytorch(
             image = image / 2.0 + 0.5
 
             # Apply PyTorch-based augmentations
-            if "wrist" not in key:
+            if key == "base_0_rgb":
                 # Geometric augmentations for non-wrist cameras
-                height, width = image.shape[1:3]
+                batch, height, width = image.shape[:3]
 
                 # Random crop and resize
                 crop_height = int(height * 0.95)
@@ -96,10 +180,7 @@ def preprocess_observation_pytorch(
                     start_h = torch.randint(0, max_h + 1, (1,), device=image.device)
                     start_w = torch.randint(0, max_w + 1, (1,), device=image.device)
                     image = image[
-                        :,
-                        start_h : start_h + crop_height,
-                        start_w : start_w + crop_width,
-                        :,
+                        :, start_h : start_h + crop_height, start_w : start_w + crop_width, :
                     ]
 
                 # Resize back to original size
@@ -149,6 +230,15 @@ def preprocess_observation_pytorch(
                         align_corners=False,
                     ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
+                # split back into base_image and meta_images
+                split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
+                image = split_images[0]
+                for i, meta_key in enumerate(meta_image_keys):
+                    meta_image = split_images[i + 1]
+                    if is_channels_first:
+                        meta_image = split_images[i + 1].permute(0, 3, 1, 2)
+                    out_images[meta_key] = meta_image * 2.0 - 1.0
+
             # Color augmentations for all cameras
             # Random brightness
             # Use tensor operations instead of .item() for torch.compile compatibility
@@ -180,6 +270,19 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
+        elif key == "base_0_rgb":
+            batch, height, width = image.shape[:3]
+
+            # split back into base_image and meta_images
+            split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
+            image = split_images[0]
+            for i, meta_key in enumerate(meta_image_keys):
+                if is_channels_first:
+                    meta_image = split_images[i + 1].permute(0, 3, 1, 2)
+                else:
+                    meta_image = split_images[i + 1]
+                out_images[meta_key] = meta_image
+
         # Convert back to [B, C, H, W] format if it was originally channels-first
         if is_channels_first:
             image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
@@ -209,6 +312,8 @@ def preprocess_observation_pytorch(
         state=observation.state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
+        token_ar_mask=observation.token_ar_mask,
+        token_loss_mask=observation.token_loss_mask,
     )
 
 
@@ -456,8 +561,8 @@ class PI05(BaseModel):
         """Helper method to preprocess observation."""
         observation = preprocess_observation_pytorch(observation, train=train)
         imgs = list(observation.images.values())
-        if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
-            imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
+        # if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
+        #     imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
         return (
             imgs,
             list(observation.image_masks.values()),
@@ -492,16 +597,6 @@ class PI05(BaseModel):
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
-            # NOTE: SigLIP vision tower expects NCHW (B, 3, H, W).
-            # Online rollout path usually goes through `_preprocess_observation()` which already converts,
-            # but GRPO replay/data-packer path can pass NHWC tensors here.
-            if torch.is_tensor(img):
-                if img.dtype == torch.uint8:
-                    img = img.to(torch.float32) / 255.0 * 2.0 - 1.0
-                if img.ndim == 4 and img.shape[-1] == 3 and img.shape[1] != 3:
-                    img = img.permute(0, 3, 1, 2).contiguous()
-                elif img.ndim == 3 and img.shape[-1] == 3 and img.shape[0] != 3:
-                    img = img.permute(2, 0, 1).unsqueeze(0).contiguous()
 
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
@@ -626,17 +721,176 @@ class PI05(BaseModel):
 
         return embs, pad_masks, att_masks, adarms_cond
 
+    def _move_tensors_to_device(self, obj, device):
+        """Recursively move all tensors inside a (possibly nested) object to `device`."""
+        if isinstance(obj, torch.Tensor):
+            return obj.to(device=device)
+        if isinstance(obj, dict):
+            return {k: self._move_tensors_to_device(v, device) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(self._move_tensors_to_device(v, device) for v in obj)
+        if hasattr(obj, "__dict__"):
+            new_obj = object.__new__(type(obj))
+            for k, v in vars(obj).items():
+                setattr(new_obj, k, self._move_tensors_to_device(v, device))
+            return new_obj
+        return obj
+
+    def _to_cpu_detach(self, obj):
+        """Recursively detach tensors and move them to CPU for safe pickling."""
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu()
+        if isinstance(obj, dict):
+            return {k: self._to_cpu_detach(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(self._to_cpu_detach(v) for v in obj)
+        if hasattr(obj, "__dict__"):
+            new_obj = object.__new__(type(obj))
+            for k, v in vars(obj).items():
+                setattr(new_obj, k, self._to_cpu_detach(v))
+            return new_obj
+        return obj
+
+    def _observation_to_plain_dict(self, observation) -> dict:
+        """Convert an observation object into a plain-Python dict (no cosmos_rl classes).
+
+        This is important for pickling: pickled custom classes require the original
+        module path to exist on load (e.g. openpi environment may not have cosmos_rl).
+        """
+        if isinstance(observation, dict):
+            return observation
+
+        out: dict = {}
+        # Keep this in sync with fields used by preprocess_observation_pytorch().
+        for key in (
+            "images",
+            "image_masks",
+            "state",
+            "tokenized_prompt",
+            "tokenized_prompt_mask",
+            "token_ar_mask",
+            "token_loss_mask",
+        ):
+            if hasattr(observation, key):
+                val = getattr(observation, key)
+                # Normalize mapping-like fields to a real dict.
+                if key in ("images", "image_masks") and val is not None and not isinstance(val, dict):
+                    val = dict(val)
+                out[key] = val
+        return out
+
+    def _load_from_disk(self, target_like, path):
+        """Load object from disk and align tensor device/dtype to target_like."""
+        if not os.path.exists(path):
+            return target_like
+
+        with open(path, "rb") as f:
+            loaded = pickle.load(f)
+
+        def align(template, value):
+            if isinstance(template, torch.Tensor) and isinstance(value, torch.Tensor):
+                return value.to(device=template.device, dtype=template.dtype)
+            if isinstance(template, dict) and isinstance(value, dict):
+                # Align keys present in template; keep all other keys from value unchanged.
+                out = dict(value)
+                for k in template:
+                    if k in value:
+                        out[k] = align(template[k], value[k])
+                return out
+            if isinstance(template, (list, tuple)) and isinstance(value, (list, tuple)):
+                aligned = [
+                    align(t, v) for t, v in zip(template, value, strict=False)
+                ]
+                return type(template)(aligned)
+            if hasattr(template, "__dict__") and hasattr(value, "__dict__"):
+                new_obj = object.__new__(type(template))
+                for k, v in vars(template).items():
+                    if k in vars(value):
+                        setattr(new_obj, k, align(v, getattr(value, k)))
+                return new_obj
+            return value
+
+        return align(target_like, loaded)
+
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
-        images, img_masks, lang_tokens, lang_masks, state = (
-            self._preprocess_observation(observation, train=True)
-        )
+
+        # Fixed input handling: load from files if exist, otherwise save (rank 0 only)
+        fix_input_dir = "/workspace/fix_input"
+        obs_path = os.path.join(fix_input_dir, "observation.pkl")
+        actions_path = os.path.join(fix_input_dir, "actions.pkl")
+        time_path = os.path.join(fix_input_dir, "time.pkl")
+        noise_path = os.path.join(fix_input_dir, "noise.pkl")
+        preproc_dump_path = os.path.join(fix_input_dir, "cosmos_preproc.pkl")
+        forward_dump_path = os.path.join(fix_input_dir, "cosmos_forward.pkl")
+        outputs_dump_path = os.path.join(fix_input_dir, "cosmos_outputs.pkl")
+
+        if os.path.exists(obs_path) and os.path.exists(actions_path):
+            # Strict alignment: match dtype+device of the *current* observation fields.
+            obs_template = self._observation_to_plain_dict(observation)
+            loaded_obs = self._load_from_disk(obs_template, obs_path)
+            observation = SimpleNamespace(**loaded_obs)
+
+            actions = self._load_from_disk(actions, actions_path)
+
+        # Preprocess caching: if a cached preprocess output exists, reuse it to avoid
+        # stochastic train-time augmentations diverging across implementations.
+        if os.path.exists(preproc_dump_path):
+            with open(preproc_dump_path, "rb") as f:
+                cached = pickle.load(f)
+            cached = self._move_tensors_to_device(cached, actions.device)
+            images = cached["images"]
+            img_masks = cached["img_masks"]
+            lang_tokens = cached["lang_tokens"]
+            lang_masks = cached["lang_masks"]
+            state = cached["state"]
+        else:
+            images, img_masks, lang_tokens, lang_masks, state = (
+                self._preprocess_observation(observation, train=True)
+            )
+
+        if get_rank() == 0:
+            os.makedirs(fix_input_dir, exist_ok=True)
+            if not os.path.exists(preproc_dump_path):
+                with open(preproc_dump_path, "wb") as f:
+                    pickle.dump(
+                        self._to_cpu_detach(
+                            {
+                                "images": images,
+                                "img_masks": img_masks,
+                                "lang_tokens": lang_tokens,
+                                "lang_masks": lang_masks,
+                                "state": state,
+                            }
+                        ),
+                        f,
+                    )
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
+
+        if os.path.exists(noise_path):
+            noise = self._load_from_disk(noise, noise_path)
+        if os.path.exists(time_path):
+            time = self._load_from_disk(time, time_path)
+
+        # Save fixed inputs if not exist (rank 0 only)
+        if not os.path.exists(obs_path) and get_rank() == 0:
+            os.makedirs(fix_input_dir, exist_ok=True)
+            
+            with open(obs_path, "wb") as f:
+                # Store a plain dict so loading doesn't require cosmos_rl installed.
+                obs_dict = self._observation_to_plain_dict(observation)
+                pickle.dump(self._to_cpu_detach(obs_dict), f)
+            with open(actions_path, "wb") as f:
+                pickle.dump(actions.detach().cpu(), f)
+            with open(time_path, "wb") as f:
+                pickle.dump(time.detach().cpu(), f)
+            with open(noise_path, "wb") as f:
+                pickle.dump(noise.detach().cpu(), f)
 
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
@@ -665,6 +919,22 @@ class PI05(BaseModel):
 
         # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        if get_rank() == 0:
+            if not os.path.exists(forward_dump_path):
+                with open(forward_dump_path, "wb") as f:
+                    pickle.dump(
+                        self._to_cpu_detach(
+                            {
+                                "prefix_embs": prefix_embs,
+                                "suffix_embs": suffix_embs,
+                                "att_2d_masks_4d": att_2d_masks_4d,
+                                "position_ids": position_ids,
+                                "adarms_cond": adarms_cond,
+                            }
+                        ),
+                        f,
+                    )
 
         # Apply gradient checkpointing if enabled
         def forward_func(
@@ -698,66 +968,60 @@ class PI05(BaseModel):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
+        if get_rank() == 0:
+            if not os.path.exists(outputs_dump_path):
+                with open(outputs_dump_path, "wb") as f:
+                    pickle.dump(
+                        self._to_cpu_detach(
+                            {
+                                "suffix_out": suffix_out,
+                                "v_t": v_t,
+                            }
+                        ),
+                        f,
+                    )
+
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, mode="train") -> dict:
+    def sample_actions(self, inputs, noise=None, mode="train") -> dict:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
-        
+
         Matches RLinf's OpenPi0ForRLActionPrediction.sample_actions() interface.
-        
+
         Args:
-            device: torch device
             observation: Observation object
             noise: Optional initial noise
             num_steps: Number of denoise steps
             mode: "train" or "eval" - controls whether to collect chains for GRPO
-            
+
         Returns:
             dict with 'actions', 'chains', 'denoise_inds'
         """
-        fp = os.path.expanduser("~/pi05_first_input.pt")
-        dbg = str(os.getenv("DEBUG", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
-        fixed = torch.load(fp, map_location="cpu", weights_only=False) if (dbg and os.path.exists(fp)) else None
-        if isinstance(fixed, dict) and all(k in fixed for k in ("images", "img_masks", "lang_tokens", "lang_masks", "state")):
-            images = [x.to(device=device) for x in fixed["images"]]
-            img_masks = [x.to(device=device) for x in fixed["img_masks"]]
-            lang_tokens = fixed["lang_tokens"].to(device=device)
-            lang_masks = fixed["lang_masks"].to(device=device)
-            state = fixed["state"].to(device=device)
-            bsize = int(state.shape[0])
-            if noise is None:
-                noise = fixed.get("noise_init", None)
-                if torch.is_tensor(noise):
-                    noise = noise.to(device=device)
-            if noise is None:
-                actions_shape = (bsize, self.action_horizon, self.action_dim)
-                noise = self.sample_noise(actions_shape, device)
-        else:
-            bsize = observation.state.shape[0]
-            if noise is None:
-                actions_shape = (bsize, self.action_horizon, self.action_dim)
-                noise = self.sample_noise(actions_shape, device)
-            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
-            if (
-                str(os.getenv("SAVE_FIRST_INPUT", os.getenv("save_first_input", "0"))).strip().lower()
-                in {"1", "true", "yes", "y", "on"}
-                and int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")) or 0) == 0
-                and not getattr(self, "_pi05_first_input_saved", False)
-            ):
-                if not os.path.exists(fp):
-                    torch.save(
-                        {
-                            "images": [x.detach().cpu() for x in images],
-                            "img_masks": [x.detach().cpu() for x in img_masks],
-                            "lang_tokens": lang_tokens.detach().cpu(),
-                            "lang_masks": lang_masks.detach().cpu(),
-                            "state": state.detach().cpu(),
-                            "noise_init": noise.detach().cpu() if torch.is_tensor(noise) else None,
-                        },
-                        fp,
-                    )
-                setattr(self, "_pi05_first_input_saved", True)
+        observation = SimpleNamespace(
+            images={
+                "base_0_rgb": inputs["images"][:, 0],
+                "left_wrist_0_rgb": inputs["images"][:, 1],
+                "right_wrist_0_rgb": inputs["images"][:, 2],
+            },
+            image_masks={
+                "base_0_rgb": inputs["image_masks"][:, 0],
+                "left_wrist_0_rgb": inputs["image_masks"][:, 1],
+                "right_wrist_0_rgb": inputs["image_masks"][:, 2],
+            },
+            tokenized_prompt=inputs["input_ids"],
+            tokenized_prompt_mask=inputs["attention_mask"],
+            state=inputs["states"],
+        )
+        device = observation.state.device
+
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.action_horizon, self.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
+        )
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
@@ -777,7 +1041,7 @@ class PI05(BaseModel):
             use_cache=True,
         )
 
-        x_t = noise
+        x_t = noise.to(device)
         chains = [x_t]
         log_probs = []
 
@@ -790,18 +1054,18 @@ class PI05(BaseModel):
         # RLinf-style denoise index selection
         if mode == "train":
             if self.joint_logprob:
-                denoise_inds = torch.arange(self.num_steps, device=device)
+                denoise_inds = torch.arange(self.num_steps)
             else:
                 if self.ignore_last:
                     denoise_inds = torch.tensor(
-                        [random.randint(0, self.num_steps - 2)] * self.num_steps, device=device
+                        [random.randint(0, self.num_steps - 2)] * self.num_steps,
                     )
                 else:
                     denoise_inds = torch.tensor(
-                        [random.randint(0, self.num_steps - 1)] * self.num_steps, device=device
+                        [random.randint(0, self.num_steps - 1)] * self.num_steps,
                     )
         else:
-            denoise_inds = torch.tensor([-1] * self.num_steps, device=device)
+            denoise_inds = torch.tensor([-1] * self.num_steps)
         denoise_inds = denoise_inds[None].repeat(bsize, 1)
 
         for idx in range(self.num_steps):
@@ -819,7 +1083,7 @@ class PI05(BaseModel):
                 sample_mode,
                 self.num_steps,
             )
-            
+
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t_mean + self.sample_noise(x_t.shape, device) * x_t_std
             log_prob = self.get_logprob_norm(x_t, x_t_mean, x_t_std)
@@ -827,13 +1091,13 @@ class PI05(BaseModel):
             log_probs.append(log_prob)
         x_0 = x_t
         chains = torch.stack(chains, dim=1)
-        log_probs = torch.stack(log_probs, dim=1)[:, :, : self.action_chunk, : self.action_env_dim]
+        log_probs = torch.stack(log_probs, dim=1)[
+            :, :, : self.action_chunk, : self.action_env_dim
+        ]
         if self.joint_logprob:
             log_probs = log_probs.mean(dim=1)
         else:
             log_probs = log_probs[torch.arange(log_probs.shape[0]), denoise_inds[:, 0]]
-
-        x_0 = x_0[..., : self.action_env_dim] if self.action_env_dim <= self.action_dim else x_0
 
         return {
             "actions": x_0,
@@ -1219,83 +1483,3 @@ class PI05(BaseModel):
     def check_tp_compatible(self, tp_size: int):
         raise ValueError("PI05 does not support tensor parallelism")
 
-
-def resize_with_pad_torch(
-    images: torch.Tensor,
-    height: int,
-    width: int,
-    mode: str = "bilinear",
-) -> torch.Tensor:
-    """PyTorch version of resize_with_pad. Resizes an image to a target height and width without distortion
-    by padding with black. If the image is float32, it must be in the range [-1, 1].
-
-    Args:
-        images: Tensor of shape [*b, h, w, c] or [*b, c, h, w]
-        height: Target height
-        width: Target width
-        mode: Interpolation mode ('bilinear', 'nearest', etc.)
-
-    Returns:
-        Resized and padded tensor with same shape format as input
-    """
-    # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
-    if images.shape[-1] <= 4:  # Assume channels-last format
-        channels_last = True
-        # Convert to channels-first for torch operations
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-        images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
-    else:
-        channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-
-    batch_size, channels, cur_height, cur_width = images.shape
-
-    # Calculate resize ratio
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-
-    # Resize
-    resized_images = F.interpolate(
-        images,
-        size=(resized_height, resized_width),
-        mode=mode,
-        align_corners=False if mode == "bilinear" else None,
-    )
-
-    # Handle dtype-specific clipping
-    if images.dtype == torch.uint8:
-        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
-    elif images.dtype == torch.float32:
-        resized_images = resized_images.clamp(-1.0, 1.0)
-    else:
-        raise ValueError(f"Unsupported image dtype: {images.dtype}")
-
-    # Calculate padding
-    pad_h0, remainder_h = divmod(height - resized_height, 2)
-    pad_h1 = pad_h0 + remainder_h
-    pad_w0, remainder_w = divmod(width - resized_width, 2)
-    pad_w1 = pad_w0 + remainder_w
-
-    # Pad
-    constant_value = 0 if images.dtype == torch.uint8 else -1.0
-    padded_images = F.pad(
-        resized_images,
-        (pad_w0, pad_w1, pad_h0, pad_h1),  # left, right, top, bottom
-        mode="constant",
-        value=constant_value,
-    )
-
-    # Convert back to original format if needed
-    if channels_last:
-        padded_images = padded_images.permute(
-            0, 2, 3, 1
-        )  # [b, c, h, w] -> [b, h, w, c]
-        if batch_size == 1 and images.shape[0] == 1:
-            padded_images = padded_images.squeeze(
-                0
-            )  # Remove batch dimension if it was added
-
-    return padded_images

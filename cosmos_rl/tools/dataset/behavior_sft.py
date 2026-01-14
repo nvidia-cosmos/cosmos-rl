@@ -412,7 +412,7 @@ class BehaviorSFTDataset(Dataset):
         # openpi/src/openpi/training/config.py ModelTransformFactory.inputs
         self._transforms.append(InjectDefaultPrompt())
         self._transforms.append(ResizeImages(config.custom['image_size'][0], config.custom['image_size'][1]))
-        self._transforms.append(TokenizePrompt(self.tokenizer, discrete_state_input=config.train.train_policy.dataset.discrete_state_input))
+        self._transforms.append(TokenizePrompt(self.tokenizer, discrete_state_input=config.custom['discrete_state_input']))
         self._transforms.append(PadStatesAndActions(config.custom['action_dim']))
 
     def __len__(self) -> int:
