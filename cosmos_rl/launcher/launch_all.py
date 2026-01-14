@@ -66,7 +66,7 @@ def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
                         logger.error(
                             f"Process {process.pid} exited as soon as launched. Exiting."
                         )
-                        sys.exit(process.returncode)
+                        sys.exit(1)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
             host, port = url.split(":")
