@@ -66,4 +66,4 @@ model_path = ""
 download_path = "/workspace"
 device = "cuda"
 dtype = "float16"
-enable = true
+enable = false
