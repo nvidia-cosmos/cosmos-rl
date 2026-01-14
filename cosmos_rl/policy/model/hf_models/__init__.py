@@ -543,7 +543,7 @@ class HFModel(BaseModel):
         del hf_model
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        position_ids = None
+        position_ids = kwargs.get("position_ids", None)
         inputs = kwargs["input_ids"]
         seq_dim_idx = 1 if not self.is_vlm else 2
         return position_ids, inputs, seq_dim_idx
