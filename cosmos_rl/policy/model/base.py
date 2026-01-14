@@ -520,10 +520,14 @@ class ModelRegistry:
     def check_model_type_supported(cls, model_type: str) -> bool:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
-    def build_hf_model(self, config, hf_config_args={}):
+    @classmethod
+    def build_model(cls, config: CosmosConfig, hf_config_args=None):
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        hf_config_args["attn_implementation"] = "flash_attention_2"
+        hf_config_args = hf_config_args if hf_config_args is not None else {}
+        hf_config_args.setdefault("attn_implementation", "flash_attention_2")
+        for k, v in hf_config_args.items():
+            logger.info(f"Set hf config args {k} to {v}")
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )
