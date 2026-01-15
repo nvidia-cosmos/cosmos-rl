@@ -703,7 +703,7 @@ class GRPOTrainer(LLMTrainer):
             current_logprobs.shape == teacher_logprobs.shape == current_advantages.shape
         ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
         reversed_kl = current_logprobs - teacher_logprobs
-        return self.post_precess_teacher_kl_advantages(
+        return self.post_process_teacher_kl_advantages(
             reversed_kl,
             current_advantages,
             logprob_masks,
@@ -775,7 +775,7 @@ class GRPOTrainer(LLMTrainer):
             jsd = beta * kl_teacher + (1 - beta) * kl_student
 
         jsd = jsd.sum(-1)  # Sum over top-k dimension for each token
-        return self.post_precess_teacher_kl_advantages(
+        return self.post_process_teacher_kl_advantages(
             jsd,
             current_advantages,
             logprob_masks,
@@ -783,7 +783,7 @@ class GRPOTrainer(LLMTrainer):
             mode=f"jsd_top{top_k}",
         )
 
-    def post_precess_teacher_kl_advantages(
+    def post_process_teacher_kl_advantages(
         self,
         divergence: torch.Tensor,
         current_advantages: torch.Tensor,
