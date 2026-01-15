@@ -56,7 +56,7 @@ tasks = ["setting_the_fire"]
 model_type = "PI05"
 prompt_from_task = true
 skip_norm_stats = false
-# norm_stats="/workspace/comet_weights_pytorch_2/pi05-b1kpt50-cs32/assets/behavior-1k/2025-challenge-demos/norm_stats.json" # default use json from resumed weights
+norm_stats="/workspace/new_weights/pi05-b1kpt50-cs32/assets/behavior-1k/2025-challenge-demos/norm_stats.json" # default use json from resumed weights
 modalities = ["rgb"]
 
 [validation]

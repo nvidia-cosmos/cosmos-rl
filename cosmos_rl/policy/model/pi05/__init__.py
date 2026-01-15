@@ -26,7 +26,7 @@ from cosmos_rl.utils.util import resolve_model_path
 from cosmos_rl.utils.wfm.distributed import get_rank
 from transformers import AutoConfig
 from safetensors import safe_open
-
+import inspect
 
 
 IMAGE_KEYS = (
@@ -594,6 +594,7 @@ class PI05(BaseModel):
         embs = []
         pad_masks = []
         att_masks = []
+        _debug_img_embs = []
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
@@ -602,6 +603,7 @@ class PI05(BaseModel):
                 return self.paligemma_with_expert.embed_image(img)
 
             img_emb = self._apply_checkpoint(image_embed_func, img)
+            _debug_img_embs.append(img_emb)
 
             bsize, num_img_embs = img_emb.shape[:2]
 
@@ -621,6 +623,47 @@ class PI05(BaseModel):
 
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
+
+        # Dump intermediate prefix parts for comparison with openpi-comet.
+        # Rank0 only; do not overwrite existing file unless user deletes it.
+        if get_rank() == 0:
+            fix_input_dir = "/workspace/fix_input"
+            os.makedirs(fix_input_dir, exist_ok=True)
+            prefix_parts_path = os.path.join(fix_input_dir, "cosmos_prefix_parts.pkl")
+            if not os.path.exists(prefix_parts_path):
+                with open(prefix_parts_path, "wb") as f:
+                    pickle.dump(
+                        self._to_cpu_detach(
+                            {
+                                "img_embs": _debug_img_embs,
+                                "lang_emb": lang_emb,
+                                "img_masks": img_masks,
+                                "lang_masks": lang_masks,
+                            }
+                        ),
+                        f,
+                    )
+
+            # Extended debug dump: also store embed_image inputs + weight fingerprints.
+            prefix_debug_path = os.path.join(fix_input_dir, "cosmos_prefix_debug.pkl")
+            if not os.path.exists(prefix_debug_path):
+                # Save pixel_values exactly as passed into embed_image (per-camera).
+                img_inputs = [self._to_cpu_detach(x) for x in images]
+
+                with open(prefix_debug_path, "wb") as f:
+                    pickle.dump(
+                        self._to_cpu_detach(
+                            {
+                                "img_inputs": img_inputs,
+                                "img_embs": _debug_img_embs,
+                                "lang_emb": lang_emb,
+                                "lang_tokens": lang_tokens,
+                                "img_masks": img_masks,
+                                "lang_masks": lang_masks,
+                            }
+                        ),
+                        f,
+                    )
 
         # full attention between image and language inputs
         num_lang_embs = lang_emb.shape[1]
@@ -825,16 +868,15 @@ class PI05(BaseModel):
         forward_dump_path = os.path.join(fix_input_dir, "cosmos_forward.pkl")
         outputs_dump_path = os.path.join(fix_input_dir, "cosmos_outputs.pkl")
 
-        if os.path.exists(obs_path) and os.path.exists(actions_path):
+        if os.path.exists(obs_path):
             # Strict alignment: match dtype+device of the *current* observation fields.
             obs_template = self._observation_to_plain_dict(observation)
             loaded_obs = self._load_from_disk(obs_template, obs_path)
             observation = SimpleNamespace(**loaded_obs)
-
+        if os.path.exists(actions_path):
             actions = self._load_from_disk(actions, actions_path)
 
-        # Preprocess caching: if a cached preprocess output exists, reuse it to avoid
-        # stochastic train-time augmentations diverging across implementations.
+
         if os.path.exists(preproc_dump_path):
             with open(preproc_dump_path, "rb") as f:
                 cached = pickle.load(f)
@@ -845,9 +887,7 @@ class PI05(BaseModel):
             lang_masks = cached["lang_masks"]
             state = cached["state"]
         else:
-            images, img_masks, lang_tokens, lang_masks, state = (
-                self._preprocess_observation(observation, train=True)
-            )
+            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
 
         if get_rank() == 0:
             os.makedirs(fix_input_dir, exist_ok=True)
@@ -877,35 +917,29 @@ class PI05(BaseModel):
         if os.path.exists(time_path):
             time = self._load_from_disk(time, time_path)
 
-        # Save fixed inputs if not exist (rank 0 only)
-        if not os.path.exists(obs_path) and get_rank() == 0:
-            os.makedirs(fix_input_dir, exist_ok=True)
+        # # Save fixed inputs if not exist (rank 0 only)
+        # if not os.path.exists(obs_path) and get_rank() == 0:
+        #     os.makedirs(fix_input_dir, exist_ok=True)
             
-            with open(obs_path, "wb") as f:
-                # Store a plain dict so loading doesn't require cosmos_rl installed.
-                obs_dict = self._observation_to_plain_dict(observation)
-                pickle.dump(self._to_cpu_detach(obs_dict), f)
-            with open(actions_path, "wb") as f:
-                pickle.dump(actions.detach().cpu(), f)
-            with open(time_path, "wb") as f:
-                pickle.dump(time.detach().cpu(), f)
-            with open(noise_path, "wb") as f:
-                pickle.dump(noise.detach().cpu(), f)
+        #     with open(obs_path, "wb") as f:
+        #         # Store a plain dict so loading doesn't require cosmos_rl installed.
+        #         obs_dict = self._observation_to_plain_dict(observation)
+        #         pickle.dump(self._to_cpu_detach(obs_dict), f)
+        #     with open(actions_path, "wb") as f:
+        #         pickle.dump(actions.detach().cpu(), f)
+        #     with open(time_path, "wb") as f:
+        #         pickle.dump(time.detach().cpu(), f)
+        #     with open(noise_path, "wb") as f:
+        #         pickle.dump(noise.detach().cpu(), f)
 
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
-        )
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
-            self.embed_suffix(state, x_t, time)
-        )
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
         if (
-            self.paligemma_with_expert.paligemma.language_model.layers[
-                0
-            ].self_attn.q_proj.weight.dtype
+            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
         ):
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
@@ -919,6 +953,27 @@ class PI05(BaseModel):
 
         # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        # Dump RoPE buffers for cross-checking with cosmos-rl.
+        if self._is_rank0():
+            cosmos_rope_path = os.path.join(fix_input_dir, "cosmos_rope_debug.pkl")
+            if not os.path.exists(cosmos_rope_path):
+                rope = self.paligemma_with_expert.paligemma.model.language_model.rotary_emb
+                try:
+                    from transformers.models.gemma import modeling_gemma as hf_modeling_gemma
+                    modeling_gemma_path = inspect.getfile(hf_modeling_gemma)
+                except Exception:
+                    modeling_gemma_path = None
+                rope_payload = {
+                    "inv_freq": rope.inv_freq.detach().cpu() if hasattr(rope, "inv_freq") else None,
+                    "original_inv_freq": rope.original_inv_freq.detach().cpu()
+                    if hasattr(rope, "original_inv_freq") and isinstance(rope.original_inv_freq, torch.Tensor)
+                    else None,
+                    "attention_scaling": getattr(rope, "attention_scaling", None),
+                    "modeling_gemma_path": modeling_gemma_path,
+                }
+                with open(cosmos_rope_path, "wb") as f:
+                    pickle.dump(self._to_cpu_detach(rope_payload), f)
 
         if get_rank() == 0:
             if not os.path.exists(forward_dump_path):

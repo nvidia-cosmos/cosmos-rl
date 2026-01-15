@@ -17,6 +17,10 @@ def _as_dict(obj: Any):
 
 
 def _compare(a: Any, b: Any, path: Tuple, mismatches: List[str], rtol=1e-4, atol=1e-6):
+    # Stop early to avoid printing enormous diffs (e.g., full model state_dict).
+    if len(mismatches) >= 50:
+        return
+
     # Tensor comparison
     if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
         if a.shape != b.shape:
@@ -59,19 +63,40 @@ def _compare(a: Any, b: Any, path: Tuple, mismatches: List[str], rtol=1e-4, atol
         mismatches.append(f"{path}: value mismatch {a} vs {b}")
 
 
+def _load_any(path: str) -> Any:
+    """Load either a pickle (.pkl) or a torch checkpoint (.pt/.pth)."""
+    if path.endswith(".pkl"):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    if path.endswith(".pt") or path.endswith(".pth"):
+        # map_location=cpu keeps comparison deterministic and avoids GPU requirements.
+        try:
+            return torch.load(path, map_location="cpu")
+        except Exception as e:
+            # Commonly caused by interrupted/partial writes of large checkpoints.
+            raise RuntimeError(f"Failed to torch.load({path}): {e}") from e
+    raise ValueError(f"Unsupported file type: {path}")
+
+
 def compare_pair(left_path: str, right_path: str, rtol=1e-4, atol=1e-6) -> List[str]:
     if not os.path.exists(left_path):
         return [f"{left_path} not found"]
     if not os.path.exists(right_path):
         return [f"{right_path} not found"]
 
-    with open(left_path, "rb") as f:
-        left = pickle.load(f)
-    with open(right_path, "rb") as f:
-        right = pickle.load(f)
+    try:
+        left = _load_any(left_path)
+    except Exception as e:
+        return [str(e)]
+    try:
+        right = _load_any(right_path)
+    except Exception as e:
+        return [str(e)]
 
     mismatches: List[str] = []
     _compare(left, right, path=(), mismatches=mismatches, rtol=rtol, atol=atol)
+    if len(mismatches) >= 50:
+        mismatches.append("(truncated after 50 mismatches)")
     return mismatches
 
 
@@ -81,6 +106,9 @@ def main():
         ("cosmos_preproc.pkl", "openpi_preproc.pkl"),
         ("cosmos_forward.pkl", "openpi_forward.pkl"),
         ("cosmos_outputs.pkl", "openpi_outputs.pkl"),
+        # Optional debug dumps (only present if enabled in code)
+        ("cosmos_prefix_parts.pkl", "openpi_prefix_parts.pkl"),
+        ("cosmos_prefix_debug.pkl", "openpi_prefix_debug.pkl"),
     ]
 
     any_mismatch = False

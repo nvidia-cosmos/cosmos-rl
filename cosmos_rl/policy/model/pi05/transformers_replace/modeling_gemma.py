@@ -34,7 +34,9 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_u
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import auto_docstring, can_return_tuple, logging
-from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import GemmaConfig
+from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import (
+    GemmaConfig,
+)
 
 
 # LossKwargs compatibility for different transformers versions
@@ -42,8 +44,10 @@ try:
     from transformers.utils import LossKwargs
 except ImportError:
     from typing import TypedDict
+
     class LossKwargs(TypedDict, total=False):
         num_items_in_batch: int
+
 
 logger = logging.get_logger(__name__)
 
@@ -514,7 +518,7 @@ class GemmaModel(GemmaPreTrainedModel):
         # normalized
         # Gemma downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
         # See https://github.com/huggingface/transformers/pull/29402
-        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
+        # normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
         #hidden_states = hidden_states * normalizer
 
         # decoder layers

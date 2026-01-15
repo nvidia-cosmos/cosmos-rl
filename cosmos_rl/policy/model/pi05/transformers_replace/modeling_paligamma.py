@@ -27,12 +27,22 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import ModelOutput, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
+from transformers.utils import (
+    ModelOutput,
+    auto_docstring,
+    can_return_tuple,
+    is_torchdynamo_compiling,
+    logging,
+)
 
 # Import local implementations
-from cosmos_rl.policy.model.pi05.transformers_replace.configuration_paligemma import PaliGemmaConfig
+from cosmos_rl.policy.model.pi05.transformers_replace.configuration_paligemma import (
+    PaliGemmaConfig,
+)
 from cosmos_rl.policy.model.pi05.transformers_replace.modeling_gemma import GemmaModel
-from cosmos_rl.policy.model.pi05.transformers_replace.modeling_siglip import SiglipVisionModel
+from cosmos_rl.policy.model.pi05.transformers_replace.modeling_siglip import (
+    SiglipVisionModel,
+)
 
 
 # LossKwargs compatibility for different transformers versions
@@ -40,8 +50,10 @@ try:
     from transformers.utils import LossKwargs
 except ImportError:
     from typing import TypedDict
+
     class LossKwargs(TypedDict, total=False):
         num_items_in_batch: int
+
 
 logger = logging.get_logger(__name__)
 
@@ -148,12 +160,10 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
 
     def __init__(self, config: PaliGemmaConfig):
         super().__init__(config)
-        # Use local SiglipVisionModel implementation
         self.vision_tower = SiglipVisionModel(config=config.vision_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(config)
         self.vocab_size = config.text_config.vocab_size
 
-        # Use local GemmaModel implementation
         language_model = GemmaModel(config=config.text_config)
         self.language_model = language_model
 
