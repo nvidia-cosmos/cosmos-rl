@@ -955,7 +955,7 @@ class PI05(BaseModel):
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
         # Dump RoPE buffers for cross-checking with cosmos-rl.
-        if self._is_rank0():
+        if get_rank() == 0:
             cosmos_rope_path = os.path.join(fix_input_dir, "cosmos_rope_debug.pkl")
             if not os.path.exists(cosmos_rope_path):
                 rope = self.paligemma_with_expert.paligemma.model.language_model.rotary_emb

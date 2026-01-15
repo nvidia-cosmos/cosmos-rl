@@ -109,6 +109,7 @@ def main():
         # Optional debug dumps (only present if enabled in code)
         ("cosmos_prefix_parts.pkl", "openpi_prefix_parts.pkl"),
         ("cosmos_prefix_debug.pkl", "openpi_prefix_debug.pkl"),
+        ("cosmos_rope_debug.pkl", "openpi_rope_debug.pkl"),
     ]
 
     any_mismatch = False
