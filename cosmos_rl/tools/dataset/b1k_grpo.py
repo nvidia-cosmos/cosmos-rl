@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import csv
+
 from torch.utils.data import Dataset
 from typing import Optional, Any, Dict
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 
-from cosmos_rl.simulators.b1k.utils import get_b1k_tasks
+from omnigibson.macros import gm
 
 
 class B1KDataset(Dataset):
@@ -26,17 +29,36 @@ class B1KDataset(Dataset):
         self.train_val = train_val
         self.num_trials_per_task = num_trials_per_task
 
+        with open(
+            os.path.join(
+                gm.DATA_PATH,
+                "2025-challenge-task-instances",
+                "metadata",
+                "test_instances.csv",
+            ),
+            "r",
+        ) as f:
+            lines = list(csv.reader(f))[1:]
+            self.task_instances = [None for _ in range(len(lines))]
+            for line in lines:
+                task_id = int(line[0])
+                task_instances = [
+                    int(instance_id) for instance_id in line[2].split(",")
+                ]
+                self.task_instances[task_id] = task_instances
+
+        self.num_tasks = 1  # len(self.task_instances)
+
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.config = config
-        benchmark_dict = get_b1k_tasks()
-        task_names = list(benchmark_dict.keys())
         dataframes = []
 
-        for i in range(0, int(self.num_trials_per_task)):
-            for task_name in task_names:
+        for i in range(self.num_tasks):
+            task_instances = self.task_instances[i]
+            for instance_id in task_instances[: self.num_trials_per_task]:
                 data = {
-                    "task_name": task_name,
-                    "trial_id": i,
+                    "task_id": i,
+                    "trial_id": int(instance_id),
                     "trial_seed": -1,
                 }
                 dataframes.append(data)

@@ -15,6 +15,10 @@
 
 import os
 import json
+import numpy as np
+from omnigibson.learning.utils.eval_utils import (
+    PROPRIOCEPTION_INDICES,
+)
 
 
 def get_b1k_task_descriptions():
@@ -30,3 +34,36 @@ def get_b1k_task_descriptions():
         for i in range(len(task_description))
     }
     return task_description_map
+
+
+def extract_state_from_proprio(proprio_data):
+    """
+    We assume perfect correlation for the two gripper fingers.
+    """
+    # extract joint position
+    base_qvel = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["base_qvel"]]  # 3
+    trunk_qpos = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["trunk_qpos"]]  # 4
+    arm_left_qpos = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_left_qpos"]
+    ]  #  7
+    arm_right_qpos = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_right_qpos"]
+    ]  #  7
+    left_gripper_width = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_left_qpos"]
+    ].sum(axis=-1, keepdims=True)  # 1
+    right_gripper_width = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_right_qpos"]
+    ].sum(axis=-1, keepdims=True)  # 1
+    return np.concatenate(
+        [
+            base_qvel,
+            trunk_qpos,
+            arm_left_qpos,
+            # left_gripper_width,
+            arm_right_qpos,
+            left_gripper_width,  # NOTE: we rearrange the gripper from 21 to 14 to match the action space
+            right_gripper_width,
+        ],
+        axis=-1,
+    )

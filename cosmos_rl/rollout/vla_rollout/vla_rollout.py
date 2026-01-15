@@ -31,11 +31,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils import util
-from cosmos_rl.simulators.libero.utils import (
-    LIBERO_MAX_STEPS_MAP,
-)
+
 from cosmos_rl.simulators.env_manager import EnvManager
-from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
 
@@ -66,11 +63,55 @@ def get_physical_gpu_id():
     return local_rank
 
 
+def get_simulator_type(config: Config) -> str:
+    """Determine simulator type based on dataset subset.
+
+    Args:
+        config: Training configuration
+
+    Returns:
+        "b1k" or "libero"
+    """
+    subset = config.validation.dataset.subset.lower()
+    if "b1k" in subset:
+        return "b1k"
+    elif "libero" in subset:
+        return "libero"
+    else:
+        # Default to libero for backward compatibility
+        logger.warning(
+            f"Unknown dataset subset '{subset}', defaulting to libero simulator"
+        )
+        return "libero"
+
+
 def extract_simulator_config(config: Config):
+    """Extract simulator configuration based on simulator type.
+
+    Args:
+        config: Training configuration
+
+    Returns:
+        SimpleNamespace with simulator-specific configuration
+    """
     cfg = SimpleNamespace()
-    cfg.task_suite_name = config.validation.dataset.subset
-    cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
     cfg.num_envs = config.vla.num_envs
+
+    sim_type = get_simulator_type(config)
+
+    if sim_type == "b1k":
+        # B1K-specific config
+        cfg.height = getattr(config.vla, "height", 256)
+        cfg.width = getattr(config.vla, "width", 256)
+    elif sim_type == "libero":
+        # Libero-specific config
+        from cosmos_rl.simulators.libero.utils import (
+            LIBERO_MAX_STEPS_MAP,
+        )
+
+        cfg.task_suite_name = config.validation.dataset.subset
+        cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+
     return cfg
 
 
@@ -100,10 +141,35 @@ class OpenVLARollout(RolloutBase):
                 self.config.policy.model_name_or_path
             )
 
+        # Determine which environment wrapper to use based on simulator type
+        sim_type = get_simulator_type(self.config)
+        if sim_type == "b1k":
+            from cosmos_rl.simulators.b1k.env_wrapper import (
+                B1KEnvWrapper as EnvWrapperCls,
+            )
+
+            # B1K/OmniGibson cannot run in subprocess due to Isaac Sim's complex GPU/thread management
+            # - "spawn": causes pidfd_getfd permission errors (needs CAP_SYS_PTRACE)
+            # - "fork": causes segmentation fault (GPU contexts copied in bad state)
+            # Solution: Run in-process
+            use_subprocess = False
+            logger.info("Initializing B1K simulator in-process (no subprocess)")
+        elif sim_type == "libero":
+            from cosmos_rl.simulators.libero.env_wrapper import (
+                LiberoEnvWrapper as EnvWrapperCls,
+            )
+
+            # Libero works fine in subprocess with spawn method
+            use_subprocess = True
+            logger.info("Initializing LIBERO simulator in subprocess (spawn)")
+        else:
+            raise ValueError(f"Invalid simulator type: {sim_type}")
+
         self.env_manager = EnvManager(
             cfg=extract_simulator_config(self.config),
             rank=get_physical_gpu_id(),
-            env_cls=LiberoEnvWrapper,
+            env_cls=EnvWrapperCls,
+            use_subprocess=use_subprocess,
         )
         self.env_manager.start_simulator()
 
@@ -341,21 +407,23 @@ class OpenVLARollout(RolloutBase):
                 enqueue_payload_list.append(payload)
                 enqueued_payloads += 1
 
-            self._wait_init_results(sim_results, async_wait_envs)
+            # self._wait_init_results(sim_results, async_wait_envs)
             if available_env_ids:
-                # self._get_init_results(sim_results, available_env_ids, enqueue_payload_list, is_validation)
-                self._setup_parallel_envs_async(
-                    enqueue_payload_list, available_env_ids, is_validation
+                self._get_init_results(
+                    sim_results, available_env_ids, enqueue_payload_list, is_validation
                 )
-                for env_id in available_env_ids:
-                    async_wait_envs[env_id] = 10
+                # self._setup_parallel_envs_async(
+                #     enqueue_payload_list, available_env_ids, is_validation
+                # )
+                # for env_id in available_env_ids:
+                #     async_wait_envs[env_id] = 10
 
             active_env_ids = [
                 i
                 for i, pidx in enumerate(payload_env_mapping)
                 if pidx != -1 and async_wait_envs[i] == -1
             ]
-            logger.debug(
+            logger.info(
                 f"payload_env_mapping: {payload_env_mapping}, "
                 f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
                 f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}, "

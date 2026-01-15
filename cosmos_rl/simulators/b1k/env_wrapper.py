@@ -49,7 +49,10 @@ gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_TRANSITION_RULES = True
 
 from cosmos_rl.simulators.utils import save_rollout_video
-from cosmos_rl.simulators.b1k.utils import get_b1k_task_descriptions
+from cosmos_rl.simulators.b1k.utils import (
+    get_b1k_task_descriptions,
+    extract_state_from_proprio,
+)
 from .venv import VectorEnvironment
 
 
@@ -155,6 +158,7 @@ class B1KEnvWrapper(gym.Env):
     def _extract_image_and_state(self, obs_list):
         full_images = []
         wrist_images = []
+        states = []
         for i, obs in enumerate(obs_list):
             for data in obs.values():
                 assert isinstance(data, dict)
@@ -165,6 +169,8 @@ class B1KEnvWrapper(gym.Env):
                         right_image = v["rgb"]
                     elif "zed_link:Camera:0" in k:
                         zed_image = v["rgb"]
+                    elif "proprio" in k:
+                        states.append(v)
 
             full_images.append(zed_image)
             wrist_images.append(torch.stack([left_image, right_image], axis=0))
@@ -174,6 +180,7 @@ class B1KEnvWrapper(gym.Env):
         return {
             "full_images": np.stack(full_images, axis=0),
             "wrist_images": np.stack(wrist_images, axis=0),
+            "states": extract_state_from_proprio(np.stack(states, axis=0)),
         }
 
     def reset(
@@ -248,9 +255,6 @@ class B1KEnvWrapper(gym.Env):
                 self.env_states[env_id].current_obs = {}
             for k, v in images_and_states.items():
                 self.env_states[env_id].current_obs[k] = v[i]
-            # Add states placeholder if not present
-            if "states" not in self.env_states[env_id].current_obs:
-                self.env_states[env_id].current_obs["states"] = np.zeros(0)
 
             if self.env_states[env_id].do_validation:
                 for img_key in ["full_images", "wrist_images"]:

@@ -517,6 +517,8 @@ class PI05(BaseModel):
         for k, v in defaults.items():
             setattr(hf_config, k, overrides.get(k, getattr(hf_config, k, v)))
 
+        hf_config.dataset_name = config.policy.dataset_name
+
         return hf_config
 
     def set_global_step(self, global_step: int):
@@ -576,6 +578,8 @@ class PI05(BaseModel):
         imgs = list(observation.images.values())
         if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
             imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
+        elif imgs and imgs[0].ndim == 5 and imgs[0].shape[-1] == 3:
+            imgs = [x.permute(0, 1, 4, 2, 3).contiguous() for x in imgs]
         return (
             imgs,
             list(observation.image_masks.values()),
@@ -951,8 +955,8 @@ class PI05(BaseModel):
             log_probs = log_probs[torch.arange(log_probs.shape[0]), denoise_inds[:, 0]]
 
         return {
-            "actions": x_0,
-            "chains": chains,
+            "actions": x_0[..., : self.action_env_dim],
+            "chains": chains[..., : self.action_env_dim],
             "old_log_probs": log_probs,
             "denoise_inds": denoise_inds,
         }
@@ -1353,15 +1357,19 @@ class PI05(BaseModel):
             # 3. Convert to torch.Tensor
             return torch.from_numpy(pil_img)  # [H, W, C], values in [0, 255]
 
-        base_imgs = [_to_pi05_img(img) for img in inputs["full_images"]]
-        wrist_imgs = [_to_pi05_img(img) for img in inputs["wrist_images"]]
+        base_imgs = [_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]
+        wrist_imgs = [_to_pi05_img(img[..., :3]) for img in inputs["wrist_images"]]
 
         base_imgs_t = torch.stack(base_imgs, 0)
         wrist_imgs_t = torch.stack(wrist_imgs, 0)
+        if len(wrist_imgs_t.shape) > 4:  # [N, N_IMG, H, W, C]
+            base_imgs_t = base_imgs_t.unsqueeze(1)
+            images = torch.cat([base_imgs_t, wrist_imgs_t], dim=1)
+        else:
+            images = torch.stack(
+                [base_imgs_t, wrist_imgs_t, torch.zeros_like(wrist_imgs_t)], dim=1
+            )
 
-        images = torch.stack(
-            [base_imgs_t, wrist_imgs_t, torch.zeros_like(wrist_imgs_t)], dim=1
-        )
         image_masks = torch.tensor(
             [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
         )
@@ -1406,9 +1414,18 @@ class PI05(BaseModel):
         import json
 
         resolved = resolve_model_path(model_path)
-        p = os.path.join(
-            resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
-        )
+        if self.hf_config.dataset_name == "libero":
+            p = os.path.join(
+                resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
+            )
+        else:
+            p = os.path.join(
+                resolved,
+                "assets",
+                "behavior-1k",
+                "2025-challenge-demos",
+                "norm_stats.json",
+            )
         if not os.path.isfile(p):
             return None
         with open(p, "r") as f:
