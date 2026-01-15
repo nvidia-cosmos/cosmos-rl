@@ -340,7 +340,11 @@ class vLLMRolloutAsync(vLLMRollout):
                 self.rollout_engine.collective_rpc("get_state_dict_ipc"),
                 self._engine_event_loop,
             ).result(timeout=None)
-        # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
+        # vllm backend only creates one worker in external_launcher executor, so we use the first worker's state dict to initialize the underlying model.
+        # https://github.com/vllm-project/vllm/blob/main/vllm/v1/executor/uniproc_executor.py#L140
+        logger.info(
+            f"[Rollout] get_underlying_model get {len(rpc_results)} workers' state dict."
+        )
         sd_ipc_worker0, not_parameter_names = rpc_results[0]
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
         self.underlying_model = ModuleLike(state_dict, not_parameter_names)

@@ -20,7 +20,6 @@ import toml
 import torch
 import threading
 import uuid
-import functools
 from typing import Optional, Tuple, List, Any, Dict
 import numpy as np
 from transformers import AutoTokenizer
@@ -75,13 +74,16 @@ class MockAPIClient(APIClient):
         self.rollout_completion_payloads: List[RLPayload] = []
         self.validation_completion_payloads: List[RLPayload] = []
 
+        # rollout shard infos cache
+        self.rollout_shard_infos: List[Dict[str, Any]] = []
+
     def post_rollout_shard_info(
         self,
         shard_infos: List[Dict[str, Any]],
         param_groups: List[List[str]],
         sorted_params: List[List[str]],
     ):
-        pass
+        self.rollout_shard_infos = shard_infos
 
     def register(
         self,
@@ -311,6 +313,55 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         if hasattr(LocalRewardCalculator, "_instance"):
             delattr(LocalRewardCalculator, "_instance")
 
+    def _wrapper_rollout_worker_cls(self, cosmos_config: CosmosConfig):
+        from cosmos_rl.rollout.worker.rollout_control import (
+            DisaggregatedRolloutControlWorker,
+        )
+
+        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        DisaggregatedRolloutControlWorker.init_redis = dummy
+        DisaggregatedRolloutControlWorker.query_command_from_controller = dummy
+        return DisaggregatedRolloutControlWorker
+
+    def test_prepare_shard_infos_for_weight_sync_insts(self):
+        """Test prepare shard infos for weight sync insts."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.dp_shard_size = 1
+        cosmos_config.rollout.parallelism.tp_size = 1
+        cosmos_config.rollout.parallelism.pp_size = 1
+        cosmos_config.rollout.batch_size = 4
+
+        parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
+        parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
+
+        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
+
+        worker = worker_cls(cosmos_config, parallel_dims)
+        worker.replica_name = str(uuid.uuid4())
+        worker.shutdown_signal = threading.Event()
+        worker.shutdown_mp_signal = threading.Event()
+        worker.heartbeat_thread = None
+        # Skip weight sync preparation in test since we don't need it
+        worker.state.set_weight_synced()
+
+        try:
+            # only test the async rollout worker.
+            worker._start_async_rollout_scheduler("auto")
+            worker.prepare_shard_infos_for_weight_sync_insts()
+
+            self.assertEqual(len(worker.api_client.rollout_shard_infos), 1)
+            # check the rollout shard infos
+            for name, shard_info in worker.api_client.rollout_shard_infos[0].items():
+                self.assertGreater(
+                    len(shard_info),
+                    0,
+                    f"Shard info is empty for {name}, "
+                    r"which should like '[{0: {'offset': 0, 'total_size': 2, 'dim': 'tp', 'length': 1}}, ...]'",
+                )
+        finally:
+            # clean the test environment
+            worker.handle_shutdown()
+
     def test_async_rollout_worker_1gpu(self):
         """Test async rollout worker."""
         cosmos_config = getMockConfig()
@@ -322,15 +373,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        from cosmos_rl.rollout.worker.rollout_control import (
-            DisaggregatedRolloutControlWorker,
-        )
+        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
 
-        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
-        DisaggregatedRolloutControlWorker.init_redis = dummy
-
-        worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
-        worker.query_command_from_controller = functools.partial(dummy, worker)
+        worker = worker_cls(cosmos_config, parallel_dims)
+        worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
@@ -361,15 +407,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
-        from cosmos_rl.rollout.worker.rollout_control import (
-            DisaggregatedRolloutControlWorker,
-        )
 
-        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
-        DisaggregatedRolloutControlWorker.init_redis = dummy
-
-        worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
-        worker.query_command_from_controller = functools.partial(dummy, worker)
+        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
+        worker = worker_cls(cosmos_config, parallel_dims)
+        worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
