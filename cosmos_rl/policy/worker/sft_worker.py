@@ -280,29 +280,47 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.setup_hooks()
 
     def setup_hooks(self):
-        if "pre_validation_hook" in self.hook_fns:
-            self.pre_validation_hook = self.hook_fns["pre_validation_hook"]
-        else:
-            self.pre_validation_hook = None
+        """Setup hook functions for training and validation lifecycle.
 
-        if "pre_per_step_validation_hook" in self.hook_fns:
-            self.pre_per_step_validation_hook = self.hook_fns[
-                "pre_per_step_validation_hook"
-            ]
-        else:
-            self.pre_per_step_validation_hook = None
+        Supported hooks:
+            Training hooks:
+                - pre_training_hook: Called before training loop starts.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - pre_training_step_hook: Called before each training step.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_training_step_hook: Called after each training step.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_training_hook: Called after training loop completes.
+                    Signature: fn(worker, report_data: Dict[str, Any])
 
-        if "post_per_step_validation_hook" in self.hook_fns:
-            self.post_per_step_validation_hook = self.hook_fns[
-                "post_per_step_validation_hook"
-            ]
-        else:
-            self.post_per_step_validation_hook = None
+            Validation hooks:
+                - pre_validation_hook: Called before validation starts.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - pre_per_step_validation_hook: Called before each validation batch.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_per_step_validation_hook: Called after each validation batch.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_validation_hook: Called after validation completes.
+                    Signature: fn(worker, report_data: Dict[str, Any])
 
-        if "post_validation_hook" in self.hook_fns:
-            self.post_validation_hook = self.hook_fns["post_validation_hook"]
-        else:
-            self.post_validation_hook = None
+        These hooks can be used for custom logging (e.g., TAO status logging),
+        monitoring, or any custom behavior during the training lifecycle.
+        """
+        # Training hooks
+        self.pre_training_hook = self.hook_fns.get("pre_training_hook", None)
+        self.pre_training_step_hook = self.hook_fns.get("pre_training_step_hook", None)
+        self.post_training_step_hook = self.hook_fns.get("post_training_step_hook", None)
+        self.post_training_hook = self.hook_fns.get("post_training_hook", None)
+
+        # Validation hooks
+        self.pre_validation_hook = self.hook_fns.get("pre_validation_hook", None)
+        self.pre_per_step_validation_hook = self.hook_fns.get(
+            "pre_per_step_validation_hook", None
+        )
+        self.post_per_step_validation_hook = self.hook_fns.get(
+            "post_per_step_validation_hook", None
+        )
+        self.post_validation_hook = self.hook_fns.get("post_validation_hook", None)
 
     def build_runner(
         self,
@@ -619,6 +637,17 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
+
+        # Call pre_training_hook before training starts
+        if self.pre_training_hook is not None:
+            pre_training_data = {
+                "total_epochs": self.epoch,
+                "total_steps": self.total_steps,
+                "start_epoch": self.start_epoch,
+                "start_step": self.train_step,
+            }
+            self.pre_training_hook(self, report_data=pre_training_data)
+
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
@@ -643,6 +672,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     ):
                         torch.cuda.cudart().cudaProfilerStop()
 
+                # Call pre_training_step_hook before each training step
+                if self.pre_training_step_hook is not None:
+                    pre_step_data = {
+                        "current_epoch": cur_epoch,
+                        "current_step": self.train_step,
+                        "total_steps": self.total_steps,
+                    }
+                    self.pre_training_step_hook(self, report_data=pre_step_data)
+
                 report_data = self.trainer.step_training(
                     global_batch=global_batch,
                     total_steps=self.total_steps,
@@ -651,6 +689,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
 
                 self.train_step += 1
+
+                # Call post_training_step_hook after each training step
+                if self.post_training_step_hook is not None:
+                    post_step_data = {
+                        "current_epoch": cur_epoch,
+                        "current_step": self.train_step,
+                        "total_steps": self.total_steps,
+                        **report_data,
+                    }
+                    self.post_training_step_hook(self, report_data=post_step_data)
 
                 if report_data and util.is_master_rank(
                     self.parallel_dims, self.global_rank
@@ -706,6 +754,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
             pp_last_stage=pp_last_stage,
             val_score=val_avg_loss,
         )
+
+        # Call post_training_hook after training completes
+        if self.post_training_hook is not None:
+            post_training_data = {
+                "final_epoch": cur_epoch,
+                "final_step": self.train_step,
+                "total_steps": self.total_steps,
+                "final_val_loss": val_avg_loss,
+            }
+            self.post_training_hook(self, report_data=post_training_data)
 
         self.unregister_from_controller()
 
