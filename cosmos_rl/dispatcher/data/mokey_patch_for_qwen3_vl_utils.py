@@ -54,7 +54,6 @@ def fetch_video(
     return_video_sample_fps: bool = False,
     return_video_metadata: bool = False,
 ) -> Union[torch.Tensor, List[Image.Image]]:
-    logger.info("LMS: in patched function.")
     image_factor = image_patch_size * SPATIAL_MERGE_SIZE
     VIDEO_FRAME_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * image_factor * image_factor
     VIDEO_FRAME_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * image_factor * image_factor
