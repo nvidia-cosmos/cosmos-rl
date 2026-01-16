@@ -647,7 +647,7 @@ class ModelRegistry:
         return model
 
     @classmethod
-    def build_diffusers_model(cls, config, diffusers_config_args={}):
+    def build_diffusers_model(cls, config, diffusers_config_args=None):
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
@@ -689,7 +689,7 @@ class ModelRegistry:
         return model
 
     @classmethod
-    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+    def build_model(cls, config: CosmosConfig, hf_config_args=None):
         if not config.policy.is_diffusers:
             return cls.build_hf_model(config, hf_config_args)
         else:
