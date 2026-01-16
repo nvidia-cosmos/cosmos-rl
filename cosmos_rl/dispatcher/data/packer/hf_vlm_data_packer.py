@@ -25,6 +25,13 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
+# Patch the fetch_video function in qwen_vl_utils to use the smart_resize function in transformers
+from cosmos_rl.dispatcher.data.mokey_patch_for_qwen3_vl_utils import (
+    apply_patch_to_fetch_video,
+)
+
+apply_patch_to_fetch_video()
+
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 
