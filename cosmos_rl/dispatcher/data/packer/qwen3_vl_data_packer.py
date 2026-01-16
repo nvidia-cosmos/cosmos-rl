@@ -19,7 +19,6 @@ import torch
 from PIL import Image
 from typing import List, Any, Dict, Optional, Tuple, Union
 from transformers import AutoProcessor, AutoConfig
-from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
@@ -33,6 +32,7 @@ from cosmos_rl.dispatcher.data.mokey_patch_for_qwen3_vl_utils import (
 
 apply_patch_to_fetch_video()
 
+from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 IGNORE_LABEL_ID = -100
 
