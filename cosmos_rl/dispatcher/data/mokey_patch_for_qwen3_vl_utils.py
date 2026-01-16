@@ -41,7 +41,13 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from cosmos_rl.utils.logging import logger
 
+# Original function:
+# https://github.com/QwenLM/Qwen3-VL/blob/e5c7e5c26af6a8bd65aec9388f3642cf6ea9d75c/qwen-vl-utils/src/qwen_vl_utils/vision_process.py#L403
 
+
+# Main changes:
+# 1. Using smart_resize inside transformers instead.
+# 2. Using user specified max_pixels like `update_processor_pixels`
 def fetch_video(
     ele: Dict[str, Any],
     image_patch_size: int = 14,
