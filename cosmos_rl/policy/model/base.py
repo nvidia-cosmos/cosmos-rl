@@ -646,7 +646,8 @@ class ModelRegistry:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
 
-    def build_diffusers_model(self, config, diffusers_config_args={}):
+    @classmethod
+    def build_diffusers_model(cls, config, diffusers_config_args={}):
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
@@ -690,9 +691,9 @@ class ModelRegistry:
     @classmethod
     def build_model(cls, config: CosmosConfig, hf_config_args={}):
         if not config.policy.is_diffusers:
-            return cls.build_hf_model(cls, config, hf_config_args)
+            return cls.build_hf_model(config, hf_config_args)
         else:
-            return cls.build_diffusers_model(cls, config, hf_config_args)
+            return cls.build_diffusers_model(config, hf_config_args)
 
 
 class WeightMapper(ABC):
