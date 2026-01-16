@@ -449,6 +449,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         valid_payloads,
                         False,
                         0,
+                        bypass_reward=self.config.train.train_policy.bypass_reward,
                     )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():

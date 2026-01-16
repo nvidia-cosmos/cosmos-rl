@@ -25,6 +25,7 @@ from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.util as util
 from queue import Queue
+from concurrent.futures import Future
 
 
 class RolloutGroup:
@@ -315,6 +316,7 @@ class RewardCalculator:
                     cumulative_logprob=payloads[idx].cumulative_logprob,
                     teacher_result_uuids=payloads[idx].teacher_result_uuids,
                     prompt_logprobs=payloads[idx].prompt_logprobs,
+                    prompt_token_ids=payloads[idx].prompt_token_ids,
                 )
             )
         return payload_list, True, step
@@ -368,7 +370,7 @@ class RewardCalculator:
                 rollout_tokens = []
             else:
                 rollout_tokens = [
-                    rollout.completion_token_ids
+                    [t[0] for t in rollout.completion_token_ids]
                     if self.config.train.train_policy.rollout_as_token_ids
                     else self.tokenizer(
                         rollout.completion, add_special_tokens=False
@@ -448,6 +450,7 @@ class RewardCalculator:
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
                         prompt_logprobs=payloads[idx].prompt_logprobs,
+                        prompt_token_ids=payloads[idx].prompt_token_ids,
                     )
                 )
             else:
@@ -493,6 +496,7 @@ class RewardCalculator:
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
                         prompt_logprobs=payloads[idx].prompt_logprobs,
+                        prompt_token_ids=payloads[idx].prompt_token_ids,
                     )
                 )
         return payload_list, False, step
@@ -601,6 +605,7 @@ class RewardDispatcher:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
+        bypass_reward: bool = False,
     ) -> None:
         """
         Enqueue the reward calculation task.
@@ -610,16 +615,44 @@ class RewardDispatcher:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
+            bypass_reward (bool): Whether to bypass the reward calculation and set rewards to zero.
         """
         for i in range(0, len(payloads), self.payload_per_task):
-            self.task_queue.put(
-                self.executor.submit(
-                    RewardDispatcher.compute_rewards,
-                    payloads[i : i + self.payload_per_task],
-                    is_validation,
-                    step,
+            if bypass_reward:
+                # Directly return the payloads with zero rewards and advantages
+                for payload in payloads[i : i + self.payload_per_task]:
+                    payload.rewards = [0.0 for _ in payload.completions]
+                    payload.advantages = [0.0 for _ in payload.completions]
+                    payload.filter_rewards = [0.0 for _ in payload.completions]
+                    payload.report_metrics = [{} for _ in payload.completions]
+                    if payload.completed_conversations is None:
+                        payload.completed_conversations = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.completion_logprobs is None:
+                        payload.completion_logprobs = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.completion_token_ids is None:
+                        payload.completion_token_ids = [
+                            [] for _ in range(len(payload.completions))
+                        ]
+                    if payload.n_ignore_prefix_tokens is None:
+                        payload.n_ignore_prefix_tokens = [
+                            0 for _ in payload.completions
+                        ]
+                self.task_queue.put(
+                    (payloads[i : i + self.payload_per_task], is_validation, step)
                 )
-            )
+            else:
+                self.task_queue.put(
+                    self.executor.submit(
+                        RewardDispatcher.compute_rewards,
+                        payloads[i : i + self.payload_per_task],
+                        is_validation,
+                        step,
+                    )
+                )
 
     def dequeue_rewards_cal(
         self,
@@ -639,6 +672,10 @@ class RewardDispatcher:
                 all_done: whether all pending tasks are done
         """
         if not self.task_queue.empty():
+            if not isinstance(self.task_queue.queue[0], Future):
+                assert isinstance(self.task_queue.queue[0], tuple)
+                payloads, is_validation, step = self.task_queue.get()
+                return payloads, is_validation, step, False
             if self.task_queue.queue[0].done():
                 payloads, is_validation, step = self.task_queue.get().result()
                 return payloads, is_validation, step, False
