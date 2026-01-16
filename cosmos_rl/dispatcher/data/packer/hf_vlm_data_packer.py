@@ -19,12 +19,14 @@ import torch
 from PIL import Image
 from typing import List, Any, Dict, Optional, Tuple, Union
 from transformers import AutoProcessor, AutoConfig
-from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+
+from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
+
 
 IGNORE_LABEL_ID = -100
 
@@ -301,6 +303,12 @@ class HFVLMDataPacker(DataPacker):
                         elif isinstance(content, dict):
                             assert "text" in content, f"text not in content: {content}"
                             assistant_contents.append(content["text"])
+                        elif isinstance(content, list):
+                            for _, item in enumerate(content):
+                                assert (
+                                    "text" in item
+                                ), f"text not in content of assistant: {item}"
+                                assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
                                 f"Unsupported content type: {type(content)}"

@@ -520,9 +520,14 @@ class ModelRegistry:
     def check_model_type_supported(cls, model_type: str) -> bool:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
-    def build_hf_model(self, config, hf_config_args={}):
+    @classmethod
+    def build_hf_model(cls, config: CosmosConfig, hf_config_args=None):
         model_name_or_path = config.policy.model_name_or_path
         model = None
+        hf_config_args = hf_config_args if hf_config_args is not None else {}
+        hf_config_args.setdefault("attn_implementation", "flash_attention_2")
+        for k, v in hf_config_args.items():
+            logger.info(f"Set hf config args {k} to {v}")
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )
@@ -641,7 +646,8 @@ class ModelRegistry:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
 
-    def build_diffusers_model(self, config, diffusers_config_args={}):
+    @classmethod
+    def build_diffusers_model(cls, config, diffusers_config_args=None):
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
@@ -683,11 +689,11 @@ class ModelRegistry:
         return model
 
     @classmethod
-    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+    def build_model(cls, config: CosmosConfig, hf_config_args=None):
         if not config.policy.is_diffusers:
-            return cls.build_hf_model(cls, config, hf_config_args)
+            return cls.build_hf_model(config, hf_config_args)
         else:
-            return cls.build_diffusers_model(cls, config, hf_config_args)
+            return cls.build_diffusers_model(config, hf_config_args)
 
 
 class WeightMapper(ABC):
