@@ -73,6 +73,8 @@ class PISFTTrainer(Trainer):
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(mode=True, warn_only=True)
+        else:
+            torch.backends.cudnn.benchmark = True
 
         # init model
         self.model = ModelRegistry.build_model(self.config)

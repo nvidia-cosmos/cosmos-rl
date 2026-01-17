@@ -110,6 +110,8 @@ def main():
         ("cosmos_prefix_parts.pkl", "openpi_prefix_parts.pkl"),
         ("cosmos_prefix_debug.pkl", "openpi_prefix_debug.pkl"),
         ("cosmos_rope_debug.pkl", "openpi_rope_debug.pkl"),
+        ("cosmos_siglip_output.pkl", "openpi_siglip_output.pkl"),
+        ("cosmos_visual_embeddings.pkl", "openpi_visual_embeddings.pkl"),
     ]
 
     any_mismatch = False

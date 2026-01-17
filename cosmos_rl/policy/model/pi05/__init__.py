@@ -23,7 +23,7 @@ from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
-from cosmos_rl.utils.wfm.distributed import get_rank
+from cosmos_rl.utils.wfm.distributed import get_rank, barrier
 from transformers import AutoConfig
 from safetensors import safe_open
 import inspect
@@ -500,7 +500,7 @@ class PI05(BaseModel):
         hf_config.cosmos_compile = bool(getattr(config.train, "compile", False))
 
         # Unified assignment via the toml's custom field
-        if hasattr(config, "custom") and isinstance(config.custom, dict):
+        if hasattr(config, "custom"):
             for k, v in config.custom.items():
                 setattr(hf_config, k, v)
 
@@ -629,12 +629,24 @@ class PI05(BaseModel):
         if get_rank() == 0:
             fix_input_dir = "/workspace/fix_input"
             os.makedirs(fix_input_dir, exist_ok=True)
+            vision_weights_path = os.path.join(fix_input_dir, "cosmos_vision_weights.pkl")
+            if not os.path.exists(vision_weights_path):
+                vision_tower = self.paligemma_with_expert.paligemma.model.vision_tower
+                vision_prefix = "paligemma_with_expert.paligemma.model.vision_tower."
+                vision_state = {
+                    f"{vision_prefix}{k}": self._to_cpu_detach(v)
+                    for k, v in vision_tower.state_dict().items()
+                }
+                with open(vision_weights_path, "wb") as f:
+                    pickle.dump(vision_state, f)
             prefix_parts_path = os.path.join(fix_input_dir, "cosmos_prefix_parts.pkl")
             if not os.path.exists(prefix_parts_path):
+                img_inputs = [self._to_cpu_detach(x) for x in images]
                 with open(prefix_parts_path, "wb") as f:
                     pickle.dump(
                         self._to_cpu_detach(
                             {
+                                "img_inputs": img_inputs,
                                 "img_embs": _debug_img_embs,
                                 "lang_emb": lang_emb,
                                 "img_masks": img_masks,
@@ -888,6 +900,8 @@ class PI05(BaseModel):
             state = cached["state"]
         else:
             images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+
+        logger.info(f"images: {images[0].dtype}, img_masks: {img_masks[0].dtype}, lang_tokens: {lang_tokens.dtype}, lang_masks: {lang_masks.dtype}, state: {state.dtype}")
 
         if get_rank() == 0:
             os.makedirs(fix_input_dir, exist_ok=True)
@@ -1496,7 +1510,7 @@ class PI05(BaseModel):
     ):
         """
         Load PI05 weights from a HuggingFace-style checkpoint directory/repo.
-        Simple DDP-compatible version that loads weights directly.
+        Uses safetensors.torch.load_model to preserve original dtypes (e.g., float32 for vision embeddings).
         """
         logger.info(f"Loading PI05 weights from {model_name_or_path}")
 
@@ -1506,12 +1520,10 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
-        if any(p.is_meta for p in self.parameters()) or any(
-            b.is_meta for b in self.buffers()
-        ):
-            self.to_empty(device=device)
-        else:
-            self.to(device)
+        self._apply(
+            lambda t: torch.empty_like(t, device=device) if getattr(t, "is_meta", False) else t.to(device),
+            recurse=True,
+        )
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
@@ -1527,9 +1539,9 @@ class PI05(BaseModel):
 
         missing, unexpected = self.load_state_dict(state_dict, strict=True)
         if missing:
-            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
+            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys: {missing}")
         if unexpected:
-            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)")
+            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys: {unexpected}")
 
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):

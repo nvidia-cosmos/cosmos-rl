@@ -286,11 +286,43 @@ class SiglipVisionEmbeddings(nn.Module):
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        embeddings_pre_pos=embeddings
 
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         else:
             embeddings = embeddings + self.position_embedding(self.position_ids)
+        
+        import os, pickle
+        def _cpu(x):
+            return x.detach().cpu() if isinstance(x, torch.Tensor) else x
+        cfg = self.config.to_dict() if hasattr(self.config, "to_dict") else dict(getattr(self.config, "__dict__", {}))
+        payload = {
+            "pixel_values": _cpu(pixel_values),
+            "config": cfg,
+            "embed_dim": self.embed_dim,
+            "image_size": self.image_size,
+            "patch_size": self.patch_size,
+            "num_patches": self.num_patches,
+            "num_positions": self.num_positions,
+            "position_embedding_weight": _cpu(self.position_embedding.weight),
+            "position_ids": _cpu(self.position_ids),
+            "patch_embedding_weight": _cpu(self.patch_embedding.weight),
+            "patch_embedding_bias": _cpu(self.patch_embedding.bias) if self.patch_embedding.bias is not None else None,
+            "target_dtype": str(target_dtype),
+            "height": int(height),
+            "width": int(width),
+            "patch_embeds": _cpu(patch_embeds),
+            "embeddings_pre_pos": _cpu(embeddings_pre_pos),
+            "embeddings": _cpu(embeddings),
+        }
+        path = "/workspace/fix_input/cosmos_visual_embeddings.pkl"
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                pickle.dump(payload, f)
+            logger.info(f"Saved visual embeddings to {path}")
+        else:
+            logger.info(f"Visual embeddings already exists at {path}")
         return embeddings
 
 
@@ -799,7 +831,27 @@ class SiglipVisionTransformer(nn.Module):
         last_hidden_state = encoder_outputs.last_hidden_state
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
+
+        import pickle
+        def _cpu(x):
+            return x.detach().cpu()
+        
+        payload = {
+            "embeddings": _cpu(hidden_states),
+            "last_hidden_state_pre_ln": _cpu(encoder_outputs.last_hidden_state),
+            "last_hidden_state_post_ln": _cpu(last_hidden_state),
+        }
+        path = "/workspace/fix_input/cosmos_siglip_output.pkl"
+        import os
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                pickle.dump(payload, f)
+            logger.info(f"Saved siglip output to {path}")
+        else:
+            logger.info(f"Siglip output already exists at {path}")
+
         pooler_output = self.head(last_hidden_state) if self.use_head else None
+
 
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
