@@ -9,7 +9,6 @@ from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
 import logging
 import math
 import os
-import pickle
 import random
 from types import SimpleNamespace
 
@@ -23,10 +22,8 @@ from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
-from cosmos_rl.utils.wfm.distributed import get_rank, barrier
 from transformers import AutoConfig
 from safetensors import safe_open
-import inspect
 
 
 IMAGE_KEYS = (
@@ -624,59 +621,6 @@ class PI05(BaseModel):
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
 
-        # Dump intermediate prefix parts for comparison with openpi-comet.
-        # Rank0 only; do not overwrite existing file unless user deletes it.
-        if get_rank() == 0:
-            fix_input_dir = "/workspace/fix_input"
-            os.makedirs(fix_input_dir, exist_ok=True)
-            vision_weights_path = os.path.join(fix_input_dir, "cosmos_vision_weights.pkl")
-            if not os.path.exists(vision_weights_path):
-                vision_tower = self.paligemma_with_expert.paligemma.model.vision_tower
-                vision_prefix = "paligemma_with_expert.paligemma.model.vision_tower."
-                vision_state = {
-                    f"{vision_prefix}{k}": self._to_cpu_detach(v)
-                    for k, v in vision_tower.state_dict().items()
-                }
-                with open(vision_weights_path, "wb") as f:
-                    pickle.dump(vision_state, f)
-            prefix_parts_path = os.path.join(fix_input_dir, "cosmos_prefix_parts.pkl")
-            if not os.path.exists(prefix_parts_path):
-                img_inputs = [self._to_cpu_detach(x) for x in images]
-                with open(prefix_parts_path, "wb") as f:
-                    pickle.dump(
-                        self._to_cpu_detach(
-                            {
-                                "img_inputs": img_inputs,
-                                "img_embs": _debug_img_embs,
-                                "lang_emb": lang_emb,
-                                "img_masks": img_masks,
-                                "lang_masks": lang_masks,
-                            }
-                        ),
-                        f,
-                    )
-
-            # Extended debug dump: also store embed_image inputs + weight fingerprints.
-            prefix_debug_path = os.path.join(fix_input_dir, "cosmos_prefix_debug.pkl")
-            if not os.path.exists(prefix_debug_path):
-                # Save pixel_values exactly as passed into embed_image (per-camera).
-                img_inputs = [self._to_cpu_detach(x) for x in images]
-
-                with open(prefix_debug_path, "wb") as f:
-                    pickle.dump(
-                        self._to_cpu_detach(
-                            {
-                                "img_inputs": img_inputs,
-                                "img_embs": _debug_img_embs,
-                                "lang_emb": lang_emb,
-                                "lang_tokens": lang_tokens,
-                                "img_masks": img_masks,
-                                "lang_masks": lang_masks,
-                            }
-                        ),
-                        f,
-                    )
-
         # full attention between image and language inputs
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
@@ -806,145 +750,17 @@ class PI05(BaseModel):
             return new_obj
         return obj
 
-    def _observation_to_plain_dict(self, observation) -> dict:
-        """Convert an observation object into a plain-Python dict (no cosmos_rl classes).
-
-        This is important for pickling: pickled custom classes require the original
-        module path to exist on load (e.g. openpi environment may not have cosmos_rl).
-        """
-        if isinstance(observation, dict):
-            return observation
-
-        out: dict = {}
-        # Keep this in sync with fields used by preprocess_observation_pytorch().
-        for key in (
-            "images",
-            "image_masks",
-            "state",
-            "tokenized_prompt",
-            "tokenized_prompt_mask",
-            "token_ar_mask",
-            "token_loss_mask",
-        ):
-            if hasattr(observation, key):
-                val = getattr(observation, key)
-                # Normalize mapping-like fields to a real dict.
-                if key in ("images", "image_masks") and val is not None and not isinstance(val, dict):
-                    val = dict(val)
-                out[key] = val
-        return out
-
-    def _load_from_disk(self, target_like, path):
-        """Load object from disk and align tensor device/dtype to target_like."""
-        if not os.path.exists(path):
-            return target_like
-
-        with open(path, "rb") as f:
-            loaded = pickle.load(f)
-
-        def align(template, value):
-            if isinstance(template, torch.Tensor) and isinstance(value, torch.Tensor):
-                return value.to(device=template.device, dtype=template.dtype)
-            if isinstance(template, dict) and isinstance(value, dict):
-                # Align keys present in template; keep all other keys from value unchanged.
-                out = dict(value)
-                for k in template:
-                    if k in value:
-                        out[k] = align(template[k], value[k])
-                return out
-            if isinstance(template, (list, tuple)) and isinstance(value, (list, tuple)):
-                aligned = [
-                    align(t, v) for t, v in zip(template, value, strict=False)
-                ]
-                return type(template)(aligned)
-            if hasattr(template, "__dict__") and hasattr(value, "__dict__"):
-                new_obj = object.__new__(type(template))
-                for k, v in vars(template).items():
-                    if k in vars(value):
-                        setattr(new_obj, k, align(v, getattr(value, k)))
-                return new_obj
-            return value
-
-        return align(target_like, loaded)
-
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
-
-        # Fixed input handling: load from files if exist, otherwise save (rank 0 only)
-        fix_input_dir = "/workspace/fix_input"
-        obs_path = os.path.join(fix_input_dir, "observation.pkl")
-        actions_path = os.path.join(fix_input_dir, "actions.pkl")
-        time_path = os.path.join(fix_input_dir, "time.pkl")
-        noise_path = os.path.join(fix_input_dir, "noise.pkl")
-        preproc_dump_path = os.path.join(fix_input_dir, "cosmos_preproc.pkl")
-        forward_dump_path = os.path.join(fix_input_dir, "cosmos_forward.pkl")
-        outputs_dump_path = os.path.join(fix_input_dir, "cosmos_outputs.pkl")
-
-        if os.path.exists(obs_path):
-            # Strict alignment: match dtype+device of the *current* observation fields.
-            obs_template = self._observation_to_plain_dict(observation)
-            loaded_obs = self._load_from_disk(obs_template, obs_path)
-            observation = SimpleNamespace(**loaded_obs)
-        if os.path.exists(actions_path):
-            actions = self._load_from_disk(actions, actions_path)
-
-
-        if os.path.exists(preproc_dump_path):
-            with open(preproc_dump_path, "rb") as f:
-                cached = pickle.load(f)
-            cached = self._move_tensors_to_device(cached, actions.device)
-            images = cached["images"]
-            img_masks = cached["img_masks"]
-            lang_tokens = cached["lang_tokens"]
-            lang_masks = cached["lang_masks"]
-            state = cached["state"]
-        else:
-            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
-
-        logger.info(f"images: {images[0].dtype}, img_masks: {img_masks[0].dtype}, lang_tokens: {lang_tokens.dtype}, lang_masks: {lang_masks.dtype}, state: {state.dtype}")
-
-        if get_rank() == 0:
-            os.makedirs(fix_input_dir, exist_ok=True)
-            if not os.path.exists(preproc_dump_path):
-                with open(preproc_dump_path, "wb") as f:
-                    pickle.dump(
-                        self._to_cpu_detach(
-                            {
-                                "images": images,
-                                "img_masks": img_masks,
-                                "lang_tokens": lang_tokens,
-                                "lang_masks": lang_masks,
-                                "state": state,
-                            }
-                        ),
-                        f,
-                    )
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
+            observation, train=True
+        )
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
-
-        if os.path.exists(noise_path):
-            noise = self._load_from_disk(noise, noise_path)
-        if os.path.exists(time_path):
-            time = self._load_from_disk(time, time_path)
-
-        # # Save fixed inputs if not exist (rank 0 only)
-        # if not os.path.exists(obs_path) and get_rank() == 0:
-        #     os.makedirs(fix_input_dir, exist_ok=True)
-            
-        #     with open(obs_path, "wb") as f:
-        #         # Store a plain dict so loading doesn't require cosmos_rl installed.
-        #         obs_dict = self._observation_to_plain_dict(observation)
-        #         pickle.dump(self._to_cpu_detach(obs_dict), f)
-        #     with open(actions_path, "wb") as f:
-        #         pickle.dump(actions.detach().cpu(), f)
-        #     with open(time_path, "wb") as f:
-        #         pickle.dump(time.detach().cpu(), f)
-        #     with open(noise_path, "wb") as f:
-        #         pickle.dump(noise.detach().cpu(), f)
 
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
@@ -967,43 +783,6 @@ class PI05(BaseModel):
 
         # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
-
-        # Dump RoPE buffers for cross-checking with cosmos-rl.
-        if get_rank() == 0:
-            cosmos_rope_path = os.path.join(fix_input_dir, "cosmos_rope_debug.pkl")
-            if not os.path.exists(cosmos_rope_path):
-                rope = self.paligemma_with_expert.paligemma.model.language_model.rotary_emb
-                try:
-                    from transformers.models.gemma import modeling_gemma as hf_modeling_gemma
-                    modeling_gemma_path = inspect.getfile(hf_modeling_gemma)
-                except Exception:
-                    modeling_gemma_path = None
-                rope_payload = {
-                    "inv_freq": rope.inv_freq.detach().cpu() if hasattr(rope, "inv_freq") else None,
-                    "original_inv_freq": rope.original_inv_freq.detach().cpu()
-                    if hasattr(rope, "original_inv_freq") and isinstance(rope.original_inv_freq, torch.Tensor)
-                    else None,
-                    "attention_scaling": getattr(rope, "attention_scaling", None),
-                    "modeling_gemma_path": modeling_gemma_path,
-                }
-                with open(cosmos_rope_path, "wb") as f:
-                    pickle.dump(self._to_cpu_detach(rope_payload), f)
-
-        if get_rank() == 0:
-            if not os.path.exists(forward_dump_path):
-                with open(forward_dump_path, "wb") as f:
-                    pickle.dump(
-                        self._to_cpu_detach(
-                            {
-                                "prefix_embs": prefix_embs,
-                                "suffix_embs": suffix_embs,
-                                "att_2d_masks_4d": att_2d_masks_4d,
-                                "position_ids": position_ids,
-                                "adarms_cond": adarms_cond,
-                            }
-                        ),
-                        f,
-                    )
 
         # Apply gradient checkpointing if enabled
         def forward_func(
@@ -1036,19 +815,6 @@ class PI05(BaseModel):
             return self.action_out_proj(suffix_out)
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
-
-        if get_rank() == 0:
-            if not os.path.exists(outputs_dump_path):
-                with open(outputs_dump_path, "wb") as f:
-                    pickle.dump(
-                        self._to_cpu_detach(
-                            {
-                                "suffix_out": suffix_out,
-                                "v_t": v_t,
-                            }
-                        ),
-                        f,
-                    )
 
         return F.mse_loss(u_t, v_t, reduction="none")
 
