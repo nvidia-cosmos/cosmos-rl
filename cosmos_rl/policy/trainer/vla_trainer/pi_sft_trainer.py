@@ -35,7 +35,12 @@ from cosmos_rl.policy.trainer.optm import LRSchedulersContainer
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers
-from cosmos_rl.policy.trainer.base import Trainer, TrainerRegistry
+from cosmos_rl.policy.trainer.base import (
+    Trainer,
+    TrainerRegistry,
+    wrap_to_cuda_tensor,
+    extract_from_cuda_tensor,
+)
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.checkpoint import CheckpointMananger
@@ -82,12 +87,102 @@ class PISFTTrainer(Trainer):
                 config.policy.model_gradient_checkpointing
             )
 
-        # init training utils
+        # Materialize meta-initialized parameters on the training device (LLMTrainer-style).
+        self.model._apply(
+            lambda t: torch.empty_like(t, device=self.device)
+            if getattr(t, "is_meta", False)
+            else t.to(self.device),
+            recurse=True,
+        )
+
         self.build_optimizers()
         self.lr_schedulers = None
         self.ckpt_manager = CheckpointMananger(
             self.config, self.parallel_dims, self.global_rank
         )
+
+    def sync_all_states(
+        self,
+        *,
+        is_send: bool,
+        send_hook: callable,
+        recv_hook: callable,
+    ) -> int:
+        """Sync model/optimizer/scheduler/rng across dp_replicate, mirroring LLMTrainer."""
+        len_params = 0
+
+        # 1) model params + buffers
+        state_dict = self.model.state_dict()
+        state_dict.update(dict(self.model.named_buffers()))
+        for dest_name in sorted(state_dict.keys()):
+            obj = state_dict[dest_name]
+            assert isinstance(obj, torch.Tensor)
+            local_view = wrap_to_cuda_tensor(
+                self.device, dest_name, obj, in_place=obj.is_cuda
+            )
+            if is_send:
+                send_hook(local_view)
+            else:
+                recv_hook(local_view)
+                if isinstance(obj, torch.distributed.tensor.DTensor):
+                    to_write = obj.to_local()
+                else:
+                    to_write = obj
+                if not to_write.is_cuda:
+                    to_write.copy_(local_view)
+            len_params += 1
+
+        # 2) optimizer state
+        optimizer_state = self.optimizers.state_dict()
+        for dest_name in sorted(optimizer_state.keys()):
+            obj = optimizer_state[dest_name]
+            local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
+            if local_view.data_ptr() is None:
+                continue
+            if is_send:
+                send_hook(local_view)
+            else:
+                recv_hook(local_view)
+                optimizer_state[dest_name] = extract_from_cuda_tensor(
+                    self.device, dest_name, obj, local_view
+                )
+        if not is_send:
+            self.optimizers.load_state_dict(optimizer_state)
+        len_params += len(optimizer_state)
+
+        # 3) scheduler state
+        if self.lr_schedulers is not None:
+            lr_state = self.lr_schedulers.state_dict()
+            for dest_name in sorted(lr_state.keys()):
+                obj = lr_state[dest_name]
+                local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
+                if is_send:
+                    send_hook(local_view)
+                else:
+                    recv_hook(local_view)
+                    lr_state[dest_name] = extract_from_cuda_tensor(
+                        self.device, dest_name, obj, local_view
+                    )
+            if not is_send:
+                self.lr_schedulers.load_state_dict(lr_state)
+            len_params += len(lr_state)
+
+        # 4) rng_state
+        rng_state = self.ckpt_manager.get_rng_state()
+        for dest_name in sorted(rng_state.keys()):
+            obj = rng_state[dest_name]
+            local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
+            if is_send:
+                send_hook(local_view)
+            else:
+                recv_hook(local_view)
+                rng_state[dest_name] = extract_from_cuda_tensor(
+                    self.device, dest_name, obj, local_view
+                )
+        len_params += len(rng_state)
+        if not is_send:
+            self.ckpt_manager.set_rng_state(rng_state)
+        return len_params
 
 
     def step_training(self, global_batch, total_steps, train_step, save_freq):
@@ -230,23 +325,20 @@ class PISFTTrainer(Trainer):
     def load_model(self):
         ckpt_total_steps = 0
         train_step = 0
-        if (
-            not self.parallel_dims.dp_replicate_enabled
+        if (not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
+            resumed = False
             if self.config.train.resume:
                 try:
-                    # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
                     ckpt_extra_vars = self.model_resume_from_checkpoint()
                     ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
                     train_step = ckpt_extra_vars.get("step", 0)
+                    resumed = True
                 except Exception as e:
                     logger.error(
                         f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                     )
-                    self.lr_schedulers = None
-                    self.build_optimizers()
-                    self.model_load_from_hf()
-            else:
+            if not resumed:
                 self.model_load_from_hf()
         
         if self.parallel_dims.dp_replicate_enabled:
@@ -268,11 +360,8 @@ class PISFTTrainer(Trainer):
                         self.lr_schedulers is not None
                     ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
 
-            send_recv_hook = partial(
-                dist.broadcast,
-                group=self.parallel_dims.mesh["dp_replicate"].get_group(),
-                group_src=0,
-            )
+            group = self.parallel_dims.mesh["dp_replicate"].get_group()
+            send_recv_hook = partial(dist.broadcast, src=0, group=group)
             len_params = self.sync_all_states(
                 is_send=self.parallel_dims.dp_replicate_coord[0] == 0,
                 send_hook=send_recv_hook,
@@ -313,10 +402,10 @@ class PISFTTrainer(Trainer):
     def step_validation(self, *args, **kwargs):
         pass
 
-    def build_lr_schedulers(self, total_steps):
+    def build_lr_schedulers(self, training_steps):
         """OpenPI-aligned warmup + cosine LR scheduler."""
         warmup_steps = int(self.config.train.optm_warmup_steps)
-        decay_steps = total_steps
+        decay_steps = training_steps
 
         def lr_factor(step: int) -> float:
             if step < warmup_steps:

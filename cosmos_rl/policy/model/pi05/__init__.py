@@ -1286,10 +1286,6 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
-        self._apply(
-            lambda t: torch.empty_like(t, device=device) if getattr(t, "is_meta", False) else t.to(device),
-            recurse=True,
-        )
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}

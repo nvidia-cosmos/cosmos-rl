@@ -34,9 +34,9 @@ model_gradient_checkpointing = true
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 8
+dp_shard_size = 1
 pp_size = 1
-dp_replicate_size = 1
+dp_replicate_size = 8
 
 [logging]
 logger = ["console", "wandb"]
