@@ -120,8 +120,20 @@ class ControllerDataFetcher(DataFetcherBase):
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
 
+        # Buffers for undispatched fetched data when data_dispatch_as_rank_in_mesh is enabled.
+        self.fetched_data_buffer: List = []
+        self.fetched_data_buffer_for_validation: List = []
+        # Index to track which policy rank the fetched data next belongs to.
+        self.data_fetch_policy_rank_index = 0
+
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
+
+    def set_rollout_global_mesh_size(self, global_mesh_size: int):
+        self.rollout_global_mesh_size = global_mesh_size
+
+    def set_policy_global_mesh_size(self, global_mesh_size: int):
+        self.policy_global_mesh_size = global_mesh_size
 
     def load_dataset(self):
         """
@@ -371,7 +383,10 @@ class ControllerDataFetcher(DataFetcherBase):
         self.remain_samples_num = remain_samples_num
 
     def get_batched_prompt(
-        self, n: int, validation_step: Optional[int] = None
+        self,
+        n: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         add_answer = (
             self.config.rollout.multi_turn_config.enable
@@ -386,9 +401,11 @@ class ControllerDataFetcher(DataFetcherBase):
         if is_validation:
             iterator = self.validation_get_dataloader(validation_step)
             batch_size = self.val_batch_size
+            fetched_data_buffer = self.fetched_data_buffer_for_validation
         else:
             iterator = self.train_dataloader_iter
             batch_size = self.rollout_batch_size
+            fetched_data_buffer = self.fetched_data_buffer
 
         def _next_payload(
             iterator, add_answer: bool
@@ -411,47 +428,110 @@ class ControllerDataFetcher(DataFetcherBase):
                 updated_payloads.append(payload)
             return idxs, updated_payloads
 
-        for _ in range(math.ceil(n / batch_size)):
-            payload: RLPayload | None = None
-            try:
-                idxs, payloads = _next_payload(iterator, add_answer)
-            except StopIteration:
-                if not is_validation:
-                    self.epoch += 1
-                    if hasattr(self.train_sampler, "set_epoch"):
-                        # Here the epoch from 1 to total epoch count, not start from 0
-                        self.train_sampler.set_epoch(self.epoch)
-                    if self.epoch <= self.config.train.epoch:
-                        logger.info(f"[Controller] Epoch {self.epoch} start.")
-                        iterator = iter(self.train_dataloader)
-                        self.train_dataloader_iter = iterator
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            """
+            First use the fetched_data_buffer to fill the payloads_list.
+            Then fetch new data from the iterator until we have n payloads or the iterator is exhausted.
+            """
+            assert (
+                rank_in_mesh is not None
+            ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            while n - len(payloads_list) > 0:
+                found = False
+                for index, data in enumerate(fetched_data_buffer):
+                    if data[0] % self.rollout_global_mesh_size == rank_in_mesh and (
+                        data[0] % self.policy_global_mesh_size
+                        == self.data_fetch_policy_rank_index
+                        or is_validation
+                    ):
+                        payloads_list.append(data[1])
+                        self.data_fetch_policy_rank_index = (
+                            self.data_fetch_policy_rank_index + 1
+                        ) % self.policy_global_mesh_size
+                        found = True
+                        break
+                if found:
+                    fetched_data_buffer = (
+                        fetched_data_buffer[:index] + fetched_data_buffer[index + 1 :]
+                    )
+                else:
+                    break
 
-                        idxs, payloads = _next_payload(iterator, add_answer)
+        while n - len(payloads_list) > 0:
+            for _ in range(math.ceil(n / batch_size)):
+                payload: RLPayload | None = None
+                try:
+                    idxs, payloads = _next_payload(iterator, add_answer)
+                except StopIteration:
+                    if not is_validation:
+                        self.epoch += 1
+                        if hasattr(self.train_sampler, "set_epoch"):
+                            # Here the epoch from 1 to total epoch count, not start from 0
+                            self.train_sampler.set_epoch(self.epoch)
+                        if self.epoch <= self.config.train.epoch:
+                            logger.info(f"[Controller] Epoch {self.epoch} start.")
+                            iterator = iter(self.train_dataloader)
+                            self.train_dataloader_iter = iterator
+
+                            idxs, payloads = _next_payload(iterator, add_answer)
+                        else:
+                            if self.epoch == self.config.train.epoch + 1:
+                                # We only log this all finished information once.
+                                logger.info(
+                                    "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
+                                )
+                            is_end = True
+                            break
                     else:
-                        if self.epoch == self.config.train.epoch + 1:
-                            # We only log this all finished information once.
-                            logger.info(
-                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
-                            )
                         is_end = True
                         break
-                else:
-                    is_end = True
-                    break
-            assert len(idxs) == len(payloads)
-            for idx, payload in zip(idxs, payloads):
-                idx = idx.item() if isinstance(idx, torch.Tensor) else idx
-                if self.config.train.local_dataset:
-                    # If local dataset is enabled, we set prompt to None. And rollout worker will query
-                    # the prompt from local dataset.
-                    payload.prompt = None
-                    payload.conversation = None
-                    if not self.config.rollout.multi_turn_config.enable:
-                        # For non-multi-turn rollout, we set reference answer to None.
-                        payload.reference_answer = None
-
-                payloads_list.append(payload)
-
+                assert len(idxs) == len(payloads)
+                for idx, payload in zip(idxs, payloads):
+                    idx = idx.item() if isinstance(idx, torch.Tensor) else idx
+                    if self.config.train.local_dataset:
+                        # If local dataset is enabled, we set prompt to None. And rollout worker will query
+                        # the prompt from local dataset.
+                        payload.prompt = None
+                        payload.conversation = None
+                        if not self.config.rollout.multi_turn_config.enable:
+                            # For non-multi-turn rollout, we set reference answer to None.
+                            payload.reference_answer = None
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                        assert (
+                            rank_in_mesh is not None
+                        ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        if (
+                            idx % self.rollout_global_mesh_size == rank_in_mesh
+                            and (
+                                idx % self.policy_global_mesh_size
+                                == self.data_fetch_policy_rank_index
+                                or is_validation
+                            )
+                            and len(payloads_list) < n
+                        ):
+                            payloads_list.append(payload)
+                            self.data_fetch_policy_rank_index = (
+                                self.data_fetch_policy_rank_index + 1
+                            ) % self.policy_global_mesh_size
+                        else:
+                            # For data_dispatch_as_rank_in_mesh, we store the fetched data into the buffer if not suitable for current rank_in_mesh.
+                            fetched_data_buffer.append((idx, payload))
+                    else:
+                        payloads_list.append(payload)
+            if (
+                is_end
+                or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+            ):
+                break
+        # For data_dispatch_as_rank_in_mesh, we only allow is_end to be True when there is no more data suitable for current rank_in_mesh.
+        is_end = is_end and (
+            len(payloads_list) == 0
+            or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+        )
+        if is_validation:
+            self.fetched_data_buffer_for_validation = fetched_data_buffer
+        else:
+            self.fetched_data_buffer = fetched_data_buffer
         return payloads_list, is_end
 
     def validation_activate_dataloader(self, validation_step: int):

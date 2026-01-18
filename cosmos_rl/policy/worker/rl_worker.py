@@ -263,6 +263,14 @@ class RLPolicyWorker(PolicyWorkerBase):
                     f"[Policy] Failed to get rollouts: {e}, wait for next round"
                 )
             for rollout in rollouts:
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    assert (
+                        rollout.prompt_idx
+                        % len(self.inter_policy_nccl.replica_name_to_rank)
+                        == self.inter_policy_nccl.replica_name_to_rank[
+                            self.replica_name
+                        ]
+                    )
                 self.data_queue.put_nowait(rollout)
                 if rollout.teacher_result_uuid:
                     self.teacher_prefetch_queue.put_nowait(rollout.teacher_result_uuid)

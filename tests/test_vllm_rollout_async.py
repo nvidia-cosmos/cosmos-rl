@@ -102,7 +102,10 @@ class MockAPIClient(APIClient):
         logger.info(f"[MockAPIClient] Unregister: {replica_name}")
 
     def get_next_prompt(
-        self, batch_size: int, validation_step: Optional[int] = None
+        self,
+        batch_size: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[Tuple[int, str]], bool]:
         # masked validation_step for testing
         validation_step = None

@@ -191,7 +191,7 @@ maxmemory-policy allkeys-lfu
             hook_fns=hook_fns,
         )
         self.rollout_status_manager.setup(
-            config, self.redis_controller, self.policy_status_manager
+            config, self.redis_controller, self.policy_status_manager, self.data_fetcher
         )
 
         # Register the exit function to be called when the program exits
@@ -234,6 +234,7 @@ maxmemory-policy allkeys-lfu
         self,
         n: int,
         validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
         # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
@@ -328,7 +329,7 @@ maxmemory-policy allkeys-lfu
                     )
 
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step
+                n, validation_step, rank_in_mesh
             )
             current_fetch_count = len(payloads_list)
             # record the number of valid prompts for current weight version
@@ -365,7 +366,7 @@ maxmemory-policy allkeys-lfu
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step
+                n, validation_step, rank_in_mesh
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):

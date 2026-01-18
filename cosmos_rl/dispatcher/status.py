@@ -130,6 +130,9 @@ class PolicyStatusManager:
         # Record filter rewards distribution for dynamic sampling
         self.filter_records = {}
 
+        # For rank specific data dispatch
+        self.rollout_buffer_per_rank: List[Queue] = []
+
     def setup(
         self,
         config: Config,
@@ -457,6 +460,23 @@ class PolicyStatusManager:
             sorted_valid_replicas, redis_handler=self.redis_handler
         )
         self.recompute_total_steps()
+        self.data_fetcher.set_policy_global_mesh_size(len(sorted_valid_replicas))
+        self.rearrange_rollout_buffer_after_mesh_rebuild(sorted_valid_replicas)
+
+    def rearrange_rollout_buffer_after_mesh_rebuild(
+        self, sorted_valid_replicas: List[Replica]
+    ):
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            new_rollout_buffer_per_rank: List[Queue[Rollout]] = [
+                Queue() for _ in range(len(sorted_valid_replicas))
+            ]
+            for q in self.rollout_buffer_per_rank:
+                while not q.empty():
+                    rollout: Rollout = q.get()
+                    new_rollout_buffer_per_rank[
+                        rollout.prompt_idx % len(sorted_valid_replicas)
+                    ].put(rollout)
+            self.rollout_buffer_per_rank = new_rollout_buffer_per_rank
 
     def post_register_hook(
         self,
@@ -668,6 +688,8 @@ class PolicyStatusManager:
         """
         Get the total pending rollouts.
         """
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            return sum(q.qsize() for q in self.rollout_buffer_per_rank)
         return self.rollout_buffer.qsize()
 
     def get_all_atoms_arrived_replicas(self) -> List[Replica]:
@@ -696,7 +718,12 @@ class PolicyStatusManager:
                         rollout.completed_conversation[
                             -1
                         ].content += self.tokenizer.eos_token
-        self.rollout_buffer.put(rollout)
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            # Dispatch based on prompt idx
+            target_rank = rollout.prompt_idx % len(self.rollout_buffer_per_rank)
+            self.rollout_buffer_per_rank[target_rank].put(rollout)
+        else:
+            self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 
     def put_rollouts(self, rollouts: List[Rollout]):
@@ -1010,6 +1037,13 @@ class PolicyStatusManager:
             # Colocated mode always has enough rollouts since they are locally prepared.
             return True
 
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            # In this dispatch mode, each rank has its own rollout buffer.
+            return all(
+                q.qsize() >= self.config.train.train_batch_per_replica
+                for q in self.rollout_buffer_per_rank
+            )
+
         return self.total_pending_rollouts() >= (
             self.config.train.train_batch_per_replica
             * len(self.get_all_atoms_arrived_replicas())
@@ -1063,11 +1097,21 @@ class PolicyStatusManager:
             # Interleave-style data dispatch
             if not self.config.mode == "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
-                for _ in range(items_count):
-                    for replica in arrived_replicas:
-                        rollout = self.rollout_buffer.get()
-                        replica.put_rollout(rollout, self.redis_handler)
-                        rollouts_of_this_step.append(rollout)
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    sorted_valid_replicas = sorted(
+                        arrived_replicas, key=lambda x: x.start_time
+                    )
+                    for index, replica in enumerate(sorted_valid_replicas):
+                        for _ in range(items_count):
+                            rollout = self.rollout_buffer_per_rank[index].get()
+                            replica.put_rollout(rollout, self.redis_handler)
+                            rollouts_of_this_step.append(rollout)
+                else:
+                    for _ in range(items_count):
+                        for replica in arrived_replicas:
+                            rollout = self.rollout_buffer.get()
+                            replica.put_rollout(rollout, self.redis_handler)
+                            rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
@@ -1184,11 +1228,14 @@ class RolloutStatusManager:
         config: Config,
         redis_handler: RedisStreamHandler,
         policy_status_manager: PolicyStatusManager,
+        data_fetcher: ControllerDataFetcher,
     ):
         self.redis_handler = redis_handler
         self.config = config
         # Rollout status manager has to access some information throug policy status manager.
         self.policy_status_manager = policy_status_manager
+        # Data fetcher is needed to set global mesh size when rebuilding mesh for replica specific dispatch.
+        self.data_fetcher = data_fetcher
         """
         Maintain the life status of the policy and rollout replicas.
         """
@@ -1354,6 +1401,7 @@ class RolloutStatusManager:
         command.BuildMeshCommand.trigger(
             sorted_valid_replicas, redis_handler=self.redis_handler
         )
+        self.data_fetcher.set_rollout_global_mesh_size(len(sorted_valid_replicas))
 
     def post_register_hook(
         self,
