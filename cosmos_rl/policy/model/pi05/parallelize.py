@@ -20,14 +20,9 @@ def apply_ddp(
 ):
     """Apply DDP to the model."""
     if enable_compile:
-        if enable_compiled_autograd:
-            torch._dynamo.config.optimize_ddp = (
-                "python_reducer_without_compiled_forward"
-            )
-        else:
-            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+        torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100, find_unused_parameters=True)
     logger.info("Applied DDP to PI05 model")
 
 
@@ -42,23 +37,28 @@ def parallelize(
 
     Note: PI05 only supports DDP, not TP/PP/FSDP.
     """
-    world_mesh = parallel_dims.mesh
-
     # Check unsupported parallelism
     if parallel_dims.tp > 1:
         raise ValueError("PI05 does not support tensor parallelism")
     if parallel_dims.pp > 1:
         raise ValueError("PI05 does not support pipeline parallelism")
+    if parallel_dims.cp > 1:
+        raise ValueError("PI05 does not support context parallelism")
+    if parallel_dims.dp_shard > 1:
+        raise ValueError("PI05 does not support dp_shard (FSDP-style sharding)")
 
-    # Apply DDP
-    if world_mesh.ndim > 1:
-        raise RuntimeError("PI05 DDP only supports 1D parallelism")
-
-    apply_ddp(
-        model,
-        world_mesh,
-        enable_compile=config.train.compile,
-        enable_compiled_autograd=config.train.compile,
-    )
+    # Apply DDP replicate, using the 1D dp_replicate submesh from Cosmos' N-D mesh.
+    # Cosmos always includes a dp_shard dim in the global mesh (even if size=1), so
+    # `parallel_dims.mesh` is often >1D. PI05 should replicate only across dp_replicate.
+    if parallel_dims.dp_replicate_enabled:
+        dp_mesh = parallel_dims.mesh["dp_replicate"]
+        apply_ddp(
+            model,
+            dp_mesh,
+            enable_compile=config.train.compile,
+            enable_compiled_autograd=config.train.compile,
+        )
+    else:
+        logger.info("PI05 running without DDP replicate (dp_replicate_size=1)")
 
     return None, None

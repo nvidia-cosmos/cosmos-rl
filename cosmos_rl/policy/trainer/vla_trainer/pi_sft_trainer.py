@@ -30,11 +30,8 @@ import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import math
 
-from cosmos_rl.policy.trainer.optm import LRSchedulersContainer
-
-
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.trainer.optm import build_optimizers
+from cosmos_rl.policy.trainer.optm import build_optimizers, LRSchedulersContainer
 from cosmos_rl.policy.trainer.base import (
     Trainer,
     TrainerRegistry,
@@ -45,6 +42,22 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.policy.model import ModelRegistry
+
+
+def openpi_lr_factor(step: int, warmup_steps: int, decay_steps: int, min_lr_factor: float = 0.0) -> float:
+    """
+    OpenPI-comet-aligned LR schedule (returns multiplicative factor for LambdaLR).
+    
+    Warmup: 1/(warmup_steps+1) -> 1 (matches OpenPI JAX init_lr = peak_lr/(warmup_steps+1))
+    Decay: cosine from 1 -> min_lr_factor
+    """
+    if warmup_steps > 0 and step < warmup_steps:
+        init_factor = 1.0 / (warmup_steps + 1)
+        return init_factor + (1.0 - init_factor) * step / warmup_steps
+
+    progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
+    cos = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_lr_factor + (1.0 - min_lr_factor) * cos
 
 
 @TrainerRegistry.register(trainer_type="pi_sft")
@@ -83,17 +96,29 @@ class PISFTTrainer(Trainer):
 
         # init model
         self.model = ModelRegistry.build_model(self.config)
+
+        if config.train.fsdp_offload:
+            self.model._apply(
+                lambda t: torch.empty_like(t, device="cpu")
+                if t.device.type == "meta"
+                else t.to("cpu"),
+                recurse=True,
+            )
+        else:
+            self.model._apply(
+                lambda t: torch.empty_like(t, device=self.device)
+                if getattr(t, "is_meta", False)
+                else t.to(self.device),
+                recurse=True,
+            )
+
+        parallelize_fn, _ = self.model.parallelize_fn
+        parallelize_fn(self.model, parallel_dims, config, pp_loss_fn=None)
+        self.model.post_to_empty_hook(config)
+
         self.model.set_gradient_checkpointing_enabled(
                 config.policy.model_gradient_checkpointing
             )
-
-        # Materialize meta-initialized parameters on the training device (LLMTrainer-style).
-        self.model._apply(
-            lambda t: torch.empty_like(t, device=self.device)
-            if getattr(t, "is_meta", False)
-            else t.to(self.device),
-            recurse=True,
-        )
 
         self.build_optimizers()
         self.lr_schedulers = None
@@ -192,12 +217,14 @@ class PISFTTrainer(Trainer):
         start_event.record()
 
         # prepare lr and optimizer state
-        self.optimizers.zero_grad()
         if self.lr_schedulers is None:
             assert (
                 train_step == 0
             ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
-            self.lr_schedulers = self.build_lr_schedulers(total_steps)
+            self.lr_schedulers = self.build_lr_schedulers(training_steps=total_steps)
+
+        self.lr_schedulers.step()
+        self.optimizers.zero_grad()
         
         # split global_batch into mini_batches
         global_batch_size = len(global_batch)
@@ -218,7 +245,7 @@ class PISFTTrainer(Trainer):
             observation = self._move_observation_to_device(observation)
             actions = actions.to(dtype=torch.float32, device=self.device)
             loss = self.model(observation, actions)
-            loss.mean().backward()
+            (loss.mean()/len(mini_batch_begin_idxs)).backward()
             acc_loss += loss.mean().detach()
         # Average loss over all mini-batches for logging
         acc_loss = acc_loss / len(mini_batch_begin_idxs)
@@ -236,7 +263,6 @@ class PISFTTrainer(Trainer):
 
         # optimizer step
         self.optimizers.step()
-        self.lr_schedulers.step()
 
         # # official implementation applies a more aggressive gradient clipping here.
         # for param in self.model.parameters():
@@ -402,19 +428,18 @@ class PISFTTrainer(Trainer):
     def step_validation(self, *args, **kwargs):
         pass
 
-    def build_lr_schedulers(self, training_steps):
-        """OpenPI-aligned warmup + cosine LR scheduler."""
+    def build_lr_schedulers(self, training_steps: int, **_kwargs):
+        """OpenPI-comet-aligned warmup + cosine LR scheduler using LambdaLR."""
         warmup_steps = int(self.config.train.optm_warmup_steps)
-        decay_steps = training_steps
+        min_lr_factor = 0.0
 
-        def lr_factor(step: int) -> float:
-            if step < warmup_steps:
-                init_factor = 1.0 / (warmup_steps + 1)
-                return init_factor + (1.0 - init_factor) * step / warmup_steps
-            progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        return LRSchedulersContainer(self.optimizers, lr_factor)
+        lr_lambda = partial(
+            openpi_lr_factor,
+            warmup_steps=warmup_steps,
+            decay_steps=training_steps,
+            min_lr_factor=min_lr_factor,
+        )
+        return LRSchedulersContainer(self.optimizers, lr_lambda)
 
     def export_safetensors(self, *args, **kwargs):
         pass
