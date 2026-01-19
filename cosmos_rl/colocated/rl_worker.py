@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch.utils.data import Dataset
+from typing import Callable, Optional, List
+
 from cosmos_rl.colocated.controller import ColocatedController
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
-from torch.utils.data import Dataset
-from typing import Callable, Optional
 from cosmos_rl.utils.logging import logger
-from typing import List
 from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.policy.worker.colocated.policy_control import (
     ColocatedPolicyControlWorker,

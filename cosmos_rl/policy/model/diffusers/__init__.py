@@ -27,7 +27,8 @@ from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import DiffusersConfig
-from cosmos_rl.policy.config import LoraConfig as cosmos_lora_config
+from cosmos_rl.policy.config import LoraConfig as CosmosLoraConfig
+from cosmos_rl.utils.util import str2torch_dtype
 
 from peft import LoraConfig, get_peft_model_state_dict
 
@@ -48,12 +49,13 @@ class DiffuserModel(BaseModel, ABC):
     def __init__(
         self,
         config: DiffusersConfig,
-        lora_config: cosmos_lora_config = None,
+        lora_config: CosmosLoraConfig = None,
         model_str: str = "",
     ):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
+        self.dtype = str2torch_dtype(config.dtype)
         self.load_models_from_hf(model_str)
         if lora_config is not None:
             self.is_lora = True
@@ -117,7 +119,7 @@ class DiffuserModel(BaseModel, ABC):
         return self.model_parts
 
     @property
-    def trainable_parameters(self):
+    def trainable_params(self):
         # Get all trainable parameters
         return [
             params for params in self.transformer.parameters() if params.requires_grad
@@ -167,7 +169,7 @@ class DiffuserModel(BaseModel, ABC):
         self.model_str = model_str
         # Always init on cuda now
         self.pipeline = DiffusionPipeline.from_pretrained(
-            model_str, torch_dtype=torch.get_default_dtype(), device_map="cuda"
+            model_str, torch_dtype=self.dtype, device_map="cuda"
         )
 
         # Register all model parts to self
@@ -180,7 +182,7 @@ class DiffuserModel(BaseModel, ABC):
         Model initialize entrypoiny
         """
         return cls(
-            config.policy.diffusers_config,
+            config.policy.diffusers,
             lora_config=config.policy.lora,
             model_str=config.policy.model_name_or_path,
         )
@@ -347,7 +349,10 @@ class DiffuserModel(BaseModel, ABC):
             init_lora_weights=lora_config.init_lora_weights,
             target_modules=lora_config.target_modules,
         )
-        self.transformer.add_adapter(transformer_lora_config)
+        for lora_name in lora_config.lora_names:
+            self.transformer.add_adapter(
+                adapter_config=transformer_lora_config, adapter_name=lora_name
+            )
 
     @property
     def trained_model(self):

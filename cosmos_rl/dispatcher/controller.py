@@ -114,6 +114,7 @@ class Controller:
             )
 
         self.is_rl = task_type != "sft"
+        self.is_diffusers = self.config.policy.is_diffusers
         self.weight_version_to_prompt_num = {}  # Only for on-policy.
 
         self.data_fetcher = ControllerDataFetcher(
@@ -182,7 +183,7 @@ maxmemory-policy allkeys-lfu
             if self.is_rl
             else 0,
             tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
-            if self.is_rl
+            if (self.is_rl and not self.is_diffusers)
             else None,
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,

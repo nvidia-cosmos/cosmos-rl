@@ -92,6 +92,11 @@ class DatasetConfig(BaseModel):
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
 
+    local_dir: str = Field(
+        default="",
+        description="Local path to load dataset",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.split, str):
@@ -245,6 +250,18 @@ class OverlongRewardConfig(BaseModel):
     )
 
 
+class RemoteRewardConfig(BaseModel):
+    enabled: bool = True
+    score_key: str = "overall_reward"
+    scale: float = 1.0
+    reward_fn: Dict[str, float] = Field(
+        default_factory=lambda: {"dance_grpo": 1.0},
+        description="Dictionary of reward functions and their weights for remote reward calculation.",
+    )
+    reward_clip_min: float = -5.0
+    reward_clip_max: float = 5.0
+
+
 class GrpoConfig(BaseModel):
     type: Literal["grpo"]
 
@@ -295,6 +312,14 @@ class GrpoConfig(BaseModel):
         default_factory=lambda: ["single_choice"],
         description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
     )
+    use_remote_reward: bool = Field(
+        default=False,
+        description="Whether to use remote reward calculation. If set to True, the reward calculation will be done in a remote worker. If False, the reward calculation will be done in the local process.",
+    )
+    remote_reward: RemoteRewardConfig = Field(
+        default_factory=RemoteRewardConfig,
+        description="Configuration for remote reward calculation.",
+    )
     filter_reward_metric: Union[str, List[str]] = Field(
         default_factory=list,
         description="Reward function to filter in dynamic sampling for DAPO. If specified, only samples with different this rewards will be used for training. If None, no filtering will be applied.",
@@ -317,6 +342,15 @@ class GrpoConfig(BaseModel):
         default=0.2,
         description="Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the "
         "lower-bound specified in argument `epsilon`. Paper DAPO recommends `0.28`.",
+    )
+
+    advantage_low: float = Field(
+        default=-5.0,
+        description="Lower-bound advantage value for clipping.",
+    )
+    advantage_high: float = Field(
+        default=5.0,
+        description="Upper-bound advantage value for clipping.",
     )
 
     positive_nll_coef: Optional[float] = Field(
@@ -626,6 +660,17 @@ class TrainingConfig(BaseModel):
         default=1.0, description="Gradient norm clip for optimizer"
     )
 
+    # --------- EMA ---------
+    ema_enable: bool = Field(
+        default=False,
+        description="Whether to enable EMA for model parameters. Only support diffusers models for now.",
+    )
+    ema_decay: float = Field(default=0.9999, description="Decay rate for EMA")
+    ema_update_step_interval: int = Field(
+        default=0,
+        description="Interval steps to update EMA parameters, 0 means update every step",
+    )
+
     # --------- FSDP ---------
 
     master_dtype: str = Field(
@@ -803,6 +848,13 @@ class RolloutParallelismConfig(ParallelismConfig):
 
 class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
+    lora_names: List[str] = Field(
+        default=["default"],
+        description="A List of name for the LoRA adapters. If multiple names are provided, then multiple LoRA adapters will be created and trained simultaneously.",
+    )
+    lora_path: Optional[str] = Field(
+        default=None, description="Path to pre-trained LoRA weights"
+    )
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
     lora_dropout: float = Field(default=0.0, description="LoRA dropout")
     target_modules: Union[List[str], str] = Field(
@@ -850,7 +902,39 @@ class LoraConfig(BaseModel):
         return self
 
 
+class SampleConfig(BaseModel):
+    num_steps: int = Field(
+        default=40, description="Number of sampler inference steps for training"
+    )
+    eval_num_steps: int = Field(
+        default=40, description="Number of sampler inference steps for evaluation"
+    )
+    guidance_scale: float = Field(
+        default=4.5, description="Classifier-free guidance weight"
+    )
+    global_std: bool = Field(
+        default=True, description="Whether to use all samples in a batch to compute std"
+    )
+    noise_level: float = Field(default=1.0, description="Noise level for sampling")
+    deterministic_sampling: bool = Field(
+        default=False, description="Whether to use deterministic sampling"
+    )
+    solver: str = Field(default="dpm2", description="Sampler solver to be used")
+
+
+class TokenizerConfig(BaseModel):
+    chunk_duration: int = 81
+    load_mean_std: bool = False
+    compile_encode: bool = False
+    temporal_window: int = 16
+
+
 class DiffusersConfig(BaseModel):
+    dtype: str = Field(
+        default="float16",
+        description="Data type for diffusers model",
+        choices=["float16", "bfloat16", "float32"],
+    )
     is_video: bool = Field(
         default=False, description="True if this model is video generate model"
     )
@@ -885,18 +969,27 @@ class DiffusersConfig(BaseModel):
     train_frames: int = Field(
         default=41, description="Total frame of video size for training"
     )
-    inference_step: int = Field(
-        default=50, description="Total denoise step used for validation generation"
+    timesteps_fraction: float = Field(
+        default=1.0,
+        description="Fraction of timesteps to use during training. if set to less than 1.0, the model will be trained on a subset of the timesteps for each sample. this will speed up training but reduce the accuracy of policy gradient estimates.",
     )
-    guidance_scale: float = Field(
-        default=4.5, description="CFG guidance scale for validation generation"
+    weight_copy_decay_type: int = Field(
+        default=0,
+        description="Weight copy decay type for diffusers model in rl training",
     )
+    lora: LoraConfig | None = Field(
+        default=None, description="LoRA configuration for diffusers model"
+    )
+    sample: SampleConfig = Field(
+        default_factory=SampleConfig, description="Sampling configuration"
+    )
+    tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)
 
 
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
 
-    diffusers_config: Optional[DiffusersConfig] = Field(default_factory=DiffusersConfig)
+    diffusers: Optional[DiffusersConfig] = Field(default_factory=DiffusersConfig)
 
     is_diffusers: bool = Field(
         default=False, description="Whether this model is diffusers or not"
@@ -1419,7 +1512,13 @@ class Config(BaseModel):
             # Determine the type based on characteristic fields
             if any(
                 key in train_policy_data
-                for key in ["temperature", "epsilon_low", "epsilon_high", "kl_beta"]
+                for key in [
+                    "temperature",
+                    "epsilon_low",
+                    "epsilon_high",
+                    "kl_beta",
+                    "use_remote_reward",
+                ]
             ):
                 data["train"]["train_policy"]["type"] = "grpo"
             else:

@@ -42,7 +42,7 @@ from diffusers.utils import export_to_video
 
 
 @TrainerRegistry.register(trainer_type="diffusers_sft")
-class Diffusers_SFTTrainer(DiffusersTrainer):
+class SFTTrainer(DiffusersTrainer):
     def __init__(
         self,
         config: CosmosConfig,
@@ -52,7 +52,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         val_data_packer: Optional[BaseDataPacker] = None,
         **kwargs,
     ):
-        super(Diffusers_SFTTrainer, self).__init__(
+        super(SFTTrainer, self).__init__(
             config,
             parallel_dims,
             train_stream,
@@ -167,7 +167,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             loss_term["loss"].mean().backward()
 
         acc_loss += loss_term["loss"].detach()
-        all_params = self.model.trainable_parameters
+        all_params = self.model.trainable_params
 
         grad_norm = dist_util.gradient_norm_clipping(
             all_params,

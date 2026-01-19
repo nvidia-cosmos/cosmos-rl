@@ -1408,3 +1408,9 @@ def aggregate_report_data(
                     [data.get(k, 0) for data in report_data_list]
                 )
     return report_data
+
+
+def copy_weights(src_params, tgt_params):
+    for src_param, tgt_param in zip(src_params, tgt_params, strict=True):
+        tgt_param.data.copy_(src_param.detach().data)
+        assert src_param is not tgt_param

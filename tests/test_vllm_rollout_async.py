@@ -39,7 +39,7 @@ from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.utils import async_utils
-from cosmos_rl.reward.reward_calculator import RewardCalculator
+from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
 
 def override_environment(port: int = 29500) -> dict[str, str]:
@@ -292,9 +292,9 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         os.environ.update(self.old_env)
         destroy_distributed()
 
-        # clean singleton instance of RewardCalculator
-        if hasattr(RewardCalculator, "_instance"):
-            delattr(RewardCalculator, "_instance")
+        # clean singleton instance of LocalRewardCalculator
+        if hasattr(LocalRewardCalculator, "_instance"):
+            delattr(LocalRewardCalculator, "_instance")
 
     def test_async_rollout_worker_1gpu(self):
         """Test async rollout worker."""

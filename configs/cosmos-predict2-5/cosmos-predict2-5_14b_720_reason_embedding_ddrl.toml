@@ -245,7 +245,7 @@ offline_text_embedding = false
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos_predict2-5_2b_720_reason_embedding_ddrl"
+name = "cosmos-predict2-5_2b_720_reason_embedding_ddrl"
 wandb_mode = "online"
 
 [checkpoint]

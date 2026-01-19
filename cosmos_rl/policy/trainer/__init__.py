@@ -22,8 +22,11 @@ from cosmos_rl.policy.trainer.base import Trainer
 from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
     DiffusersTrainer,
 )
-from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_sfttrainer import (
-    Diffusers_SFTTrainer,
+from cosmos_rl.policy.trainer.diffusers_trainer.sft_trainer import (
+    SFTTrainer as Diffusers_SFTTrainer,
+)
+from cosmos_rl.policy.trainer.diffusers_trainer.nft_trainer import (
+    NFTTrainer,
 )
 
 __all__ = [
@@ -35,4 +38,5 @@ __all__ = [
     "Trainer",
     "DiffusersTrainer",
     "Diffusers_SFTTrainer",
+    "NFTTrainer",
 ]

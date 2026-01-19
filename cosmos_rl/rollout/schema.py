@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Dict, Union, Any
 from pydantic import BaseModel
 from cosmos_rl.dispatcher.data.schema import ConversationType
 
@@ -48,3 +48,6 @@ class RolloutResult(BaseModel):
 
     # The token ids of the input prompt consider top_k tokens
     prompt_token_ids: Optional[List[List[int]]] = None
+
+    # The extra information returned by the rollout engine
+    extra_info: Optional[Dict[str, Any]] = None
