@@ -27,6 +27,7 @@ from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import DiffusersConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import LoraConfig as CosmosLoraConfig
 from cosmos_rl.utils.util import str2torch_dtype
 
@@ -51,12 +52,13 @@ class DiffuserModel(BaseModel, ABC):
         config: DiffusersConfig,
         lora_config: CosmosLoraConfig = None,
         model_str: str = "",
+        model_revision: str = "main",
     ):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
         self.dtype = str2torch_dtype(config.dtype)
-        self.load_models_from_hf(model_str)
+        self.load_models_from_hf(model_str, model_revision)
         if lora_config is not None:
             self.is_lora = True
             self.apply_lora(lora_config)
@@ -158,7 +160,7 @@ class DiffuserModel(BaseModel, ABC):
                 f"{self.model_str} have neither video_processor or image_processor, may not be a valid pipeline"
             )
 
-    def load_models_from_hf(self, model_str: str):
+    def load_models_from_hf(self, model_str: str, revision: str = "main"):
         """
         Load all models
 
@@ -169,7 +171,7 @@ class DiffuserModel(BaseModel, ABC):
         self.model_str = model_str
         # Always init on cuda now
         self.pipeline = DiffusionPipeline.from_pretrained(
-            model_str, torch_dtype=self.dtype, device_map="cuda"
+            model_str, revision=revision, torch_dtype=self.dtype, device_map="cuda"
         )
 
         # Register all model parts to self
@@ -177,14 +179,17 @@ class DiffuserModel(BaseModel, ABC):
         self.register_models()
 
     @classmethod
-    def from_pretrained(cls, config, diffusers_config_args):
+    def from_pretrained(
+        cls, config: CosmosConfig, model_str: str, model_revision: str = "main"
+    ):
         """
         Model initialize entrypoiny
         """
         return cls(
             config.policy.diffusers,
             lora_config=config.policy.lora,
-            model_str=config.policy.model_name_or_path,
+            model_str=model_str,
+            model_revision=model_revision,
         )
 
     @classmethod

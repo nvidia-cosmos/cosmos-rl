@@ -1,0 +1,108 @@
+redis = "12800"
+mode = "colocated"
+
+[policy]
+model_name_or_path = "nvidia/Cosmos-Predict2.5-2B"
+model_revision = "diffusers/base/post-trained"
+is_diffusers = true
+model_gradient_checkpointing = true
+
+[policy.lora]
+lora_names = ["default", "ref"]
+r = 32
+lora_alpha = 64
+init_lora_weights = "gaussian"
+target_modules = [
+    "attn.add_k_proj",
+    "attn.add_q_proj",
+    "attn.add_v_proj",
+    "attn.to_add_out",
+    "attn.to_k",
+    "attn.to_out.0",
+    "attn.to_q",
+    "attn.to_v",
+]
+
+[policy.diffusers]
+dtype = "float32"
+use_pipeline = true
+is_video = false
+offload = false
+inference_size = [512, 512]
+timestep_fraction = 0.99
+weight_copy_decay_type = 1
+
+[policy.diffusers.sample]
+num_steps = 10
+eval_num_steps = 40
+guidance_scale = 1.0
+noise_level = 0.7
+solver = "dpm2"
+deterministic_sampling = true
+
+[rollout]
+backend = "diffusion_nft_rollout"
+n_generation = 24
+
+[logging]
+logger = ['console', 'wandb']
+project_name = "cosmos_rl"
+experiment_name = "None"
+
+[train]
+non_text = true
+resume = false
+epoch = 10
+output_dir = "./outputs/cosmos-predict2-5_2b-medium_720_nft"
+epsilon = 1e-8
+optm_name = "AdamW"
+optm_lr = 3e-4
+optm_impl = "foreach"
+optm_weight_decay = 1e-4
+optm_betas = [ 0.9, 0.999,]
+optm_grad_norm_clip = 1.0
+ema_enable = true
+ema_decay = 0.9
+ema_update_step_interval = 1
+async_tp_enabled = false
+compile = false
+
+[train.train_policy]
+type = "grpo"
+trainer_type = "diffusion_nft"
+use_remote_reward = true
+dataset.name = "pickscore"
+dataset.split = "train"
+kl_beta = 1.0
+advantage_high = 5.0
+advantage_low = -5.0
+
+[train.train_policy.remote_reward]
+score_key = "pickscore"
+scale = 1.0
+
+[train.train_policy.remote_reward.reward_fn]
+pickscore = 1.0
+
+[train.ckpt]
+enable_checkpoint = false
+save_freq = 5
+save_mode = "async"
+
+[validation]
+dataset.name = "pickscore"
+dataset.split = "test"
+
+[rollout.parallelism]
+n_init_replicas = 1
+tp_size = 1
+dp_shard_size = 1
+pp_size = 1
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 1
+pp_size = 1
+dp_replicate_size = 1
