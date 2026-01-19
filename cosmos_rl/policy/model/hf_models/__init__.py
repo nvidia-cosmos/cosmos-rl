@@ -444,6 +444,8 @@ class HFModel(BaseModel):
                 tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
             target_tensor = self_state_dict[dest_name]
+            if dest_name in dict(self.model.named_buffers()):
+                sharded_weight = tensor
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
