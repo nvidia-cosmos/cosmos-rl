@@ -171,7 +171,12 @@ class RewardDispatcher:
                             0 for _ in payload.completions
                         ]
                 self.task_queue.put(
-                    (payloads[i : i + self.payload_per_task], is_validation, step, self.is_remote)
+                    (
+                        payloads[i : i + self.payload_per_task],
+                        is_validation,
+                        step,
+                        self.is_remote,
+                    )
                 )
         else:
             # For the remote reward, we send one payload at a time, and get the uuid back.
