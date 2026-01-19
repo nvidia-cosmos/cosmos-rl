@@ -219,7 +219,10 @@ class vLLMRollout(RolloutBase):
 
         # control the prompt logprobs for vllm
         prompt_logprobs = None
-        if self.config.train.train_policy.collect_rollout_logprobs or self.config.distillation.rollout_top_k_recompute:
+        if (
+            self.config.train.train_policy.collect_rollout_logprobs
+            or self.config.distillation.rollout_top_k_recompute
+        ):
             prompt_logprobs = 0
         if self.config.distillation.top_k > 0:
             prompt_logprobs = self.config.distillation.top_k
