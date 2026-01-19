@@ -175,7 +175,6 @@ class RewardDispatcher:
                         payloads[i : i + self.payload_per_task],
                         is_validation,
                         step,
-                        self.is_remote,
                     )
                 )
         else:
