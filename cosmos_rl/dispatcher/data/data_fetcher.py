@@ -20,12 +20,13 @@ from tqdm import tqdm
 from abc import ABC
 
 import torch
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, TensorDataset
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
+    RLDataset,
     RLPayload,
     CosmosValidationDataset,
 )
@@ -155,6 +156,14 @@ class ControllerDataFetcher(DataFetcherBase):
                 )
             else:
                 self.dataset = CosmosDataset(config=self.config)
+
+            if self.config.train.local_dataset:
+                train_index_set = RLDataset(
+                    TensorDataset(torch.arange(len(self.dataset.train_set))),
+                    self.config,
+                )
+                assert len(train_index_set) == len(self.dataset.train_set)
+                self.dataset.train_set = train_index_set
 
             remain_samples_num = (
                 (
@@ -319,6 +328,13 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                 else:
                     self.val_dataset = CosmosValidationDataset(config=self.config)
+                if self.config.train.local_dataset:
+                    val_index_set = RLDataset(
+                        TensorDataset(torch.arange(len(self.val_dataset.val_set))),
+                        self.config,
+                    )
+                    assert len(val_index_set) == len(self.val_dataset.val_set)
+                    self.val_dataset.val_set = val_index_set
                 if self.val_sampler is not None:
                     logger.info("[DataFetcher] Using provided sampler for validation")
                     if isinstance(self.val_sampler, Callable):
