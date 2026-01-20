@@ -93,6 +93,12 @@ class HFModel(BaseModel):
         # cosmos_default_dtype is config.train.master_dtype
         # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
         self.model = self.model.to(dtype=torch.get_default_dtype())
+        try:
+            self.model.set_attn_implementation("flash_attention_2")
+        except Exception as e:
+            logger.warning(
+                f"Set attn_implementation to flash_attention_2 failed with error: {e}"
+            )
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
