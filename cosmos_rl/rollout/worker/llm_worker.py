@@ -77,7 +77,7 @@ class LLMRolloutWorker(WorkerBase):
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=self.config.rollout.parallelism
             )
-            init_distributed()
+            init_distributed(self.config.train.fsdp_offload)
             parallel_dims.build_mesh(device_type="cuda")
             if self.config.rollout.mode == "async":
                 # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.

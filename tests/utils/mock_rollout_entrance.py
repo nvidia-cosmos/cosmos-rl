@@ -64,7 +64,7 @@ def run_rollout(*args, **kwargs):
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
-            init_distributed()
+            init_distributed(enabled=cosmos_rollout_config.train.fsdp_offload)
             parallel_dims.build_mesh(device_type="cuda")
             rollout_worker = DisaggregatedRolloutControlWorker(
                 cosmos_rollout_config, parallel_dims, **kwargs

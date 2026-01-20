@@ -43,7 +43,7 @@ def policy_entry(**kwargs):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(cpu_enabled=cosmos_config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     custom_logger_fns = kwargs.get("custom_logger_fns", [])

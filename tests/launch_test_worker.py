@@ -1577,7 +1577,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -1623,7 +1623,7 @@ def run_sft_validation():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -1710,7 +1710,7 @@ def run_reward_check():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.rollout.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -1817,7 +1817,7 @@ def run_sft_custom_sampler():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -2029,7 +2029,7 @@ def run_gspo_test():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -2128,7 +2128,7 @@ def run_reference_reset_test():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -2207,7 +2207,7 @@ def run_dynamic_batchsize_test(
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -2355,7 +2355,7 @@ def run_sft_ddp_load_check():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     def dummy(self):
@@ -2534,7 +2534,7 @@ async def main():
         exit(0)
 
     # Initialize distributed environment
-    init_distributed()
+    init_distributed(cpu_enabled=True)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)

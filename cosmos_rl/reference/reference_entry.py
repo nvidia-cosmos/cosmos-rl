@@ -57,7 +57,7 @@ def reference_entry(args: Optional[argparse.Namespace] = None, **kwargs):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.distillation.parallelism
     )
-    init_distributed()
+    init_distributed(cosmos_config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     custom_logger_fns = kwargs.get("custom_logger_fns", [])

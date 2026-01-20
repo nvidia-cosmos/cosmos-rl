@@ -160,7 +160,7 @@ def main(*args, **kwargs):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.policy.parallelism
     )
-    init_distributed()
+    init_distributed(cpu_enabled=cosmos_config.train.fsdp_offload)
     parallel_dims.build_mesh(device_type="cuda")
 
     policy_type = cosmos_config.train.train_policy.type
