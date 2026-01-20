@@ -126,6 +126,11 @@ class SFTDataConfig(BaseModel):
         default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
+
+    dataloader_seed: int = Field(
+        default=0, description="random seed for dataloader shuffling"
+    )
+
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",
@@ -284,6 +289,9 @@ class GrpoConfig(BaseModel):
     dataloader_shuffle: bool = Field(
         default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
+    )
+    dataloader_seed: int = Field(
+        default=0, description="random seed for dataloader shuffling"
     )
     enable_dataset_cache: bool = Field(
         default=False,

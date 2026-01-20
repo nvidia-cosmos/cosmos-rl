@@ -173,12 +173,14 @@ class ControllerDataFetcher(DataFetcherBase):
                     rank=0,
                     shuffle=self.config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
+                    seed=self.config.train.train_policy.dataloader_seed,
                 )
+            self.train_sampler = train_sampler
             if self.batch_sampler is not None and isinstance(
                 self.batch_sampler, Callable
             ):
                 self.batch_sampler = self.batch_sampler(
-                    train_sampler,
+                    self.train_sampler,
                     batch_size=self.rollout_batch_size,
                     drop_last=False,
                 )
@@ -228,12 +230,18 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                     from cosmos_rl.policy.trainer.sampler import SkippingSampler
 
-                    train_sampler = SkippingSampler(
-                        base_sampler=train_sampler,
+                    if hasattr(self.train_sampler, "set_epoch"):
+                        # Here the epoch from 1 to total epoch count, not start from 0
+                        self.train_sampler.set_epoch(self.epoch)
+
+                    self.train_sampler = SkippingSampler(
+                        base_sampler=self.train_sampler,
                         skip_samples=train_dataloader_bias
                         // (
-                            len(list(islice(iter(train_sampler), 1))[0])
-                            if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                            len(list(islice(iter(self.train_sampler), 1))[0])
+                            if isinstance(
+                                list(islice(iter(self.train_sampler), 1))[0], list
+                            )
                             else 1
                         ),
                     )
@@ -275,7 +283,7 @@ class ControllerDataFetcher(DataFetcherBase):
                     num_workers=self.config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
-                    sampler=train_sampler,
+                    sampler=self.train_sampler,
                 )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
@@ -410,6 +418,9 @@ class ControllerDataFetcher(DataFetcherBase):
             except StopIteration:
                 if not is_validation:
                     self.epoch += 1
+                    if hasattr(self.train_sampler, "set_epoch"):
+                        # Here the epoch from 1 to total epoch count, not start from 0
+                        self.train_sampler.set_epoch(self.epoch)
                     if self.epoch <= self.config.train.epoch:
                         logger.info(f"[Controller] Epoch {self.epoch} start.")
                         iterator = iter(self.train_dataloader)

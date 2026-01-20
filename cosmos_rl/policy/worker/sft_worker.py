@@ -372,11 +372,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 rank=self.dp_rank,
                 shuffle=self.config.train.train_policy.dataloader_shuffle,
                 drop_last=False,
+                seed=self.config.train.train_policy.dataloader_seed,
             )
+        self.train_sampler = train_sampler
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
-                train_sampler,
+                self.train_sampler,
                 batch_size=self.config.train.train_batch_per_replica,
                 drop_last=False,
             )
@@ -416,19 +418,21 @@ class SFTPolicyWorker(PolicyWorkerBase):
             """
             # Resume training from the last checkpoint if needed
             total_steps_per_epoch = len(
-                get_train_data_loader(train_sampler, batch_sampler)
+                get_train_data_loader(self.train_sampler, batch_sampler)
             )
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= self.config.train.train_batch_per_replica
             logger.info(
                 f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
             )
-            train_sampler = SkippingSampler(
-                train_sampler,
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(self.train_step // total_steps_per_epoch)
+            self.train_sampler = SkippingSampler(
+                self.train_sampler,
                 skip_samples=data_loader_bias
                 // (
-                    len(list(islice(iter(train_sampler), 1))[0])
-                    if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                    len(list(islice(iter(self.train_sampler), 1))[0])
+                    if isinstance(list(islice(iter(self.train_sampler), 1))[0], list)
                     else 1
                 ),
             )
@@ -464,7 +468,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
+        self.train_data_loader = get_train_data_loader(
+            self.train_sampler, batch_sampler
+        )
         if val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
@@ -622,6 +628,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
