@@ -51,18 +51,37 @@ from cosmos_rl.utils.pynccl import (
 )
 from cosmos_rl.utils.constant import COSMOS_GLOO_TIMEOUT
 
+from torch._utils import _get_available_device_type, _get_device_module
+
+
+def get_device_info() -> tuple[str, torch.device]:
+    device_type = _get_available_device_type() or "cuda"
+    assert device_type == "cuda", "Only CUDA device is supported now."
+    device_module = _get_device_module(device_type)  # default device_module:torch.cuda
+    return device_type, device_module
+
+
+cosmos_device_type, cosmos_device_module = get_device_info()
+
 
 def init_distributed(cpu_enabled: bool = True):
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    if world_size == 1:
+    def _get_distributed_backend(enable_cpu_backend):
+        backend = "nccl"
+        if cosmos_device_type in torch.distributed.Backend.default_device_backend_map:
+            backend = torch.distributed.Backend.default_device_backend_map.get(
+                cosmos_device_type
+            )
+        if enable_cpu_backend:
+            backend = f"{cosmos_device_type}:{backend},cpu:gloo"
+        return backend
+
+    if torch.distributed.is_initialized():
         return
-    elif torch.distributed.is_initialized():
-        return
-    else:
-        torch.distributed.init_process_group(
-            backend="cuda:nccl,cpu:gloo",
-            timeout=timedelta(seconds=COSMOS_GLOO_TIMEOUT),
-        )
+
+    torch.distributed.init_process_group(
+        backend=_get_distributed_backend(cpu_enabled),
+        timeout=timedelta(seconds=COSMOS_GLOO_TIMEOUT),
+    )
 
 
 def destroy_distributed():

@@ -17,7 +17,7 @@ import torch
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.distributed import init_distributed
+from cosmos_rl.utils.distributed import init_distributed, cosmos_device_type
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -44,7 +44,7 @@ def policy_entry(**kwargs):
         parallesim_config=cosmos_config.policy.parallelism
     )
     init_distributed()
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     custom_logger_fns = kwargs.get("custom_logger_fns", [])
     hook_fns = kwargs.get("hook_fns", {})
