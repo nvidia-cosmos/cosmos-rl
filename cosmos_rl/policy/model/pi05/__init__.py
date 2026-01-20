@@ -517,7 +517,7 @@ class PI05(BaseModel):
         for k, v in defaults.items():
             setattr(hf_config, k, overrides.get(k, getattr(hf_config, k, v)))
 
-        hf_config.dataset_name = config.policy.dataset_name
+        hf_config.dataset_name = config.train.train_policy.dataset.name
 
         return hf_config
 
@@ -1365,14 +1365,16 @@ class PI05(BaseModel):
         if len(wrist_imgs_t.shape) > 4:  # [N, N_IMG, H, W, C]
             base_imgs_t = base_imgs_t.unsqueeze(1)
             images = torch.cat([base_imgs_t, wrist_imgs_t], dim=1)
+            image_masks = torch.tensor(
+                [[1, 1, 1] for _ in range(batch_size)], dtype=torch.bool
+            )
         else:
             images = torch.stack(
                 [base_imgs_t, wrist_imgs_t, torch.zeros_like(wrist_imgs_t)], dim=1
             )
-
-        image_masks = torch.tensor(
-            [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
-        )
+            image_masks = torch.tensor(
+                [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
+            )
 
         state = torch.stack(
             [

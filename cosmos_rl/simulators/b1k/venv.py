@@ -16,6 +16,7 @@
 
 import omnigibson as og
 from typing import List, Any
+from omnigibson.learning.utils.eval_utils import ROBOT_CAMERA_NAMES, HEAD_RESOLUTION, WRIST_RESOLUTION
 
 
 class VectorEnvironment:
@@ -32,6 +33,27 @@ class VectorEnvironment:
         og.sim.play()
         for env in self.envs:
             env.post_play_load()
+            self._apply_camera_resolutions(env)
+
+    def _apply_camera_resolutions(self, env):
+        """Apply the correct camera resolutions to match eval.py behavior.
+        
+        This sets:
+        - Head camera: 720x720 with 40.0 horizontal aperture
+        - Wrist cameras: 480x480
+        """
+        robot = env.robots[0]
+        for camera_id, camera_name in ROBOT_CAMERA_NAMES["R1Pro"].items():
+            sensor_name = camera_name.split("::")[1]
+            if camera_id == "head":
+                robot.sensors[sensor_name].horizontal_aperture = 40.0
+                robot.sensors[sensor_name].image_height = HEAD_RESOLUTION[0]
+                robot.sensors[sensor_name].image_width = HEAD_RESOLUTION[1]
+            else:
+                robot.sensors[sensor_name].image_height = WRIST_RESOLUTION[0]
+                robot.sensors[sensor_name].image_width = WRIST_RESOLUTION[1]
+        # Reload observation space to reflect the new camera resolutions
+        env.load_observation_space()
 
     def step(self, env_ids: List[int], actions: Any):
         observations, rewards, terminates, truncates, infos = [], [], [], [], []
@@ -68,6 +90,7 @@ class VectorEnvironment:
         for env_id, tro_state in zip(env_ids, tro_states):
             env = self.envs[env_id]
             env.post_play_load()
+            self._apply_camera_resolutions(env)
 
             for tro_key, tro_state in tro_state.items():
                 if tro_key == "robot_poses":
@@ -92,6 +115,14 @@ class VectorEnvironment:
             env = self.envs[env_id]
             env.scene.update_initial_file()
             env.scene.reset()
+            
+        # Warm up rendering to sync camera buffers
+        # OmniGibson rendering is async and takes 3-4 render calls to sync
+        for _ in range(4):
+            og.sim.render()
+            
+        for env_id in env_ids:
+            env = self.envs[env_id]
             obs, info = env.get_obs()
             observations.append(obs)
             infos.append(info)

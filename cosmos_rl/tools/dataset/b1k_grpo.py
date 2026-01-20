@@ -102,7 +102,7 @@ if __name__ == "__main__":
         return B1KDataset(num_trials_per_task=50, train_val="train")
 
     def get_val_dataset(config: CosmosConfig) -> Dataset:
-        return B1KDataset(num_trials_per_task=50, train_val="val")
+        return B1KDataset(num_trials_per_task=20, train_val="val")
 
     launch_worker(
         dataset=get_dataset,

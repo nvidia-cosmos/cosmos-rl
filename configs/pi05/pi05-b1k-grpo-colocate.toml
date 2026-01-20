@@ -110,10 +110,11 @@ dataset.split = "val"
 [vla]
 vla_type = "pi05"  # Custom VLA type for PI05
 use_proprio = false
-num_envs = 2
+num_envs = 1
 proprio_dim = 7
 num_images_in_input = 3  # base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
 training_chunk_size = 16  # Number of action chunks to train in one iteration
+save_video = false
 
 # Reward filtering (aligned with RLinf algorithm.filter_rewards)
 filter_lower_bound = 0.1  # algorithm.rewards_lower_bound
@@ -134,6 +135,6 @@ joint_logprob = false  # Whether to use joint log probability
 safe_get_logprob = false
 ignore_last = false  # Whether to ignore last denoise step in training
 train_expert_only = true  # Freeze VLM, only train action expert
-discrete_state_input = false  # IMPORTANT: Pi05 LIBERO uses continuous state input, not discrete!
+discrete_state_input = true  # IMPORTANT: Pi05 LIBERO uses continuous state input, not discrete!
 max_token_len = 200
 
