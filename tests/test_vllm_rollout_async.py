@@ -37,7 +37,6 @@ from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.utils import async_utils
 from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
@@ -165,12 +164,10 @@ class TestAsyncVLLMRollout(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment()
-        init_distributed(cpu_enabled=True)
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        destroy_distributed()
 
     def get_rollout_engine_and_data_packer(
         self, config: CosmosConfig
@@ -285,12 +282,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment(port=29501)
-        init_distributed(cpu_enabled=True)
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        destroy_distributed()
 
         # clean singleton instance of LocalRewardCalculator
         if hasattr(LocalRewardCalculator, "_instance"):

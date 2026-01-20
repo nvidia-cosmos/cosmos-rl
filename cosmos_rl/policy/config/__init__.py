@@ -803,6 +803,11 @@ class TrainingConfig(BaseModel):
         if self.deterministic and self.seed is None:
             self.seed = 42
 
+        if self.seed is not None and self.seed < 0:
+            # Seed must be positive
+            logger.warning("Seed is negative, setting to 42")
+            self.seed = 42
+
         return self
 
 
