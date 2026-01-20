@@ -146,11 +146,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.eos_token = util.setup_tokenizer(
                 self.config.policy.model_name_or_path
             ).eos_token
+
             hf_config = util.retry(AutoConfig.from_pretrained)(
                 self.config.policy.model_name_or_path, trust_remote_code=True
             )
+
             model_type = hf_config.model_type
+            if not ModelRegistry.check_model_type_supported(model_type):
+                logger.warning(
+                    f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+                )
+                model_type = constant.COSMOS_HF_MODEL_TYPES
             self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
+
             model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
             if hasattr(model_cls, "preprocess_hf_config"):
                 hf_config = model_cls.preprocess_hf_config(self.config)
@@ -160,12 +168,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 assert (
                     model_type == "gpt_oss"
                 ), "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
-
-            if not ModelRegistry.check_model_type_supported(model_type):
-                logger.warning(
-                    f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
-                )
-                model_type = constant.COSMOS_HF_MODEL_TYPES
 
         atexit.register(self.handle_shutdown)
 
