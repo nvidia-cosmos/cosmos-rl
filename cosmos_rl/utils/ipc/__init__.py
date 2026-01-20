@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-from cosmos_rl.utils.ipc.adapters import ModuleLike
+from cosmos_rl.utils.ipc.module_like import ModuleLike
 from cosmos_rl.utils.ipc.tensor_util import (
     named_tensors_to_serialize,
     named_tensors_from_serialize,

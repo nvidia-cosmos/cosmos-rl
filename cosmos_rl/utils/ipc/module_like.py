@@ -17,6 +17,7 @@ import warnings
 
 import torch
 from typing import Dict, Iterator, Tuple, Set
+from torch.nn import Parameter
 
 
 class ModuleLike:
@@ -36,7 +37,7 @@ class ModuleLike:
             state_dict: The state dict of the module.
             not_parameter_names: The names of the tensors that are not parameters.
         """
-        self._parameters: Dict[str, torch.Tensor] = {}
+        self._parameters: Dict[str, Parameter] = {}
         # it will not appear in named_parameters(), for example, lm_head.weight.
         self._not_parameter_tensors: Dict[str, torch.Tensor] = {}
         self._modules: Dict[str, "ModuleLike"] = {}
@@ -79,6 +80,11 @@ class ModuleLike:
                 if name in nested_not_parameter_names:
                     self._not_parameter_tensors[name] = value
                 else:
+                    # wrap the value to Parameter if it is not a Parameter, this keep same behavior with nn.Module
+                    if not isinstance(value, Parameter):
+                        value = Parameter(value)
+                    # not trainable by default for inference engine.
+                    value.requires_grad = False
                     self._parameters[name] = value
 
     def __getitem__(self, idx: int | str) -> "ModuleLike":
@@ -114,6 +120,7 @@ class ModuleLike:
         if "_modules" in self.__dict__ and name in self._modules:
             raise ValueError("Cannot set sub-module of ModuleLike")
 
+        # TODO(zjx): support set tensor to compatible with `replace_weight_of_quantized_module`
         if isinstance(value, torch.Tensor):
             warnings.warn(
                 f"Setting tensor {name} to ModuleLike will not sync to other processes"
@@ -142,7 +149,7 @@ class ModuleLike:
                 state_dict[f"{name}.{sub_name}"] = sub_value
         return state_dict
 
-    def named_parameters(self, *args, **kwargs) -> Iterator[Tuple[str, torch.Tensor]]:
+    def named_parameters(self, *args, **kwargs) -> Iterator[Tuple[str, Parameter]]:
         """
         Get the named parameters of the module.
         """
