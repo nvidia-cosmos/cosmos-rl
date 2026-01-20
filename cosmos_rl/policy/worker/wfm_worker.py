@@ -108,7 +108,7 @@ class WFMPolicyWorker(WorkerBase):
         logger.info(f"Successfully loaded configuration: {self.config.model_dump()}")
 
         # init dist
-        init_distributed(cpu_enabled=config.model_parallel.cpu_offloading)
+        init_distributed()
 
         logger.info(f"Local rank: {os.environ.get('LOCAL_RANK')}")
 

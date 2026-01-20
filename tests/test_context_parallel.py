@@ -27,6 +27,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import ParallelismConfig
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.gpt import GPT
+from cosmos_rl.utils.distributed import cosmos_device_type
+
 import toml
 import random
 
@@ -181,7 +183,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     parallel_dims = ParallelDims.from_config(
         ParallelismConfig(cp_size=CP_SIZE, tp_size=TP_SIZE, dp_shard_size=DP_SIZE)
     )
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     cp_mesh = parallel_dims.mesh["cp"]
 
@@ -317,7 +319,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     parallel_dims = ParallelDims.from_config(
         ParallelismConfig(cp_size=1, tp_size=TP_SIZE * CP_SIZE, dp_shard_size=DP_SIZE)
     )
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     with init_on_device("meta", include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):

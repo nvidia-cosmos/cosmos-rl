@@ -35,6 +35,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
     DataFetchCommand,
 )
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 
 class ColocatedRLControlWorker(WorkerBase):
@@ -62,7 +63,7 @@ class ColocatedRLControlWorker(WorkerBase):
         )
         # Setting up rollout parallel dims
         rollout_parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
-        rollout_parallel_dims.build_mesh(device_type="cuda")
+        rollout_parallel_dims.build_mesh(device_type=cosmos_device_type)
         assert (
             rollout_parallel_dims.world_size == parallel_dims.world_size
         ), "Rollout and Policy parallel dims must have the same world size in colocated mode."

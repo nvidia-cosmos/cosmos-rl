@@ -165,7 +165,7 @@ class TestAsyncVLLMRollout(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment()
-        init_distributed()
+        init_distributed(cpu_enabled=True)
 
     def tearDown(self):
         os.environ.clear()
@@ -285,7 +285,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment(port=29501)
-        init_distributed()
+        init_distributed(cpu_enabled=True)
 
     def tearDown(self):
         os.environ.clear()

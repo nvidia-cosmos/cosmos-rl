@@ -60,17 +60,18 @@ def get_device_info() -> tuple[str, torch.device]:
     return device_type, device_module
 
 
-def init_distributed(cpu_enabled: bool = True):
-    device_type, _ = get_device_info()
+cosmos_device_type, cosmos_device_module = get_device_info()
 
+
+def init_distributed(cpu_enabled: bool = True):
     def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
-        if device_type in torch.distributed.Backend.default_device_backend_map:
+        if cosmos_device_type in torch.distributed.Backend.default_device_backend_map:
             backend = torch.distributed.Backend.default_device_backend_map.get(
-                device_type
+                cosmos_device_type
             )
         if enable_cpu_backend:
-            backend = f"{device_type}:{backend},cpu:gloo"
+            backend = f"{cosmos_device_type}:{backend},cpu:gloo"
         return backend
 
     if torch.distributed.is_initialized():

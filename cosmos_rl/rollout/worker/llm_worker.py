@@ -20,7 +20,11 @@ from cosmos_rl.policy.config import Config as RolloutConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
+from cosmos_rl.utils.distributed import (
+    init_distributed,
+    destroy_distributed,
+    cosmos_device_type,
+)
 from cosmos_rl.utils.async_utils import unsafe_enable_nest_asyncio
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
@@ -77,8 +81,8 @@ class LLMRolloutWorker(WorkerBase):
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=self.config.rollout.parallelism
             )
-            init_distributed(self.config.train.fsdp_offload)
-            parallel_dims.build_mesh(device_type="cuda")
+            init_distributed()
+            parallel_dims.build_mesh(device_type=cosmos_device_type)
             if self.config.rollout.mode == "async":
                 # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.
                 unsafe_enable_nest_asyncio()

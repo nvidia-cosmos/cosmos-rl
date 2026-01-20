@@ -21,6 +21,7 @@ from cosmos_rl.policy.trainer import GRPOTrainer
 from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.distributed import cosmos_device_type
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
 from typing import List
@@ -160,8 +161,8 @@ def main(*args, **kwargs):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.policy.parallelism
     )
-    init_distributed(cpu_enabled=cosmos_config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     policy_type = cosmos_config.train.train_policy.type
 

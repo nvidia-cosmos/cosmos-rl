@@ -53,6 +53,7 @@ from cosmos_rl.utils.parallelism import ParallelismConfig, ParallelDims
 from cosmos_rl.utils.distributed import (
     init_distributed,
     destroy_distributed,
+    cosmos_device_type,
 )
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.protocol import Role
@@ -291,7 +292,7 @@ class TestPolicyWorker:
         self.parallel_dims = ParallelDims.from_config(
             policy_parallelism_dims,
         )
-        self.parallel_dims.build_mesh(device_type="cuda")
+        self.parallel_dims.build_mesh(device_type=cosmos_device_type)
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
@@ -365,7 +366,7 @@ class TestRollout:
         self.parallel_dims = ParallelDims.from_config(
             rollout_parallelism_config,
         )
-        self.parallel_dims.build_mesh(device_type="cuda")
+        self.parallel_dims.build_mesh(device_type=cosmos_device_type)
         self.model = TestModel(self.device, self.parallel_dims, freeze_params)
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
@@ -689,7 +690,7 @@ def policy_to_policy_sync_common(
             config_dict,
         )
         parallel_dims = ParallelDims.from_config(cosmos_config.policy.parallelism)
-        parallel_dims.build_mesh(device_type="cuda")
+        parallel_dims.build_mesh(device_type=cosmos_device_type)
 
         def dummy(self, *args, **kwargs):
             pass
@@ -1124,7 +1125,7 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
         trust_remote_code=True,
     )
     parallel_dims = ParallelDims.from_config(config.policy.parallelism)
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
     model = ModelRegistry.build_model(config)
     try:
         # Apply parallelism to the model
@@ -1181,7 +1182,7 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
 
     rollout.init_engine(seed=config.rollout.seed, load_format="dummy")
     parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(hf_config)
     mapper = ParallelTopoMapperGroup(
@@ -1577,8 +1578,8 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -1623,8 +1624,8 @@ def run_sft_validation():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -1710,8 +1711,8 @@ def run_reward_check():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.rollout.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -1817,8 +1818,8 @@ def run_sft_custom_sampler():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -2029,8 +2030,8 @@ def run_gspo_test():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -2128,8 +2129,8 @@ def run_reference_reset_test():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -2207,8 +2208,8 @@ def run_dynamic_batchsize_test(
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -2355,8 +2356,8 @@ def run_sft_ddp_load_check():
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    init_distributed(config.train.fsdp_offload)
-    parallel_dims.build_mesh(device_type="cuda")
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
@@ -2534,7 +2535,7 @@ async def main():
         exit(0)
 
     # Initialize distributed environment
-    init_distributed(cpu_enabled=True)
+    init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
