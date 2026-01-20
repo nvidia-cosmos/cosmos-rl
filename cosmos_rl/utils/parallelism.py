@@ -330,8 +330,6 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self) -> bool:
-        # alway warp model with fsdp
-        # to ensure consistent mix precision trainning strategy controled by mp_policy
         return self.dp_shard >= 1
 
     @property

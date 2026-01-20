@@ -441,9 +441,25 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
-            target_tensor = self_state_dict[dest_name]
+            if dest_name is None and sharded_weight is None:
+                # Only skip weights that are not loaded, like expert weight not belonging to the current GPU process
+                continue
+            elif isinstance(dest_name, Callable):
+                # For expert weight, `experts.$ID.gate_and_up_projs` -> `experts.gate_and_up_projs[$ID]`
+                target_tensor = dest_name(self_state_dict)
+            else:
+                logger.info(
+                    f"Loading weight: {dest_name} with shape {sharded_weight.shape}"
+                )
+                target_tensor = self_state_dict[dest_name]
+
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
@@ -469,7 +485,12 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
             if dest_name in self_state_dict:
                 target_tensor = self_state_dict[dest_name]
@@ -549,7 +570,12 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
 
             target_tensor = self_state_dict[dest_name]
