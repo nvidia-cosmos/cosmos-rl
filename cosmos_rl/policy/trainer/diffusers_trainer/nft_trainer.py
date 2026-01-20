@@ -32,7 +32,6 @@ from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
     DiffusersTrainer,
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
-from cosmos_rl.utils.diffusers.text_embedding import compute_text_embeddings
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -259,13 +258,14 @@ class NFTTrainer(DiffusersTrainer):
             log_wandb(data, step)
 
     def set_neg_prompt_embed(self):
-        self.neg_prompt_embed, self.neg_pooled_prompt_embed = compute_text_embeddings(
+        neg_text_embedding_dict = self.model.text_embedding(
             [""],
-            self.model.text_encoders,
-            self.model.tokenizers,
-            max_sequence_length=128,
             device=self.device,
+            built_in=False,
+            max_sequence_length=128,
         )
+        self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def step_training(
         self,

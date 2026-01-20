@@ -198,7 +198,7 @@ class DiffuserModel(BaseModel, ABC):
         pass
 
     @abstractmethod
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def text_embedding(self, prompt_list: List[str], device="cuda", **kwargs):
         """
         Text embedding of list of prompts
         """
@@ -213,7 +213,7 @@ class DiffuserModel(BaseModel, ABC):
 
     @abstractmethod
     def visual_embedding(
-        self, input_visual_list, height=None, width=None, device="cuda"
+        self, input_visual_list, height=None, width=None, device="cuda", **kwargs
     ):
         """
         Text embedding of list of preprocessed image tensor
