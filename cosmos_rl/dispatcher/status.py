@@ -431,7 +431,7 @@ class PolicyStatusManager:
                         command.RolloutToRolloutBroadcastCommand.trigger(
                             src_replica=any_valid_rollout_replica,
                             dst_replicas=valid_rollout_replicas,
-                            weight_step=self.current_step, # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
+                            weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                             total_steps=None,
                             redis_handler=self.redis_handler,
                         )
@@ -1427,7 +1427,7 @@ class RolloutStatusManager:
                 command.RolloutToRolloutBroadcastCommand.trigger(
                     src_replica=any_loaded_rollout_replica,
                     dst_replicas=valid_replicas,
-                    weight_step=self.policy_status_manager.current_step, # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
+                    weight_step=self.policy_status_manager.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                     total_steps=None,
                     redis_handler=self.redis_handler,
                 )
