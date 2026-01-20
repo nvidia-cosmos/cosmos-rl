@@ -525,7 +525,6 @@ class ModelRegistry:
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config_args = hf_config_args if hf_config_args is not None else {}
-        hf_config_args.setdefault("attn_implementation", "flash_attention_2")
         for k, v in hf_config_args.items():
             logger.info(f"Set hf config args {k} to {v}")
         hf_config = util.retry(AutoConfig.from_pretrained)(
