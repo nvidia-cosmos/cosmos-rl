@@ -294,7 +294,7 @@ class SFTTrainer(LLMTrainer):
                         pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                         seq_len_multiple=self.seq_len_multiple,
                     )
-                loss = (
+                ce_loss = (
                     torch.mean(torch.stack(losses)).to(self.device)
                     if pp_last_stage
                     else torch.tensor([-1.0], device=self.device)
@@ -329,22 +329,35 @@ class SFTTrainer(LLMTrainer):
                 # return
                 #########################################################################################
 
+                aux_loss = None
                 with self.act_offloading_ctx_manager:
-                    logits = self.model(**batch)
+                    output = self.model(**batch)
+                    if isinstance(output, torch.Tensor):
+                        logits = output
+                    else:
+                        logits = output.logits
+                        # Enumerate the output to involve any `loss` like output
+                        for k, v in output.items():
+                            if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                                aux_loss = v if aux_loss is None else aux_loss + v
 
-                loss = self.loss_fn(
+                ce_loss = self.loss_fn(
                     logits,
                     labels,
                     output_packing_mask=batch.get("input_packing_mask", None),
                     target_packing_mask=batch.get("label_packing_mask", None),
                     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                 )
+                if aux_loss is not None:
+                    loss = ce_loss + aux_loss
+                else:
+                    loss = ce_loss
                 # # Hint FSDP to do all-reduce on the last backward pass
                 # if hasattr(self.model, "set_is_last_backward"):
                 #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
                 #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
                 loss.backward()
-            acc_loss += loss.detach()
+            acc_loss += ce_loss.detach()
 
         """
         Compute the global grad norm on all parameters and then apply
@@ -367,6 +380,8 @@ class SFTTrainer(LLMTrainer):
 
         self.optimizers.step()
         self.lr_schedulers.step()
+
+        self.model.step_hook()
 
         end_event.record()
 

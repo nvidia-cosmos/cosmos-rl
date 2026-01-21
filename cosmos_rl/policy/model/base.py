@@ -391,6 +391,12 @@ class BaseModel(torch.nn.Module, ABC):
         """
         raise NotImplementedError
 
+    def step_hook(self):
+        """
+        Hook to be called after each step update.
+        """
+        pass
+
     @abstractmethod
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """

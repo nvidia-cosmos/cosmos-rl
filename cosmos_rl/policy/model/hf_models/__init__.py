@@ -163,7 +163,7 @@ class HFModel(BaseModel):
             *args,
             **kwargs_filtered,
         )
-        return out.logits
+        return out
 
     @property
     def image_token_id(self):
