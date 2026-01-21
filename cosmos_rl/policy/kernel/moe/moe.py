@@ -590,12 +590,16 @@ class Gate(nn.Module):
 
         aux_loss = None
         if self.aux_loss_coeff > 0 and self.training:
-            aux_loss = self._compute_aux_loss(
-                original_scores, expert_load, token_mask, cp_mesh
+            aux_loss = (
+                self._compute_aux_loss(
+                    original_scores, expert_load, token_mask, cp_mesh
+                )
+                * self.aux_loss_coeff
             )
 
         return weights.type_as(x), indices, aux_loss
 
+    @torch.no_grad()
     def update_bias(self) -> None:
         """
         Updates the correction bias used in the gate based on the popularity of experts.
@@ -629,9 +633,12 @@ class Gate(nn.Module):
             expert_load = DTensor.from_local(
                 expert_load,
                 device_mesh=self.e_score_correction_bias.device_mesh,
-                placements=[Partial()] * self.e_score_correction_bias.device_mesh.ndim,
+                placements=[Partial(reduce_op="sum")]
+                * self.e_score_correction_bias.device_mesh.ndim,
             )
-            expert_load = expert_load.full_tensor()
+            expert_load = expert_load.redistribute(
+                placements=[Replicate()] * expert_load.device_mesh.ndim
+            )
 
         # 2) Compute the bias update by comparing the expert load to the average expert load.
         expert_load = expert_load.float()
@@ -656,14 +663,20 @@ class Gate(nn.Module):
             )
 
         # 3) Update the correction bias using the bias update.
-        with torch.no_grad():
-            # Create full precision master weights
-            if self.e_score_correction_bias_master is None:
-                self.e_score_correction_bias_master = (
-                    self.e_score_correction_bias.clone().detach().float()
-                )
-            self.e_score_correction_bias_master += bias_update * self.bias_update_factor
-            self.e_score_correction_bias.copy_(self.e_score_correction_bias_master)
+        # Create full precision master weights
+        if self.e_score_correction_bias_master is None:
+            self.e_score_correction_bias_master = (
+                self.e_score_correction_bias.clone().detach().float()
+            )
+        delta = bias_update * self.bias_update_factor
+
+        delta_local = delta.to_local()
+        if isinstance(delta_local, DTensor):
+            delta_local = delta_local.to_local()
+        self.e_score_correction_bias_master.to_local().add_(delta_local)
+        self.e_score_correction_bias.to_local().copy_(
+            self.e_score_correction_bias_master.to_local()
+        )
 
     def _compute_expert_load(
         self,
