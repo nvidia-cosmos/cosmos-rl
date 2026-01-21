@@ -12,22 +12,20 @@ lora_names = ["default", "ref"]
 r = 32
 lora_alpha = 64
 init_lora_weights = "gaussian"
-target_modules = [
-    "attn.add_k_proj",
-    "attn.add_q_proj",
-    "attn.add_v_proj",
-    "attn.to_add_out",
-    "attn.to_k",
-    "attn.to_out.0",
-    "attn.to_q",
-    "attn.to_v",
+target_modules = [ # Set both attention and cross-attention modules
+    "to_k",
+    "to_out.0",
+    "to_q",
+    "to_v",
+    "ff.net.0.proj",
+    "ff.net.2",
 ]
 
 [policy.diffusers]
 dtype = "float32"
-use_pipeline = true
 is_video = false
 offload = false
+max_prompt_length = 512
 inference_size = [512, 512]
 timestep_fraction = 0.99
 weight_copy_decay_type = 1

@@ -179,6 +179,7 @@ class SD3Model(DiffuserModel):
         noise_level: float = 0.7,
         deterministic: bool = False,
         solver: str = "flow",
+        **kwargs,
     ):
         height = (
             height or self.pipeline.default_sample_size * self.pipeline.vae_scale_factor

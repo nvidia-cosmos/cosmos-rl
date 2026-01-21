@@ -52,7 +52,7 @@ class NFTRollout(RolloutBase):
         neg_text_embedding_dict = self.model.text_embedding(
             [""],
             device=self.device,
-            max_sequence_length=128,
+            max_sequence_length=self.diffusers_config.max_prompt_length,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
@@ -75,14 +75,14 @@ class NFTRollout(RolloutBase):
             text_embedding_dict = self.model.text_embedding(
                 prompts,
                 device=self.device,
-                max_sequence_length=128,
+                max_sequence_length=self.diffusers_config.max_prompt_length,
             )
             prompt_embeds = text_embedding_dict["encoder_hidden_states"]
             pooled_prompt_embeds = text_embedding_dict["pooled_projections"]
             prompt_ids = self.model.tokenizers[0](
                 prompts,
                 padding="max_length",
-                max_length=256,
+                max_length=self.diffusers_config.max_prompt_length,
                 truncation=True,
                 return_tensors="pt",
             ).input_ids.to(self.device)
@@ -96,7 +96,9 @@ class NFTRollout(RolloutBase):
                 for _ in range(self.config.rollout.n_generation)
             ]
             with torch.no_grad():
-                images, latents, _ = self.model.pipeline_with_logprob(
+                # Inference with logprob computation
+                # mm_datas contains the generated images/videos
+                mm_datas, latents, _ = self.model.pipeline_with_logprob(
                     prompt_embeds=prompt_embeds,
                     pooled_prompt_embeds=pooled_prompt_embeds,
                     negative_prompt_embeds=self.neg_prompt_embed.repeat(
@@ -123,7 +125,7 @@ class NFTRollout(RolloutBase):
             response.append(
                 RolloutResult(
                     prompt=pl.prompt["prompt"],
-                    completions=images,
+                    completions=mm_datas,
                     completion_logprobs=None,
                     completion_token_ids=None,
                     extra_info={
