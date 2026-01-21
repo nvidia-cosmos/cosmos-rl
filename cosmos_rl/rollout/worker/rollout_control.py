@@ -457,7 +457,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     ):
         target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
         check_inside_group = do_weight_sync_check
-        if self.quantization_type != "none":
+        if self.quantization_type is not None:
             inst_group_weight_name = (
                 insts_group.param_instructions[0].param_name
             )  # take a name from the inst group to determine the full weight name
@@ -597,7 +597,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         post_process_list_for_lowp = []
 
-        if not check_inside_group and self.quantization_type != "none":
+        if not check_inside_group and self.quantization_type is not None:
             post_process_list_for_lowp.append(inst_group_full_weight_name)
 
         def completion_lambda(
@@ -633,7 +633,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             tensors_to_check.clear()
 
             # here we got one full weight tensor sync done, if it is fp8/mxfp4 weight, we should do the quantization and check the numerical error.
-            if self.quantization_type != "none":
+            if self.quantization_type is not None:
                 for inst_group_full_weight_name in post_process_list_for_lowp:
                     if self.quantization_type == "fp8":
                         if inst_group_full_weight_name in self.hp_weight_map:
