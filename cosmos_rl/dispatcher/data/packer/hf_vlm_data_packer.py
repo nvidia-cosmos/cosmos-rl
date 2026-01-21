@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import io
+import os
 import base64
 import torch
 from PIL import Image
@@ -45,6 +46,9 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
 def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     new_image_inputs = []
     for image_input in image_inputs:
+        # TODO: hardcode
+        if os.path.isfile(image_input):
+            continue
         img_bytes = base64.b64decode(image_input)
         img_buffer = io.BytesIO(img_bytes)
         image = Image.open(img_buffer)
@@ -108,7 +112,8 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type == "qwen3_vl"
+        # TODO: hardcode
+        self.use_qwen_vl_process = True
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
