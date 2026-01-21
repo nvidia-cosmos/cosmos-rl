@@ -35,7 +35,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffusers",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@ec37629", # For cosmos-predict2.5
     "peft",
     "flash-attn>=2.8.3",
 ]
@@ -84,6 +84,10 @@ wfm = [
     "webdataset",
     "decord",
     "trimesh",
+    "opencv-python-headless",
+    "better_profanity",
+    "nltk",
+    "retinaface-py",
 ]
 vla = [
     "bddl",
