@@ -413,8 +413,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         if self.config.train.resume and self.train_step > 0:
             """
-            Note: Here we assume there is no data shuffling across epochs.
-            Otherwise, we need to call `set_epoch` on the sampler after each epoch.
+            Note: Here both shuffle and no shuffle samplers are supported for deterministic resuming.
             """
             # Resume training from the last checkpoint if needed
             total_steps_per_epoch = len(
