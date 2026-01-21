@@ -111,6 +111,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # determine the quantization type
         self.quantization_type = (
             self.config.rollout.quantization
+            if self.config.rollout.quantization != "none"
+            else None
         )  # ["none", "fp8", "fp4"]
 
         self.rollout: RolloutBase = RolloutRegistry.get_rollout_cls(
