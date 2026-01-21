@@ -96,7 +96,6 @@ class MoEArgs:
             self.shared_inter_dim = self.moe_inter_dim * self.n_shared_experts
 
 
-
 class MLP(nn.Module):
     """
     Multi-Layer Perceptron (MLP) used as a feed-forward layer.
