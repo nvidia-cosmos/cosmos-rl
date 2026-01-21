@@ -1584,7 +1584,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 # Check if the prompt is valid for the current weight version
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
                 is_valid_prompt_for_current_weight_version = (
-                    first_payload.weight_version <= self.current_weight_version
+                    first_payload.weight_version
+                    <= self.current_weight_version
+                    + self.config.train.train_policy.allowed_outdated_steps
                 )
 
                 if not is_valid_prompt_for_current_weight_version:

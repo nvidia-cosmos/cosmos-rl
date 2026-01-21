@@ -1584,6 +1584,17 @@ class Config(BaseModel):
                 raise ValueError(
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
+        if (
+            self.train.train_policy.type == "grpo"
+            and self.train.train_policy.allowed_outdated_steps + 1
+            < self.train.sync_weight_interval
+        ):
+            self.train.train_policy.allowed_outdated_steps = (
+                self.train.sync_weight_interval - 1
+            )
+            logger.warning(
+                f"allowed_outdated_steps is less than sync_weight_interval - 1, setting allowed_outdated_steps to {self.train.sync_weight_interval - 1}."
+            )
 
         # Handle for evaludation configuration.
         if isinstance(self.validation.dataset.split, str):
