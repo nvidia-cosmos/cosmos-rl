@@ -407,6 +407,9 @@ class ControllerDataFetcher(DataFetcherBase):
     ) -> Tuple[List[RLPayload], bool]:
         if weight_version is not None:
             self.data_fetched_for_each_policy_at_step.setdefault(weight_version, {})
+        prompt_batch_per_replica = math.ceil(
+            self.config.train.train_batch_per_replica / self.config.rollout.n_generation
+        )
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset
@@ -416,6 +419,7 @@ class ControllerDataFetcher(DataFetcherBase):
         is_end = False
 
         is_validation = validation_step is not None
+        weight_version = None if is_validation else weight_version
 
         if is_validation:
             iterator = self.validation_get_dataloader(validation_step)
@@ -463,18 +467,18 @@ class ControllerDataFetcher(DataFetcherBase):
                         or self.data_fetched_for_each_policy_at_step[
                             weight_version
                         ].get(data[0] % self.policy_global_mesh_size, 0)
-                        < self.config.train.train_batch_per_replica
-                        or is_validation
+                        < prompt_batch_per_replica
                     ):
                         payloads_list.append(data[1])
-                        self.data_fetched_for_each_policy_at_step[weight_version][
-                            data[0] % self.policy_global_mesh_size
-                        ] = (
-                            self.data_fetched_for_each_policy_at_step[
-                                weight_version
-                            ].get(data[0] % self.policy_global_mesh_size, 0)
-                            + 1
-                        )
+                        if weight_version is not None:
+                            self.data_fetched_for_each_policy_at_step[weight_version][
+                                data[0] % self.policy_global_mesh_size
+                            ] = (
+                                self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ].get(data[0] % self.policy_global_mesh_size, 0)
+                                + 1
+                            )
                         found = True
                         break
                 if found:
@@ -534,20 +538,20 @@ class ControllerDataFetcher(DataFetcherBase):
                                 or self.data_fetched_for_each_policy_at_step[
                                     weight_version
                                 ].get(idx % self.policy_global_mesh_size, 0)
-                                < self.config.train.train_batch_per_replica
-                                or is_validation
+                                < prompt_batch_per_replica
                             )
                             and len(payloads_list) < n
                         ):
                             payloads_list.append(payload)
-                            self.data_fetched_for_each_policy_at_step[weight_version][
-                                idx % self.policy_global_mesh_size
-                            ] = (
+                            if weight_version is not None:
                                 self.data_fetched_for_each_policy_at_step[
                                     weight_version
-                                ].get(idx % self.policy_global_mesh_size, 0)
-                                + 1
-                            )
+                                ][idx % self.policy_global_mesh_size] = (
+                                    self.data_fetched_for_each_policy_at_step[
+                                        weight_version
+                                    ].get(idx % self.policy_global_mesh_size, 0)
+                                    + 1
+                                )
                         else:
                             # For data_dispatch_as_rank_in_mesh, we store the fetched data into the buffer if not suitable for current rank_in_mesh.
                             fetched_data_buffer.append((idx, payload))
@@ -560,7 +564,7 @@ class ControllerDataFetcher(DataFetcherBase):
                 break
         # For data_dispatch_as_rank_in_mesh, we only allow is_end to be True when there is no more data suitable for current rank_in_mesh.
         is_end = is_end and (
-            len(payloads_list) == 0
+            len(fetched_data_buffer) == 0
             or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
         )
         if is_validation:
