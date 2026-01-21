@@ -124,8 +124,8 @@ class ControllerDataFetcher(DataFetcherBase):
         # Buffers for undispatched fetched data when data_dispatch_as_rank_in_mesh is enabled.
         self.fetched_data_buffer: List = []
         self.fetched_data_buffer_for_validation: List = []
-        # Index to track which policy rank the fetched data next belongs to.
-        self.data_fetch_policy_rank_index = 0
+        # Dict to track the number of data fetched for each policy at current step when data_dispatch_as_rank_in_mesh is enabled.
+        self.data_fetched_for_each_policy_at_step = {}
 
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
@@ -403,7 +403,10 @@ class ControllerDataFetcher(DataFetcherBase):
         n: int,
         validation_step: Optional[int] = None,
         rank_in_mesh: Optional[int] = None,
+        weight_version: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
+        if weight_version is not None:
+            self.data_fetched_for_each_policy_at_step.setdefault(weight_version, {})
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset
@@ -456,14 +459,22 @@ class ControllerDataFetcher(DataFetcherBase):
                 found = False
                 for index, data in enumerate(fetched_data_buffer):
                     if data[0] % self.rollout_global_mesh_size == rank_in_mesh and (
-                        data[0] % self.policy_global_mesh_size
-                        == self.data_fetch_policy_rank_index
+                        weight_version is None
+                        or self.data_fetched_for_each_policy_at_step[
+                            weight_version
+                        ].get(data[0] % self.policy_global_mesh_size, 0)
+                        < self.config.train.train_batch_per_replica
                         or is_validation
                     ):
                         payloads_list.append(data[1])
-                        self.data_fetch_policy_rank_index = (
-                            self.data_fetch_policy_rank_index + 1
-                        ) % self.policy_global_mesh_size
+                        self.data_fetched_for_each_policy_at_step[weight_version][
+                            data[0] % self.policy_global_mesh_size
+                        ] = (
+                            self.data_fetched_for_each_policy_at_step[
+                                weight_version
+                            ].get(data[0] % self.policy_global_mesh_size, 0)
+                            + 1
+                        )
                         found = True
                         break
                 if found:
@@ -519,16 +530,24 @@ class ControllerDataFetcher(DataFetcherBase):
                         if (
                             idx % self.rollout_global_mesh_size == rank_in_mesh
                             and (
-                                idx % self.policy_global_mesh_size
-                                == self.data_fetch_policy_rank_index
+                                weight_version is None
+                                or self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ].get(idx % self.policy_global_mesh_size, 0)
+                                < self.config.train.train_batch_per_replica
                                 or is_validation
                             )
                             and len(payloads_list) < n
                         ):
                             payloads_list.append(payload)
-                            self.data_fetch_policy_rank_index = (
-                                self.data_fetch_policy_rank_index + 1
-                            ) % self.policy_global_mesh_size
+                            self.data_fetched_for_each_policy_at_step[weight_version][
+                                idx % self.policy_global_mesh_size
+                            ] = (
+                                self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ].get(idx % self.policy_global_mesh_size, 0)
+                                + 1
+                            )
                         else:
                             # For data_dispatch_as_rank_in_mesh, we store the fetched data into the buffer if not suitable for current rank_in_mesh.
                             fetched_data_buffer.append((idx, payload))

@@ -1098,10 +1098,25 @@ class PolicyStatusManager:
             if not self.config.mode == "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
                 if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    # Helper function to sort a queue by item.prompt_idx
+                    def sort_queue_by_prompt_idx(q):
+                        # Step 1: Extract all items
+                        items: List[Rollout] = []
+                        while not q.empty():
+                            items.append(q.get())
+
+                        # Step 2: Sort by prompt_idx
+                        items.sort(key=lambda item: item.prompt_idx)
+
+                        # Step 3: Put sorted items back
+                        for item in items:
+                            q.put(item)
+
                     sorted_valid_replicas = sorted(
                         arrived_replicas, key=lambda x: x.start_time
                     )
                     for index, replica in enumerate(sorted_valid_replicas):
+                        sort_queue_by_prompt_idx(self.rollout_buffer_per_rank[index])
                         for _ in range(items_count):
                             rollout = self.rollout_buffer_per_rank[index].get()
                             replica.put_rollout(rollout, self.redis_handler)

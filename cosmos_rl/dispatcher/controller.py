@@ -329,7 +329,12 @@ maxmemory-policy allkeys-lfu
                     )
 
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step, rank_in_mesh
+                n,
+                validation_step,
+                rank_in_mesh,
+                weight_version=weight_version_for_current_batch
+                if self.config.train.train_policy.variant != "dapo"
+                else None,
             )
             current_fetch_count = len(payloads_list)
             # record the number of valid prompts for current weight version
@@ -366,7 +371,12 @@ maxmemory-policy allkeys-lfu
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step, rank_in_mesh
+                n,
+                validation_step,
+                rank_in_mesh,
+                weight_version=weight_version_for_current_batch
+                if self.config.train.train_policy.variant != "dapo"
+                else None,
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
