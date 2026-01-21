@@ -434,7 +434,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 )
 
             # Add weight scale of quantized weights to trainable params
-            if self.quantization_type != "none":
+            if self.quantization_type is not None:
                 # Trivial params:
                 # including tensors that need to be synced but not trainable in R2R. These
                 # tensors will not be synced from P2R, so we have to add them to trainable params.

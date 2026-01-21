@@ -110,7 +110,7 @@ class vLLMRolloutAsync(vLLMRollout):
 
     def init_engine(
         self,
-        quantization: Optional[str] = None,
+        quantization: Optional[str] = None,  # [None, "fp8", "fp4"]
         seed: int = 42,
         load_format: str = "dummy",
         **kwargs,
@@ -144,11 +144,11 @@ class vLLMRolloutAsync(vLLMRollout):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            self.quantization = quantization  # ["none", "fp8", "fp4"]
+            self.quantization = quantization  # [None, "fp8", "fp4"]
 
             policy_config = self.config.policy
 
-            if self.quantization != "none":
+            if self.quantization is not None:
                 # FIXME: (lms/jxz) Find a way to support calling `simplify_process_weights_after_loading_for_fp8`
                 # inside worker processes that vLLM created before weight loading.
                 raise NotImplementedError(
