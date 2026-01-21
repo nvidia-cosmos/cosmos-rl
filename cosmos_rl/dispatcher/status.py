@@ -431,7 +431,7 @@ class PolicyStatusManager:
                         command.RolloutToRolloutBroadcastCommand.trigger(
                             src_replica=any_valid_rollout_replica,
                             dst_replicas=valid_rollout_replicas,
-                            weight_step=None,
+                            weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                             total_steps=None,
                             redis_handler=self.redis_handler,
                         )
@@ -1183,9 +1183,12 @@ class RolloutStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
+        policy_status_manager: PolicyStatusManager,
     ):
         self.redis_handler = redis_handler
         self.config = config
+        # Rollout status manager has to access some information throug policy status manager.
+        self.policy_status_manager = policy_status_manager
         """
         Maintain the life status of the policy and rollout replicas.
         """
@@ -1424,7 +1427,7 @@ class RolloutStatusManager:
                 command.RolloutToRolloutBroadcastCommand.trigger(
                     src_replica=any_loaded_rollout_replica,
                     dst_replicas=valid_replicas,
-                    weight_step=None,
+                    weight_step=self.policy_status_manager.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                     total_steps=None,
                     redis_handler=self.redis_handler,
                 )

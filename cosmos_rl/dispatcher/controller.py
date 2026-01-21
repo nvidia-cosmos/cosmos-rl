@@ -190,7 +190,9 @@ maxmemory-policy allkeys-lfu
             custom_logger_fns=custom_logger_fns,
             hook_fns=hook_fns,
         )
-        self.rollout_status_manager.setup(config, self.redis_controller)
+        self.rollout_status_manager.setup(
+            config, self.redis_controller, self.policy_status_manager
+        )
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):
