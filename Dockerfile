@@ -130,15 +130,16 @@ RUN set -eux; \
             torchao=="${TORCHAO_VERSION}" \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
-            flashinfer-python=="${FLASHINFER_VERSION}" \
+            flashinfer-python \
             transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
 # RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu128
+
 # RUN pip install \
 #     torchao==${TORCHAO_VERSION} \
 #     flash_attn==${FLASH_ATTN_VERSION} \
 #     vllm==${VLLM_VERSION} \
-#     flashinfer-python==0.6.1 \
-#     transformer_engine[pytorch] --no-build-isolation
+#     flashinfer-python \
+#     transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
