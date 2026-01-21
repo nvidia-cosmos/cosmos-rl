@@ -176,7 +176,7 @@ class NFTTrainer(DiffusersTrainer):
             model_loaded = True
 
         assert model_loaded, "Model weight must be populated before training starts."
-        self.model.train()
+        self.model.transformer.train()
 
         return False
 
@@ -261,7 +261,6 @@ class NFTTrainer(DiffusersTrainer):
         neg_text_embedding_dict = self.model.text_embedding(
             [""],
             device=self.device,
-            built_in=False,
             max_sequence_length=128,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]

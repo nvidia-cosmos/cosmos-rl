@@ -52,7 +52,6 @@ class NFTRollout(RolloutBase):
         neg_text_embedding_dict = self.model.text_embedding(
             [""],
             device=self.device,
-            built_in=False,
             max_sequence_length=128,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
@@ -76,7 +75,6 @@ class NFTRollout(RolloutBase):
             text_embedding_dict = self.model.text_embedding(
                 prompts,
                 device=self.device,
-                built_in=False,
                 max_sequence_length=128,
             )
             prompt_embeds = text_embedding_dict["encoder_hidden_states"]

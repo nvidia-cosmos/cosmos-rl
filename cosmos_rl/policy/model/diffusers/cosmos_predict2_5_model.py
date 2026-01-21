@@ -25,6 +25,7 @@ from cosmos_rl.policy.model.diffusers import DiffuserModel
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.policy.config import DiffusersConfig
 from cosmos_rl.utils.diffusers.solver import run_sampling
+from cosmos_rl.utils.logging import logger
 
 
 def mean_flat(tensor):
@@ -43,15 +44,8 @@ class CosmosPredict2_5Model(DiffuserModel):
     def __init__(self, config: DiffusersConfig, **kwargs):
         super().__init__(config, **kwargs)
         self.set_scheduler_timestep(timestep=self.train_sampling_steps)
-        # Combine text_encoders and tokenizers for easier access
-        self.text_encoders = [
-            self.text_encoder,
-            self.text_encoder_2,
-            self.text_encoder_3,
-        ]
-        self.tokenizers = [self.tokenizer, self.tokenizer_2, self.tokenizer_3]
 
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def text_embedding(self, prompt_list: List[str], device="cuda", **kwargs):
         """
         Text embedding of list of prompts
         """
@@ -64,13 +58,14 @@ class CosmosPredict2_5Model(DiffuserModel):
         with torch.no_grad():
             # Fetch all default value of pipeline.__call__ that used by encode_prompt
             ignore_args = ["prompt", "do_classifier_free_guidance"]
-            kwargs = {}
+            default_kwargs = {}
             sig_encode_pompt = inspect.signature(self.pipeline.encode_prompt)
             sig_call = inspect.signature(self.pipeline.__call__)
             for name, params in sig_encode_pompt.parameters.items():
                 if name not in ignore_args and name in sig_call.parameters:
-                    kwargs[name] = sig_call.parameters[name].default
-
+                    default_kwargs[name] = sig_call.parameters[name].default
+            default_kwargs.update(kwargs)
+            logger.debug(f"Default kwargs for encode_prompt: {default_kwargs}")
             # Training doesn't need to do cfg, only prompt embedding is needed
             (
                 prompt_embeds,
@@ -81,7 +76,7 @@ class CosmosPredict2_5Model(DiffuserModel):
                 prompt_list,
                 do_classifier_free_guidance=False,
                 device=device,
-                **kwargs,
+                **default_kwargs,
             )
 
         if self.offload:
