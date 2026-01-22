@@ -13,21 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import toml
 import json
 
 import os, sys
+import torch, re
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
-
 from torch.utils.data import Dataset
-
-import cosmos_rl.utils.util as util
 from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
-from cosmos_rl.policy.config import Config
-import cosmos_rl.policy.model.hf_models as hf_models 
+import cosmos_rl.policy.model.hf_models as hf_models
+from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
 
 def modify_messages(messages, max_pixels = None):
@@ -60,17 +56,85 @@ class CustomDataset(Dataset):
         sample = modify_messages(sample, self.max_pixels)
         return sample
 
+@torch.no_grad()
+def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tensor):
+
+    # Only For Nemotron-3-Nano Base LLM Model naming convention
+    # Leave the prefix "model." for Nemotron-3-Nano Vision-Language Model naming convention
+    if name.startswith("model.backbone."):
+        name = name[len("model."):]
+
+    if match := re.search(
+        r"backbone\.layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)",
+        name,
+    ):
+        def yield_weight(n_experts, expert_weight, w_name, layer_id):
+            for expert_id in range(n_experts):
+                single_expert_weight = expert_weight[expert_id].contiguous()
+                yield (
+                    f"backbone.layers.{layer_id}.mixer.experts.{expert_id}.{w_name}.weight",
+                    single_expert_weight,
+                )
+        layer_id = int(match.group(1))
+        w_name = match.group(2)
+        n_experts = expert_weight.shape[0]
+        if w_name == "gate_and_up_projs":
+            # gate_and_up_projs is `up_proj` in nemotron
+            # shape: [experts, ffn_dim, hidden_dim]
+            yield from yield_weight(
+                n_experts, expert_weight, "up_proj", layer_id
+            )
+        else:
+            yield from yield_weight(n_experts, expert_weight, "down_proj", layer_id)
+    elif match := re.search(
+        r"model\.language_model\.layers\.(\d+)\.mixer\.experts\.(\d+)\.(gate_and_up_projs|down_projs)",
+        name,
+    ):
+        def yield_weight(n_experts, expert_weight, w_name, layer_id):
+            for expert_id in range(n_experts):
+                single_expert_weight = expert_weight[expert_id].contiguous()
+                yield (
+                    f"model.language_model.layers.{layer_id}.mixer.experts.{expert_id}.{w_name}.weight",
+                    single_expert_weight,
+                )
+        layer_id = int(match.group(1))
+        w_name = match.group(2)
+        n_experts = expert_weight.shape[0]
+        if w_name == "gate_and_up_projs":
+            # gate_and_up_projs is `up_proj` in nemotron
+            # shape: [experts, ffn_dim, hidden_dim]
+            yield from yield_weight(
+                n_experts, expert_weight, "up_proj", layer_id
+            )
+        else:
+            yield from yield_weight(n_experts, expert_weight, "down_proj", layer_id)
+    else:
+        yield name, expert_weight
+
+def patched_parallelize_fn(self):
+    # whatever you want to return
+    return parallelize, self
+
+# MoE: Aux-free load balancing update bias after each step update.
+def step_hook(self):
+    for _, module in self.model.language_model.named_modules():
+        if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
+            module.mixer.gate.update_bias()
+
+def get_dataset(config: CosmosConfig):
+    return CustomDataset()
+
 if __name__ == "__main__":
-    def patched_parallelize_fn(self):
-        # whatever you want to return
-        return parallelize, self
 
-    def get_dataset(config: CosmosConfig):
-        return CustomDataset()
-
+    # Override the parallelize_fn to support EP
     hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+    # Override the convert_weight_from_hf to support EP weight sharding during initialization
     hf_models.convert_weight_from_hf = convert_weight_from_hf
-
+    # Override the step_hook to enable aux-free load balancing update bias after each step update.
+    hf_models.HFModel.step_hook = step_hook
+    # Map the weight name from custom DeepEP convention back to HF convention for safetensor saving.
+    HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    
     launch_dispatcher(
         dataset=get_dataset,
     )

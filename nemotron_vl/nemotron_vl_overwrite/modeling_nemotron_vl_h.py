@@ -1676,6 +1676,7 @@ class NemotronVLCausalLMOutput(ModelOutput):
     """
 
     loss: Optional[torch.FloatTensor] = None
+    aux_loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
     cache_params: Optional[HybridMambaAttentionDynamicCache] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
@@ -2224,10 +2225,10 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.backbone.get_input_embeddings()
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, new_embeddings):
-        return self.backbone.set_input_embeddings(new_embeddings)
+        return self.model.set_input_embeddings(new_embeddings)
 
     def get_output_embeddings(self):
         return self.lm_head
@@ -2366,7 +2367,6 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
             use_cache=use_cache,
         )
         hidden_states = nemotron_h_outputs[0]
-
         # TODO: Check zamba_modeling.py: https://github.com/huggingface/transformers/blob/d7188ba600e36d3fd191b12e19f1b3bb81a8404f/src/transformers/models/zamba/modeling_zamba.py#L1284C1-L1286C2
         #logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
         logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
@@ -2388,6 +2388,7 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
 
         return NemotronVLCausalLMOutput(
             loss=loss,
+            aux_loss=nemotron_h_outputs.aux_loss,
             logits=logits,
             cache_params=nemotron_h_outputs.cache_params,
             hidden_states=nemotron_h_outputs.hidden_states,

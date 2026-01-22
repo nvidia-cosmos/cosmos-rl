@@ -106,25 +106,29 @@ def parallelize(
         #     enable_glu: bool = True
         #     act_fn: Optional[str] = None
         from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
+
+        # TODO(jiaxinc): to be compatible with both pure text and vision-language models.
+        language_model_config = model.hf_config.text_config if 'text_config' in model.hf_config else model.hf_config
         moe_args = MoEArgs(
-            n_routed_experts=model.hf_config.text_config.n_routed_experts,
-            n_shared_experts=model.hf_config.text_config.n_shared_experts,
-            n_activated_experts=model.hf_config.text_config.num_experts_per_tok,
-            n_expert_groups=model.hf_config.text_config.n_group,
-            n_limited_groups=model.hf_config.text_config.topk_group,
-            train_gate=False, # TODO(jiaxinc): should be configurable
-            gate_bias_update_factor=0.0, # TODO(jiaxinc): should be configurable
-            aux_loss_coeff=0.0, # TODO(jiaxinc): should be configurable
+            n_routed_experts=language_model_config.n_routed_experts,
+            n_shared_experts=language_model_config.n_shared_experts,
+            n_activated_experts=language_model_config.num_experts_per_tok,
+            n_expert_groups=language_model_config.n_group,
+            n_limited_groups=language_model_config.topk_group,
+            train_gate=True, # TODO(jiaxinc): should be configurable
+            gate_bias_update_factor=1e-3, # TODO(jiaxinc): should be configurable
+            aux_loss_coeff=1e-4, # TODO(jiaxinc): should be configurable
             score_func="sigmoid", # TODO(jiaxinc): hardcoded to be consistent with the original implementation
-            route_scale=model.hf_config.text_config.routed_scaling_factor,
-            dim=model.hf_config.text_config.hidden_size,
-            moe_inter_dim=model.hf_config.text_config.moe_intermediate_size,
-            shared_inter_dim=model.hf_config.text_config.moe_shared_expert_intermediate_size,
-            norm_topk_prob=model.hf_config.text_config.norm_topk_prob,
+            route_scale=language_model_config.routed_scaling_factor,
+            dim=language_model_config.hidden_size,
+            moe_inter_dim=language_model_config.moe_intermediate_size,
+            shared_inter_dim=language_model_config.moe_shared_expert_intermediate_size,
+            norm_topk_prob=language_model_config.norm_topk_prob,
             enable_router_bias=True, # TODO(jiaxinc): hardcoded to be consistent with the original implementation
             enable_glu=False, # TODO(jiaxinc): hardcoded to be consistent with the original implementation
-            act_fn=model.hf_config.text_config.mlp_hidden_act
+            act_fn=language_model_config.mlp_hidden_act
         )
+
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
@@ -346,15 +350,13 @@ def apply_fsdp(
             **fsdp_config_no_moe,
             reshard_after_forward=reshard_after_forward,
         )
-    if model.language_model.embeddings is not None:
-        logger.info("Applying FSDP to the language model embeddings")
-        fully_shard(model.language_model.embeddings, **fsdp_config_no_moe, reshard_after_forward=True)
-    fully_shard(model.language_model, **fsdp_config_no_moe, reshard_after_forward=True)
-    if model.model is not model.language_model:
-        # model.model might be the same with model.language_model which is already shard above,
-        # so we only shard it when not the same to avoid redundant sharding assertion error.
-        fully_shard(model.model, **fsdp_config_no_moe, reshard_after_forward=True)
 
+    embed_tokens = model.embed_tokens
+
+    if embed_tokens is not None:
+        logger.info("Applying FSDP to the language model embeddings")
+        fully_shard(embed_tokens, **fsdp_config_no_moe, reshard_after_forward=True)
+    fully_shard(model.model, **fsdp_config_no_moe, reshard_after_forward=True)
 
 def apply_ddp(
     model: nn.Module,

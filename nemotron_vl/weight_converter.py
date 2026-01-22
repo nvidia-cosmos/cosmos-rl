@@ -40,14 +40,11 @@ def convert_weight_from_hf(
     ignore_unknown_weights: bool = False,
     hf_config: Optional[Any] = None,
 ) -> Tuple[str, torch.Tensor]:
-    # if "e_score_correction_bias" in name:
-    #     # This is just a buffer, not a parameter, so we don't need to shard it
-    #     return name, tensor
-
     # Since TP is not used in this model, we use tp_coord to represent the expert rank and size
     ep_rank, ep_size = parallel_dims.tp_coord
 
-    n_experts = hf_config.text_config.n_routed_experts
+    language_model_config = hf_config.text_config if 'text_config' in hf_config else hf_config
+    n_experts = language_model_config.n_routed_experts
 
     if ep_size > 1 and "mixer.experts." in name:
         # for example, `backbone.layers.1.mixer.experts.32`
@@ -97,6 +94,53 @@ def convert_weight_from_hf(
 
                     return target_tensor[local_expert_idx]
 
+                return partial(transform_name_fn, name=name), tensor
+            else:
+                # If the expert does not belong to the current process, return None to skip this weight
+                return None, None
+        elif (
+            match := re.search(
+            r"backbone.layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)$",
+            name)
+        ) is not None:
+            # shard = tensor.tensor_split(ep_size, dim=0)[ep_rank]
+            # Check whether this expert belongs to the current process
+            # Groups example (with 32 experts, and 4 EP groups):
+            #  EP=0: 0, 1, 2, 3, 4, 5, 6, 7
+            #  EP=1: 8, 9, 10, 11, 12, 13, 14, 15
+            #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
+            #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
+            n_expert_per_ep = n_experts // ep_size
+            belongs_to_current_ep = (
+                ep_rank * n_expert_per_ep
+                <= int(match.group(2))  # Expert index
+                < (ep_rank + 1) * n_expert_per_ep
+            )
+            belongs_to_current_dp_shard = (
+                int(match.group(2)) - ep_rank * n_expert_per_ep
+            ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
+            if belongs_to_current_ep and belongs_to_current_dp_shard:
+                # No fsdp applied to expert weights of shape [out_features, in_features]
+                # since the sharding dim is only on dim 0 of shape [n_experts, out_features, in_features]
+
+                def transform_name_fn(model_state_dict: Dict[str, torch.Tensor], name: str) -> Optional[torch.Tensor]:
+                    m = re.search(
+                        r"^(backbone\.layers\.\d+\.mixer\.experts)\.\d+\.((?:up_proj|gate_proj|down_proj)\.(?:weight|bias))$",
+                        name,
+                    )
+                    assert m is not None, f"Unsupported weight: {name}"
+
+                    # `prefix` is the prefix of the weight name, e.g. "backbone.layers.1.mixer.experts"
+                    # `suffix` is the suffix of the weight name, e.g. "up_proj.weight"
+                    prefix, suffix = m.group(1), m.group(2)
+                    suffix = suffix.replace("up_proj.weight", "gate_and_up_projs").replace("down_proj.weight", "down_projs")
+
+                    local_expert_idx = int(match.group(2)) % (n_experts // (ep_size * dp_shard_size))
+                    target_tensor = model_state_dict[prefix + "." + suffix]
+                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                        target_tensor = target_tensor.to_local()
+
+                    return target_tensor[local_expert_idx]
                 return partial(transform_name_fn, name=name), tensor
             else:
                 # If the expert does not belong to the current process, return None to skip this weight

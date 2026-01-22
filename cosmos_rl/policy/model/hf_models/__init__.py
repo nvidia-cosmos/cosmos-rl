@@ -293,6 +293,7 @@ class HFModel(BaseModel):
         for path in [
             "embed_tokens",
             "model.embed_tokens",
+            "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
