@@ -77,7 +77,7 @@ max_response_length = 1024
 enforce_eager = false
 
 [policy.parallelism]
-n_init_replicas = 1
+n_init_replicas = 4
 tp_size = 1  # PI05 does not support tensor parallelism
 cp_size = 1  # PI05 does not support context parallelism
 dp_shard_size = 1  # FSDP sharding (auto-detect based on GPUs)
@@ -86,7 +86,7 @@ dp_replicate_size = 1
 cp_rotate_method = "allgather"
 
 [rollout.parallelism]
-n_init_replicas = 1
+n_init_replicas = 4
 tp_size = 1
 cp_size = 1
 dp_shard_size = 1
@@ -100,9 +100,9 @@ top_k = 50  # algorithm.sampling_params.top_k
 
 [validation]
 enable = true
-freq = 20
+freq = 200
 val_before_train = true
-batch_size = 64
+batch_size = 4
 dataset.name = "b1k"
 dataset.subset = "b1k"
 dataset.split = "val"
@@ -114,7 +114,7 @@ num_envs = 1
 proprio_dim = 7
 num_images_in_input = 3  # base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
 training_chunk_size = 16  # Number of action chunks to train in one iteration
-save_video = false
+save_video = true
 
 # Reward filtering (aligned with RLinf algorithm.filter_rewards)
 filter_lower_bound = 0.1  # algorithm.rewards_lower_bound

@@ -423,7 +423,7 @@ class OpenVLARollout(RolloutBase):
                 for i, pidx in enumerate(payload_env_mapping)
                 if pidx != -1 and async_wait_envs[i] == -1
             ]
-            logger.info(
+            logger.debug(
                 f"payload_env_mapping: {payload_env_mapping}, "
                 f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
                 f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}, "
