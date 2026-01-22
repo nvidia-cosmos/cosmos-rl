@@ -156,7 +156,14 @@ class CheckpointMananger:
                     )
 
         is_final = kwargs.get("is_final", False)
-        cur_step_ckpt_dir = os.path.join(f"step_{step}", "policy")
+        # Use epoch-based naming if epoch is provided (e.g., save_freq_in_epoch > 0)
+        # Otherwise fall back to step-based naming
+        epoch = kwargs.get("epoch")
+        if epoch is not None:
+            ckpt_identifier = f"epoch_{epoch}"
+        else:
+            ckpt_identifier = f"step_{step}"
+        cur_step_ckpt_dir = os.path.join(ckpt_identifier, "policy")
         os.makedirs(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
         )
@@ -361,13 +368,23 @@ class CheckpointMananger:
 
     def save_check(self, step: int, **kwargs):
         if is_master_rank(self.parallel_dims, self.global_rank):
-            heapq.heappush(self.saved_steps, step)
+            # Use epoch-based naming if epoch is provided, otherwise step-based
+            epoch = kwargs.get("epoch")
+            if epoch is not None:
+                ckpt_identifier = f"epoch_{epoch}"
+                # Track by epoch for max_keep management
+                heapq.heappush(self.saved_steps, (epoch, "epoch"))
+            else:
+                ckpt_identifier = f"step_{step}"
+                heapq.heappush(self.saved_steps, (step, "step"))
+
             # remove the old checkpoints
             if len(self.saved_steps) > self.max_keep:
-                oldest = heapq.heappop(self.saved_steps)
-                ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{oldest}")
+                oldest_val, oldest_type = heapq.heappop(self.saved_steps)
+                oldest_identifier = f"{oldest_type}_{oldest_val}"
+                ckpt_dir = os.path.join(self.ckpt_output_dir, oldest_identifier)
                 safetensors_dir = os.path.join(
-                    self.config.train.output_dir, "safetensors", f"step_{oldest}"
+                    self.config.train.output_dir, "safetensors", oldest_identifier
                 )
                 if os.path.exists(ckpt_dir):
                     shutil.rmtree(ckpt_dir)
@@ -387,9 +404,9 @@ class CheckpointMananger:
                     )
                     if os.path.islink(best_ckpt_dir):
                         os.unlink(best_ckpt_dir)
-                    os.symlink(f"step_{step}", best_ckpt_dir)
+                    os.symlink(ckpt_identifier, best_ckpt_dir)
                     logger.info(
-                        f"Best checkpoint updated to step_{step} with score: {val_score}"
+                        f"Best checkpoint updated to {ckpt_identifier} with score: {val_score}"
                     )
                     if self.config.train.ckpt.export_safetensors:
                         best_safetensors_dir = os.path.join(
@@ -397,5 +414,5 @@ class CheckpointMananger:
                         )
                         if os.path.islink(best_safetensors_dir):
                             os.unlink(best_safetensors_dir)
-                        os.symlink(f"step_{step}", best_safetensors_dir)
-                        logger.info(f"Best safetensors updated to step_{step}")
+                        os.symlink(ckpt_identifier, best_safetensors_dir)
+                        logger.info(f"Best safetensors updated to {ckpt_identifier}")

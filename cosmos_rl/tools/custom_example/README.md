@@ -212,7 +212,6 @@ The key to customization is the registry system:
 
 This design allows you to experiment with novel RL algorithms while maintaining compatibility with the distributed training infrastructure.
 
-
 ## Custom Logger Functions and Training Hooks
 
 Cosmos-RL provides a flexible system for integrating custom logging and monitoring through `custom_logger_fns` and `hook_fns`. This allows you to integrate external systems (e.g., TAO, MLflow, custom monitoring) without modifying the core training code.
@@ -235,9 +234,7 @@ def custom_logger_fn(report_data: Dict[str, Any], step: int) -> None:
 **Example:**
 ```python
 from cosmos_rl.launcher.worker_entry import main
-from cosmos_rl.tools.custom_example import create_status_logger
-
-# Create a custom logger that sends status to an external endpoint
+from cosmos_rl.tools.custom_example import create_status_logger# Create a custom logger that sends status to an external endpoint
 status_logger = create_status_logger(
     endpoint="http://monitoring-server/api/status",
     component_name="My SFT Training"
@@ -272,9 +269,7 @@ def hook_fn(worker, report_data: Dict[str, Any]) -> None:
         report_data: Dictionary containing context-specific data
     """
     pass
-```
-
-**Example with TAO-like Integration:**
+```**Example with TAO-like Integration:**
 ```python
 from cosmos_rl.launcher.worker_entry import main
 from cosmos_rl.tools.custom_example import TAOStatusLogger

@@ -449,6 +449,19 @@ class TAOStatusLogger:
 
         return self._status_logger
 
+    @staticmethod
+    def _convert_tensors_to_scalars(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert any PyTorch tensors in a dict to Python scalars for JSON serialization."""
+        result = {}
+        for k, v in data.items():
+            if hasattr(v, 'item'):  # PyTorch tensor
+                result[k] = v.item()
+            elif hasattr(v, 'tolist'):  # NumPy array
+                result[k] = v.tolist()
+            else:
+                result[k] = v
+        return result
+
     def log_status(self, report_data: Dict[str, Any], step: int) -> None:
         """Custom logger function for TAO status updates.
 
@@ -466,27 +479,34 @@ class TAOStatusLogger:
         try:
             from datetime import timedelta
 
-            # Get epoch info if available
-            current_epoch = report_data.get("val/cur_epoch", report_data.get("current_epoch"))
-            max_epochs = report_data.get("val/train_epochs", report_data.get("total_epochs"))
-            total_steps = report_data.get("train/total_steps", report_data.get("total_steps", 0))
-            steps_per_epoch = report_data.get("steps_per_epoch", 100)
+            # Convert any tensors to Python scalars for JSON serialization
+            report_data = self._convert_tensors_to_scalars(report_data)
+
+            # Get epoch info from either training or validation report_data
+            current_epoch = report_data.get("train/cur_epoch", report_data.get("val/cur_epoch"))
+            max_epochs = report_data.get("train/total_epochs", report_data.get("val/train_epochs"))
+            total_steps = report_data.get("train/total_steps", report_data.get("val/total_steps", 0))
+            steps_per_epoch = report_data.get("steps_per_epoch", 1)
 
             # Use epoch-based logging if provided, otherwise fall back to step-based
+            # But calculate ETA based on remaining STEPS for more accurate progress
+            iteration_time = report_data.get('train/iteration_time', 1.0)
+
             if current_epoch is not None and max_epochs is not None:
                 current_value = current_epoch
                 max_value = max_epochs
-                remaining_units = max(max_epochs - current_epoch, 0)
-                estimated_time_per_unit = report_data.get('train/iteration_time', 1.0) * steps_per_epoch
+                # ETA based on remaining steps (more accurate than remaining epochs)
+                remaining_steps = max(total_steps - step, 0)
+                eta_seconds = remaining_steps * iteration_time
+                estimated_time_per_unit = iteration_time * steps_per_epoch
                 log_key = "epoch"
             else:
                 current_value = step
-                max_value = total_steps if total_steps > 0 else step + 1000
-                remaining_units = max(max_value - current_value, 0)
-                estimated_time_per_unit = report_data.get('train/iteration_time', 1.0)
+                max_value = total_steps if total_steps > 0 else step
+                remaining_steps = max(max_value - current_value, 0)
+                eta_seconds = remaining_steps * iteration_time
+                estimated_time_per_unit = iteration_time
                 log_key = "step"
-
-            eta_seconds = remaining_units * estimated_time_per_unit
 
             # Create TAO-compatible status data
             tao_data = {
@@ -507,23 +527,131 @@ class TAOStatusLogger:
                 message = f"{self.experiment_name} in progress"
 
             # Write to status file
-            status_logger.write(
-                data=tao_data,
-                kpi=report_data,
-                message=message
-            )
+            # Check if using fallback logger (supports kpi as argument) or TAO core logger
+            if isinstance(status_logger, _FallbackStatusLogger):
+                status_logger.write(
+                    data=tao_data,
+                    kpi=report_data,
+                    message=message
+                )
+            else:
+                # TAO core StatusLogger: set kpi as attribute, then call write()
+                try:
+                    from nvidia_tao_core.loggers.logging import Status, Verbosity
+                    status_logger.kpi = report_data
+                    status_logger.write(
+                        data=tao_data,
+                        status_level=Status.RUNNING,
+                        verbosity_level=Verbosity.INFO,
+                        message=message
+                    )
+                except Exception as write_err:
+                    logger.warning(f"TAO core write failed: {write_err}")
 
             logger.debug(f"TAO status logged for {self.experiment_name} {log_key} {current_value}")
 
         except Exception as e:
             logger.warning(f"TAO status logging failed: {e}")
 
+    def _write_status(self, phase: str, data: Dict[str, Any], message: str = "") -> None:
+        """Write status update to TAO status file."""
+        # Only write from master rank (rank 0)
+        node_rank = int(os.environ.get("NODE_RANK", 0))
+        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
+        if node_rank != 0 or local_rank != 0:
+            return
+
+        status_logger = self._get_status_logger()
+        if status_logger is None:
+            return
+
+        try:
+            # Convert tensors to scalars
+            data = self._convert_tensors_to_scalars(data)
+
+            # Only put component and phase at outer level, metrics go in kpi only
+            tao_data = {
+                'component': self.experiment_name,
+                'phase': phase,
+            }
+
+            if not message:
+                message = f"{self.experiment_name} - {phase}"
+
+            if isinstance(status_logger, _FallbackStatusLogger):
+                status_logger.write(data=tao_data, kpi=data, message=message)
+            else:
+                try:
+                    from nvidia_tao_core.loggers.logging import Status, Verbosity
+                    status_logger.kpi = data
+                    status_logger.write(
+                        data=tao_data,
+                        status_level=Status.RUNNING,
+                        verbosity_level=Verbosity.INFO,
+                        message=message
+                    )
+                except Exception as write_err:
+                    logger.debug(f"TAO hook write failed: {write_err}")
+        except Exception as e:
+            logger.debug(f"TAO hook status failed: {e}")
+
     def get_hooks(self) -> Dict[str, Callable]:
-        """Get all hooks for TAO status updates during training/validation."""
-        return create_all_hooks(
-            status_endpoint=None,  # File-based logging, no HTTP endpoint
-            component_name=self.experiment_name,
-        )
+        """Get all hooks for TAO status updates during training/validation.
+
+        Returns hooks that write to the TAO status file for per-batch progress.
+        """
+        def pre_validation_hook(worker, report_data: Dict[str, Any]) -> None:
+            self._write_status(
+                "validation_starting",
+                {
+                    "validation_dataset_size": len(worker.val_data_loader.dataset),
+                    **report_data
+                },
+                f"Starting validation at epoch {report_data.get('current_epoch', 0) + 1}"
+            )
+
+        def pre_per_step_validation_hook(worker, report_data: Dict[str, Any]) -> None:
+            batch_idx = report_data.get("batch_index", 0)
+            total_batches = len(worker.val_data_loader)
+            progress = (batch_idx / total_batches) * 100 if total_batches > 0 else 0
+            self._write_status(
+                "validation_batch_start",
+                {
+                    "batch_index": batch_idx,
+                    "total_batches": total_batches,
+                    "progress_percent": progress,
+                },
+                f"Validation batch {batch_idx + 1}/{total_batches}"
+            )
+
+        def post_per_step_validation_hook(worker, report_data: Dict[str, Any]) -> None:
+            batch_idx = report_data.get("batch_index", 0)
+            total_batches = len(worker.val_data_loader)
+            progress = ((batch_idx + 1) / total_batches) * 100 if total_batches > 0 else 0
+            self._write_status(
+                "validation_batch_complete",
+                {
+                    "batch_index": batch_idx,
+                    "total_batches": total_batches,
+                    "progress_percent": progress,
+                    "batch_loss": report_data.get("val_score"),
+                },
+                f"Validation batch {batch_idx + 1}/{total_batches} complete"
+            )
+
+        def post_validation_hook(worker, report_data: Dict[str, Any]) -> None:
+            self._write_status(
+                "validation_complete",
+                report_data,
+                f"Validation complete. Avg loss: {report_data.get('val_avg_loss', 'N/A')}"
+            )
+
+        return {
+            "pre_validation_hook": pre_validation_hook,
+            "pre_per_step_validation_hook": pre_per_step_validation_hook,
+            "post_per_step_validation_hook": post_per_step_validation_hook,
+            "post_validation_hook": post_validation_hook,
+        }
 
 
 class _FallbackStatusLogger:

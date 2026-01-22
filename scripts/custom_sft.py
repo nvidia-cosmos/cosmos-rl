@@ -44,6 +44,20 @@ from cosmos_rl.utils.logging import logger
 # Import TAO status logger utilities
 from cosmos_rl.tools.custom_example import TAOStatusLogger
 
+# Import TAO core logging for STARTED/SUCCESS/FAILURE status
+try:
+    from nvidia_tao_core.loggers.logging import (
+        StatusLogger,
+        Status,
+        Verbosity,
+        set_status_logger,
+        get_status_logger,
+    )
+    HAS_TAO_CORE = True
+except ImportError:
+    HAS_TAO_CORE = False
+    logger.warning("nvidia_tao_core not found - job lifecycle status logging disabled")
+
 # Optional: Import cosmos_reason1_utils if available
 try:
     from cosmos_reason1_utils.text import create_conversation
@@ -154,26 +168,127 @@ class CustomDataset(torch.utils.data.Dataset):
         return conversations
 
 
+def _get_results_dir() -> str:
+    """Get the results directory based on TAO environment variables."""
+    job_id = os.environ.get('TAO_API_JOB_ID')
+    if job_id:
+        results_base = os.environ.get('TAO_API_RESULTS_DIR', '/results')
+        return os.path.join(results_base, job_id)
+    return './results'
+
+
+def _is_master_rank() -> bool:
+    """Check if current process is the master rank for status logging."""
+    cosmos_role = os.environ.get("COSMOS_ROLE", "")
+    node_rank = int(os.environ.get("NODE_RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
+    is_worker = cosmos_role != "Controller"
+    return is_worker and (node_rank == 0) and (local_rank == 0)
+
+
+def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
+    """Decorator to monitor job status (STARTED/SUCCESS/FAILURE).
+
+    Only logs status from master rank to minimize memory overhead.
+    This decorator handles TAO status logging without interfering with
+    the main function's logic.
+
+    Usage:
+        @monitor_status("My Experiment")
+        def main():
+            # your code here
+            pass
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            s_logger = None
+
+            # Only setup logger on master rank
+            if HAS_TAO_CORE and _is_master_rank():
+                results_dir = _get_results_dir()
+                os.makedirs(results_dir, exist_ok=True)
+                status_file = os.path.join(results_dir, "status.json")
+
+                s_logger = StatusLogger(
+                    filename=status_file,
+                    is_master=True,
+                    verbosity=Verbosity.INFO,
+                    append=True
+                )
+                set_status_logger(s_logger)
+                logger.info(f"Job lifecycle status will be logged to: {status_file}")
+
+                # Log STARTED
+                s_logger.write(
+                    status_level=Status.STARTED,
+                    message=f"Starting {experiment_name} training"
+                )
+                logger.info(f"Job STARTED: {experiment_name}")
+
+            try:
+                result = func(*args, **kwargs)
+
+                # Log SUCCESS
+                if s_logger:
+                    s_logger.write(
+                        status_level=Status.RUNNING,
+                        message=f"{experiment_name} training completed successfully"
+                    )
+                    logger.info(f"Job SUCCESS: {experiment_name}")
+
+                return result
+
+            except (KeyboardInterrupt, SystemExit) as e:
+                if s_logger:
+                    try:
+                        s_logger.write(
+                            status_level=Status.FAILURE,
+                            verbosity_level=Verbosity.WARNING,
+                            message=f"{experiment_name} training was interrupted: {str(e)}"
+                        )
+                    except Exception:
+                        pass
+                    logger.warning(f"Job INTERRUPTED: {experiment_name}")
+                raise
+
+            except Exception as e:
+                if s_logger:
+                    try:
+                        s_logger.write(
+                            status_level=Status.FAILURE,
+                            verbosity_level=Verbosity.ERROR,
+                            message=f"{experiment_name} training failed: {str(e)}"
+                        )
+                    except Exception:
+                        pass
+                    logger.error(f"Job FAILED: {experiment_name} - {str(e)}")
+                raise
+
+        return wrapper
+    return decorator
+
+
+@monitor_status("Cosmos-RL SFT")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, required=True, help="Path to config file."
     )
     args = parser.parse_known_args()[0]
+
     # Load config
     with open(args.config, encoding="utf-8") as f:
         config_kwargs = toml.load(f)
     config = cosmos_rl.policy.config.Config.from_dict(config_kwargs)
     custom_config = CustomConfig.model_validate(config_kwargs.get("custom", {}))
 
-    # Log
+    # Save config if controller
     role = os.environ.get("COSMOS_ROLE")
     is_controller = role == "Controller"
     if is_controller:
         output_dir = Path(config.train.output_dir).resolve().parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save config
         config_kwargs_to_save = config.model_dump()
         config_kwargs_to_save["custom"] = custom_config.model_dump()
         config_path = output_dir / "config.toml"
@@ -198,7 +313,6 @@ def main():
         """Factory function to create validation dataset."""
         custom_cfg = CustomConfig.model_validate(config.model_dump().get("custom", {}))
 
-        # Only create validation dataset if validation dataset config is specified
         if not custom_cfg.val_dataset:
             logger.info("No validation dataset specified, skipping validation dataset")
             return None
@@ -218,15 +332,11 @@ def main():
     if custom_config.tao_logging_enabled and os.environ.get("TAO_API_JOB_ID"):
         logger.info("TAO logging enabled - will write to status.json")
 
-        # Create TAO status logger
         tao_logger = TAOStatusLogger(
             experiment_name=config.logging.experiment_name or "Cosmos-RL SFT Training"
         )
 
-        # Add the custom logger function (writes metrics after each step)
         custom_logger_fns.append(tao_logger.log_status)
-
-        # Add hooks for training/validation lifecycle events
         hook_fns = tao_logger.get_hooks()
 
         logger.info(f"TAO status will be logged to: {tao_logger._get_status_file_path()}")
