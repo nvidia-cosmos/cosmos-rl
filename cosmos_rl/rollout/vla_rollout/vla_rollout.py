@@ -562,14 +562,14 @@ class OpenVLARollout(RolloutBase):
             input_ids: List[torch.Tensor], attention_mask: List[torch.Tensor]
         ):
             """Remove padding tokens from input_ids using attention_mask."""
-            
+
             # Check if all tensors have the same length - if so, skip trimming
             if len(input_ids) > 0:
                 first_len = input_ids[0].shape[0]
                 if all(tensor.shape[0] == first_len for tensor in input_ids):
                     # All tensors have the same length, no trimming needed
                     return input_ids, attention_mask
-            
+
             trimmed_input_ids, trimmed_attention_mask = [], []
             for step_input_ids, step_attention_mask in zip(input_ids, attention_mask):
                 # Convert to CPU for indexing if needed, then create boolean mask

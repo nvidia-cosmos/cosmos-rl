@@ -16,7 +16,11 @@
 
 import omnigibson as og
 from typing import List, Any
-from omnigibson.learning.utils.eval_utils import ROBOT_CAMERA_NAMES, HEAD_RESOLUTION, WRIST_RESOLUTION
+from omnigibson.learning.utils.eval_utils import (
+    ROBOT_CAMERA_NAMES,
+    HEAD_RESOLUTION,
+    WRIST_RESOLUTION,
+)
 
 
 class VectorEnvironment:
@@ -37,7 +41,7 @@ class VectorEnvironment:
 
     def _apply_camera_resolutions(self, env):
         """Apply the correct camera resolutions to match eval.py behavior.
-        
+
         This sets:
         - Head camera: 720x720 with 40.0 horizontal aperture
         - Wrist cameras: 480x480
@@ -115,12 +119,12 @@ class VectorEnvironment:
             env = self.envs[env_id]
             env.scene.update_initial_file()
             env.scene.reset()
-            
+
         # Warm up rendering to sync camera buffers
         # OmniGibson rendering is async and takes 3-4 render calls to sync
         for _ in range(4):
             og.sim.render()
-            
+
         for env_id in env_ids:
             env = self.envs[env_id]
             obs, info = env.get_obs()
