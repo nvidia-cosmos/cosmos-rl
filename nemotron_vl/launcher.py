@@ -136,6 +136,6 @@ if __name__ == "__main__":
     HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
     
     launch_dispatcher(
-        dataset=get_dataset,
+        # dataset=get_dataset,
     )
 
