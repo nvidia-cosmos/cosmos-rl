@@ -461,9 +461,6 @@ class HFModel(BaseModel):
                 # For expert weight, `experts.$ID.gate_and_up_projs` -> `experts.gate_and_up_projs[$ID]`
                 target_tensor = dest_name(self_state_dict)
             else:
-                logger.info(
-                    f"Loading weight: {dest_name} with shape {sharded_weight.shape}"
-                )
                 target_tensor = self_state_dict[dest_name]
 
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
