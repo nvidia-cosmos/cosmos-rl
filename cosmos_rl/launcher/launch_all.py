@@ -721,7 +721,8 @@ def main():
     ):
         n_rollouts = 0
         n_reference = 0
-        if n_policy > 1:
+        allow_sft_multi_replica = True
+        if n_policy > 1 and not allow_sft_multi_replica:
             logger.warning(
                 "Warning: n_init_replicas for rollout is set to 0 for SFT training, but n_init_replicas for policy is more than 1."
             )

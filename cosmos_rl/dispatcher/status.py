@@ -272,6 +272,12 @@ class PolicyStatusManager:
         """
         return all([x in status for x in self.status.values()])
 
+    def any_with_status(self, status: List[PolicyStatus]) -> bool:
+        """
+        Check if any policies have the given status.
+        """
+        return any([x in status for x in self.status.values()])
+
     def all_reduced(self) -> bool:
         """
         Check if all policies are reduced.
@@ -466,6 +472,8 @@ class PolicyStatusManager:
     def rearrange_rollout_buffer_after_mesh_rebuild(
         self, sorted_valid_replicas: List[Replica]
     ):
+        # Only handle the case when data dispatch as rank in mesh is enabled for GRPO
+        # Currently SFT does not support rank specific data dispatch
         if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
             new_rollout_buffer_per_rank: List[Queue[Rollout]] = [
                 Queue() for _ in range(len(sorted_valid_replicas))
@@ -521,6 +529,7 @@ class PolicyStatusManager:
                 command.PolicyToPolicyBroadcastCommand.trigger(
                     src_replica=initialized_replica,
                     dst_replicas=valid_replicas,
+                    total_steps=self.total_steps,
                     redis_handler=self.redis_handler,
                 )
             # Set all policy replicas to `ready`
@@ -590,6 +599,7 @@ class PolicyStatusManager:
             command.PolicyToPolicyUnicastCommand.trigger(
                 src_replica=initialized_replica,
                 dst_replica=target_replica,
+                total_steps=self.total_steps,
                 redis_handler=self.redis_handler,
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
@@ -806,6 +816,47 @@ class PolicyStatusManager:
         )
         return filtered_rollouts
 
+    def sft_report_summary(
+        self,
+        train_step: int,
+        total_steps: int,
+    ):
+        try:
+            for replica in self.get_all_atoms_arrived_replicas():
+                self.set_status(replica.name, PolicyStatus.RUNNING)
+            report_data = {}
+            report_data = aggregate_report_data(self.report_data_list, report_data)
+            self.report_data_list = []
+            report_data_str = ", ".join([f"{k}: {v}" for k, v in report_data.items()])
+            logger.debug(
+                f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} data batch: {report_data_str}"
+            )
+            if "wandb" in self.config.logging.logger and is_wandb_available():
+                log_wandb(
+                    data=report_data,
+                    step=train_step,
+                )
+            if "console" in self.config.logging.logger:
+                logger.info(
+                    f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                )
+            for custom_logger_fn in self.custom_logger_fns:
+                # We add a separate try-except block to handle the error of custom logger function.
+                # This is to avoid the error of custom logger function affecting the fundamental logging system.
+                for custom_logger_fn in self.custom_logger_fns:
+                    try:
+                        custom_logger_fn(report_data, train_step)
+                    except Exception as e:
+                        logger.warning(
+                            f"[Controller] Error calling custom logger function: {e}"
+                        )
+        except Exception as e:
+            import traceback
+
+            logger.warning(
+                f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
+            )
+
     def train_ack(
         self,
         replica_name: str,
@@ -818,6 +869,12 @@ class PolicyStatusManager:
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
 
+        if self.config.train.train_policy.type == "sft" and not self.any_with_status(
+            [PolicyStatus.REDUCED]
+        ):
+            # For SFT, we increment current_step at first train_ack received in each step
+            self.current_step += 1
+
         self.set_status(replica_name, PolicyStatus.REDUCED)
 
         if not hasattr(self, "report_data_list"):
@@ -825,6 +882,11 @@ class PolicyStatusManager:
 
         self.report_data_list.append(report_data)
         if self.all_reduced():
+            if self.config.train.train_policy.type == "sft":
+                return self.sft_report_summary(
+                    train_step=step,
+                    total_steps=total_steps,
+                )
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
                 self.get_all_atoms_arrived_replicas()
             )

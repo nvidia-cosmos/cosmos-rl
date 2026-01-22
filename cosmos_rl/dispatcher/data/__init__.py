@@ -53,7 +53,7 @@ class RLInternalDataset(Dataset):
     def __init__(
         self,
         dataset: Any,
-        prompt_column: str,
+        prompt_column: Optional[str] = None,
         response_column: Optional[str] = None,
     ):
         self.dataset = dataset
@@ -64,11 +64,19 @@ class RLInternalDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        prompt: str = self.dataset[idx][self.prompt_column]
+        prompt: str = (
+            self.dataset[idx][self.prompt_column]
+            if self.prompt_column is not None
+            else self.dataset[idx]
+        )
         return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
-        ref = self.dataset[idx][self.response_column]
+        ref = (
+            self.dataset[idx][self.response_column]
+            if self.response_column is not None
+            else ""
+        )
         return ref
 
 
@@ -86,8 +94,16 @@ class CosmosDataset:
             Deprecated: for most cases, users should provide a train_set for better generalization
             """
             self.grpo_config = config.train.train_policy
-            self.prompt_column = self.grpo_config.prompt_column_name
-            self.response_column = self.grpo_config.response_column_name
+            self.prompt_column = (
+                self.grpo_config.prompt_column_name
+                if hasattr(self.grpo_config, "prompt_column_name")
+                else None
+            )
+            self.response_column = (
+                self.grpo_config.response_column_name
+                if hasattr(self.grpo_config, "response_column_name")
+                else None
+            )
             dataset = load_data_from_disk_or_hf(
                 self.grpo_config.dataset.name,
                 self.grpo_config.dataset.subset,

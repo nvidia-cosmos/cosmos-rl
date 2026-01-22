@@ -113,7 +113,11 @@ class Controller:
                 "Wandb is not available. Please install it to use wandb logging features."
             )
 
-        self.is_rl = task_type != "sft"
+        # Treat SFT with multiple replicas as RL for controller data fetcher
+        # It can be regarded as RL without rollout workers
+        self.is_rl = (
+            task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
+        )
         self.is_diffusers = self.config.policy.is_diffusers
         self.weight_version_to_prompt_num = {}  # Only for on-policy.
 
@@ -249,7 +253,12 @@ maxmemory-policy allkeys-lfu
             self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
         )
 
-        if not is_validation and not self.config.mode == "colocated":
+        is_sft = self.config.train.train_policy.type == "sft"
+        step_fetched_count_control = (
+            not is_validation and not is_sft and not self.config.mode == "colocated"
+        )
+
+        if step_fetched_count_control:
             # Throttle the generation speed:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
@@ -308,9 +317,8 @@ maxmemory-policy allkeys-lfu
                         )
 
         if (
-            (not is_validation)
+            step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
-            and not self.config.mode == "colocated"
         ):
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
@@ -333,7 +341,7 @@ maxmemory-policy allkeys-lfu
                 validation_step,
                 rank_in_mesh,
                 weight_version=weight_version_for_current_batch
-                if self.config.train.train_policy.variant != "dapo"
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
                 else None,
             )
             current_fetch_count = len(payloads_list)
@@ -375,12 +383,17 @@ maxmemory-policy allkeys-lfu
                 validation_step,
                 rank_in_mesh,
                 weight_version=weight_version_for_current_batch
-                if self.config.train.train_policy.variant != "dapo"
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
                 else None,
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
-                payloads_list[i].weight_version = 0
+                if is_sft:
+                    payloads_list[
+                        i
+                    ].weight_version = self.policy_status_manager.current_step
+                else:
+                    payloads_list[i].weight_version = 0
         if not is_validation:
             self.policy_status_manager.samples_on_the_fly += (
                 current_fetch_count * self.config.rollout.n_generation

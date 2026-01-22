@@ -153,6 +153,7 @@ class SFTTrainer(LLMTrainer):
         total_steps: int,
         train_step: int,
         save_freq: int,
+        inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
@@ -363,6 +364,16 @@ class SFTTrainer(LLMTrainer):
         Compute the global grad norm on all parameters and then apply
         gradient clipping using the global grad norm.
         """
+        if inter_policy_nccl is not None:
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], inter_policy_nccl
+                    )
+
         all_params = [
             p
             for m in [model for model in self.model_parts if model is not None]

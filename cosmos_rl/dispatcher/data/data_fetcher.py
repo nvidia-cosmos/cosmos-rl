@@ -127,6 +127,13 @@ class ControllerDataFetcher(DataFetcherBase):
         # Dict to track the number of data fetched for each policy at current step when data_dispatch_as_rank_in_mesh is enabled.
         self.data_fetched_for_each_policy_at_step = {}
 
+        if self.config.train.train_policy.type == "sft":
+            assert (
+                self.config.train.train_policy.dataloader_batch_size
+            ), "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            # Set n_generation to 1 for SFT policy to avoid duplicated data counting when calculating the related value.
+            self.config.rollout.n_generation = 1
+
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
 

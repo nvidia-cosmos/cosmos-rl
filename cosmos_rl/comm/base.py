@@ -93,7 +93,7 @@ class CommMixin:
         )
 
         policy_type = self.config.train.train_policy.type
-        if policy_type != "sft":
+        if policy_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1:
             # if not sft, we have to init redis
             self.init_redis()
 
