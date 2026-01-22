@@ -482,9 +482,7 @@ class ControllerDataFetcher(DataFetcherBase):
                         found = True
                         break
                 if found:
-                    fetched_data_buffer = (
-                        fetched_data_buffer[:index] + fetched_data_buffer[index + 1 :]
-                    )
+                    del fetched_data_buffer[index]
                 else:
                     break
 
