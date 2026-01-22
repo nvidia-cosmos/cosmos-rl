@@ -293,6 +293,12 @@ class GrpoConfig(BaseModel):
     dataloader_seed: int = Field(
         default=0, description="random seed for dataloader shuffling"
     )
+
+    data_dispatch_as_rank_in_mesh: bool = Field(
+        default=False,
+        description="Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.",
+    )
+
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",
@@ -1578,6 +1584,17 @@ class Config(BaseModel):
                 raise ValueError(
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
+        if (
+            self.train.train_policy.type == "grpo"
+            and self.train.train_policy.allowed_outdated_steps + 1
+            < self.train.sync_weight_interval
+        ):
+            self.train.train_policy.allowed_outdated_steps = (
+                self.train.sync_weight_interval - 1
+            )
+            logger.warning(
+                f"allowed_outdated_steps is less than sync_weight_interval - 1, setting allowed_outdated_steps to {self.train.sync_weight_interval - 1}."
+            )
 
         # Handle for evaludation configuration.
         if isinstance(self.validation.dataset.split, str):

@@ -841,6 +841,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.val_batch_size,
                     validation_queue,
                     validation_step=self.current_step,
+                    rank_in_mesh=self.rank_in_rollout_repicas,
                 )
                 if not validation_queue.empty():
                     payloads_list: List[RLPayload] = validation_queue.get()
@@ -1313,6 +1314,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     payload["prompt_idx"] >= 0 for payload in payloads
                 ), "All payloads should have a valid prompt index"
 
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    for payload in payloads:
+                        assert (
+                            payload["prompt_idx"] % len(self.replica_name_to_rank)
+                            == self.rank_in_rollout_repicas
+                        ), f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
                 is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
@@ -1549,7 +1556,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # try fetching new prompts if no ending signal is set
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
-                    self.batch_size, self._prompt_queue
+                    self.batch_size,
+                    self._prompt_queue,
+                    rank_in_mesh=self.rank_in_rollout_repicas,
                 )
                 if no_more_prompts:
                     logger.info(
@@ -1575,7 +1584,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 # Check if the prompt is valid for the current weight version
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
                 is_valid_prompt_for_current_weight_version = (
-                    first_payload.weight_version <= self.current_weight_version
+                    first_payload.weight_version
+                    <= self.current_weight_version
+                    + self.config.train.train_policy.allowed_outdated_steps
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
@@ -1751,7 +1762,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             return 0, False
 
         is_end = self.request_new_prompts(
-            request_prompts_count, prompt_queue, validation_step=validation_step
+            request_prompts_count,
+            prompt_queue,
+            validation_step=validation_step,
+            rank_in_mesh=self.rank_in_rollout_repicas,
         )
 
         is_validation = validation_step is not None

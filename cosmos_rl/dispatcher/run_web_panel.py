@@ -382,8 +382,12 @@ Rollout API
 
 
 @app.get(COSMOS_API_NEXT_PROMPT_SUFFIX)
-async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
-    payloads_list, is_end = await controller.get_batched_prompt(n, validation_step)
+async def get_batched_prompt(
+    n: int, validation_step: Optional[int] = None, rank_in_mesh: Optional[int] = None
+):
+    payloads_list, is_end = await controller.get_batched_prompt(
+        n, validation_step, rank_in_mesh
+    )
     return {
         "payloads_list": payloads_list,
         "is_end": is_end,

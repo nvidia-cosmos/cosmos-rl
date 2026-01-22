@@ -678,6 +678,15 @@ class RLPolicyWorker(PolicyWorkerBase):
             ), "All rollouts from controller should have a valid prompt index"
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                        for rollout in rollouts:
+                            assert (
+                                rollout.prompt_idx
+                                % len(self.inter_policy_nccl.replica_name_to_rank)
+                                == self.inter_policy_nccl.replica_name_to_rank[
+                                    self.replica_name
+                                ]
+                            ), f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
                     # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
