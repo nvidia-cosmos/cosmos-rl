@@ -23,7 +23,7 @@ target_modules = [ # Set both attention and cross-attention modules
 
 [policy.diffusers]
 dtype = "float32"
-is_video = false
+is_video = true
 offload = false
 max_prompt_length = 512
 inference_size = [512, 512]
@@ -41,7 +41,7 @@ deterministic_sampling = true
 
 [rollout]
 backend = "diffusion_nft_rollout"
-n_generation = 24
+n_generation = 4
 
 [logging]
 logger = ['console', 'wandb']
@@ -95,13 +95,13 @@ dataset.split = "test"
 [rollout.parallelism]
 n_init_replicas = 1
 tp_size = 1
-dp_shard_size = 1
+dp_shard_size = 2
 pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 1
+dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1

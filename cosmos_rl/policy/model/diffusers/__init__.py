@@ -30,8 +30,9 @@ from cosmos_rl.policy.config import DiffusersConfig
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import LoraConfig as CosmosLoraConfig
 from cosmos_rl.utils.util import str2torch_dtype
+from cosmos_rl.utils.logging import logger
 
-from peft import LoraConfig, get_peft_model_state_dict
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
 
 def mean_flat(tensor):
@@ -81,7 +82,7 @@ class DiffuserModel(BaseModel, ABC):
             model_part = getattr(self.pipeline, valid_model)
             if isinstance(model_part, nn.Module) and valid_model != "transformer":
                 # Offload all torch.nn.Modules to cpu except transformers
-                model_part.to(torch.bfloat16)
+                model_part.to(dtype=torch.bfloat16)
                 if self.offload:
                     model_part.to("cpu")
                     self.offloaded_models.append(model_part)
@@ -173,7 +174,12 @@ class DiffuserModel(BaseModel, ABC):
         self.pipeline = DiffusionPipeline.from_pretrained(
             model_str, revision=revision, torch_dtype=self.dtype, device_map="cuda"
         )
-
+        if self.pipeline._execution_device.type != "cuda":
+            logger.warning(
+                f"{model_str} pipeline does not support cuda device map. Manually move it to cuda."
+            )
+            self.pipeline.reset_device_map()
+            self.pipeline.to("cuda")
         # Register all model parts to self
         # self.transformer will point to self.pipeline.transformer
         self.register_models()
@@ -354,10 +360,18 @@ class DiffuserModel(BaseModel, ABC):
             init_lora_weights=lora_config.init_lora_weights,
             target_modules=lora_config.target_modules,
         )
-        for lora_name in lora_config.lora_names:
-            self.transformer.add_adapter(
-                adapter_config=transformer_lora_config, adapter_name=lora_name
-            )
+        if not hasattr(self.transformer, "add_adapter"):
+            for lora_name in lora_config.lora_names:
+                self.transformer = get_peft_model(
+                    self.transformer,
+                    peft_config=transformer_lora_config,
+                    adapter_name=lora_name,
+                )
+        else:
+            for lora_name in lora_config.lora_names:
+                self.transformer.add_adapter(
+                    adapter_config=transformer_lora_config, adapter_name=lora_name
+                )
 
     @property
     def trained_model(self):

@@ -29,7 +29,8 @@ class RolloutResult(BaseModel):
     # In tensor native, video, or any other mode, it can be a list of any type of objects.
     # The object type can be defined by the `rollout_generation` implementation.
     # For non-text objects, it will be converted by the `get_rollout_output` of `data_packer` into final serializable format.
-    completions: List[Union[str, Any]]
+    # The Any type is to support a torch tensor with shape (B, ...) for batch generation.
+    completions: Union[List[Union[str, Any]], Any]
 
     # The generated conversation history for the prompt.
     completed_conversations: Optional[List[ConversationType]] = None

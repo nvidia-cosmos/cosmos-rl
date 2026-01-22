@@ -323,7 +323,7 @@ class SD3Model(DiffuserModel):
         image = self.vae.decode(latents, return_dict=False)[0]
         image = self.pipeline.image_processor.postprocess(
             image, output_type=output_type
-        )
+        )  # (B, C, H, W)
 
         # Offload all models
         self.pipeline.maybe_free_model_hooks()

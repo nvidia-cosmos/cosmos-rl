@@ -15,7 +15,6 @@
 
 import inspect
 import math
-import numpy as np
 import torch
 import torchvision
 from diffusers.image_processor import PipelineImageInput
@@ -263,13 +262,6 @@ class CosmosPredict2_5Model(DiffuserModel):
         return_pixel_log_prob: bool = False,
         **kwargs,
     ):
-        if self.pipeline.safety_checker is None:
-            raise ValueError(
-                f"You have disabled the safety checker for {self.pipeline.__class__}. This is in violation of the "
-                "[NVIDIA Open Model License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license). "
-                f"Please ensure that you are compliant with the license agreement."
-            )
-
         # Check inputs. Raise error if not correct
         self.pipeline.check_inputs(
             prompt, height, width, prompt_embeds, callback_on_step_end_tensor_inputs
@@ -279,17 +271,6 @@ class CosmosPredict2_5Model(DiffuserModel):
         self.pipeline._interrupt = False
 
         device = self.pipeline._execution_device
-
-        if self.pipeline.safety_checker is not None:
-            self.pipeline.safety_checker.to(device)
-            if prompt is not None:
-                prompt_list = [prompt] if isinstance(prompt, str) else prompt
-                for p in prompt_list:
-                    if not self.pipeline.safety_checker.check_text_safety(p):
-                        raise ValueError(
-                            f"Cosmos Guardrail detected unsafe text in the prompt: {p}. Please ensure that the "
-                            f"prompt abides by the NVIDIA Open Model License Agreement."
-                        )
 
         # Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -394,7 +375,7 @@ class CosmosPredict2_5Model(DiffuserModel):
 
         with self.pipeline.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                if self.interrupt:
+                if self.pipeline.interrupt:
                     continue
 
                 self._current_timestep = t.cpu().item()
@@ -422,7 +403,7 @@ class CosmosPredict2_5Model(DiffuserModel):
                 # NOTE: replace velocity (noise_pred) with gt_velocity for conditioning inputs only
                 noise_pred = gt_velocity + noise_pred * (1 - cond_mask)
 
-                if self.do_classifier_free_guidance:
+                if self.pipeline.do_classifier_free_guidance:
                     noise_pred_neg = self.transformer(
                         hidden_states=in_latents,
                         condition_mask=cond_mask,
@@ -433,7 +414,7 @@ class CosmosPredict2_5Model(DiffuserModel):
                     )[0]
                     # NOTE: replace velocity (noise_pred_neg) with gt_velocity for conditioning inputs only
                     noise_pred_neg = gt_velocity + noise_pred_neg * (1 - cond_mask)
-                    noise_pred = noise_pred + self.guidance_scale * (
+                    noise_pred = noise_pred + self.pipeline.guidance_scale * (
                         noise_pred - noise_pred_neg
                     )
 
@@ -457,27 +438,15 @@ class CosmosPredict2_5Model(DiffuserModel):
 
         self._current_timestep = None
 
-        latents_mean = self.latents_mean.to(latents.device, latents.dtype)
-        latents_std = self.latents_std.to(latents.device, latents.dtype)
+        latents_mean = self.pipeline.latents_mean.to(latents.device, latents.dtype)
+        latents_std = self.pipeline.latents_std.to(latents.device, latents.dtype)
         latents = latents * latents_std + latents_mean
         video = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
-        video = self._match_num_frames(video, num_frames)
-
-        assert self.safety_checker is not None
-        self.safety_checker.to(device)
-        video = self.pipeline.video_processor.postprocess_video(video, output_type="np")
-        video = (video * 255).astype(np.uint8)
-        video_batch = []
-        for vid in video:
-            vid = self.safety_checker.check_video_safety(vid)
-            video_batch.append(vid)
-        video = np.stack(video_batch).astype(np.float32) / 255.0 * 2 - 1
-        video = torch.from_numpy(video).permute(0, 4, 1, 2, 3)
+        video = self.pipeline._match_num_frames(video, num_frames)
         video = self.pipeline.video_processor.postprocess_video(
             video, output_type=output_type
-        )
-
-        # Offload all models
+        )  # (B, T, C, H, W)
+        video = video.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
         self.pipeline.maybe_free_model_hooks()
 
         return video, all_latents, all_log_probs

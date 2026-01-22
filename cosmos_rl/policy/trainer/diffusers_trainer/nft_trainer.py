@@ -351,12 +351,13 @@ class NFTTrainer(DiffusersTrainer):
                         train_sample_batch["prompt_embeds"],
                     ]
                 )
-                pooled_embeds = torch.cat(
-                    [
-                        self.neg_pooled_prompt_embed.repeat(batch_size, 1),
-                        train_sample_batch["pooled_prompt_embeds"],
-                    ]
-                )
+                if self.neg_pooled_prompt_embed is not None:
+                    pooled_embeds = torch.cat(
+                        [
+                            self.neg_pooled_prompt_embed.repeat(batch_size, 1),
+                            train_sample_batch["pooled_prompt_embeds"],
+                        ]
+                    )
             else:
                 embeds = train_sample_batch["prompt_embeds"]
                 pooled_embeds = train_sample_batch["pooled_prompt_embeds"]
