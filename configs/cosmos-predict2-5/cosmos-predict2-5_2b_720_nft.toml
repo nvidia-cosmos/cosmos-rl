@@ -29,6 +29,7 @@ max_prompt_length = 512
 inference_size = [512, 512]
 timestep_fraction = 0.99
 weight_copy_decay_type = 1
+train_frames = 93
 
 [policy.diffusers.sample]
 num_steps = 10

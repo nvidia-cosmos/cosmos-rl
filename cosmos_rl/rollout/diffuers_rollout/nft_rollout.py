@@ -98,25 +98,34 @@ class NFTRollout(RolloutBase):
             with torch.no_grad():
                 # Inference with logprob computation
                 # mm_datas contains the generated images/videos
-                mm_datas, latents, _ = self.model.pipeline_with_logprob(
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=self.neg_prompt_embed.repeat(
+                call_kwargs = {
+                    "prompt_embeds": prompt_embeds,
+                    "negative_prompt_embeds": self.neg_prompt_embed.repeat(
                         self.config.rollout.n_generation, 1, 1
                     ),
-                    negative_pooled_prompt_embeds=self.neg_pooled_prompt_embed.repeat(
-                        self.config.rollout.n_generation, 1
-                    ),
-                    num_inference_steps=self.diffusers_config.sample.num_steps,
-                    guidance_scale=self.diffusers_config.sample.guidance_scale,
-                    output_type="pt",
-                    height=self.diffusers_config.inference_size[0],
-                    width=self.diffusers_config.inference_size[1],
-                    noise_level=self.diffusers_config.sample.noise_level,
-                    deterministic=self.diffusers_config.sample.deterministic_sampling,
-                    generator=generators,
-                    solver=self.diffusers_config.sample.solver,
-                )
+                    "num_inference_steps": self.diffusers_config.sample.num_steps,
+                    "guidance_scale": self.diffusers_config.sample.guidance_scale,
+                    "output_type": "pt",
+                    "height": self.diffusers_config.inference_size[0],
+                    "width": self.diffusers_config.inference_size[1],
+                    "noise_level": self.diffusers_config.sample.noise_level,
+                    "deterministic": self.diffusers_config.sample.deterministic_sampling,
+                    "generator": generators,
+                    "solver": self.diffusers_config.sample.solver,
+                    "num_frames": self.diffusers_config.train_frames,
+                }
+
+                if pooled_prompt_embeds is not None:
+                    call_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+
+                if self.neg_pooled_prompt_embed is not None:
+                    call_kwargs["negative_pooled_prompt_embeds"] = (
+                        self.neg_pooled_prompt_embed.repeat(
+                            self.config.rollout.n_generation, 1
+                        )
+                    )
+
+                mm_datas, latents, _ = self.model.pipeline_with_logprob(**call_kwargs)
                 latents = torch.stack(latents, dim=1)
                 timesteps = self.model.pipeline.scheduler.timesteps.repeat(
                     len(prompts), 1

@@ -261,6 +261,7 @@ class CosmosPredict2_5Model(DiffuserModel):
         conditional_frame_timestep: float = 0.1,
         determistic: bool = False,
         return_pixel_log_prob: bool = False,
+        **kwargs,
     ):
         if self.pipeline.safety_checker is None:
             raise ValueError(
