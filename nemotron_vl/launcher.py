@@ -32,7 +32,6 @@ def modify_messages(messages, max_pixels = None):
             message['content'] = [{'type': 'text', 'text': message['content']}]
         for content in message['content']:
             if content['type'] in ['image', 'video']:
-                content[content['type']] = content[content['type']].replace('workspace', 'data')
                 if max_pixels is not None:
                     content['max_pixels'] = max_pixels
     return messages
