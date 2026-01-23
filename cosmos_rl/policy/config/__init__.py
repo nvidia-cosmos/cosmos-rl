@@ -567,6 +567,12 @@ class GrpoConfig(BaseModel):
         assert not (
             self.use_rollout_logprobs_for_loss and self.use_decoupled_loss
         ), "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
+        if self.variant == "dapo":
+            if self.outdated_rollout_fetch_batch_size <= 0:
+                self.outdated_rollout_fetch_batch_size = 128
+                logger.warning(
+                    "DAPO is enabled, so outdated_rollout_fetch_batch_size is set to 128 as a large value."
+                )
 
         return self
 
@@ -813,6 +819,10 @@ class TrainingConfig(BaseModel):
                 assert (
                     self.sync_weight_interval == 1
                 ), "sync_weight_interval must be 1 when on_policy is enabled"
+                self.train_policy.allowed_outdated_steps = 0
+                logger.warning(
+                    "on_policy is enabled, so allowed_outdated_steps is set to 0."
+                )
 
         if self.deterministic and self.seed is None:
             self.seed = 42
