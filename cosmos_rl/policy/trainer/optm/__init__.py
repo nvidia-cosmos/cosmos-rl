@@ -245,6 +245,92 @@ def build_optimizers(
     }
 
     name = config.train.optm_name
+    if name == "Muon":
+        # Special handling for Muon optimizer
+        from cosmos_rl.policy.trainer.optm.muon_optimizer import MuonOptimizer
+
+        # Collect parameters from all model parts
+        all_muon_params = []
+        all_adamw_params = []
+
+        # Get embedding and lm_head keys from config if available
+        # These are typically excluded from Muon updates
+        embed_key = getattr(config.policy, "embed_key", None) or "embed_tokens"
+        lm_head_key = getattr(config.policy, "lm_head_key", None) or "lm_head"
+
+        for model_part in model_parts:
+            if model_part is None:
+                continue
+            for param_name, param in model_part.named_parameters():
+                if not param.requires_grad:
+                    continue
+                # Apply Muon to 2D weight matrices, excluding embeddings and lm_head
+                if (
+                    param.ndim >= 2
+                    and embed_key not in param_name
+                    and lm_head_key not in param_name
+                ):
+                    all_muon_params.append(param)
+                else:
+                    all_adamw_params.append(param)
+
+        # Get Muon-specific hyperparameters from config
+        muon_momentum = getattr(config.train, "optm_muon_momentum", 0.95)
+        muon_nesterov = getattr(config.train, "optm_muon_nesterov", True)
+        muon_ns_steps = getattr(config.train, "optm_muon_ns_steps", 5)
+
+        # Create Muon optimizer with parameter groups
+        muon_optimizer = MuonOptimizer(
+            params=[],  # Empty, we'll use muon_params and adamw_params instead
+            lr=lr[0] if isinstance(lr, list) else lr,
+            momentum=muon_momentum,
+            weight_decay=config.train.optm_weight_decay,
+            nesterov=muon_nesterov,
+            ns_steps=muon_ns_steps,
+            adamw_betas=config.train.optm_betas,
+            adamw_eps=getattr(config.train, "epsilon", 1e-8),
+            muon_params=all_muon_params,
+            adamw_params=all_adamw_params,
+        )
+
+        logger.info(
+            f"Muon optimizer created with {len(all_muon_params)} Muon parameters "
+            f"and {len(all_adamw_params)} AdamW parameters"
+        )
+
+        # Wrap in OptimizersContainer for compatibility
+        # Create a wrapper that forwards calls to Muon optimizer
+        # Since Muon handles its own parameter groups internally, we create a minimal container
+        class MuonOptimizersContainer(OptimizersContainer):
+            def __init__(self, muon_optimizer, model_parts):
+                # Initialize parent with minimal setup
+                # Create dummy optimizer kwargs for each model part
+                dummy_kwargs = [{"lr": 1e-4} for _ in model_parts]
+                # Initialize with AdamW as placeholder (will be overridden)
+                super().__init__(torch.optim.AdamW, model_parts, dummy_kwargs)
+                # Replace with Muon optimizer
+                self.muon_optimizer = muon_optimizer
+                # Set optimizers to contain Muon optimizer for each model part
+                self.optimizers = [[muon_optimizer] for _ in model_parts]
+
+            def step(self, *args, **kwargs):
+                """Forward step call to Muon optimizer"""
+                self.muon_optimizer.step(*args, **kwargs)
+
+            def zero_grad(self, *args, **kwargs):
+                """Forward zero_grad call to Muon optimizer"""
+                self.muon_optimizer.zero_grad(*args, **kwargs)
+
+            def state_dict(self):
+                """Return Muon optimizer state dict"""
+                return self.muon_optimizer.state_dict()
+
+            def load_state_dict(self, state_dict):
+                """Load state dict into Muon optimizer"""
+                self.muon_optimizer.load_state_dict(state_dict)
+
+        return MuonOptimizersContainer(muon_optimizer, model_parts)
+
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
     elif optimizer_classes[name] is None:

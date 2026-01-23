@@ -623,7 +623,7 @@ class TrainingConfig(BaseModel):
     optm_name: str = Field(
         default="AdamW",
         description="Optimizer name",
-        choices=["AdamW", "Adam"],
+        choices=["AdamW", "Adam", "Muon"],
     )
     optm_lr: Union[float, List[float]] = Field(
         default=1e-6,
@@ -658,6 +658,20 @@ class TrainingConfig(BaseModel):
     )
     optm_grad_norm_clip: float = Field(
         default=1.0, description="Gradient norm clip for optimizer"
+    )
+
+    # --------- Muon Optimizer ---------
+    optm_muon_momentum: float = Field(
+        default=0.95,
+        description="Momentum coefficient for Muon optimizer (only used when optm_name='Muon')",
+    )
+    optm_muon_nesterov: bool = Field(
+        default=True,
+        description="Whether to use Nesterov momentum for Muon optimizer (only used when optm_name='Muon')",
+    )
+    optm_muon_ns_steps: int = Field(
+        default=5,
+        description="Number of Newton-Schulz iterations for Muon optimizer (only used when optm_name='Muon')",
     )
 
     # --------- EMA ---------
