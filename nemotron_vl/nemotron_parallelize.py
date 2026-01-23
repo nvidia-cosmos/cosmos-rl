@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import Callable, Optional
-
+import os
 import torch
 import torch.nn as nn
 from torch.distributed._composable.replicate import replicate
@@ -109,23 +109,24 @@ def parallelize(
 
         # TODO(jiaxinc): to be compatible with both pure text and vision-language models.
         language_model_config = model.hf_config.text_config if 'text_config' in model.hf_config else model.hf_config
+        gate_training_enabled = config.custom.get("enable_moe_load_balancing_training", True)
         moe_args = MoEArgs(
             n_routed_experts=language_model_config.n_routed_experts,
             n_shared_experts=language_model_config.n_shared_experts,
             n_activated_experts=language_model_config.num_experts_per_tok,
             n_expert_groups=language_model_config.n_group,
             n_limited_groups=language_model_config.topk_group,
-            train_gate=True, # TODO(jiaxinc): should be configurable
-            gate_bias_update_factor=1e-3, # TODO(jiaxinc): should be configurable
-            aux_loss_coeff=1e-4, # TODO(jiaxinc): should be configurable
+            train_gate=gate_training_enabled,
+            gate_bias_update_factor=1e-3 if gate_training_enabled else 0.0,
+            aux_loss_coeff=1e-4 if gate_training_enabled else 0.0,
             score_func="sigmoid", # TODO(jiaxinc): hardcoded to be consistent with the original implementation
             route_scale=language_model_config.routed_scaling_factor,
             dim=language_model_config.hidden_size,
             moe_inter_dim=language_model_config.moe_intermediate_size,
             shared_inter_dim=language_model_config.moe_shared_expert_intermediate_size,
             norm_topk_prob=language_model_config.norm_topk_prob,
-            enable_router_bias=True, # TODO(jiaxinc): hardcoded to be consistent with the original implementation
-            enable_glu=False, # TODO(jiaxinc): hardcoded to be consistent with the original implementation
+            enable_router_bias=True,
+            enable_glu=False,
             act_fn=language_model_config.mlp_hidden_act
         )
 
@@ -145,6 +146,17 @@ def parallelize(
                         device_mesh=world_mesh["tp"],
                         parallelize_plan=_ExpertParallel(),
                     )
+    # for name, param in model.named_parameters():
+    #     param.requires_grad = False
+    # # Only allow Attention layer to be trained
+    # for layer_id, transformer_block in enumerate(model.lm_layers):
+    #     if transformer_block.block_type == "attention":
+    #         for name, param in transformer_block.named_parameters():
+    #             print(f"Setting {name} to train mode")
+    #             param.requires_grad = True
+    #         logger.info(f"Set Attention layer {layer_id} to train mode")
+    # model.model.enable_input_require_grads()
+
     # apply_compile(model, fullgraph=True)
 
     # apply FSDP or HSDP
@@ -212,48 +224,6 @@ def apply_compile(model: nn.Module, fullgraph: bool = True):
             transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
             model.model.backbone.layers.register_module(layer_id, transformer_block)
             logger.info("Each TransformerBlock compiled with torch.compile")
-
-# def apply_tp(
-#     model: nn.Module,
-#     tp_mesh: DeviceMesh,
-#     enable_float8_tensorwise_tp: bool,
-#     enable_async_tp: bool,
-# ):
-#     """Apply tensor parallelism."""
-#     tp_plans = get_tp_plans(
-#         model, enable_float8_tensorwise_tp=enable_float8_tensorwise_tp
-#     )
-
-#     parallelize_module(
-#         module=model.model,
-#         device_mesh=tp_mesh,
-#         parallelize_plan=tp_plans,
-#     )
-
-#     if enable_async_tp:
-#         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
-#         torch._inductor.config._micro_pipeline_tp = True
-#         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
-
-#     logger.info(
-#         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
-#         "Tensor Parallelism to the model"
-#     )
-
-# def apply_compile(model: nn.Module, fullgraph: bool = True):
-#     """
-#     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-#     repeated structure. Alternatively one can compile the whole model (after applying DP).
-#     """
-#     for layer_id, transformer_block in model.model.backbone.layers.named_children():
-#         # transformer_block = torch.compile(transformer_block, fullgraph=True)
-#         cls = transformer_block.mixer.__class__
-#         if cls.__name__ == "NemotronHMOE":# or "Attention" in cls.__name__:
-#             transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
-#             model.model.backbone.layers.register_module(layer_id, transformer_block)
-#             logger.info(f"Each TransformerBlock compiled with torch.compile for layer: {layer_id}")
-
 
 def apply_fsdp(
     model: nn.Module,

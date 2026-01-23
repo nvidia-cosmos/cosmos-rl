@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-
 import os, sys
 import torch, re
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -25,6 +24,7 @@ from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 import cosmos_rl.policy.model.hf_models as hf_models
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.logging import logger
 
 def modify_messages(messages, max_pixels = None):
     for message in messages:
@@ -55,6 +55,26 @@ class CustomDataset(Dataset):
         sample = self.data_list[idx]
         sample = modify_messages(sample, self.max_pixels)
         return sample
+
+    
+class CustomDatasetForText(Dataset):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
+        from datasets import load_dataset
+        self.ds = load_dataset("open-thoughts/OpenThoughts3-1.2M")['train'].shuffle(seed=42)
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx: int) -> list[dict]:
+        messages: list[dict] = self.ds[idx]['conversations']
+        from_to_role = {
+            "human": "user",
+            "gpt": "assistant",
+            "system": "system",
+        }
+        # rename key from `from` to `role`, and `value` to `content`
+        messages = [{'role': from_to_role[turn['from']], 'content': turn['value']} for turn in messages]
+        return messages
 
 @torch.no_grad()
 def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tensor):
@@ -117,14 +137,23 @@ def patched_parallelize_fn(self):
 
 # MoE: Aux-free load balancing update bias after each step update.
 def step_hook(self):
-    for _, module in self.model.language_model.named_modules():
-        if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
-            module.mixer.gate.update_bias()
+    enable_moe_load_balancing_training = self.cosmos_config.custom.get("enable_moe_load_balancing_training", True)
+    
+    if enable_moe_load_balancing_training:
+        for _, module in self.model.language_model.named_modules():
+            if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
+                module.mixer.gate.update_bias()
+    elif not hasattr(self, "_warn_moe_load_balancing_training_once"):
+        self._warn_moe_load_balancing_training_once = True
+        print("WARNING: MoE load balancing training is disabled. Please set enable_moe_load_balancing_training to True in the config['custom'] to enable it.")
 
 def get_dataset(config: CosmosConfig):
-    return CustomDataset()
+    return CustomDatasetForText()
 
 if __name__ == "__main__":
+    # 1. 参数requires_grad配置
+    # 2. 训练长度设置
+    # 3. MoE的router是否需要训练load-balancing
 
     # Override the parallelize_fn to support EP
     hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
