@@ -15,9 +15,10 @@
 
 
 from queue import Queue
+import zmq
 
 
-class Collective:
+class CollectiveManager:
     """
     A manager for collective operations. Abstract the send/recv operations for
     IPC and NCCL.
@@ -28,10 +29,14 @@ class Collective:
         """
         Initialize the CollectiveManager.
         """
-        self.peers = []
+        self.zmq_context = zmq.Context()
+        self.zmq_socket = self.zmq_context.socket(zmq.PAIR)
+        self.zmq_socket.bind("ipc:///tmp/collective.sock")
 
         # For IPC communication
         self.ipc_queue = Queue()
+
+        # For NCCL communication
         self.nccl_comm = {}
 
     def send(self):
