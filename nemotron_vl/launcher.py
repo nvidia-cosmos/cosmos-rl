@@ -140,7 +140,7 @@ def step_hook(self):
     enable_moe_load_balancing_training = self.cosmos_config.custom.get("enable_moe_load_balancing_training", True)
     
     if enable_moe_load_balancing_training:
-        for _, module in self.model.language_model.named_modules():
+        for _, module in self.language_model.named_modules():
             if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
                 module.mixer.gate.update_bias()
     elif not hasattr(self, "_warn_moe_load_balancing_training_once"):
