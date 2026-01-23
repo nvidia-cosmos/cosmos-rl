@@ -139,7 +139,8 @@ def parallelize(
             for layer_id, transformer_block in enumerate(model.lm_layers):
                 if transformer_block.block_type == "moe":
                     del transformer_block.mixer
-                    transformer_block.register_module("mixer", MoE(moe_args))
+                    with torch.device('meta'):
+                        transformer_block.register_module("mixer", MoE(moe_args))
                     logger.info(f"Swizzled MoE module for layer {layer_id}")
                     parallelize_module(
                         module=transformer_block.mixer.experts,
@@ -211,6 +212,17 @@ def parallelize(
             enable_compile=False,
             enable_compiled_autograd=False,
         )
+
+    train_layers = config.custom.get("train_layers", None)
+    if train_layers is not None:
+        logger.info(f"All trainable layers: {train_layers}")
+        for name, parameters in model.named_parameters():
+            parameters.requires_grad = False
+
+        for _, module in model.named_modules():
+            if type(module).__name__ in train_layers:
+                for name, parameters in module.named_parameters():
+                    parameters.requires_grad = True
 
     return None, None
 

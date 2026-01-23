@@ -41,11 +41,17 @@ class CustomDataset(Dataset):
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.data_list = []
         data_path = config.train.train_policy.dataset.name
-        with open(data_path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    self.data_list.append(json.loads(line)['messages'])
+        jsonl_files = sorted(
+            [f for f in os.listdir(data_path) if f.endswith(".jsonl")]
+        )
+        for file_name in jsonl_files:
+            if 'webvid' in file_name:
+                continue
+            with open(os.path.join(data_path, file_name)) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        self.data_list.append(json.loads(line)['messages'])
         self.max_pixels = config.policy.model_max_length * 0.9 * ((16 * 2) ** 2)
 
     def __len__(self):
@@ -107,7 +113,7 @@ def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tens
         else:
             yield from yield_weight(n_experts, expert_weight, "down_proj", layer_id)
     elif match := re.search(
-        r"model\.language_model\.layers\.(\d+)\.mixer\.experts\.(\d+)\.(gate_and_up_projs|down_projs)",
+        r"model\.language_model\.layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)",
         name,
     ):
         def yield_weight(n_experts, expert_weight, w_name, layer_id):
@@ -138,7 +144,6 @@ def patched_parallelize_fn(self):
 # MoE: Aux-free load balancing update bias after each step update.
 def step_hook(self):
     enable_moe_load_balancing_training = self.cosmos_config.custom.get("enable_moe_load_balancing_training", True)
-    
     if enable_moe_load_balancing_training:
         for _, module in self.language_model.named_modules():
             if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
@@ -148,7 +153,7 @@ def step_hook(self):
         print("WARNING: MoE load balancing training is disabled. Please set enable_moe_load_balancing_training to True in the config['custom'] to enable it.")
 
 def get_dataset(config: CosmosConfig):
-    return CustomDatasetForText()
+    return CustomDataset()
 
 if __name__ == "__main__":
     # 1. 参数requires_grad配置
@@ -165,6 +170,6 @@ if __name__ == "__main__":
     HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
     
     launch_dispatcher(
-        # dataset=get_dataset,
+        dataset=get_dataset,
     )
 

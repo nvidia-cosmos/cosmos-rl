@@ -1,0 +1,63 @@
+iredis = "12800"
+[train]
+resume = false
+epoch = 1
+output_dir = "./outputs/Nemotron_local"
+epsilon = 1e-6
+optm_name = "AdamW"
+optm_lr = 1e-4
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_betas = [ 0.9, 0.999,]
+optm_warmup_steps = 0.03
+optm_decay_type = "cosine"
+optm_grad_norm_clip = 1.0
+async_tp_enabled = false
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+master_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 16
+sync_weight_interval = 1
+enable_validation = true
+validation_step = 30
+validation_batch_per_replica = 2
+
+[policy]
+model_name_or_path = "/data/nemotron-vlm/nemotron_v3_vl"
+model_max_length = 8192
+model_gradient_checkpointing = true
+
+[logging]
+logger = ['console']
+project_name = "cosmos_reason2_av_vqa_yyt_test"
+experiment_name = "nemotron_v3_vl_8x8_image_only"
+
+[train.train_policy]
+type = "sft"
+dataset.name = "/data/haoyuan/vlm_data/stage1"
+dataset.subset = ""
+dataset.split = "train"
+conversation_column_name = "conversation"
+mini_batch = 4
+dataloader_shuffle= true
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 300
+save_mode = "async"
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 8
+cp_size = 1
+dp_shard_size = 1
+pp_size = 1
+dp_replicate_size = 1
+cp_rotate_method = "allgather"
+
+[custom]
+enable_moe_load_balancing_training = false
+train_layers = ["Qwen3VLVisionPatchMerger"]

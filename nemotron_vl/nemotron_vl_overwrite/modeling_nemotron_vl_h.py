@@ -1373,9 +1373,9 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
         self.norm = nn.LayerNorm(self.hidden_size if use_postshuffle_norm else config.hidden_size, eps=1e-6)
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
+        self.linear_fc1 = nn.Linear(self.hidden_size, config.merger_intermedia)
         self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.hidden_size, config.out_hidden_size)
+        self.linear_fc2 = nn.Linear(config.merger_intermedia, config.out_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
@@ -2087,7 +2087,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
+        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
@@ -2173,7 +2173,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
             )
             prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
                 (cache_position is not None and cache_position[0] == 0)
-                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+                or (cache_params is None or cache_params.get_seq_length() == 0)
             )
             if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
                 position_ids, rope_deltas = self.get_rope_index(
@@ -2201,7 +2201,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
             input_ids=None,
             position_ids=position_ids,
             attention_mask=attention_mask,
-            past_key_values=past_key_values,
+            cache_params=cache_params,
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
             visual_pos_masks=visual_pos_masks,
@@ -2279,8 +2279,6 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
             use_cache=use_cache,
             **kwargs,
         )
-        
-
         # Copy from https://github.com/huggingface/transformers/blob/main/src/transformers/models/jamba/modeling_jamba.py
         # Overwitten -- uses `cache_params` as opposed to `past_key_values`
         empty_past_kv = past_key_values is None
@@ -2300,7 +2298,7 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
                 input_ids = input_ids[:, cache_position]
         else:
             past_key_values = HybridMambaAttentionDynamicCache(
-                self.config, input_ids.shape[0], self.dtype, device=self.device
+                self.config.text_config, input_ids.shape[0], self.dtype, device=self.device
             )
         model_inputs["past_key_values"] = past_key_values
         
@@ -2309,16 +2307,15 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and empty_past_kv:
-            model_inputs = {"inputs_embeds": inputs_embeds}
+            model_inputs["inputs_embeds"] = inputs_embeds
         else:
-            model_inputs = {"input_ids": input_ids.contiguous()} 
+            model_inputs["input_ids"] = input_ids.contiguous()
 
         # if cache_position is larger than 0 (which mean in decode phase), 
         # remove pixel_values (embedding is already done in prefill phase)
         if cache_position[0] != 0:
             model_inputs["pixel_values"] = None
             model_inputs["pixel_values_videos"] = None
-
         return model_inputs
 
     def forward(
@@ -2357,7 +2354,7 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
             input_ids,
             attention_mask = attention_mask,
             position_ids=position_ids,
-            past_key_value=cache_params,
+            cache_params=cache_params,
             inputs_embeds=inputs_embeds,
             pixel_values=pixel_values,
             pixel_values_videos=pixel_values_videos,
@@ -2367,6 +2364,7 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
             use_cache=use_cache,
         )
         hidden_states = nemotron_h_outputs[0]
+
         # TODO: Check zamba_modeling.py: https://github.com/huggingface/transformers/blob/d7188ba600e36d3fd191b12e19f1b3bb81a8404f/src/transformers/models/zamba/modeling_zamba.py#L1284C1-L1286C2
         #logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
         logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()

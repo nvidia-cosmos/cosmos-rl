@@ -70,6 +70,7 @@
   },
   "transformers_version": "4.57.0.dev0",
   "tie_word_embeddings": false,
+  "merger_intermedia": 11520,
   "vision_config": {
     "deepstack_visual_indexes": [],
     "depth": 27,

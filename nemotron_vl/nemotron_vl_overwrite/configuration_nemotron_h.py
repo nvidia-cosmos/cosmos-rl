@@ -379,13 +379,14 @@ class NemotronVLConfig(PretrainedConfig):
         vision_start_token_id = 20,
         vision_end_token_id = 21,
         tie_word_embeddings=False,
+        merger_intermedia=1152,
         **kwargs,
     ):
         if isinstance(vision_config, dict):
             self.vision_config = self.sub_configs["vision_config"](**vision_config)
         elif vision_config is None:
             self.vision_config = self.sub_configs["vision_config"]()
-        
+        setattr(self.vision_config, "merger_intermedia", merger_intermedia)
         if isinstance(text_config, dict):
             self.text_config = self.sub_configs["text_config"](**text_config)
         elif text_config is None:
