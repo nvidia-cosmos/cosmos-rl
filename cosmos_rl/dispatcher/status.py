@@ -75,6 +75,7 @@ class PolicyStatus(StrEnum):
     RUNNING: The policy is running.
     REDUCED: The policy has finished reduce.
     END: The policy has finished.
+    VALIDATED: The policy has finished validation.
     """
 
     UNINITIALIZED = "uninitialized"
@@ -82,6 +83,7 @@ class PolicyStatus(StrEnum):
     RUNNING = "running"
     REDUCED = "reduced"
     END = "end"
+    VALIDATED = "validated"
 
 
 class PolicyStatusManager:
@@ -820,16 +822,15 @@ class PolicyStatusManager:
         self,
         train_step: int,
         total_steps: int,
+        is_validation: bool = False,
     ):
         try:
-            for replica in self.get_all_atoms_arrived_replicas():
-                self.set_status(replica.name, PolicyStatus.RUNNING)
             report_data = {}
             report_data = aggregate_report_data(self.report_data_list, report_data)
             self.report_data_list = []
             report_data_str = ", ".join([f"{k}: {v}" for k, v in report_data.items()])
             logger.debug(
-                f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} data batch: {report_data_str}"
+                f"[Controller] {'Validation' if is_validation else 'Train'} report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} data batch: {report_data_str}"
             )
             if "wandb" in self.config.logging.logger and is_wandb_available():
                 log_wandb(
@@ -837,9 +838,14 @@ class PolicyStatusManager:
                     step=train_step,
                 )
             if "console" in self.config.logging.logger:
-                logger.info(
-                    f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
-                )
+                if is_validation:
+                    logger.info(
+                        f"[SFT] Validation Loss: {report_data['val/avg_loss']:.5f} at step {train_step}/{total_steps}, epoch {self.data_fetcher.epoch - 1}."
+                    )
+                else:
+                    logger.info(
+                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                    )
             for custom_logger_fn in self.custom_logger_fns:
                 # We add a separate try-except block to handle the error of custom logger function.
                 # This is to avoid the error of custom logger function affecting the fundamental logging system.
@@ -856,6 +862,41 @@ class PolicyStatusManager:
             logger.warning(
                 f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
             )
+        for replica in self.get_all_atoms_arrived_replicas():
+            self.set_status(replica.name, PolicyStatus.RUNNING)
+
+    def sft_train_ack(
+        self,
+        replica_name: str,
+        report_data: Dict[str, Any],
+        step: int,
+        total_steps: int,
+    ):
+        if "val/avg_loss" in report_data:
+            self.set_status(replica_name, PolicyStatus.VALIDATED)
+            if self.all_with_status([PolicyStatus.VALIDATED]):
+                # First validation ack received in this step
+                self.sft_report_summary(
+                    train_step=step,
+                    total_steps=total_steps,
+                    is_validation=True,
+                )
+            return
+        self.remain_samples_num -= self.config.train.train_batch_per_replica
+        if not self.any_with_status([PolicyStatus.REDUCED]):
+            # For SFT, we increment current_step at first train_ack received in each step
+            self.current_step += 1
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            ):
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
+        self.set_status(replica_name, PolicyStatus.REDUCED)
+        if self.all_reduced():
+            self.sft_report_summary(
+                train_step=step,
+                total_steps=total_steps,
+            )
 
     def train_ack(
         self,
@@ -869,24 +910,21 @@ class PolicyStatusManager:
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
 
-        if self.config.train.train_policy.type == "sft" and not self.any_with_status(
-            [PolicyStatus.REDUCED]
-        ):
-            # For SFT, we increment current_step at first train_ack received in each step
-            self.current_step += 1
+        if not hasattr(self, "report_data_list"):
+            self.report_data_list = []
+        self.report_data_list.append(report_data)
+
+        if self.config.train.train_policy.type == "sft":
+            return self.sft_train_ack(
+                replica_name,
+                report_data,
+                step,
+                total_steps,
+            )
 
         self.set_status(replica_name, PolicyStatus.REDUCED)
 
-        if not hasattr(self, "report_data_list"):
-            self.report_data_list = []
-
-        self.report_data_list.append(report_data)
         if self.all_reduced():
-            if self.config.train.train_policy.type == "sft":
-                return self.sft_report_summary(
-                    train_step=step,
-                    total_steps=total_steps,
-                )
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
                 self.get_all_atoms_arrived_replicas()
             )
@@ -1111,6 +1149,40 @@ class PolicyStatusManager:
             * len(self.get_all_atoms_arrived_replicas())
         )
 
+    def check_checkpoint_saving(self, required_rollouts: int):
+        # Decide whether to save checkpoint
+        # First check if we need to save checkpoint based on epoch
+        do_save = False
+        if self.current_step == self.total_steps:
+            # Always save checkpoint at the last step
+            do_save = True
+        elif self.config.train.ckpt.save_freq_in_epoch > 0:
+            # Checkpointing based on epoch if `save_freq_in_epoch` is set
+            if (
+                self.remain_samples_num + required_rollouts - 1
+            ) // self.samples_per_epoch != (
+                self.remain_samples_num - 1
+            ) // self.samples_per_epoch:
+                # New epoch begins and old epoch ends
+                # So check the epoch number against save_freq_in_epoch for saving checkpoint
+                epoch = (
+                    self.config.train.epoch
+                    - (self.remain_samples_num + required_rollouts - 1)
+                    // self.samples_per_epoch
+                )
+                do_save = epoch % self.config.train.ckpt.save_freq_in_epoch == 0
+                if do_save:
+                    logger.info(
+                        f"[Controller] Epoch {epoch} ends, triggering checkpoint saving at step {self.current_step}"
+                    )
+        else:
+            # Checkpointing based on step if `save_freq_in_epoch` is not set
+            do_save = (
+                self.current_step % self.config.train.ckpt.save_freq == 0
+                and self.current_step > 0
+            )
+        return do_save and self.config.train.ckpt.enable_checkpoint
+
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.data_fetcher.activated_val_iter is not None:
@@ -1191,36 +1263,7 @@ class PolicyStatusManager:
                             rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
-            # First check if we need to save checkpoint based on epoch
-            do_save = False
-            if self.current_step == self.total_steps:
-                # Always save checkpoint at the last step
-                do_save = True
-            elif self.config.train.ckpt.save_freq_in_epoch > 0:
-                # Checkpointing based on epoch if `save_freq_in_epoch` is set
-                if (
-                    self.remain_samples_num + required_rollouts - 1
-                ) // self.samples_per_epoch != (
-                    self.remain_samples_num - 1
-                ) // self.samples_per_epoch:
-                    # New epoch begins and old epoch ends
-                    # So check the epoch number against save_freq_in_epoch for saving checkpoint
-                    epoch = (
-                        self.config.train.epoch
-                        - (self.remain_samples_num + required_rollouts - 1)
-                        // self.samples_per_epoch
-                    )
-                    do_save = epoch % self.config.train.ckpt.save_freq_in_epoch == 0
-                    if do_save:
-                        logger.info(
-                            f"[Controller] Epoch {epoch} ends, triggering checkpoint saving at step {self.current_step}"
-                        )
-            else:
-                # Checkpointing based on step if `save_freq_in_epoch` is not set
-                do_save = (
-                    self.current_step % self.config.train.ckpt.save_freq == 0
-                    and self.current_step > 0
-                )
+            do_save = self.check_checkpoint_saving(required_rollouts)
 
             for replica in arrived_replicas:
                 command.DataFetchCommand.trigger(
@@ -1231,7 +1274,7 @@ class PolicyStatusManager:
                     # `remain_samples_num` is just for checkpointing the training progress
                     remain_samples_num=self.remain_samples_num,
                     # Only `do_save` when checkpointing is enabled
-                    do_save=do_save and self.config.train.ckpt.enable_checkpoint,
+                    do_save=do_save,
                     redis_handler=self.redis_handler,
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)

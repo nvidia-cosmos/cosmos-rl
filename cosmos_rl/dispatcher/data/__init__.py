@@ -140,8 +140,16 @@ class CosmosValidationDataset:
             Deprecated: for most cases, users should provide a train_set for better generalization
             """
             self.grpo_config = config.train.train_policy
-            self.prompt_column = self.grpo_config.prompt_column_name
-            self.response_column = self.grpo_config.response_column_name
+            self.prompt_column = (
+                self.grpo_config.prompt_column_name
+                if hasattr(self.grpo_config, "prompt_column_name")
+                else None
+            )
+            self.response_column = (
+                self.grpo_config.response_column_name
+                if hasattr(self.grpo_config, "response_column_name")
+                else None
+            )
             dataset = load_data_from_disk_or_hf(
                 self.config.validation.dataset.name,
                 self.config.validation.dataset.subset,

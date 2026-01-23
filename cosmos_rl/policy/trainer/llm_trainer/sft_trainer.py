@@ -443,8 +443,6 @@ class SFTTrainer(LLMTrainer):
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
         if not self.config.validation.enable:
             return
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
 
         self.model.eval()
         with torch.no_grad():
@@ -526,7 +524,17 @@ class SFTTrainer(LLMTrainer):
                 val_logits = self.model(**val_batch)
 
                 val_loss = self.loss_fn(val_logits, val_labels)
-        return val_loss.item() * val_inputs.size(0)
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+        ):
+            val_loss = (  # noqa: F841
+                dist_util.dist_mean(val_loss, self.parallel_dims.mesh["dp"])
+            ) * self.parallel_dims.mesh["dp"].size()
+        else:
+            val_loss = val_loss.item()  # noqa: F841
+
+        return val_loss * val_inputs.size(0)
 
     def checkpointing(
         self,
@@ -536,9 +544,10 @@ class SFTTrainer(LLMTrainer):
         is_last_step: bool = False,
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
+        do_save: bool = False,
     ):
         if (
-            is_last_step or (train_step % save_freq == 0 and train_step > 0)
+            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             # save safetensors
             # TODO(dinghaoy): support export safetensors asynchronously.

@@ -19,6 +19,7 @@ import copy
 from queue import Queue
 import threading
 import time
+from typing import List, Tuple
 from cosmos_rl.dispatcher.command import (
     PolicyToPolicyBroadcastCommand,
     PolicyToPolicyUnicastCommand,
@@ -26,20 +27,15 @@ from cosmos_rl.dispatcher.command import (
 )
 from cosmos_rl.dispatcher.data.schema import RLPayload
 import torch
-from tqdm import tqdm
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
-from cosmos_rl.utils.wandb_logger import (
-    is_wandb_available,
-    log_wandb,
-)
 
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
-from cosmos_rl.policy.worker import RLPolicyWorker
+from cosmos_rl.policy.worker import RLPolicyWorker, SFTPolicyWorker
 import cosmos_rl.utils.distributed as dist_util
 import torch.distributed as dist
 
@@ -59,17 +55,11 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         self.is_user_provided_val_set = kwargs.get("val_dataset", None) is not None
         self.weight_sync_done = False
         # Calculate the step interval to save the checkpoint
-        if self.config.train.ckpt.save_freq_in_epoch > 0:
-            # Use save_freq_in_epoch to calculate the save frequency in priority
-            self._save_freq = (
-                self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
-            ) // self.dp_world_size
-            logger.info(
-                f"Checkpoint will be saved every {self._save_freq} steps, which is approximately every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
-            )
-        else:
-            self._save_freq = self.config.train.ckpt.save_freq
+        self._save_freq = self.config.train.ckpt.save_freq
         self.train_step = None
+        self.current_epoch = None
+        # Setup hooks for later use
+        SFTPolicyWorker.setup_hooks(self)
 
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
@@ -95,15 +85,21 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
     def prepare_shard_infos_for_weight_sync_insts(self):
         pass
 
-    def validate(self, current_epoch: int, is_last_step: bool = False):
+    def validate(self, is_last_step: bool = False):
+        """
+        Perform validation and return the average validation loss.
+        """
+        # validation
         if not self.config.validation.enable:
             return None
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
         if (
-            (self.train_step == 0 and self.config.validation.val_before_train)
+            (
+                (self.train_step is None or self.train_step == 0)
+                and self.config.validation.val_before_train
+            )
             or (
-                self.train_step != 0
+                self.train_step is not None
+                and self.train_step != 0
                 and self.train_step % self.config.validation.freq == 0
             )
             or is_last_step
@@ -111,78 +107,105 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             pass
         else:
             return None
-
-        # Call pre_validation_hook
-        if self.pre_validation_hook is not None:
-            report_data = {
-                "current_epoch": current_epoch,
-                "is_last_step": is_last_step,
-            }
-            self.pre_validation_hook(self, report_data=report_data)
-
-        # validation
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
         val_total_loss = 0.0
-
-        for batch_index, val_global_batch in enumerate(
-            tqdm(self.val_data_loader, desc="Validation")
-        ):
-            # Call pre_per_step_validation_hook
-            if self.pre_per_step_validation_hook is not None:
-                report_data = {
-                    "current_epoch": current_epoch,
-                    "batch_index": batch_index,
-                }
-                self.pre_per_step_validation_hook(self, report_data=report_data)
-
-            val_score = self.trainer.step_validation(
-                val_global_batch, self.train_step, self.total_steps
-            )
-
-            # Call post_per_step_validation_hook
-            if self.post_per_step_validation_hook is not None:
-                report_data = {
-                    "current_epoch": current_epoch,
-                    "batch_index": batch_index,
-                    "val_score": val_score,
-                }
-                self.post_per_step_validation_hook(self, report_data=report_data)
-
-            val_total_loss += val_score
-
-        val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
-        logger.info(
-            f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
+        val_batch_size = (
+            self.config.validation.batch_size
+            or self.config.train.train_batch_per_replica
         )
+        batch_index = 0
+        pre_validation_called = False
+        while True:
+            is_end, new_epoch = self.request_new_prompts(
+                val_batch_size // self.dp_world_size,
+                prompt_queue=self.data_queue,
+                validation_step=self.train_step or 0,
+            )
+            assert (
+                (val_batch_size % self.dp_world_size) == 0
+            ), f"train_batch_per_replica({val_batch_size}) must be divisible by dp_world_size({self.dp_world_size})"
+            if self.data_queue.qsize() >= val_batch_size // self.dp_world_size:
+                global_batch = [
+                    self.data_queue.get()
+                    for _ in range(val_batch_size // self.dp_world_size)
+                ]
+                # Call pre_validation_hook
+                if self.pre_validation_hook is not None and not pre_validation_called:
+                    report_data = {
+                        "current_epoch": self.current_epoch,
+                        "is_last_step": is_last_step,
+                    }
+                    self.pre_validation_hook(self, report_data=report_data)
+                    pre_validation_called = True
+
+                # Call pre_per_step_validation_hook
+                if self.pre_per_step_validation_hook is not None:
+                    report_data = {
+                        "current_epoch": self.current_epoch,
+                        "batch_index": batch_index,
+                    }
+                    self.pre_per_step_validation_hook(self, report_data=report_data)
+
+                val_score = self.trainer.step_validation(
+                    global_batch, self.train_step, self.total_steps
+                )
+
+                # Call post_per_step_validation_hook
+                if self.post_per_step_validation_hook is not None:
+                    report_data = {
+                        "current_epoch": self.current_epoch,
+                        "batch_index": batch_index,
+                        "val_score": val_score,
+                    }
+                    self.post_per_step_validation_hook(self, report_data=report_data)
+
+                val_total_loss += val_score
+                batch_index += 1
+
+            if is_end:
+                break  # break outer epoch loop
+        if val_total_loss == 0.0:
+            logger.warning(
+                f"[SFT] No validation data processed at train step {self.train_step}/{self.total_steps}, epoch {self.current_epoch}"
+            )
+        val_avg_loss = val_total_loss / (val_batch_size * batch_index or 1)
+        logger.debug(
+            f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {self.current_epoch}"
+        )
+        # Clear the data queue for later use
+        self.data_queue.queue.clear()
 
         # Call post_validation_hook
         if self.post_validation_hook is not None:
             report_data = {
-                "current_epoch": current_epoch,
+                "current_epoch": self.current_epoch,
                 "val_avg_loss": val_avg_loss,
             }
             self.post_validation_hook(self, report_data=report_data)
 
         # Call custom logger functions
         report_data = {
-            "val/cur_epoch": current_epoch,
+            "val/cur_epoch": self.current_epoch,
             "val/avg_loss": val_avg_loss,
-            "val/train_epochs": self.epoch,
+            "val/train_epochs": self.config.train.epoch,
             "val/total_steps": self.total_steps,  # This total_steps is for training
             "val/train_step": self.train_step,
         }
 
         if util.is_master_rank(self.parallel_dims, self.global_rank):
-            if "wandb" in self.config.logging.logger and is_wandb_available():
-                log_wandb(
-                    data=report_data,
-                    step=self.train_step,
-                )
-            for custom_logger_fn in self.custom_logger_fns:
-                try:
-                    custom_logger_fn(report_data, self.train_step)
-                except Exception as e:
-                    logger.warning(f"[SFT] Error calling custom logger function: {e}")
+            for key in report_data.keys():
+                if isinstance(report_data[key], torch.Tensor):
+                    report_data[key] = report_data[key].item()
+            logger.debug(
+                f"[SFT] Validation step {self.train_step}/{self.total_steps}, report data: {report_data}"
+            )
+            self.api_client.post_policy_train_ack(
+                self.replica_name,
+                self.train_step,
+                self.total_steps,
+                False,
+                report_data,
+            )
 
         return val_avg_loss
 
@@ -190,7 +213,10 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         """
         Request new prompts from the controller for both training and validation.
         """
-        prompts_and_is_end = (None, False)
+        assert (
+            prompt_queue.empty()
+        ), "Prompt queue should be empty before requesting new prompts."
+        prompts_and_is_end: Tuple[List[RLPayload] | None, bool] = (None, False)
         if self.global_rank == 0:
             # blocking request to get prompts from controller
             # batch_size is per data parallel rank so we need to multiply it with data parallel size
@@ -231,6 +257,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 # ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
                 ranks_to_scatter = self.parallel_dims.mesh["dp"].size()
 
+                # Ignore extra prompts that cannot be evenly scattered
+                prompts = prompts[: len(prompts) - len(prompts) % ranks_to_scatter]
+
                 # Distribute prompts in an interleaved (round-robin) fashion
                 # Rank 0 gets indices [0, N, 2N, ...], Rank 1 gets [1, N+1, 2N+1, ...], etc.
                 scattered_prompts_and_is_end = []
@@ -255,10 +284,58 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             )
             prompts_and_is_end = recv_prompts_and_is_end[0]
         prompts, is_end = prompts_and_is_end
+        target_train_step = 0
+        target_epoch = 0
+        new_epoch = False
         if prompts is not None:
-            for p in prompts:
-                prompt_queue.put(p)
-        return is_end
+            for fullpayload in prompts:
+                payload = fullpayload.prompt
+                self.train_step = (
+                    fullpayload.weight_version
+                    if self.train_step is None
+                    else self.train_step
+                )
+                target_train_step = max(target_train_step, fullpayload.weight_version)
+                target_epoch = max(target_epoch, fullpayload.extra_info["epoch"])
+                if (
+                    self.config.train.train_policy.conversation_column_name
+                    and not self.is_user_provided_train_set
+                ):
+                    if isinstance(payload, list):
+                        payload = [
+                            self.data_packer.sft_process_sample(
+                                x[
+                                    self.config.train.train_policy.conversation_column_name
+                                ]
+                            )
+                            for x in payload
+                        ]
+                    else:
+                        payload = self.data_packer.sft_process_sample(
+                            payload[
+                                self.config.train.train_policy.conversation_column_name
+                            ],
+                        )
+                else:
+                    if isinstance(payload, list):
+                        payload = [
+                            self.data_packer.sft_process_sample(x) for x in payload
+                        ]
+                    else:
+                        payload = self.data_packer.sft_process_sample(payload)
+                prompt_queue.put(payload)
+            assert (
+                self.train_step == target_train_step
+            ), f"train_step {self.train_step} should be equal to target_train_step {target_train_step}"
+            new_epoch = (
+                self.current_epoch is not None and self.current_epoch != target_epoch
+            )
+            self.current_epoch = target_epoch
+        assert is_end or prompt_queue.qsize() >= batch_size, (
+            f"Prompt queue size {prompt_queue.qsize()} should be at least batch_size {batch_size} "
+            "unless is_end is True"
+        )
+        return is_end, new_epoch
 
     def main_loop(self):
         def fetch_command_helper(trainer: MultiReplicaSFTPolicyWorker):
@@ -280,12 +357,11 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         ).start()
 
         self.profiler.start()
-        # pp_last_stage = False
-
-        # if self.parallel_dims.pp_enabled:
-        #     pp_last_stage = (
-        #         self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
-        #     )
+        pp_last_stage = False
+        if self.parallel_dims.pp_enabled:
+            pp_last_stage = (
+                self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+            )
 
         while True:
             self.broadcast_command()
@@ -304,8 +380,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             if not self.weight_sync_done:
                 time.sleep(1)
                 continue
-
-            is_end = self.request_new_prompts(
+            if self.train_step is None:
+                val_avg_loss = self.validate(is_last_step=False)
+            is_end, new_epoch = self.request_new_prompts(
                 batch_size=self.config.train.train_batch_per_replica
                 // self.dp_world_size,
                 prompt_queue=self.data_queue,
@@ -317,59 +394,12 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 self.data_queue.qsize()
                 >= self.config.train.train_batch_per_replica // self.dp_world_size
             ):
-                global_batch = []
-                target_train_step = 0
-                for _ in range(
-                    self.config.train.train_batch_per_replica // self.dp_world_size
-                ):
-                    fullpayload: RLPayload = self.data_queue.get()
-                    payload = fullpayload.prompt
-                    self.train_step = (
-                        fullpayload.weight_version
-                        if self.train_step is None
-                        else self.train_step
+                global_batch = [
+                    self.data_queue.get()
+                    for _ in range(
+                        self.config.train.train_batch_per_replica // self.dp_world_size
                     )
-                    target_train_step = max(
-                        target_train_step, fullpayload.weight_version
-                    )
-                    if (
-                        self.config.train.train_policy.conversation_column_name
-                        and not self.is_user_provided_train_set
-                    ):
-                        if isinstance(payload, list):
-                            global_batch.append(
-                                [
-                                    self.data_packer.sft_process_sample(
-                                        x[
-                                            self.config.train.train_policy.conversation_column_name
-                                        ]
-                                    )
-                                    for x in payload
-                                ]
-                            )
-                        else:
-                            global_batch.append(
-                                self.data_packer.sft_process_sample(
-                                    payload[
-                                        self.config.train.train_policy.conversation_column_name
-                                    ],
-                                )
-                            )
-                    else:
-                        if isinstance(payload, list):
-                            global_batch.append(
-                                [
-                                    self.data_packer.sft_process_sample(x)
-                                    for x in payload
-                                ]
-                            )
-                        else:
-                            global_batch.append(
-                                self.data_packer.sft_process_sample(payload)
-                            )
-                assert (
-                    self.train_step == target_train_step
-                ), f"train_step {self.train_step} should be equal to target_train_step {target_train_step}"
+                ]
                 if (
                     self.config.profiler.enable_nsys
                     and self.profiler.global_rank in self.profiler.rank_filter
@@ -414,39 +444,52 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         report_data,
                     )
 
-                if (
-                    self.config.train.max_num_steps is not None
-                    and self.train_step >= self.total_steps
-                ):
-                    break  # break outer epoch loop
+            if self.train_step >= self.total_steps or is_end:
+                break  # break outer epoch loop
 
-                # val_avg_loss = self.validate(
-                #     current_epoch=cur_epoch, is_last_step=False
-                # )
-
-                # self.trainer.checkpointing(
-                #     total_steps=self.total_steps,
-                #     train_step=self.train_step,
-                #     save_freq=self._save_freq,
-                #     pp_last_stage=False,
-                #     is_last_step=False,
-                #     val_score=val_avg_loss,
-                # )
-            if is_end:
-                break
-
-            # cur_epoch += 1
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                # Checkpointing based on epoch if `save_freq_in_epoch` is set
+                if new_epoch:
+                    # New epoch begins and old epoch ends
+                    # So check the epoch number against save_freq_in_epoch for saving checkpoint
+                    do_save = (
+                        self.current_epoch % self.config.train.ckpt.save_freq_in_epoch
+                        == 0
+                    )
+                    if do_save:
+                        logger.info(
+                            f"[Controller] Epoch {self.current_epoch} ends, triggering checkpoint saving at step {self.train_step}"
+                        )
+            else:
+                # Checkpointing based on step if `save_freq_in_epoch` is not set
+                do_save = (
+                    self.train_step % self.config.train.ckpt.save_freq == 0
+                    and self.train_step > 0
+                )
+            val_avg_loss = self.validate(is_last_step=False)
+            if do_save and self.is_master_replica:
+                self.trainer.checkpointing(
+                    total_steps=self.total_steps,
+                    train_step=self.train_step,
+                    save_freq=self._save_freq,
+                    pp_last_stage=pp_last_stage,
+                    is_last_step=False,
+                    val_score=val_avg_loss,
+                    do_save=True,
+                )
 
         # Finally: validation and save checkpoint
-        # val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
-        # self.trainer.checkpointing(
-        #     total_steps=self.total_steps,
-        #     train_step=self.train_step,
-        #     save_freq=self._save_freq,
-        #     is_last_step=True,
-        #     pp_last_stage=pp_last_stage,
-        #     val_score=val_avg_loss,
-        # )
+        val_avg_loss = self.validate(is_last_step=True)
+        if self.is_master_replica:
+            self.trainer.checkpointing(
+                total_steps=self.total_steps,
+                train_step=self.train_step,
+                save_freq=self._save_freq,
+                is_last_step=True,
+                pp_last_stage=pp_last_stage,
+                val_score=val_avg_loss,
+                do_save=True,
+            )
 
         self.train_stream.synchronize()
         self.handle_shutdown()

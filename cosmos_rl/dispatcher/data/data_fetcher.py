@@ -20,6 +20,7 @@ from tqdm import tqdm
 from abc import ABC
 
 import torch
+import datasets
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, TensorDataset
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
@@ -34,6 +35,7 @@ from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import split_train_n_val_dataset
 
 
 class DataFetcherBase(ABC):
@@ -163,6 +165,17 @@ class ControllerDataFetcher(DataFetcherBase):
                 )
             else:
                 self.dataset = CosmosDataset(config=self.config)
+
+            if (
+                self.config.validation.enable
+                and self.val_dataset is None
+                and not self.config.validation.dataset.name
+            ):
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
 
             if self.config.train.local_dataset:
                 train_index_set = RLDataset(
@@ -325,7 +338,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     self.val_batch_size > 0
                 ), "[DataFetcher] val_batch_size should be greater than 0."
                 if self.val_dataset is not None:
-                    assert isinstance(self.val_dataset, Dataset)
+                    assert isinstance(self.val_dataset, Dataset) or isinstance(
+                        self.val_dataset, datasets.arrow_dataset.Dataset
+                    )
                     self.val_dataset = CosmosValidationDataset(
                         config=self.config,
                         val_set=self.val_dataset,
@@ -653,6 +668,16 @@ class WorkerDataFetcher(DataFetcherBase):
                 )
                 logger.info(
                     "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                )
+            elif not self.config.validation.dataset.name:
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
+                self.val_dataset = CosmosValidationDataset(
+                    config=self.config,
+                    val_set=self.val_dataset,
                 )
             else:
                 self.val_dataset = CosmosValidationDataset(config=self.config)

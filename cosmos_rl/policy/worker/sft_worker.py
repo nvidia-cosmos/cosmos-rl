@@ -150,38 +150,9 @@ def construct_dataset(
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
         else:
-            logger.warning(
-                "No validation dataset provided, using split of training dataset for validation."
+            train_dataset, test_dataset = util.split_train_n_val_dataset(
+                train_dataset, cosmos_config
             )
-            if isinstance(train_dataset, torch.utils.data.Dataset):
-                # Define the split ratio (e.g., 80% train, 20% test)
-                if config.dataset.test_size is None:
-                    logger.warning(
-                        "No test size specified, using 10% of the training dataset for testing."
-                    )
-                    config.dataset.test_size = 0.1
-                if isinstance(config.dataset.test_size, float):
-                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
-                else:
-                    n_test_samples = config.dataset.test_size
-                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
-
-                # Generate deterministic indices
-                indices = list(range(len(train_dataset)))
-                test_indices = indices[:n_test_samples]
-                train_indices = indices[n_test_samples:]
-
-                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-            else:
-                assert hasattr(
-                    train_dataset, "train_test_split"
-                ), "train_dataset must have train_test_split method"
-                split = train_dataset.train_test_split(
-                    test_size=config.dataset.test_size, shuffle=False
-                )
-                train_dataset = split["train"]
-                test_dataset = split["test"]
     else:
 
         class EmptyDataset(Dataset):
@@ -526,8 +497,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def validate(self, current_epoch: int, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
+
         if (
             (self.train_step == 0 and self.config.validation.val_before_train)
             or (

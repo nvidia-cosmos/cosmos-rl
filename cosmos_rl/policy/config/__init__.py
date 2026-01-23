@@ -136,11 +136,6 @@ class SFTDataConfig(BaseModel):
         description="Batch size for each iteration of the dataloader for when fetch data from controller. This is only the setting of the dataloader iterator on the controller side.",
     )
 
-    data_dispatch_as_rank_in_mesh: bool = Field(
-        default=False,
-        description="Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.",
-    )
-
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",
