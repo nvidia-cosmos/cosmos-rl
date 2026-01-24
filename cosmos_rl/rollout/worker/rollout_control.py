@@ -360,6 +360,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 f"[Rollout] Replica {self.replica_name} not found in registered replicas."
             )
         self.rank_in_rollout_repicas = replica_name_to_rank[self.replica_name]
+        # update the replcia_name to rank dict
+        self.replica_name_to_rank = replica_name_to_rank
 
         if len(replica_name_to_rank) == 1:
             # only one rollout replica now, no need to build mesh.
@@ -398,8 +400,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.global_commnicator_idex = create_nccl_comm(
             nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
         )
-        # update the replcia_name to rank dict
-        self.replica_name_to_rank = replica_name_to_rank
 
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
