@@ -115,6 +115,7 @@ class DiffusionNFTDataPacker(BaseDataPacker):
     def get_policy_input(
         self,
         sample: List[Rollout],
+        device: torch.device,
         rollout_output: Union[str, List[int]] = None,
         n_ignore_prefix_tokens: int = 0,
     ):
@@ -133,8 +134,11 @@ class DiffusionNFTDataPacker(BaseDataPacker):
                     sk: torch.stack([s[k][sk] for s in inputs_list], dim=0)
                     for sk in inputs_list[0][k]
                 }
+            elif inputs_list[0][k] is None:
+                collated_samples[k] = None
             else:
                 collated_samples[k] = torch.stack([s[k] for s in inputs_list], dim=0)
+
         if collated_samples["advantages"].ndim == 1:
             collated_samples["advantages"] = collated_samples["advantages"][:, None]
         return collated_samples

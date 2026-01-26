@@ -191,7 +191,7 @@ class RemoteRewardCalculator:
             video_fps = payload.extra_info.get("video_fps", 16.0)
             # Encode video data
             latents = self.tokenizer.encode(mm_datas)
-            mm_tensor = latents.cpu().numpy()
+            mm_tensor = latents.to(dtype=torch.float32).cpu().numpy()
             # Create video info for entire batch (assuming 16 FPS as default)
             video_infos = []
             for _ in range(latents.shape[0]):
@@ -201,9 +201,8 @@ class RemoteRewardCalculator:
         else:  # image
             data["media_type"] = "image"
             mm_tensor = (
-                torch.stack(mm_datas, dim=0).to(dtype=torch.float32).cpu().numpy()
-            )
-            mm_tensor = mm_tensor.transpose(0, 2, 3, 1)  # B,C,H,W -> B,H,W,C
+                mm_datas.to(dtype=torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+            )  # B,C,H,W -> B,H,W,C
 
         # Enqueue request (single call for entire batch)
         uuid = self.enqueue_request(mm_tensor, data)
@@ -233,14 +232,35 @@ class RemoteRewardCalculator:
         # Extract overall reward
         if return_all:
             return response_json["scores"]
-        if self.config.score_key not in response_json["scores"]:
-            rewards = [
-                torch.tensor(response_json["scores"][w])
-                for w in self.config.score_key.split("+")
-            ]
-            reward = sum(rewards)
+
+        scores = response_json.get("scores")
+        if not isinstance(scores, dict):
+            raise KeyError(
+                f"[RemoteRewardCalculator] Invalid reward response: missing or non-dict 'scores'. Got: {type(scores)}"
+            )
+
+        score_key = self.config.score_key
+        if not isinstance(score_key, str) or not score_key.strip():
+            raise ValueError(
+                f"[RemoteRewardCalculator] Invalid config.score_key: {score_key!r}"
+            )
+
+        if score_key in scores:
+            reward = torch.tensor(scores[score_key])
         else:
-            reward = torch.tensor(response_json["scores"][self.config.score_key])
+            keys = [k.strip() for k in score_key.split("+") if k.strip()]
+            if not keys:
+                raise ValueError(
+                    f"[RemoteRewardCalculator] Invalid composite config.score_key: {score_key!r}"
+                )
+            missing = [k for k in keys if k not in scores]
+            if missing:
+                available = sorted(scores.keys())
+                raise KeyError(
+                    "[RemoteRewardCalculator] Missing score keys in response: "
+                    f"missing={missing}, requested={score_key!r}, available={available}"
+                )
+            reward = sum(torch.tensor(scores[k]) for k in keys)
         return (
             torch.clamp(
                 reward, min=self.config.reward_clip_min, max=self.config.reward_clip_max
@@ -276,8 +296,8 @@ class RemoteRewardCalculator:
                 # Remove the payload from the dict to save memory
                 del self.uuid2payload[uuid]
             except Exception as e:
-                logger.debug(
-                    f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid}: {e}"
+                logger.info(
+                    f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
                 )
                 break
 

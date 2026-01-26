@@ -655,20 +655,26 @@ class ModelRegistry:
     def build_diffusers_model(cls, config, diffusers_config_args=None):
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
+        model_revision = config.policy.model_revision or "main"
         model = None
-        model_type = util.retry(diffusers_config_fn)(model_name_or_path)["_class_name"]
+        model_type = util.retry(diffusers_config_fn)(
+            model_name_or_path, revision=model_revision
+        )["_class_name"]
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
-
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
             else config.train.param_dtype
         )
 
-        def _load_model_with_config(model_cls, config, model_name_or_path):
+        def _load_model_with_config(
+            model_cls, config, model_name_or_path, model_revision
+        ):
             """Load model and apply post-processing configurations."""
-            model = model_cls.from_pretrained(config, model_name_or_path)
+            model = model_cls.from_pretrained(
+                config, model_name_or_path, model_revision
+            )
             return model
 
         def _get_init_context_for_model_build(device):
@@ -682,7 +688,7 @@ class ModelRegistry:
             with util.cosmos_default_dtype(cosmos_default_dtype):
                 try:
                     model = _load_model_with_config(
-                        model_cls, config, model_name_or_path
+                        model_cls, config, model_name_or_path, model_revision
                     )
 
                 except Exception as e:

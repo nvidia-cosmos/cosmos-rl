@@ -25,6 +25,7 @@ from cosmos_rl.policy.model.diffusers import DiffuserModel
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.policy.config import DiffusersConfig
 from cosmos_rl.utils.diffusers.solver import run_sampling
+from cosmos_rl.utils.logging import logger
 
 
 def mean_flat(tensor):
@@ -51,7 +52,7 @@ class SD3Model(DiffuserModel):
         ]
         self.tokenizers = [self.tokenizer, self.tokenizer_2, self.tokenizer_3]
 
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def text_embedding(self, prompt_list: List[str], device="cuda", **kwargs):
         """
         Text embedding of list of prompts
         """
@@ -64,13 +65,14 @@ class SD3Model(DiffuserModel):
         with torch.no_grad():
             # Fetch all default value of pipeline.__call__ that used by encode_prompt
             ignore_args = ["prompt", "do_classifier_free_guidance"]
-            kwargs = {}
+            default_kwargs = {}
             sig_encode_pompt = inspect.signature(self.pipeline.encode_prompt)
             sig_call = inspect.signature(self.pipeline.__call__)
             for name, params in sig_encode_pompt.parameters.items():
                 if name not in ignore_args and name in sig_call.parameters:
-                    kwargs[name] = sig_call.parameters[name].default
-
+                    default_kwargs[name] = sig_call.parameters[name].default
+            default_kwargs.update(kwargs)
+            logger.debug(f"Default kwargs for encode_prompt: {default_kwargs}")
             # Training doesn't need to do cfg, only prompt embedding is needed
             (
                 prompt_embeds,
@@ -81,7 +83,7 @@ class SD3Model(DiffuserModel):
                 prompt_list,
                 do_classifier_free_guidance=False,
                 device=device,
-                **kwargs,
+                **default_kwargs,
             )
 
         if self.offload:
@@ -177,6 +179,7 @@ class SD3Model(DiffuserModel):
         noise_level: float = 0.7,
         deterministic: bool = False,
         solver: str = "flow",
+        **kwargs,
     ):
         height = (
             height or self.pipeline.default_sample_size * self.pipeline.vae_scale_factor
@@ -320,9 +323,41 @@ class SD3Model(DiffuserModel):
         image = self.vae.decode(latents, return_dict=False)[0]
         image = self.pipeline.image_processor.postprocess(
             image, output_type=output_type
-        )
+        )  # (B, C, H, W)
 
         # Offload all models
         self.pipeline.maybe_free_model_hooks()
 
         return image, all_latents, all_log_probs
+
+    def nft_prepare_transformer_input(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor,
+        timestep: torch.Tensor,
+        num_frames: int,
+        height: int,
+        width: int,
+        **kwargs,
+    ):
+        """
+        Prepare transformer input for training stage of DiffusionNFT
+        Args:
+            latents: Noised latent tensor
+            prompt_embeds: Text embedding tensor
+            pooled_prompt_embeds: Pooled text embedding tensor
+            timestep: Timestep tensor
+            num_frames: Number of frames to be generated
+            height: Height of the image/video for generation
+            width: Width of the image/video for generation
+        Returns:
+            transformer input args dict
+        """
+        return {
+            "hidden_states": latents,
+            "encoder_hidden_states": prompt_embeds,
+            "pooled_projections": pooled_prompt_embeds,
+            "timestep": timestep,
+            "return_dict": False,
+        }

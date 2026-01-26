@@ -24,7 +24,6 @@ from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.diffusers import DiffuserModel
-from cosmos_rl.utils.diffusers.text_embedding import compute_text_embeddings
 from cosmos_rl.utils.parallelism import ParallelDims
 
 
@@ -50,13 +49,13 @@ class NFTRollout(RolloutBase):
         self._model_param_map = None  # key: compatible name, value: param
 
     def set_neg_prompt_embed(self):
-        self.neg_prompt_embed, self.neg_pooled_prompt_embed = compute_text_embeddings(
+        neg_text_embedding_dict = self.model.text_embedding(
             [""],
-            self.model.text_encoders,
-            self.model.tokenizers,
-            max_sequence_length=128,
             device=self.device,
+            max_sequence_length=self.diffusers_config.max_prompt_length,
         )
+        self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def rollout_generation(
         self,
@@ -73,17 +72,17 @@ class NFTRollout(RolloutBase):
             prompts, metadatas = data_packer.get_rollout_input(
                 payload=pl, n_generation=self.config.rollout.n_generation
             )
-            prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
+            text_embedding_dict = self.model.text_embedding(
                 prompts,
-                self.model.text_encoders,
-                self.model.tokenizers,
-                max_sequence_length=128,
                 device=self.device,
+                max_sequence_length=self.diffusers_config.max_prompt_length,
             )
+            prompt_embeds = text_embedding_dict["encoder_hidden_states"]
+            pooled_prompt_embeds = text_embedding_dict["pooled_projections"]
             prompt_ids = self.model.tokenizers[0](
                 prompts,
                 padding="max_length",
-                max_length=256,
+                max_length=self.diffusers_config.max_prompt_length,
                 truncation=True,
                 return_tensors="pt",
             ).input_ids.to(self.device)
@@ -97,25 +96,36 @@ class NFTRollout(RolloutBase):
                 for _ in range(self.config.rollout.n_generation)
             ]
             with torch.no_grad():
-                images, latents, _ = self.model.pipeline_with_logprob(
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=self.neg_prompt_embed.repeat(
+                # Inference with logprob computation
+                # mm_datas contains the generated images/videos
+                call_kwargs = {
+                    "prompt_embeds": prompt_embeds,
+                    "negative_prompt_embeds": self.neg_prompt_embed.repeat(
                         self.config.rollout.n_generation, 1, 1
                     ),
-                    negative_pooled_prompt_embeds=self.neg_pooled_prompt_embed.repeat(
-                        self.config.rollout.n_generation, 1
-                    ),
-                    num_inference_steps=self.diffusers_config.sample.num_steps,
-                    guidance_scale=self.diffusers_config.sample.guidance_scale,
-                    output_type="pt",
-                    height=self.diffusers_config.inference_size[0],
-                    width=self.diffusers_config.inference_size[1],
-                    noise_level=self.diffusers_config.sample.noise_level,
-                    deterministic=self.diffusers_config.sample.deterministic_sampling,
-                    generator=generators,
-                    solver=self.diffusers_config.sample.solver,
-                )
+                    "num_inference_steps": self.diffusers_config.sample.num_steps,
+                    "guidance_scale": self.diffusers_config.sample.guidance_scale,
+                    "output_type": "pt",
+                    "height": self.diffusers_config.inference_size[0],
+                    "width": self.diffusers_config.inference_size[1],
+                    "noise_level": self.diffusers_config.sample.noise_level,
+                    "deterministic": self.diffusers_config.sample.deterministic_sampling,
+                    "generator": generators,
+                    "solver": self.diffusers_config.sample.solver,
+                    "num_frames": self.diffusers_config.train_frames,
+                }
+
+                if pooled_prompt_embeds is not None:
+                    call_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+
+                if self.neg_pooled_prompt_embed is not None:
+                    call_kwargs["negative_pooled_prompt_embeds"] = (
+                        self.neg_pooled_prompt_embed.repeat(
+                            self.config.rollout.n_generation, 1
+                        )
+                    )
+
+                mm_datas, latents, _ = self.model.pipeline_with_logprob(**call_kwargs)
                 latents = torch.stack(latents, dim=1)
                 timesteps = self.model.pipeline.scheduler.timesteps.repeat(
                     len(prompts), 1
@@ -124,7 +134,7 @@ class NFTRollout(RolloutBase):
             response.append(
                 RolloutResult(
                     prompt=pl.prompt["prompt"],
-                    completions=images,
+                    completions=mm_datas,
                     completion_logprobs=None,
                     completion_token_ids=None,
                     extra_info={
@@ -134,10 +144,6 @@ class NFTRollout(RolloutBase):
                         "prompt_embeds": prompt_embeds,
                         "pooled_prompt_embeds": pooled_prompt_embeds,
                         "timesteps": timesteps,
-                        "next_timesteps": torch.concatenate(
-                            [timesteps[:, 1:], torch.zeros_like(timesteps[:, :1])],
-                            dim=1,
-                        ),
                         "latents_clean": latents[:, -1],
                     },
                 )

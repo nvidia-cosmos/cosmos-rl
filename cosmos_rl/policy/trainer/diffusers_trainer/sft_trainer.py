@@ -158,7 +158,6 @@ class SFTTrainer(DiffusersTrainer):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-
         for i in mini_batch_begin_idxs:
             # gradient accumulation
             raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]

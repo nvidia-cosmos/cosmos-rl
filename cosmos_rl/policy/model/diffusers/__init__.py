@@ -18,19 +18,20 @@ from typing import List, Tuple, Optional
 import torch
 from torch import nn
 
-from cosmos_rl.utils.diffusers_utils import DiffusionPipeline
-from diffusers import training_utils
-
 from abc import ABC, abstractmethod
+from diffusers import training_utils
+from diffusers.loaders.peft import PeftAdapterMixin
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import DiffusersConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import LoraConfig as CosmosLoraConfig
 from cosmos_rl.utils.util import str2torch_dtype
-
-from peft import LoraConfig, get_peft_model_state_dict
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.diffusers_utils import DiffusionPipeline
 
 
 def mean_flat(tensor):
@@ -51,12 +52,13 @@ class DiffuserModel(BaseModel, ABC):
         config: DiffusersConfig,
         lora_config: CosmosLoraConfig = None,
         model_str: str = "",
+        model_revision: str = "main",
     ):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
         self.dtype = str2torch_dtype(config.dtype)
-        self.load_models_from_hf(model_str)
+        self.load_models_from_hf(model_str, model_revision)
         if lora_config is not None:
             self.is_lora = True
             self.apply_lora(lora_config)
@@ -79,7 +81,7 @@ class DiffuserModel(BaseModel, ABC):
             model_part = getattr(self.pipeline, valid_model)
             if isinstance(model_part, nn.Module) and valid_model != "transformer":
                 # Offload all torch.nn.Modules to cpu except transformers
-                model_part.to(torch.bfloat16)
+                model_part.to(dtype=torch.bfloat16)
                 if self.offload:
                     model_part.to("cpu")
                     self.offloaded_models.append(model_part)
@@ -158,7 +160,7 @@ class DiffuserModel(BaseModel, ABC):
                 f"{self.model_str} have neither video_processor or image_processor, may not be a valid pipeline"
             )
 
-    def load_models_from_hf(self, model_str: str):
+    def load_models_from_hf(self, model_str: str, revision: str = "main"):
         """
         Load all models
 
@@ -169,22 +171,30 @@ class DiffuserModel(BaseModel, ABC):
         self.model_str = model_str
         # Always init on cuda now
         self.pipeline = DiffusionPipeline.from_pretrained(
-            model_str, torch_dtype=self.dtype, device_map="cuda"
+            model_str, revision=revision, torch_dtype=self.dtype, device_map="cuda"
         )
-
+        if self.pipeline._execution_device.type != "cuda":
+            logger.warning(
+                f"{model_str} pipeline does not support cuda device map. Manually move it to cuda."
+            )
+            self.pipeline.reset_device_map()
+            self.pipeline.to("cuda")
         # Register all model parts to self
         # self.transformer will point to self.pipeline.transformer
         self.register_models()
 
     @classmethod
-    def from_pretrained(cls, config, diffusers_config_args):
+    def from_pretrained(
+        cls, config: CosmosConfig, model_str: str, model_revision: str = "main"
+    ):
         """
         Model initialize entrypoiny
         """
         return cls(
             config.policy.diffusers,
             lora_config=config.policy.lora,
-            model_str=config.policy.model_name_or_path,
+            model_str=model_str,
+            model_revision=model_revision,
         )
 
     @classmethod
@@ -193,7 +203,7 @@ class DiffuserModel(BaseModel, ABC):
         pass
 
     @abstractmethod
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def text_embedding(self, prompt_list: List[str], device="cuda", **kwargs):
         """
         Text embedding of list of prompts
         """
@@ -208,7 +218,7 @@ class DiffuserModel(BaseModel, ABC):
 
     @abstractmethod
     def visual_embedding(
-        self, input_visual_list, height=None, width=None, device="cuda"
+        self, input_visual_list, height=None, width=None, device="cuda", **kwargs
     ):
         """
         Text embedding of list of preprocessed image tensor
@@ -350,9 +360,22 @@ class DiffuserModel(BaseModel, ABC):
             target_modules=lora_config.target_modules,
         )
         for lora_name in lora_config.lora_names:
-            self.transformer.add_adapter(
-                adapter_config=transformer_lora_config, adapter_name=lora_name
-            )
+            if not hasattr(self.transformer, "add_adapter"):
+                self.transformer = get_peft_model(
+                    self.transformer,
+                    peft_config=transformer_lora_config,
+                    adapter_name=lora_name,
+                )
+            else:
+                # The add_adapter API of diffusers and peft are different
+                if isinstance(self.transformer, PeftAdapterMixin):
+                    self.transformer.add_adapter(
+                        adapter_config=transformer_lora_config, adapter_name=lora_name
+                    )
+                else:
+                    self.transformer.add_adapter(
+                        peft_config=transformer_lora_config, adapter_name=lora_name
+                    )
 
     @property
     def trained_model(self):
