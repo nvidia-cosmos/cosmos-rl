@@ -31,9 +31,13 @@ def modify_messages(messages, max_pixels = None):
         if isinstance(message['content'], str):
             message['content'] = [{'type': 'text', 'text': message['content']}]
         for content in message['content']:
-            if content['type'] in ['image', 'video']:
+            if content['type'] == 'image':
                 if max_pixels is not None:
                     content['max_pixels'] = max_pixels
+            elif content['type'] == 'video':
+                content['fps'] = 1
+                if max_pixels is not None:
+                    content['total_pixels'] = max_pixels
     return messages
 
 class CustomDataset(Dataset):
@@ -44,7 +48,7 @@ class CustomDataset(Dataset):
             [f for f in os.listdir(data_path) if f.endswith(".jsonl")]
         )
         for file_name in jsonl_files:
-            if 'webvid' in file_name:
+            if not config.custom.get("include_video", False) and 'webvid' in file_name:
                 continue
             with open(os.path.join(data_path, file_name)) as f:
                 for line in f:

@@ -46,7 +46,7 @@ dataloader_shuffle= true
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 300
+save_freq = 10000
 save_mode = "async"
 
 [policy.parallelism]
@@ -61,3 +61,4 @@ cp_rotate_method = "allgather"
 [custom]
 enable_moe_load_balancing_training = false
 train_layers = ["Qwen3VLVisionPatchMerger"]
+include_video = true

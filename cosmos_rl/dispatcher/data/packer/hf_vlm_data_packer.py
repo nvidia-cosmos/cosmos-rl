@@ -55,6 +55,14 @@ def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
         new_image_inputs.append(image)
     return new_image_inputs
 
+def retrieve_not_none_values(input_list):
+    input_list = [x for x in input_list if x is not None]
+    if len(input_list) > 0:
+        input_list = torch.cat(input_list, dim=0)
+    else:
+        input_list = None
+    return input_list
+
 
 class HFVLMDataPacker(DataPacker):
     """
@@ -480,95 +488,29 @@ class HFVLMDataPacker(DataPacker):
         image_sizes = [x["image_sizes"] for x in processed_samples]
         batch_num_images = [x["batch_num_images"] for x in processed_samples]
 
-        if all([x is not None for x in pixel_values_videos]):
-            assert all(
-                [x is not None for x in pixel_values_videos]
-            ), "pixel_values_videos should not be None"
-            pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
-        else:
-            assert all(
-                [x is None for x in pixel_values_videos]
-            ), "pixel_values_videos should be None"
-            pixel_values_videos = None
+        pixel_values_videos = retrieve_not_none_values(pixel_values_videos)
 
-        if all([x is not None for x in video_grid_thw]):
-            video_grid_thw = torch.cat(video_grid_thw, dim=0)
-        else:
-            assert all(
-                [x is None for x in video_grid_thw]
-            ), "video_grid_thw should be None"
-            video_grid_thw = None
+        pixel_values_videos_lengths_per_sample = [x for x in pixel_values_videos_lengths_per_sample if x is not None]
+        pixel_values_videos_lengths_per_sample = pixel_values_videos_lengths_per_sample if len(pixel_values_videos_lengths_per_sample) > 0 else None
 
-        if all([x is not None for x in second_per_grid_ts]):
-            assert all(
-                [x is not None for x in second_per_grid_ts]
-            ), "second_per_grid_ts should not be None"
-            second_per_grid_ts = torch.cat(second_per_grid_ts, dim=0)
-        else:
-            assert all(
-                [x is None for x in second_per_grid_ts]
-            ), "second_per_grid_ts should be None"
-            second_per_grid_ts = None
+        video_grid_thw = retrieve_not_none_values(video_grid_thw)
 
-        if all([x is not None for x in pixel_values_videos_lengths_per_sample]):
-            pass
-        else:
-            assert all(
-                [x is None for x in pixel_values_videos_lengths_per_sample]
-            ), "pixel_values_videos_lengths_per_sample should be None"
-            pixel_values_videos_lengths_per_sample = None
+        second_per_grid_ts = retrieve_not_none_values(second_per_grid_ts)
 
-        if all([x is not None for x in pixel_values]):
-            pixel_values = torch.cat(pixel_values, dim=0)
-        else:
-            assert all([x is None for x in pixel_values]), "pixel_values should be None"
-            pixel_values = None
+        pixel_values = retrieve_not_none_values(pixel_values)
 
-        if all([x is not None for x in image_grid_thw]):
-            image_grid_thw = torch.cat(image_grid_thw, dim=0)
-        else:
-            assert all(
-                [x is None for x in image_grid_thw]
-            ), "image_grid_thw should be None"
-            image_grid_thw = None
+        pixel_values_lengths_per_sample = [x for x in pixel_values_lengths_per_sample if x is not None]
+        pixel_values_lengths_per_sample = pixel_values_lengths_per_sample if len(pixel_values_lengths_per_sample) > 0 else None
 
-        if all([x is not None for x in pixel_values_lengths_per_sample]):
-            pass
-        else:
-            assert all(
-                [x is None for x in pixel_values_lengths_per_sample]
-            ), "pixel_values_lengths_per_sample should be None"
-            pixel_values_lengths_per_sample = None
+        image_grid_thw = retrieve_not_none_values(image_grid_thw)
 
-        if all([x is not None for x in aspect_ratio_ids]):
-            aspect_ratio_ids = torch.cat(aspect_ratio_ids, dim=0)
-        else:
-            assert all(
-                [x is None for x in aspect_ratio_ids]
-            ), "aspect_ratio_ids should be None"
-            aspect_ratio_ids = None
+        aspect_ratio_ids = retrieve_not_none_values(aspect_ratio_ids)
 
-        if all([x is not None for x in aspect_ratio_mask]):
-            aspect_ratio_mask = torch.cat(aspect_ratio_mask, dim=0)
-        else:
-            assert all(
-                [x is None for x in aspect_ratio_mask]
-            ), "aspect_ratio_mask should be None"
-            aspect_ratio_mask = None
+        aspect_ratio_mask = retrieve_not_none_values(aspect_ratio_mask)
 
-        if all([x is not None for x in image_sizes]):
-            image_sizes = torch.cat(image_sizes, dim=0)
-        else:
-            assert all([x is None for x in image_sizes]), "image_sizes should be None"
-            image_sizes = None
+        image_sizes = retrieve_not_none_values(image_sizes)
 
-        if all([x is not None for x in batch_num_images]):
-            batch_num_images = torch.cat(batch_num_images, dim=0)
-        else:
-            assert all(
-                [x is None for x in batch_num_images]
-            ), "batch_num_images should be None"
-            batch_num_images = None
+        batch_num_images = retrieve_not_none_values(batch_num_images)
 
         # Shape description:
         #

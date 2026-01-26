@@ -1993,7 +1993,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         # Same implementation as for images
         return self.get_image_features(pixel_values_videos, video_grid_thw)
 
-    def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None):
+    def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None, num_image: int = 0):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
 
@@ -2007,7 +2007,9 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         image_embeds, deepstack_image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
         split_sizes = (image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
-        return image_embeds, deepstack_image_embeds
+        image_embeddings = image_embeds[:num_image]
+        video_embeddings = image_embeds[num_image:]
+        return image_embeddings, video_embeddings, deepstack_image_embeds
 
     def get_placeholder_mask(
         self,
@@ -2083,16 +2085,29 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         image_mask = None
         video_mask = None
 
-        if pixel_values is not None:
-            image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
+        if pixel_values is None:
+            final_pixel_value = pixel_values_videos
+            final_thw = video_grid_thw
+            num_image = 0
+        elif pixel_values_videos is None:
+            final_pixel_value = pixel_values
+            final_thw = image_grid_thw
+            num_image = image_grid_thw.shape[0]
+        else:
+            final_pixel_value = torch.cat([pixel_values, pixel_values_videos], dim=0)
+            final_thw = torch.cat([image_grid_thw, video_grid_thw], dim=0)
+            num_image = image_grid_thw.shape[0]
+
+        image_embeds, video_embeds, deepstack_image_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
+
+        if len(image_embeds) > 0:
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-        if pixel_values_videos is not None:
-            video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
+        if len(video_embeds) > 0:
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
@@ -2109,7 +2124,8 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
             deepstack_visual_embeds = []
             image_mask_joint = image_mask[visual_pos_masks]
             video_mask_joint = video_mask[visual_pos_masks]
-            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+            # TODO：hardcode here， should split deepstack_image_embeds to deepstack_image_embeds and deepstack_video_embeds
+            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_image_embeds):
                 embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
                 embed_joint[image_mask_joint, :] = img_embed
                 embed_joint[video_mask_joint, :] = vid_embed
@@ -2121,7 +2137,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         elif video_mask is not None:
             video_mask = video_mask[..., 0]
             visual_pos_masks = video_mask
-            deepstack_visual_embeds = deepstack_video_embeds
+            deepstack_visual_embeds = deepstack_image_embeds
 
         if position_ids is None:
             attention_mask_tensor = (
