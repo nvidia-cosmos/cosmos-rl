@@ -18,10 +18,10 @@ from typing import List, Tuple, Optional
 import torch
 from torch import nn
 
-from cosmos_rl.utils.diffusers_utils import DiffusionPipeline
-from diffusers import training_utils
-
 from abc import ABC, abstractmethod
+from diffusers import training_utils
+from diffusers.loaders.peft import PeftAdapterMixin
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
@@ -31,8 +31,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import LoraConfig as CosmosLoraConfig
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.logging import logger
-
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from cosmos_rl.utils.diffusers_utils import DiffusionPipeline
 
 
 def mean_flat(tensor):
@@ -360,18 +359,23 @@ class DiffuserModel(BaseModel, ABC):
             init_lora_weights=lora_config.init_lora_weights,
             target_modules=lora_config.target_modules,
         )
-        if not hasattr(self.transformer, "add_adapter"):
-            for lora_name in lora_config.lora_names:
+        for lora_name in lora_config.lora_names:
+            if not hasattr(self.transformer, "add_adapter"):
                 self.transformer = get_peft_model(
                     self.transformer,
                     peft_config=transformer_lora_config,
                     adapter_name=lora_name,
                 )
-        else:
-            for lora_name in lora_config.lora_names:
-                self.transformer.add_adapter(
-                    adapter_config=transformer_lora_config, adapter_name=lora_name
-                )
+            else:
+                # The add_adapter API of diffusers and peft are different
+                if isinstance(self.transformer, PeftAdapterMixin):
+                    self.transformer.add_adapter(
+                        adapter_config=transformer_lora_config, adapter_name=lora_name
+                    )
+                else:
+                    self.transformer.add_adapter(
+                        peft_config=transformer_lora_config, adapter_name=lora_name
+                    )
 
     @property
     def trained_model(self):

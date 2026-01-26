@@ -329,3 +329,35 @@ class SD3Model(DiffuserModel):
         self.pipeline.maybe_free_model_hooks()
 
         return image, all_latents, all_log_probs
+
+    def nft_prepare_transformer_input(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor,
+        timestep: torch.Tensor,
+        num_frames: int,
+        height: int,
+        width: int,
+        **kwargs,
+    ):
+        """
+        Prepare transformer input for training stage of DiffusionNFT
+        Args:
+            latents: Noised latent tensor
+            prompt_embeds: Text embedding tensor
+            pooled_prompt_embeds: Pooled text embedding tensor
+            timestep: Timestep tensor
+            num_frames: Number of frames to be generated
+            height: Height of the image/video for generation
+            width: Width of the image/video for generation
+        Returns:
+            transformer input args dict
+        """
+        return {
+            "hidden_states": latents,
+            "encoder_hidden_states": prompt_embeds,
+            "pooled_projections": pooled_prompt_embeds,
+            "timestep": timestep,
+            "return_dict": False,
+        }

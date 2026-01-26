@@ -450,3 +450,48 @@ class CosmosPredict2_5Model(DiffuserModel):
         self.pipeline.maybe_free_model_hooks()
 
         return video, all_latents, all_log_probs
+
+    def nft_prepare_transformer_input(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor,
+        timestep: torch.Tensor,
+        num_frames: int,
+        height: int,
+        width: int,
+        **kwargs,
+    ):
+        """
+        Prepare transformer input for training stage of DiffusionNFT
+        This algorithm targets text2image/video generation, thus the conditional mask is all zeros.
+        Args:
+            latents: Noised latent tensor
+            prompt_embeds: Text embedding tensor
+            pooled_prompt_embeds: Pooled text embedding tensor
+            timestep: Timestep tensor
+            num_frames: Number of frames to be generated
+            height: Height of the image/video for generation
+            width: Width of the image/video for generation
+        Returns:
+            transformer input args dict
+        """
+        B = latents.shape[0]
+        C = self.transformer.config.in_channels - 1  # noqa: F841
+        T = (num_frames - 1) // self.pipeline.vae_scale_factor_temporal + 1
+        H = height // self.pipeline.vae_scale_factor_spatial
+        W = width // self.pipeline.vae_scale_factor_spatial
+
+        cond_mask = torch.zeros(
+            (B, 1, T, H, W), dtype=latents.dtype, device=latents.device
+        )
+        padding_mask = latents.new_zeros(1, 1, height, width, dtype=latents.dtype)
+
+        return {
+            "hidden_states": latents,
+            "timestep": timestep,
+            "encoder_hidden_states": prompt_embeds,
+            "condition_mask": cond_mask,
+            "padding_mask": padding_mask,
+            "return_dict": False,
+        }

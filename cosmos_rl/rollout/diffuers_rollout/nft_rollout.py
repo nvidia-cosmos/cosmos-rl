@@ -144,10 +144,6 @@ class NFTRollout(RolloutBase):
                         "prompt_embeds": prompt_embeds,
                         "pooled_prompt_embeds": pooled_prompt_embeds,
                         "timesteps": timesteps,
-                        "next_timesteps": torch.concatenate(
-                            [timesteps[:, 1:], torch.zeros_like(timesteps[:, :1])],
-                            dim=1,
-                        ),
                         "latents_clean": latents[:, -1],
                     },
                 )
