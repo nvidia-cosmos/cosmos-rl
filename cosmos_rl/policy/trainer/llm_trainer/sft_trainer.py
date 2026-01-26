@@ -601,6 +601,12 @@ class SFTTrainer(LLMTrainer):
                     group=self.parallel_dims.mesh["dp_replicate"].get_group(),
                     group_src=0,
                 )
+                train_step = dist_util.broadcast_object_cpu(
+                    train_step,
+                    group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                    group_src=0,
+                )
+
                 if (
                     self.parallel_dims.dp_replicate_coord[0] != 0
                     and ckpt_total_steps is not None

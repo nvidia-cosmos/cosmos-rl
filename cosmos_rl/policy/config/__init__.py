@@ -146,6 +146,10 @@ class SFTDataConfig(BaseModel):
         default=True,
         description="Whether to drop the last batch of the dataloader if it is not complete.",
     )
+    data_dispatch_as_rank_in_mesh: bool = Field(
+        default=False,
+        description="Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.",
+    )
 
     conversation_column_name: str = Field(
         default="conversations",  # "conversation",
