@@ -41,9 +41,6 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
 from cosmos_rl.utils.pynccl import (
-    create_nccl_uid,
-    create_nccl_comm,
-    nccl_send,
     nccl_group_start,
     nccl_group_end,
 )
@@ -59,6 +56,7 @@ from cosmos_rl.dispatcher.command import (
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
+from cosmos_rl.collective.collective import P2RCollectiveManager
 
 
 class RLPolicyWorker(PolicyWorkerBase):
@@ -138,6 +136,15 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.teacher_interact_thread: Optional[threading.Thread] = None
         self.teacher_prefetch_queue = Queue()
         self.teacher_uuid_to_dp_shard = {}
+
+        # Init P2R collective manager
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=self.api_client,
+            role=self.role,
+        )
 
     def setup(
         self,
@@ -344,44 +351,7 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        assert command.src_replica_size == self.world_size
-        if not command.src_replica_name == self.replica_name:
-            logger.error(
-                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
-            )
-            return False
-
-        comm_id = {}
-        # Create nccl id for one policy replica to another rollout replica
-        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        if mesh_key not in self.p2r_nccl_uuids:
-            nccl_uuid = None
-            if self.global_rank == 0:
-                # Only create nccl group id in rank 0.
-                nccl_uuid = create_nccl_uid()
-                logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                self.api_client.post_nccl_comm_initiator(mesh_key, nccl_uuid)
-            # broadcast the nccl group id to all ranks
-            nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
-            self.p2r_nccl_uuids[mesh_key] = nccl_uuid
-
-        if mesh_key not in self.rollouts_comm:
-            assert mesh_key in self.p2r_nccl_uuids
-            nccl_uuid = self.p2r_nccl_uuids[mesh_key]
-            logger.debug(
-                f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
-            )
-            comm_id = create_nccl_comm(
-                nccl_uuid,
-                self.global_rank,
-                self.world_size + command.dst_replica_size,
-            )
-            logger.debug(
-                f"[Policy] `P2R` nccl comm: {comm_id} for `P2R` with mesh_key: {mesh_key} is created."
-            )
-            self.rollouts_comm[mesh_key] = comm_id
-        else:
-            comm_id = self.rollouts_comm[mesh_key]
+        self.p2r_collective_manager.setup_nccl(command)
         assert (
             self.trainer.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
@@ -397,6 +367,14 @@ class RLPolicyWorker(PolicyWorkerBase):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
+        mesh_key = None
+        if self.rl_mode == "colocated_separated":
+            raise ValueError(
+                f"Colocated separated mode is not supported for P2R communication, but got {self.rl_mode}"
+            )
+        else:
+            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        comm_id = self.p2r_collective_manager.query_nccl_comm_index(mesh_key)
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 try:
@@ -419,11 +397,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                             logger.debug(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
-                            nccl_send(
-                                view,
-                                self.world_size + r_rank,
-                                comm_id,
-                            )
+                            self.p2r_collective_manager.send(mesh_key, view, r_rank)
                         nccl_group_end(comm_id)
                         grouped_send_ops.clear()
 

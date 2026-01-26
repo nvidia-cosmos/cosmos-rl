@@ -82,6 +82,7 @@ class LLMRolloutWorker(WorkerBase):
                 parallesim_config=self.config.rollout.parallelism
             )
             init_distributed()
+            logger.info("Rollout build runner normal.")
             parallel_dims.build_mesh(device_type=cosmos_device_type)
             if self.config.rollout.mode == "async":
                 # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.
