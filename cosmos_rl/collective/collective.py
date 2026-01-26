@@ -70,16 +70,145 @@ class P2RCollectiveManager:
         self.unique_ids_cache = {}
         # nccl comm index cache
         self.nccl_comm_cache = {}
-        # communicators from one policy replica to one rollout replica.
-        self.nccl_comm = {}
-        # communicators from One policy rank to one rollout rank.
-        self.p2p_comm = {}
 
     def setup_ipc(self):
         if self.rl_mode != "colocated_separated":
             raise ValueError(
                 f"IPC is only supported in colocated separated mode, but got {self.rl_mode}"
             )
+
+    def _setup_inter_replica_communicators(
+        self, command: PolicyToRolloutUnicastCommand
+    ):
+        # init replica to replica communicators
+        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        nccl_unique_id = None
+        if self.role != Role.ROLLOUT:
+            # policy initialization
+            assert (
+                command.src_replica_size == self.world_size
+            ), "The source replica size should be the same as the world size."
+            if not command.src_replica_name == self.replica_name:
+                raise RuntimeError(
+                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
+                )
+            # create the communication group ID
+            if mesh_key not in self.unique_ids_cache:
+                if self.global_rank == 0:
+                    nccl_unique_id = create_nccl_uid()
+                    logger.debug(f"[Policy] Creating nccl group id for {mesh_key}")
+                    self.api_client.post_nccl_comm_initiator(mesh_key, nccl_unique_id)
+
+                # broadcast the nccl group id to all ranks
+                nccl_unique_id = dist_util.broadcast_object_cpu(nccl_unique_id)
+                self.unique_ids_cache[mesh_key] = nccl_unique_id
+            else:
+                nccl_unique_id = self.unique_ids_cache[mesh_key]
+        else:
+            # rollout initialization
+            if command.dst_replica_name != self.replica_name:
+                raise RuntimeError(
+                    f"[Rollout] Replica {self.replica_name} doesn't match command destionation: {command.dst_replica_name}"
+                )
+            if mesh_key not in self.unique_ids_cache:
+                # query the nccl group id from controller
+                nccl_unique_id = self.api_client.post_nccl_comm_acceptor(mesh_key)
+                if nccl_unique_id is None:
+                    raise RuntimeError(
+                        f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
+                    )
+                self.unique_ids_cache[mesh_key] = nccl_unique_id
+            else:
+                nccl_unique_id = self.unique_ids_cache[mesh_key]
+
+        if self.role == Role.ROLLOUT:
+            group_size = self.world_size + command.src_replica_size
+            rank_in_group = self.global_rank + command.src_replica_size
+        else:
+            group_size = self.world_size + command.dst_replica_size
+            rank_in_group = self.global_rank
+        # create the nccl communicator
+        if mesh_key not in self.nccl_comm_cache:
+            nccl_comm_index = create_nccl_comm(
+                nccl_unique_id,
+                rank_in_group,
+                group_size,
+            )
+            self.nccl_comm_cache[mesh_key] = nccl_comm_index
+            logger.info(
+                f"Creating nccl communicator for {mesh_key} in {self.role} side."
+            )
+
+    def _steup_p2p_communicators(self, command: PolicyToRolloutUnicastCommand):
+        # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
+        if self.role != Role.ROLLOUT:
+            if command.src_replica_name != self.replica_name:
+                raise RuntimeError(
+                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
+                )
+            assert (
+                command.dst_replica_size == self.world_size
+            ), "The destination replica size should be the same as the world size."
+            # policy
+            p_rank = self.global_rank
+            for r_rank in range(command.dst_replica_size):
+                if p_rank != r_rank:
+                    mesh_key = f"{self.replica_name}_{command.dst_replica_name}_{p_rank}_{r_rank}"
+                    if mesh_key not in self.unique_ids_cache:
+                        # create p2p unique id for each non-same device pair
+                        p2p_unique_id = create_nccl_uid()
+                        logger.debug(f"[Policy] Creating nccl unique id for {mesh_key}")
+                        self.unique_ids_cache[mesh_key] = p2p_unique_id
+                        self.api_client.post_nccl_comm_initiator(
+                            mesh_key, p2p_unique_id
+                        )
+
+                    # create communicator for each non-same device pair
+                    if mesh_key not in self.nccl_comm_cache:
+                        nccl_comm_index = create_nccl_comm(
+                            p2p_unique_id,
+                            0,  # policy rank is always 0
+                            2,  # group size of two devices is always 2
+                        )
+                        self.nccl_comm_cache[mesh_key] = nccl_comm_index
+                        logger.debug(
+                            f"[Policy] Creating nccl communicator for {mesh_key}"
+                        )
+        else:
+            # rollout
+            if command.dst_replica_name != self.replica_name:
+                raise RuntimeError(
+                    f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
+                )
+            assert (
+                command.src_replica_size == self.world_size
+            ), "The source replica size should be the same as the rollout world size."
+            r_rank = self.global_rank
+            for p_rank in range(command.src_replica_size):
+                if r_rank != p_rank:
+                    mesh_key = f"{command.src_replica_name}_{self.replica_name}_{p_rank}_{r_rank}"
+                    if mesh_key not in self.unique_ids_cache:
+                        nccl_unique_id = self.api_client.post_nccl_comm_acceptor(
+                            mesh_key
+                        )
+                        if nccl_unique_id is None:
+                            raise RuntimeError(
+                                f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
+                            )
+                        self.unique_ids_cache[mesh_key] = nccl_unique_id
+                    else:
+                        nccl_unique_id = self.unique_ids_cache[mesh_key]
+
+                    if mesh_key not in self.nccl_comm_cache:
+                        nccl_comm_index = create_nccl_comm(
+                            nccl_unique_id,
+                            1,  # rollout rank is always 1
+                            2,  # group size of two devices is always 2
+                        )
+                        self.nccl_comm_cache[mesh_key] = nccl_comm_index
+                        logger.debug(
+                            f"[Rollout] Creating nccl communicator for {mesh_key}"
+                        )
 
     def setup_nccl(self, command: PolicyToRolloutUnicastCommand):
         """
@@ -89,74 +218,9 @@ class P2RCollectiveManager:
         """
 
         if self.rl_mode == "colocated_separated":
-            # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
-            assert (
-                command.dst_replica_size == self.world_size
-            ), "The destination replica size should be the same as the world size."
+            self._setup_p2p_communicators(command)
         else:
-            # init replica to replica communicators
-            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-            nccl_unique_id = None
-            if self.role != Role.ROLLOUT:
-                # policy initialization
-                assert (
-                    command.src_replica_size == self.world_size
-                ), "The source replica size should be the same as the world size."
-                if not command.src_replica_name == self.replica_name:
-                    raise RuntimeError(
-                        f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
-                    )
-                # create the communication group ID
-                if mesh_key not in self.unique_ids_cache:
-                    if self.global_rank == 0:
-                        nccl_unique_id = create_nccl_uid()
-                        logger.debug(f"[Policy] Creating nccl group id for {mesh_key}")
-                        self.api_client.post_nccl_comm_initiator(
-                            mesh_key, nccl_unique_id
-                        )
-
-                    # broadcast the nccl group id to all ranks
-                    nccl_unique_id = dist_util.broadcast_object_cpu(nccl_unique_id)
-                    self.unique_ids_cache[mesh_key] = nccl_unique_id
-                else:
-                    nccl_unique_id = self.unique_ids_cache[mesh_key]
-            else:
-                # rollout initialization
-                if command.dst_replica_name != self.replica_name:
-                    return
-                if mesh_key not in self.unique_ids_cache:
-                    # query the nccl group id from controller
-                    nccl_unique_id = self.api_client.post_nccl_comm_acceptor(mesh_key)
-                    if nccl_unique_id is None:
-                        raise RuntimeError(
-                            f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
-                        )
-                    self.unique_ids_cache[mesh_key] = nccl_unique_id
-                else:
-                    nccl_unique_id = self.unique_ids_cache[mesh_key]
-
-            if self.role == Role.ROLLOUT:
-                group_size = self.world_size + command.src_replica_size
-                rank_in_group = self.global_rank + command.src_replica_size
-            else:
-                group_size = self.world_size + command.dst_replica_size
-                rank_in_group = self.global_rank
-            # create the nccl communicator
-            if mesh_key not in self.nccl_comm_cache:
-                nccl_comm_index = create_nccl_comm(
-                    nccl_unique_id,
-                    rank_in_group,
-                    group_size,
-                )
-                self.nccl_comm_cache[mesh_key] = nccl_comm_index
-                logger.info(
-                    f"Creating nccl communicator for {mesh_key} in {self.role} side."
-                )
-            else:
-                nccl_comm_index = self.nccl_comm_cache[mesh_key]
-                logger.info(
-                    f"Reusing cached nccl communicator for {mesh_key} in {self.role} side."
-                )
+            self._setup_inter_replica_communicators(command)
 
     def send(
         self, mesh_key_or_comm_index: str | int, tensor: torch.Tensor, r_rank: int
