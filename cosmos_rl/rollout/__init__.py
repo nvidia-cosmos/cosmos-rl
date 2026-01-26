@@ -113,6 +113,8 @@ class RolloutWorkerBase(CommMixin):
         self.init_comm()
         self.init_redis()
 
+        self.rl_mode = self.config.mode
+
     def set_rollout(self, rollout: RolloutBase):
         self.rollout = rollout
 

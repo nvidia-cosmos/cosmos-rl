@@ -398,6 +398,9 @@ class SingleWorkerCommands:
         control_urls: Optional[str],
         output_files: Optional[str],
     ):
+        logger.info(
+            f"Appending command: {command} with gpu devices: {gpu_devices}, control URLs: {control_urls}, output files: {output_files}"
+        )
         self.command_items.append(
             CommandItem(command, gpu_devices, control_urls, output_files)
         )
@@ -415,14 +418,10 @@ class SingleWorkerCommands:
         assert (
             len(commands) == len(gpu_devices) == len(control_urls) == len(output_files)
         ), "The number of commands, gpu devices, control URLs, and output files must be the same"
-        self.command_items.extend(
-            [
-                CommandItem(command, gpu_device, control_url, output_file)
-                for command, gpu_device, control_url, output_file in zip(
-                    commands, gpu_devices, control_urls, output_files
-                )
-            ]
-        )
+        for command, gpu_device, control_url, output_file in zip(
+            commands, gpu_devices, control_urls, output_files
+        ):
+            self.append_command(command, gpu_device, control_url, output_file)
 
     def __iter__(self) -> Iterator[CommandItem]:
         yield from self.command_items

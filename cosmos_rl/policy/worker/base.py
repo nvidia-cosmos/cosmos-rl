@@ -80,6 +80,8 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
         self.hook_fns = kwargs.get("hook_fns", {})
 
+        self.rl_mode = self.config.mode
+
     def check_config(self):
         mini_batch = 1
         policy_type = self.config.train.train_policy.type

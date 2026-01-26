@@ -14,39 +14,188 @@
 # limitations under the License.
 
 
-from queue import Queue
 import zmq
+import os
+import torch
+
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.pynccl import (
+    create_nccl_uid,
+    create_nccl_comm,
+    nccl_send,
+    nccl_recv,
+)
+from cosmos_rl.dispatcher.protocol import Role
+from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
+import cosmos_rl.utils.distributed as dist_util
 
 
-class CollectiveManager:
+class P2RCollectiveManager:
     """
-    A manager for collective operations. Abstract the send/recv operations for
-    IPC and NCCL.
-    Only send and recv operations are supported.
+    Send and Recv operations for Policy to Rollout communication.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        replica_name: str,
+        parallel_dims: ParallelDims,
+        config: CosmosConfig,
+        api_client: APIClient,
+        role: Role,
+    ):
         """
         Initialize the CollectiveManager.
         """
+        self.config = config
+        self.replica_name = replica_name
+        self.parallel_dims = parallel_dims
+        self.world_size = parallel_dims.world_size
+        self.api_client = api_client
+        self.role = role
+        self.rl_mode = config.mode
+
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.global_rank = int(os.environ.get("RANK", 0))
+
         self.zmq_context = zmq.Context()
         self.zmq_socket = self.zmq_context.socket(zmq.PAIR)
         self.zmq_socket.bind("ipc:///tmp/collective.sock")
 
-        # For IPC communication
-        self.ipc_queue = Queue()
+        self.rl_mode = config.mode
 
-        # For NCCL communication
+        # UniqueIds cache
+        self.unique_ids_cache = {}
+        # nccl comm index cache
+        self.nccl_comm_cache = {}
+        # communicators from one policy replica to one rollout replica.
         self.nccl_comm = {}
+        # communicators from One policy rank to one rollout rank.
+        self.p2p_comm = {}
 
-    def send(self):
+    def setup_ipc(self):
+        if self.rl_mode != "colocated_separated":
+            raise ValueError(
+                f"IPC is only supported in colocated separated mode, but got {self.rl_mode}"
+            )
+
+    def setup_nccl(self, command: PolicyToRolloutUnicastCommand):
+        """
+        Arguments:
+            command: PolicyToRolloutUnicastCommand
+            The command is used to initialize the nccl communicator. It contains the source(Policy) and destination(Rollout) replica names.
+        """
+
+        if self.rl_mode == "colocated_separated":
+            # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
+            assert (
+                command.dst_replica_size == self.world_size
+            ), "The destination replica size should be the same as the world size."
+        else:
+            # init replica to replica communicators
+            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+            nccl_unique_id = None
+            if self.role != Role.ROLLOUT:
+                # policy initialization
+                assert (
+                    command.src_replica_size == self.world_size
+                ), "The source replica size should be the same as the world size."
+                if not command.src_replica_name == self.replica_name:
+                    raise RuntimeError(
+                        f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+                    )
+                # create the communication group ID
+                if mesh_key not in self.unique_ids_cache:
+                    if self.global_rank == 0:
+                        nccl_unique_id = create_nccl_uid()
+                        logger.debug(f"[Policy] Creating nccl group id for {mesh_key}")
+                        self.api_client.post_nccl_comm_initiator(
+                            mesh_key, nccl_unique_id
+                        )
+
+                    # broadcast the nccl group id to all ranks
+                    nccl_unique_id = dist_util.broadcast_object_cpu(nccl_unique_id)
+                    self.unique_ids_cache[mesh_key] = nccl_unique_id
+                else:
+                    nccl_unique_id = self.unique_ids_cache[mesh_key]
+            else:
+                # rollout initialization
+                if command.dst_replica_name != self.replica_name:
+                    return
+                if mesh_key not in self.unique_ids_cache:
+                    # query the nccl group id from controller
+                    nccl_unique_id = self.api_client.post_nccl_comm_acceptor(mesh_key)
+                    if nccl_unique_id is None:
+                        raise RuntimeError(
+                            f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
+                        )
+                    self.unique_ids_cache[mesh_key] = nccl_unique_id
+                else:
+                    nccl_unique_id = self.unique_ids_cache[mesh_key]
+
+            if self.role == Role.ROLLOUT:
+                group_size = self.world_size + command.src_replica_size
+                rank_in_group = self.global_rank + command.src_replica_size
+            else:
+                group_size = self.world_size + command.dst_replica_size
+                rank_in_group = self.global_rank
+            # create the nccl communicator
+            if mesh_key not in self.nccl_comm_cache:
+                nccl_comm_index = create_nccl_comm(
+                    nccl_unique_id,
+                    rank_in_group,
+                    group_size,
+                )
+                self.nccl_comm_cache[mesh_key] = nccl_comm_index
+                logger.info(
+                    f"Creating nccl communicator for {mesh_key} in {self.role} side."
+                )
+            else:
+                nccl_comm_index = self.nccl_comm_cache[mesh_key]
+                logger.info(
+                    f"Reusing cached nccl communicator for {mesh_key} in {self.role} side."
+                )
+
+    def send(
+        self, mesh_key_or_comm_index: str | int, tensor: torch.Tensor, r_rank: int
+    ):
         """
         Send data to a peer.
         """
-        pass
+        if isinstance(mesh_key_or_comm_index, str):
+            comm_index = self.nccl_comm_cache[mesh_key_or_comm_index]
+        else:
+            comm_index = mesh_key_or_comm_index
 
-    def recv(self):
+        if self.rl_mode == "colocated_separated":
+            pass
+        else:
+            nccl_send(tensor, self.world_size + r_rank, comm_index)
+
+    def recv(
+        self, mesh_key_or_comm_index: str | int, tensor: torch.Tensor, p_rank: int
+    ):
         """
         Receive data from a peer.
         """
-        pass
+        if isinstance(mesh_key_or_comm_index, str):
+            comm_index = self.nccl_comm_cache[mesh_key_or_comm_index]
+        else:
+            comm_index = mesh_key_or_comm_index
+
+        if self.rl_mode == "colocated_separated":
+            pass
+        else:
+            nccl_recv(tensor, p_rank, comm_index)
+
+    def query_nccl_comm_index(self, mesh_key: str):
+        """
+        Query the nccl communicator index for a given mesh key.
+        """
+        if mesh_key not in self.nccl_comm_cache:
+            raise ValueError(
+                f"NCCL communicator index not found for mesh key: {mesh_key}"
+            )
+        return self.nccl_comm_cache[mesh_key]
