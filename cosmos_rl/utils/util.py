@@ -1389,3 +1389,20 @@ def split_train_n_val_dataset(
         f"Split train dataset into {len(train_dataset)} train samples and {len(test_dataset)} {type(test_dataset)} test samples."
     )
     return train_dataset, test_dataset
+
+def extract_padding_mask(input_ids, pad_token_id):
+    """
+    Extract the padding mask from the input_ids.
+    """
+    is_pad = input_ids == pad_token_id  # [B, L] bool
+    first_pad = is_pad.float().argmax(dim=1)  # [B] (0 if no PADs OR PAD at pos0)
+
+    # Detect rows with any pad; argmax is ambiguous when there are none.
+    has_pad = is_pad.any(dim=1)  # [B] bool
+
+    L = input_ids.size(1)
+    pos = torch.arange(L, device=input_ids.device).unsqueeze(0)  # [1, L]
+
+    padding_mask = has_pad.unsqueeze(1) & (pos >= first_pad.unsqueeze(1))
+    padding_mask &= is_pad  # safety: ensure only PAD positions are True
+    return padding_mask
