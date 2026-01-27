@@ -84,6 +84,10 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
 
         </div>
       </div>
@@ -120,7 +124,7 @@
 <li><p>Cosmos-RL supports training serveral physical AI paradigms, e.g., LLM/VLM, world foundational models, VLA, etc.</p></li>
 <li><dl class="simple">
 <dt><strong>Multi-training Algorithms</strong></dt><dd><ul>
-<li><p>Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), and RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, DiffusionNFT, etc.).</p></li>
+<li><p>Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, DiffusionNFT, etc.), and VLA-specific algorithms.</p></li>
 <li><p>Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.</p></li>
 </ul>
 </dd>
@@ -140,6 +144,14 @@
 <dt>For world foundational models:</dt><dd><ul>
 <li><p>Natively supports SD3/Cosmos-Predict2.5/SANA.</p></li>
 <li><p>Compatible with mainstream Huggingface world foundational models based on diffusers.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>For VLA (Vision-Language-Action):</dt><dd><ul>
+<li><p>Natively supports OpenVLA, OpenVLA-OFT, and PI0.5 series models.</p></li>
+<li><p>Integrated with LIBERO and BEHAVIOR-1K simulators.</p></li>
 </ul>
 </dd>
 </dl>
@@ -327,6 +339,30 @@ For Rollout Model, only Tensor Parallelism and Pipeline Parallelism are supporte
 <li class="toctree-l2"><a class="reference internal" href="wfm/overview.html#sft">SFT</a></li>
 <li class="toctree-l2"><a class="reference internal" href="wfm/overview.html#rl">RL</a></li>
 <li class="toctree-l2"><a class="reference internal" href="wfm/overview.html#rl-deprecated">RL (deprecated)</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="vla/overview.html#vla-models">VLA Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="vla/overview.html#openvla-series">OpenVLA Series</a></li>
+<li class="toctree-l3"><a class="reference internal" href="vla/overview.html#pi-series-pi0-5">PI Series (PI0.5)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="vla/overview.html#simulators">Simulators</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="vla/overview.html#libero-mujoco-based">LIBERO (MuJoCo-based)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="vla/overview.html#behavior-1k-isaacsim-based">BEHAVIOR-1K (IsaacSim-based)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="vla/overview.html#reinforcement-learning-algorithms">Reinforcement Learning Algorithms</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="vla/overview.html#grpo-group-relative-policy-optimization">GRPO (Group Relative Policy Optimization)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="vla/overview.html#quick-start">Quick Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vla/overview.html#references">References</a></li>
 </ul>
 </li>
 </ul>
