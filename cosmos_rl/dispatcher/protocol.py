@@ -47,6 +47,15 @@ class NcclStoreClearRequest(BaseModel):
     unique_pair_name: str
 
 
+class IpcInfoRequest(BaseModel):
+    mesh_key: str
+    ipc_addr: str
+
+
+class QueryIpcInfoRequest(BaseModel):
+    mesh_key: str
+
+
 class TrainAckRequest(BaseModel):
     replica_name: str
     weight_step: int

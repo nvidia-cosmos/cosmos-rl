@@ -30,7 +30,11 @@ from cosmos_rl.utils.pynccl import (
 )
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
+from cosmos_rl.utils import network_util as net
 import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.collective.ipc_tensor import _SharedTensorRebuildMethodRegistry
+
+_SharedTensorRebuildMethodRegistry.initialize()
 
 
 class P2RCollectiveManager:
@@ -60,9 +64,8 @@ class P2RCollectiveManager:
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.global_rank = int(os.environ.get("RANK", 0))
 
+        # Shared ZMQ context
         self.zmq_context = zmq.Context()
-        self.zmq_socket = self.zmq_context.socket(zmq.PAIR)
-        self.zmq_socket.bind("ipc:///tmp/collective.sock")
 
         self.rl_mode = config.mode
 
@@ -71,11 +74,8 @@ class P2RCollectiveManager:
         # nccl comm index cache
         self.nccl_comm_cache = {}
 
-    def setup_ipc(self):
-        if self.rl_mode != "colocated_separated":
-            raise ValueError(
-                f"IPC is only supported in colocated separated mode, but got {self.rl_mode}"
-            )
+        # ipc socket cache
+        self.ipc_comm_cache = {}
 
     def _setup_inter_replica_communicators(
         self, command: PolicyToRolloutUnicastCommand
@@ -139,7 +139,7 @@ class P2RCollectiveManager:
                 f"Creating nccl communicator for {mesh_key} in {self.role} side."
             )
 
-    def _steup_p2p_communicators(self, command: PolicyToRolloutUnicastCommand):
+    def _setup_p2p_communicators(self, command: PolicyToRolloutUnicastCommand):
         # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
         if self.role != Role.ROLLOUT:
             if command.src_replica_name != self.replica_name:
@@ -210,7 +210,7 @@ class P2RCollectiveManager:
                             f"[Rollout] Creating nccl communicator for {mesh_key}"
                         )
 
-    def setup_nccl(self, command: PolicyToRolloutUnicastCommand):
+    def _setup_nccl(self, command: PolicyToRolloutUnicastCommand):
         """
         Arguments:
             command: PolicyToRolloutUnicastCommand
@@ -263,3 +263,72 @@ class P2RCollectiveManager:
                 f"NCCL communicator index not found for mesh key: {mesh_key}"
             )
         return self.nccl_comm_cache[mesh_key]
+
+    def _setup_ipc(self, command: PolicyToRolloutUnicastCommand):
+        if self.rl_mode != "colocated_separated":
+            raise ValueError(
+                f"IPC is only supported in colocated separated mode, but got {self.rl_mode}"
+            )
+        if self.role != Role.ROLLOUT:
+            # Policy initialization
+            assert (
+                command.dst_replica_size == self.world_size
+            ), "The dst replica size should be the same as the world size."
+            if not command.src_replica_name == self.replica_name:
+                raise RuntimeError(
+                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
+                )
+            # Each pair of policy and rollout share the same device will have one IPC socket.
+            base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+            p_rank = self.global_rank
+            r_rank = self.global_rank
+            mesh_key = f"{base_mesh_key}_{p_rank}_{r_rank}_ipc"
+            if mesh_key not in self.ipc_comm_cache:
+                # FIXME: Temporarily use local ip and port, but we have to change this in production.
+                local_ip = net.get_local_ip()[0]
+                free_port = net.find_available_port(23000)
+
+                ipc_addr = f"tcp://{local_ip}:{free_port}"
+                # create zmq socket
+                socket = self.zmq_context.socket(zmq.PAIR)
+                socket.bind(ipc_addr)
+                self.ipc_comm_cache[mesh_key] = socket
+
+                # Post ipc address to controller
+                self.api_client.post_ipc_info(mesh_key, ipc_addr)
+        else:
+            # Rollout initialization
+            assert (
+                command.src_replica_size == self.world_size
+            ), "The src replica size should be the same as the world size."
+            if not command.dst_replica_name == self.replica_name:
+                raise RuntimeError(
+                    f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
+                )
+            base_mesh_key = command.dst_replica_name + "_" + command.src_replica_name
+            r_rank = self.global_rank
+            p_rank = self.global_rank
+            mesh_key = f"{base_mesh_key}_{p_rank}_{r_rank}_ipc"
+            if mesh_key not in self.ipc_comm_cache:
+                # query ipc addr from controller
+                ipc_addr = self.api_client.query_ipc_info(mesh_key)
+                # create zmq socket
+                socket = self.zmq_context.socket(zmq.PAIR)
+                socket.connect(ipc_addr)
+                self.ipc_comm_cache[mesh_key] = socket
+
+    def setup_manager(self, command: PolicyToRolloutUnicastCommand):
+        # Setup NCCL
+        self._setup_nccl(command)
+        # Setup IPC
+        self._setup_ipc(command)
+
+    def __del__(self):
+        # close the zmq context
+        for socket in self.ipc_comm_cache.values():
+            socket.close()
+        self.ipc_comm_cache.clear()
+
+        if self.zmq_context is not None:
+            self.zmq_context.term()
+            self.zmq_context = None

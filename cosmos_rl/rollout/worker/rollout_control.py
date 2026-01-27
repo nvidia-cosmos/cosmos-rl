@@ -988,7 +988,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         load_format = "auto" if is_for_weight_resume else "dummy"
         self.lazy_initialize_rollout_engine(load_format)
 
-        self.p2r_collective_manager.setup_nccl(command)
+        self.p2r_collective_manager.setup_manager(command)
 
         comm_id = None
         if self.rl_mode == "colocated_separated":
