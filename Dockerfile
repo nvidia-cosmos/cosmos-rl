@@ -198,5 +198,4 @@ RUN apt install -y cmake && \
         bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \
     fi && \
     rm -rf /workspace/cosmos_rl
-RUN pip install cosmos_guardrail --no-deps
 RUN pip uninstall -y xformers
