@@ -26,7 +26,7 @@ sync_weight_interval = 1
 non_text = true  # Required for VLA models
 
 [policy]
-model_name_or_path = "/root/.cache/huggingface/hub/models--sunshk--comet_weights_pytorch_2/snapshots/e4333b1444400bb2331b3f1b2971b73a14cdeee0/pi05-b1kpt50-cs32/"
+model_name_or_path = "fwd4xl/pi05-b1k-pt12-cs32-v1"
 model_max_length = 4096
 model_gradient_checkpointing = false
 
@@ -71,7 +71,7 @@ backend = "vla"
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = true
 n_generation = 8
-batch_size = 4
+batch_size = 1
 quantization = "none"
 max_response_length = 1024
 enforce_eager = false
@@ -100,9 +100,9 @@ top_k = 50  # algorithm.sampling_params.top_k
 
 [validation]
 enable = true
-freq = 200
+freq = 20
 val_before_train = true
-batch_size = 4
+batch_size = 5
 dataset.name = "b1k"
 dataset.subset = "b1k"
 dataset.split = "val"
