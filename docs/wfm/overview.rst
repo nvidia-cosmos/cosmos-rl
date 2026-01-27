@@ -5,7 +5,29 @@ Cosmos-RL provides native support for SFT and RL of world foundational models.
 
 SFT
 ----
-(Coming soon)
+**Supported Models**
+
+- SD3
+- Cosmos-Predict2.5
+- SANA-Image/Video
+
+We construct the WFM SFT training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.
+
+We support both LoRA and full model finetuning for SFT.
+
+**Quick start**: A quick start guide for world foundational model's SFT (Take SD3 as an example):
+
+1. Configure the training recipe by editing toml files under ``configs/stable-diffusion-3-5/``. For LoRA finetuning, you can refer to the example config file ``stable-diffusion-3-5-image-sft-lora.toml``. For full model finetuning, you can refer to ``stable-diffusion-3-5-image-sft.toml``.
+
+2. Configure the dataset and datapacker. The Cosmos-RL is very flexible for the user-customized dataset and input/output format. You can edit the ``./cosmos_rl/tools/dataset/diffusers_dataset.py`` launcher to customize your own dataset for training. For more details about the customization of dataset, please refer to `Customization <https://nvidia-cosmos.github.io/cosmos-rl/quickstart/customization.html>`_.
+
+3. Launch the training script with the configured recipe::
+
+      cosmos-rl --config ./configs/stable-diffusion-3-5/stable-diffusion-3-5-image-sft-lora.toml cosmos_rl.tools.dataset.diffusers_dataset
+
+4. Monitor training progress via Wandb.
+
+5. Evaluate the trained world foundational model using the diffusers-based script (coming soon).
 
 RL
 ----
@@ -20,19 +42,24 @@ Cosmos-RL supports `DiffusionNFT <https://arxiv.org/pdf/2509.16117>`_ algorithm 
 
 We construct the WFM RL training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.
 
-**Quick start**: A quick start guide for world foundational model's RL (Take DiffusionNFT with SD3 as an example):
+**Quick start**: A quick start guide for world foundational model's RL (Take DiffusionNFT with Cosmos-Predict2.5 as an example):
 
-1. Configure the training recipe by editing toml files under ``configs/stable-diffusion-3-5/``.
+1. Install the required dependencies::
 
-2. Launch the reward service, you can refer docs here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
+      pip install .[wfm]
+      pip install cosmos_guardrail --no-deps # Required by the Cosmos2_5_PredictBasePipeline
 
-3. Launch the training script with the configured recipe::
+2. Configure the training recipe by editing toml files, you can take ``configs/cosmos-predict2-5/cosmos-predict2-5_2b_720_nft.toml`` as an example.
 
-      cosmos-rl --config ./configs/stable-diffusion-3-5/stable-diffusion-3-5-medium_720_nft.toml cosmos_rl.tools.dataset.diffusion_nft
+3. Launch the reward service, you can refer docs here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
 
-4. Monitor training progress via Wandb.
+4. Launch the training script with the configured recipe::
 
-5. Evaluate the trained world foundational model using the diffusers-based script (coming soon).
+      cosmos-rl --config ./configs/cosmos-predict2-5/cosmos-predict2-5_2b_720_nft.toml cosmos_rl.tools.dataset.diffusion_nft
+
+5. Monitor training progress via Wandb.
+
+6. Evaluate the trained world foundational model using the diffusers-based script (coming soon).
 
 **Reward services**: Considering the computation overhead, it's necessary to use a seperated async service for reward computing.
 
