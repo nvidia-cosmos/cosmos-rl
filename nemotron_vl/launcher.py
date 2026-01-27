@@ -99,6 +99,10 @@ def modify_messages(messages, max_pixels = None):
     return messages
 
 class CustomDataset(Dataset):
+    '''
+    Custom dataset for Nemotron-3-Nano Vision-Language Model alignment.
+    Assume the dataset are in JSONL format stored in `config.train.train_policy.dataset.name`, and each line is a JSON object with 'messages' key.
+    '''
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.data_list = []
         data_path = config.train.train_policy.dataset.name
@@ -247,6 +251,7 @@ if __name__ == "__main__":
     
     # Launch the worker
     cosmos_rl.launcher.worker_entry.main(
-        dataset=get_dataset,
+        # Uncomment this if you want to use a custom dataset
+        # dataset=get_dataset,
     )
 
