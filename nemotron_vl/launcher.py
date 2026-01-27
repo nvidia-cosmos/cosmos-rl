@@ -16,15 +16,15 @@
 import json
 from typing import Optional
 import os, sys
+# Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
+os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
+
 import torch, re
 import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
 from torch.utils.data import Dataset
-from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
-import cosmos_rl.policy.model.hf_models as hf_models
-from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
 try:
     import wandb
@@ -59,16 +59,18 @@ def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_
 
     if wandb is not None:
         table = wandb.Table(columns=["step", "layer", "layer_name", "expert", "tokens", "frac"])
-        entropies, max_fracs, stds, totals = [], [], [], []
-        for li, (lname, counts) in enumerate(zip(layer_names, layer_loads)):
-            entropy, max_fraction, std, total = _balance_metrics(counts)
-            entropies.append(entropy); max_fracs.append(max_fraction); stds.append(std); totals.append(total)
+    else:
+        table = None
+    entropies, max_fracs, stds, totals = [], [], [], []
+    for li, (lname, counts) in enumerate(zip(layer_names, layer_loads)):
+        entropy, max_fraction, std, total = _balance_metrics(counts)
+        entropies.append(entropy); max_fracs.append(max_fraction); stds.append(std); totals.append(total)
 
+        if table is not None:
             frac = counts / (counts.sum() + 1e-9)
             for ei in range(counts.shape[0]):
                 table.add_data(int(step), int(li), lname, int(ei), float(counts[ei]), float(frac[ei]))
-    else:
-        table = None
+ 
 
     return {
         f"{prefix}/layer_expert_table": table,
@@ -232,20 +234,19 @@ def get_dataset(config: CosmosConfig):
     return CustomDataset()
 
 if __name__ == "__main__":
-    # 1. 参数requires_grad配置
-    # 2. 训练长度设置
-    # 3. MoE的router是否需要训练load-balancing
-
-    # Override the parallelize_fn to support EP
-    hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+    # Do some monkey patching to support Nemotron-3-Nano Vision-Language Model parallelization.
+    import cosmos_rl
+    # Override the parallelize_fn to support EP parallelization.
+    cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
     # Override the convert_weight_from_hf to support EP weight sharding during initialization
-    hf_models.convert_weight_from_hf = convert_weight_from_hf
+    cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
     # Override the step_hook to enable aux-free load balancing update bias after each step update.
-    hf_models.HFModel.step_hook = step_hook
+    cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
     # Map the weight name from custom DeepEP convention back to HF convention for safetensor saving.
-    HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
     
-    launch_dispatcher(
+    # Launch the worker
+    cosmos_rl.launcher.worker_entry.main(
         dataset=get_dataset,
     )
 
