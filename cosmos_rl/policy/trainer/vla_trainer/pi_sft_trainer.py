@@ -125,6 +125,9 @@ class PISFTTrainer(Trainer):
         self.ckpt_manager = CheckpointMananger(
             self.config, self.parallel_dims, self.global_rank
         )
+        self._log_interval = max(1, getattr(self.config.logging, "log_interval", 100))
+        self._loss_interval_sum = 0.0
+        self._loss_interval_count = 0
 
     def sync_all_states(
         self,
@@ -288,18 +291,41 @@ class PISFTTrainer(Trainer):
 
         report_data = {}
         if self.config.logging.logger:
+            loss_value = (
+                global_avg_loss.item()
+                if isinstance(global_avg_loss, torch.Tensor)
+                else float(global_avg_loss)
+            )
+            self._loss_interval_sum += loss_value
+            self._loss_interval_count += 1
+            should_log_first = train_step == 0
+            should_log_interval = (train_step + 1) % self._log_interval == 0
+            if not (should_log_first or should_log_interval):
+                return report_data
             if util.is_master_rank(self.parallel_dims, self.global_rank):
                 # Calculate last iteration time
                 assert end_event.query()
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
 
+                if should_log_first:
+                    log_loss_avg = loss_value
+                else:
+                    log_loss_avg = (
+                        self._loss_interval_sum / self._loss_interval_count
+                        if self._loss_interval_count > 0
+                        else loss_value
+                    )
+
                 report_data = {
                     "train/iteration_time": iter_time,
-                    "train/loss_avg": global_avg_loss,
+                    "train/loss_avg": log_loss_avg,
                     "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
+            if should_log_interval:
+                self._loss_interval_sum = 0.0
+                self._loss_interval_count = 0
         
         return report_data
 

@@ -1168,6 +1168,10 @@ class LoggingConfig(BaseModel):
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
     )
+    log_interval: int = Field(
+        default=100,
+        description="Log interval (in steps) for loss averaging.",
+    )
     project_name: str = Field(
         default="cosmos_rl",
         description="Wandb project name for logging. If set, the training will be logged to this project.",
