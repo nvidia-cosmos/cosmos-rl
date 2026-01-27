@@ -14,6 +14,8 @@
 # limitations under the License.
 
 from cosmos_rl.dispatcher.command import RolloutToRolloutBroadcastCommand
+from cosmos_rl.policy.worker.multi_replica_sft_worker import MultiReplicaSFTPolicyWorker
+from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
@@ -203,6 +205,26 @@ def main(*args, **kwargs):
             worker.main_loop()
             if args.test == "custom_rollout":
                 assert worker.trainer.computed_cnt == 4
+        elif policy_type == "sft":
+            custom_sft_dataset = kwargs.get("dataset")
+            custom_sft_data_packer = kwargs.get("data_packer")
+            if cosmos_config.policy.parallelism.n_init_replicas > 1:
+                sft_worker_cls = MultiReplicaSFTPolicyWorker
+            else:
+                sft_worker_cls = SFTPolicyWorker
+            policy_worker = sft_worker_cls(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                dataset=custom_sft_dataset,
+                data_packer=custom_sft_data_packer,
+                val_dataset=kwargs.get("val_dataset", None),
+                val_data_packer=kwargs.get("val_data_packer", None),
+                sampler=kwargs.get("sampler", None),
+                batch_sampler=kwargs.get("batch_sampler", None),
+                val_sampler=kwargs.get("val_sampler", None),
+                val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            )
+            policy_worker.main_loop()
         else:
             raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:

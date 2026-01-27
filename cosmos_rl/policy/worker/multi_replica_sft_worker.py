@@ -152,7 +152,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             )
             assert (
                 (val_batch_size % self.dp_world_size) == 0
-            ), f"train_batch_per_replica({val_batch_size}) must be divisible by dp_world_size({self.dp_world_size})"
+            ), f"val_batch_size({val_batch_size}) must be divisible by dp_world_size({self.dp_world_size})"
             if self.data_queue.qsize() >= val_batch_size // self.dp_world_size:
                 global_batch = [
                     self.data_queue.get()
@@ -246,6 +246,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             prompt_queue.empty()
         ), "Prompt queue should be empty before requesting new prompts."
         prompts_and_is_end: Tuple[List[RLPayload] | None, bool] = (None, False)
+        is_validation = kwargs.get("validation_step", None) is not None
         if self.global_rank == 0:
             # blocking request to get prompts from controller
             # batch_size is per data parallel rank so we need to multiply it with data parallel size
@@ -256,8 +257,6 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             assert all(
                 payload["prompt_idx"] >= 0 for payload in payloads
             ), "All payloads should have a valid prompt index"
-
-            is_validation = kwargs.get("validation_step", None) is not None
 
             if len(payloads) > 0:
                 if self.config.train.local_dataset:
@@ -360,7 +359,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         payload = self.data_packer.sft_process_sample(payload)
                 prompt_queue.put(payload)
             assert (
-                self.train_step == target_train_step
+                self.train_step == target_train_step or is_validation
             ), f"train_step {self.train_step} should be equal to target_train_step {target_train_step}"
             new_epoch = (
                 self.current_epoch is not None and self.current_epoch != target_epoch
@@ -477,9 +476,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
 
                 self.train_step += 1
 
-                if report_data and util.is_master_rank(
-                    self.parallel_dims, self.global_rank
-                ):
+                if util.is_master_rank(self.parallel_dims, self.global_rank):
                     for key in report_data.keys():
                         if isinstance(report_data[key], torch.Tensor):
                             report_data[key] = report_data[key].item()
@@ -495,6 +492,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     )
 
             if self.train_step >= self.total_steps or is_end:
+                logger.info(
+                    f"[SFT] Reached the end of training at step {self.train_step} with is_end={is_end}."
+                )
                 break  # break outer epoch loop
 
             if self.config.train.ckpt.save_freq_in_epoch > 0:

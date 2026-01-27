@@ -295,5 +295,86 @@ class TestSFTDDPLoadFlow(unittest.TestCase):
             ), f"Process failed with code: {process.returncode}"
 
 
+class TestMultiReplicaSFT(unittest.TestCase):
+    def test_multi_replica_sft(self):
+        """Test the multi-replica SFT process flow."""
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        world_size = 2
+        port = util.find_available_port(8123)
+        config_path = os.path.join(
+            cur_dir,
+            "configs",
+            "test_simple_sft.toml",
+        )
+        with open(config_path, "r") as f:
+            config = toml.load(f)
+
+        config["train"]["epoch"] = 16
+        config["train"]["train_batch_per_replica"] = 4
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "sharegpt52k_small"
+        )
+        config["policy"]["parallelism"]["tp_size"] = 1
+        config["policy"]["parallelism"]["dp_shard_size"] = 2
+        config["policy"]["parallelism"]["n_init_replicas"] = 4
+
+        config["validation"]["batch_size"] = 2
+        config["validation"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "sharegpt52k_small"
+        )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
+            toml.dump(config, tmpfile)
+            tmpfile_toml = tmpfile.name
+        controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
+        controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        env_dict["COSMOS_ROLE"] = "Controller"
+        controller_process = subprocess.Popen(
+            controller_cmd,
+            shell=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env_dict,
+        )
+        os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
+        # Create the Python command for torchrun
+        policy_cmd = [
+            "torchrun",
+            f"--nproc_per_node={world_size}",  # Use 2 GPUs
+            "--role=rank",
+            "--tee=3",
+            "--rdzv_backend=c10d",
+            "--rdzv_endpoint=localhost:0",
+            os.path.join(cur_dir, "utils", "mock_policy_entrance.py"),
+            "--test",
+            "multi_replica_sft",
+        ]
+        rollout_processes = []
+        for dev in ["0,1", "2,3", "4,5", "6,7"]:
+            rollout_env = dict(os.environ)
+            rollout_env["CUDA_VISIBLE_DEVICES"] = dev
+            rollout_processes.append(
+                subprocess.Popen(
+                    policy_cmd,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                    env=rollout_env,
+                )
+            )
+
+        processes = [controller_process] + rollout_processes
+
+        # Wait for process to complete
+        for process in processes:
+            stdout, stderr = process.communicate()
+            # Check if process completed successfully
+            assert (
+                process.returncode == 0
+            ), f"Process failed with code: {process.returncode}"
+
+
 if __name__ == "__main__":
     unittest.main()
