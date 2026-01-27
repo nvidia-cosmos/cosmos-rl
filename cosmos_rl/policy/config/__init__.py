@@ -1043,7 +1043,7 @@ class PolicyConfig(BaseModel):
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
     )
-    model_safetensor_path: str = Field(
+    model_safetensor_path: Optional[str] = Field(
         default=None,
         description="The safetensor path",
     )

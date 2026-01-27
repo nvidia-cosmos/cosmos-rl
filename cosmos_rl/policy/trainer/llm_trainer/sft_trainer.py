@@ -16,14 +16,10 @@
 import os
 import torch
 import numpy as np
-
 import torch.distributed as dist
-
+from collections import OrderedDict
 from functools import partial
-
 from typing import Optional
-
-
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
@@ -165,7 +161,8 @@ class SFTTrainer(LLMTrainer):
                 self.optimizers, self.config, total_steps
             )
 
-        acc_loss = torch.zeros(1, device=self.device)
+        aux_loss_dict = OrderedDict()
+
         self.optimizers.zero_grad()
         global_batch_size = self.data_packer.batch_size(global_batch)
         # split global_batch into mini_batches
@@ -303,6 +300,11 @@ class SFTTrainer(LLMTrainer):
                     if pp_last_stage
                     else torch.tensor([-1.0], device=self.device)
                 )
+                aux_loss_dict["loss"] = (
+                    ce_loss.detach()
+                    if "loss" not in aux_loss_dict
+                    else aux_loss_dict["loss"] + ce_loss.detach()
+                )
             else:
                 # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
                 # last_token_ids = []
@@ -333,7 +335,7 @@ class SFTTrainer(LLMTrainer):
                 # return
                 #########################################################################################
 
-                aux_loss_dict = {}
+                loss = 0.0
                 with self.act_offloading_ctx_manager:
                     output = self.model(**batch)
                     logits = output.logits
@@ -345,10 +347,12 @@ class SFTTrainer(LLMTrainer):
                         for k, v in output.items():
                             if "loss" in k.lower() and isinstance(v, torch.Tensor):
                                 aux_loss_dict[k] = (
-                                    v
+                                    v.detach()
                                     if k not in aux_loss_dict
-                                    else aux_loss_dict[k] + v
+                                    else aux_loss_dict[k] + v.detach()
                                 )
+                                v = v / len(mini_batch_begin_idxs)
+                                loss = loss + v
 
                 ce_loss = self.loss_fn(
                     logits,
@@ -357,27 +361,16 @@ class SFTTrainer(LLMTrainer):
                     target_packing_mask=batch.get("label_packing_mask", None),
                     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                 )
-                loss = ce_loss + sum(aux_loss_dict.values())
-
-                loss_flat = [ce_loss.detach().unsqueeze(0)]
-                # `loss` stands for the tokenwise cross-entropy loss
-                loss_flat_keys = ["loss"]
-                for k, v in aux_loss_dict.items():
-                    v = v.detach()
-                    # Convert to 1d tensor if it is a scalar
-                    if v.dim() == 0:
-                        v = v.unsqueeze(0)
-
-                    if v.dim() != 1:
-                        raise ValueError(
-                            f"Unsupported loss tensor dimension: {v.dim()}. Only 1D tensors are supported."
-                        )
-                    loss_flat.append(v)
-                    loss_flat_keys.append(k)
-                loss_flat = torch.cat(loss_flat, dim=0)
+                aux_loss_dict["loss"] = (
+                    ce_loss.detach()
+                    if "loss" not in aux_loss_dict
+                    else aux_loss_dict["loss"] + ce_loss.detach()
+                )
+                loss = loss + ce_loss
                 loss.backward()
-            acc_loss += ce_loss.detach()
 
+            loss_flat = torch.stack(list(aux_loss_dict.values()))
+            loss_flat_keys = list(aux_loss_dict.keys())
         """
         Compute the global grad norm on all parameters and then apply
         gradient clipping using the global grad norm.
@@ -426,12 +419,12 @@ class SFTTrainer(LLMTrainer):
             torch.distributed.all_reduce(
                 global_avg_loss,
                 op=torch.distributed.ReduceOp.AVG,
-                group=self.parallel_dims.mesh["dp_cp_tp"].get_group(),
+                group=self.parallel_dims.mesh["dp_cp"].get_group(),
             )
             torch.distributed.all_reduce(
                 global_max_loss,
                 op=torch.distributed.ReduceOp.MAX,
-                group=self.parallel_dims.mesh["dp_cp_tp"].get_group(),
+                group=self.parallel_dims.mesh["dp_cp"].get_group(),
             )
             global_avg_loss = global_avg_loss.cpu()
             global_max_loss = global_max_loss.cpu()
@@ -469,9 +462,6 @@ class SFTTrainer(LLMTrainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
-
-                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
-
         return report_data
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
