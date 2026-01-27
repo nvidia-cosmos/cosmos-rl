@@ -90,13 +90,13 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
 
 **Quick start**: A quick start guide for world foundational model's RL:
 
-1. Configure the training recipe by editing toml files under ``configs/wfm/``.
+1. Configure the training recipe by editing toml files under ``configs/cosmos-predict2-5/``.
 
 2. Launch the reward service, you can refer docs here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
 
 3. Launch the training script with the configured recipe::
 
-      cosmos-rl --config ./configs/wfm/cosmos-predict2-5_2b_480_grpo_mock_data.toml --wfm-mode ./cosmos_rl/tools/dataset/wfm_rl.py
+      cosmos-rl --config ./configs/cosmos-predict2-5/cosmos-predict2-5_2b_480_grpo_mock_data.toml --wfm-mode cosmos_rl.tools.dataset.wfm_rl
 
 4. Monitor training progress via Wandb.
 
@@ -105,7 +105,7 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
 
 .. note::
     1. You can find detailed tutorials for DDRL here: `DDRL Tutorials <https://github.com/nvidia-cosmos/cosmos-rl/blob/main/examples/ddrl.md>`_.
-    2. For a quick rollout of the training pipeline, we recommend you use the mock_data config file, i.e., ./configs/wfm/cosmos-predict2-5_2b_480_grpo_mock_data.toml
+    2. For a quick rollout of the training pipeline, we recommend you use the mock_data config file, i.e., ./configs/cosmos-predict2-5/cosmos-predict2-5_2b_480_grpo_mock_data.toml
 
 **Reward services**: Considering the computation overhead, it's necessary to use a seperated async service for reward computing.
 
