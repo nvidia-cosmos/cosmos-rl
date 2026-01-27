@@ -367,14 +367,13 @@ class RLPolicyWorker(PolicyWorkerBase):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
-        mesh_key = None
-        if self.rl_mode == "colocated_separated":
-            raise ValueError(
-                f"Colocated separated mode is not supported for P2R communication, but got {self.rl_mode}"
-            )
-        else:
-            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        comm_id = self.p2r_collective_manager.query_nccl_comm_index(mesh_key)
+        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        comm_id = (
+            None
+            if self.rl_mode == "colocated_separated"
+            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
+        )
+
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 try:
@@ -392,13 +391,18 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
 
                     def grouped_send(grouped_send_ops):
-                        nccl_group_start(comm_id)
+                        if self.rl_mode != "colocated_separated":
+                            # Only in non-colocated-separated mode, we could use NCCL group feature.
+                            nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
                             logger.debug(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
-                            self.p2r_collective_manager.send(mesh_key, view, r_rank)
-                        nccl_group_end(comm_id)
+                            self.p2r_collective_manager.send(
+                                base_mesh_key, view, r_rank
+                            )
+                        if self.rl_mode != "colocated_separated":
+                            nccl_group_end(comm_id)
                         grouped_send_ops.clear()
 
                     grouped_send_ops = []

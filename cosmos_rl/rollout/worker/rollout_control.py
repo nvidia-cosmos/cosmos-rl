@@ -452,7 +452,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self,
         global_rank_of_rollout: int,
         insts_group: WeightSyncInstructionsGroup,
-        communicator_index: int,
+        mesh_key: str,
         trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
@@ -576,9 +576,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 logger.debug(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {underlying_tensor_view.shape} of {target_tensor.shape} with dtype {recv_tensor.dtype}."
                 )
-                self.p2r_collective_manager.recv(
-                    communicator_index, recv_tensor, p_rank
-                )
+                self.p2r_collective_manager.recv(mesh_key, recv_tensor, p_rank)
 
                 # inplace copy
                 if not inplace:
@@ -991,13 +989,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.p2r_collective_manager.setup_manager(command)
 
         comm_id = None
-        if self.rl_mode == "colocated_separated":
-            raise ValueError(
-                f"Colocated separated mode is not supported for P2R communication, but got {self.rl_mode}"
-            )
-        else:
-            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-            comm_id = self.p2r_collective_manager.query_nccl_comm_index(mesh_key)
+        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        comm_id = (
+            None
+            if self.rl_mode == "colocated_separated"
+            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
+        )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             logger.info(
@@ -1054,7 +1051,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
-            nccl_group_start(comm_id)
+            if self.rl_mode != "colocated_separated":
+                # Only in non-colocated-separated mode, we could use NCCL group feature.
+                nccl_group_start(comm_id)
 
             skipped_params_cnt = 0
             transferred_params_cnt = 0
@@ -1071,7 +1070,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ) = self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
-                    comm_id,
+                    base_mesh_key,
                     command.trainable_only,
                     command.do_weight_sync_check,
                 )
@@ -1107,7 +1106,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     nccl_group_start(comm_id)
                     pending_groups = 0
 
-            nccl_group_end(comm_id)
+            if self.rl_mode != "colocated_separated":
+                nccl_group_end(comm_id)
+
             flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):
