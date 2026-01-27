@@ -13,7 +13,7 @@ Main Features
 - **Natively Designed for Physical AI**
    - Cosmos-RL supports training serveral physical AI paradigms, e.g., LLM/VLM, world foundational models, VLA, etc.
    - **Multi-training Algorithms**
-         - Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), and RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, DiffusionNFT, etc.).
+         - Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, DiffusionNFT, etc.), and VLA-specific algorithms.
          - Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.
    - **Diversified Model Support**
          - For LLM/VLM:
@@ -22,6 +22,9 @@ Main Features
          - For world foundational models:
             - Natively supports SD3/Cosmos-Predict2.5/SANA.
             - Compatible with mainstream Huggingface world foundational models based on diffusers.
+         - For VLA (Vision-Language-Action):
+            - Natively supports OpenVLA, OpenVLA-OFT, and PI0.5 series models.
+            - Integrated with LIBERO and BEHAVIOR-1K simulators.
          - Easily extensible to other model architectures by customizing interface.
 - **6D Parallelism**: Sequence, Tensor, Context, Pipeline, FSDP, DDP.
 
@@ -92,3 +95,8 @@ Main Features
    :caption: World Foundational Models
 
    wfm/overview
+
+.. toctree::
+   :caption: Vision-Language-Action Models
+
+   vla/overview
