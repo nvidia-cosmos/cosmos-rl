@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import warnings
-
+import collections
 import torch
-from typing import Dict, Iterator, Tuple, Set
+from typing import Dict, Iterator, Tuple, Set, Type, Any
 from torch.nn import Parameter
+
+from cosmos_rl.utils.ipc.common import apply_patch_to_type, isinstance_original
 
 
 class ModuleLike:
@@ -27,8 +29,18 @@ class ModuleLike:
     Attention, this class is just a mirror of the nn.Module in another process. Can only ensure the weight's memory is shared.
     """
 
+    @staticmethod
+    def is_module_like(obj: Any) -> bool:
+        """
+        Check if the object is a ModuleLike.
+        """
+        return isinstance_original(obj, ModuleLike)
+
     def __init__(
-        self, state_dict: Dict[str, torch.Tensor], not_parameter_names: Set[str]
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        not_parameter_names: Set[str],
+        module_types: Dict[str, Type],
     ):
         """
         Initialize the ModuleLike with the given state_dict.
@@ -36,16 +48,20 @@ class ModuleLike:
         Args:
             state_dict: The state dict of the module.
             not_parameter_names: The names of the tensors that are not parameters.
+            module_types: The types of the modules.
         """
         self._parameters: Dict[str, Parameter] = {}
         # it will not appear in named_parameters(), for example, lm_head.weight.
         self._not_parameter_tensors: Dict[str, torch.Tensor] = {}
         self._modules: Dict[str, "ModuleLike"] = {}
 
-        self.__recurse_init_module(state_dict, not_parameter_names)
+        self.__recurse_init_module(state_dict, not_parameter_names, module_types)
 
     def __recurse_init_module(
-        self, state_dict: Dict[str, torch.Tensor], not_parameter_names: Set[str]
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        not_parameter_names: Set[str],
+        module_types: Dict[str, Type],
     ) -> "ModuleLike":
         """
         Recurse init the module.
@@ -61,6 +77,16 @@ class ModuleLike:
             else:
                 nested_state_dict[name] = value
 
+        # Covnert the module_types to a nested namedtuple.
+        # name -> [type, {child_name: type_string}]
+        nested_module_types = collections.defaultdict(lambda: [None, {}])
+        for name, ftype in module_types.items():
+            if "." in name:
+                parent_name, child_name = name.split(".", 1)
+                nested_module_types[parent_name][1][child_name] = ftype
+            else:
+                nested_module_types[name][0] = ftype
+
         nested_not_parameter_names = {}
         for name in not_parameter_names:
             if "." in name:
@@ -75,7 +101,13 @@ class ModuleLike:
         for name, value in nested_state_dict.items():
             if isinstance(value, dict):
                 chile_not_parameter_names = nested_not_parameter_names.get(name, set())
-                self._modules[name] = ModuleLike(value, chile_not_parameter_names)
+                current_module_type, child_module_types = nested_module_types.get(
+                    name, [None, {}]
+                )
+                _ml = ModuleLike(value, chile_not_parameter_names, child_module_types)
+                if current_module_type is not None:
+                    _ml = apply_patch_to_type(_ml, current_module_type)
+                self._modules[name] = _ml
             else:
                 if name in nested_not_parameter_names:
                     self._not_parameter_tensors[name] = value

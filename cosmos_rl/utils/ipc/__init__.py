@@ -14,10 +14,17 @@
 # limitations under the License.
 
 
+from cosmos_rl.utils.ipc.common import type_to_string, type_from_string
 from cosmos_rl.utils.ipc.module_like import ModuleLike
 from cosmos_rl.utils.ipc.tensor_util import (
     named_tensors_to_serialize,
     named_tensors_from_serialize,
 )
 
-__all__ = ["ModuleLike", "named_tensors_to_serialize", "named_tensors_from_serialize"]
+__all__ = [
+    "ModuleLike",
+    "named_tensors_to_serialize",
+    "named_tensors_from_serialize",
+    "type_to_string",
+    "type_from_string",
+]

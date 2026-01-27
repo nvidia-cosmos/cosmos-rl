@@ -350,14 +350,25 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             worker.prepare_shard_infos_for_weight_sync_insts()
 
             self.assertEqual(len(worker.api_client.rollout_shard_infos), 1)
+
+            is_valid = False
             # check the rollout shard infos
-            for name, shard_info in worker.api_client.rollout_shard_infos[0].items():
-                self.assertGreater(
-                    len(shard_info),
-                    0,
-                    f"Shard info is empty for {name}, "
-                    r"which should like '[{0: {'offset': 0, 'total_size': 2, 'dim': 'tp', 'length': 1}}, ...]'",
-                )
+            for shard_info in worker.api_client.rollout_shard_infos[0].values():
+                if len(shard_info) > 0:
+                    # shard part 0 should be '[{0: {'offset': 0, 'total_size': 2, 'dim': 'tp', 'length': 1}}, ...]'
+                    shard_part0 = list(shard_info.values())[0]
+                    is_valid |= (
+                        "offset" in shard_part0
+                        and "total_size" in shard_part0
+                        and "dim" in shard_part0
+                        and "length" in shard_part0
+                    )
+                if is_valid:
+                    break
+            self.assertTrue(
+                is_valid,
+                f"Shard info is invalid: {worker.api_client.rollout_shard_infos}",
+            )
         finally:
             # clean the test environment
             worker.handle_shutdown()

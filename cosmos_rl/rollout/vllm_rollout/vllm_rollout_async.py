@@ -30,6 +30,8 @@ from cosmos_rl.utils.ipc import (
     ModuleLike,
     named_tensors_to_serialize,
     named_tensors_from_serialize,
+    type_to_string,
+    type_from_string,
 )
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
     apply_fp8_linear_patch,
@@ -61,14 +63,17 @@ class VLLMColocateWorkerExtension:
         # we also mark whether the weight tensor is also a parameter.
         param_keys = [name for name, _ in self._get_model().named_parameters()]
 
+        module_types = {}
+
         # To compatible to DisaggregatedRolloutControlWorker, we need add those checks here.
         # 1. check the module, and make sure it isn't a FSDPModule.
-        for module in self._get_model().modules():
+        for name, module in self._get_model().named_modules():
+            module_types[name] = type_to_string(type(module))
             if isinstance(module, torch.distributed.fsdp.FSDPModule):
                 raise ValueError("FSDPModule is not supported in async rollout.")
 
         not_parameter_names = set(state_dict.keys()) - set(param_keys)
-        return named_tensors_to_serialize(state_dict), not_parameter_names
+        return named_tensors_to_serialize(state_dict), not_parameter_names, module_types
 
     def apply_fp8_linear_patch(self):
         """
@@ -345,7 +350,13 @@ class vLLMRolloutAsync(vLLMRollout):
         logger.info(
             f"[Rollout] get_underlying_model get {len(rpc_results)} workers' state dict."
         )
-        sd_ipc_worker0, not_parameter_names = rpc_results[0]
+        sd_ipc_worker0, not_parameter_names, module_types_string = rpc_results[0]
+        module_types = {
+            name: type_from_string(type_string)
+            for name, type_string in module_types_string.items()
+        }
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
-        self.underlying_model = ModuleLike(state_dict, not_parameter_names)
+        self.underlying_model = ModuleLike(
+            state_dict, not_parameter_names, module_types
+        )
         return self.underlying_model
