@@ -545,6 +545,7 @@ class SFTTrainer(LLMTrainer):
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
         do_save: bool = False,
+        **kwargs,
     ):
         if (
             is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
@@ -576,6 +577,7 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    **kwargs,
                 )
                 self.ckpt_manager.save_check(
                     step=train_step,

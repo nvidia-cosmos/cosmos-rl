@@ -399,6 +399,9 @@ maxmemory-policy allkeys-lfu
                     )
                     # The epoch in data_fetcher starts from 1 and need to minus 1 to be consistent with the worker side.
                     payloads_list[i].extra_info["epoch"] = self.data_fetcher.epoch - 1
+                    payloads_list[i].extra_info["remain_samples_num"] = (
+                        self.policy_status_manager.remain_samples_num
+                    )
                 else:
                     payloads_list[i].weight_version = 0
         if not is_validation:

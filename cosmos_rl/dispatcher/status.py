@@ -882,7 +882,6 @@ class PolicyStatusManager:
                     is_validation=True,
                 )
             return
-        self.remain_samples_num -= self.config.train.train_batch_per_replica
         if not self.any_with_status([PolicyStatus.REDUCED]):
             # For SFT, we increment current_step at first train_ack received in each step
             self.current_step += 1
@@ -893,6 +892,9 @@ class PolicyStatusManager:
                 self.data_fetcher.validation_activate_dataloader(self.current_step)
         self.set_status(replica_name, PolicyStatus.REDUCED)
         if self.all_reduced():
+            self.remain_samples_num -= (
+                self.config.train.train_batch_per_replica
+            ) * len(self.get_all_atoms_arrived_replicas())
             self.sft_report_summary(
                 train_step=step,
                 total_steps=total_steps,

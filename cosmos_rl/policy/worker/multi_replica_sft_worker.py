@@ -38,6 +38,7 @@ from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.worker import RLPolicyWorker, SFTPolicyWorker
 import cosmos_rl.utils.distributed as dist_util
 import torch.distributed as dist
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 
 
 class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
@@ -58,27 +59,55 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         self._save_freq = self.config.train.ckpt.save_freq
         self.train_step = None
         self.current_epoch = None
+        self.total_steps = None
+        self.loaded_total_steps = None
+        self.loaded_train_step = None
+        self.do_save = False
         # Setup hooks for later use
         SFTPolicyWorker.setup_hooks(self)
 
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
     ):
+        if self.total_steps is None:
+            self.trainer.lr_schedulers = build_lr_schedulers(
+                self.trainer.optimizers, self.config, command.total_steps
+            )
+            self.total_steps = command.total_steps
+            if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
+                assert (
+                    self.total_steps == self.loaded_total_steps
+                ), f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+        else:
+            assert (
+                self.total_steps == command.total_steps
+            ), f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
         ret = super().execute_policy_to_policy_broadcast(command)
         self.weight_sync_done = True
-        self.total_steps = command.total_steps
         logger.info("[SFT] Weight synchronization from broadcast command done.")
         return ret
 
     def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
+        if self.total_steps is None:
+            self.trainer.lr_schedulers = build_lr_schedulers(
+                self.trainer.optimizers, self.config, command.total_steps
+            )
+            self.total_steps = command.total_steps
+            if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
+                assert (
+                    self.total_steps == self.loaded_total_steps
+                ), f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+        else:
+            assert (
+                self.total_steps == command.total_steps
+            ), f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
         ret = super().execute_policy_to_policy_unicast(command)
         self.weight_sync_done = True
-        self.total_steps = command.total_steps
         logger.info("[SFT] Weight synchronization from unicast command done.")
         return ret
 
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        self.trainer.load_model()
+        self.loaded_total_steps, self.loaded_train_step = self.trainer.load_model()
         logger.info("[SFT] Weight resume command executed, model weights loaded.")
         return False
 
@@ -286,17 +315,23 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         prompts, is_end = prompts_and_is_end
         target_train_step = 0
         target_epoch = 0
+        target_remain_samples_num = float("inf")
         new_epoch = False
         if prompts is not None:
             for fullpayload in prompts:
                 payload = fullpayload.prompt
-                self.train_step = (
-                    fullpayload.weight_version
-                    if self.train_step is None
-                    else self.train_step
-                )
+                if self.train_step is None:
+                    self.train_step = fullpayload.weight_version
+                    if self.loaded_train_step is not None:
+                        assert (
+                            self.train_step == self.loaded_train_step
+                        ), f"train_step {self.train_step} should be equal to loaded_train_step {self.loaded_train_step}"
                 target_train_step = max(target_train_step, fullpayload.weight_version)
                 target_epoch = max(target_epoch, fullpayload.extra_info["epoch"])
+                target_remain_samples_num = min(
+                    target_remain_samples_num,
+                    fullpayload.extra_info["remain_samples_num"],
+                )
                 if (
                     self.config.train.train_policy.conversation_column_name
                     and not self.is_user_provided_train_set
@@ -331,6 +366,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 self.current_epoch is not None and self.current_epoch != target_epoch
             )
             self.current_epoch = target_epoch
+            self.remain_samples_num = target_remain_samples_num
         assert is_end or prompt_queue.qsize() >= batch_size, (
             f"Prompt queue size {prompt_queue.qsize()} should be at least batch_size {batch_size} "
             "unless is_end is True"
@@ -387,6 +423,20 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 // self.dp_world_size,
                 prompt_queue=self.data_queue,
             )
+
+            if self.do_save and self.is_master_replica:
+                self.trainer.checkpointing(
+                    total_steps=self.total_steps,
+                    train_step=self.train_step,
+                    save_freq=self._save_freq,
+                    pp_last_stage=pp_last_stage,
+                    is_last_step=False,
+                    val_score=val_avg_loss,
+                    do_save=True,
+                    **{
+                        "remain_samples_num": self.remain_samples_num,
+                    },
+                )
             assert (
                 (self.config.train.train_batch_per_replica % self.dp_world_size) == 0
             ), f"train_batch_per_replica({self.config.train.train_batch_per_replica}) must be divisible by dp_world_size({self.dp_world_size})"
@@ -466,17 +516,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     self.train_step % self.config.train.ckpt.save_freq == 0
                     and self.train_step > 0
                 )
+            self.do_save = do_save
             val_avg_loss = self.validate(is_last_step=False)
-            if do_save and self.is_master_replica:
-                self.trainer.checkpointing(
-                    total_steps=self.total_steps,
-                    train_step=self.train_step,
-                    save_freq=self._save_freq,
-                    pp_last_stage=pp_last_stage,
-                    is_last_step=False,
-                    val_score=val_avg_loss,
-                    do_save=True,
-                )
 
         # Finally: validation and save checkpoint
         val_avg_loss = self.validate(is_last_step=True)
