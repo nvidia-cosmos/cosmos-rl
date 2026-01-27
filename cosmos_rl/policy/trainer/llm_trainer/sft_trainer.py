@@ -333,7 +333,7 @@ class SFTTrainer(LLMTrainer):
                 # return
                 #########################################################################################
 
-                aux_loss = None
+                aux_loss_dict = {}
                 with self.act_offloading_ctx_manager:
                     output = self.model(**batch)
                     logits = output.logits
@@ -344,7 +344,11 @@ class SFTTrainer(LLMTrainer):
                         # Enumerate the output to involve any `loss` like output
                         for k, v in output.items():
                             if "loss" in k.lower() and isinstance(v, torch.Tensor):
-                                aux_loss = v if aux_loss is None else aux_loss + v
+                                aux_loss_dict[k] = (
+                                    v
+                                    if k not in aux_loss_dict
+                                    else aux_loss_dict[k] + v
+                                )
 
                 ce_loss = self.loss_fn(
                     logits,
@@ -353,14 +357,24 @@ class SFTTrainer(LLMTrainer):
                     target_packing_mask=batch.get("label_packing_mask", None),
                     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                 )
-                if aux_loss is not None:
-                    loss = ce_loss + aux_loss
-                else:
-                    loss = ce_loss
-                # # Hint FSDP to do all-reduce on the last backward pass
-                # if hasattr(self.model, "set_is_last_backward"):
-                #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
-                #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
+                loss = ce_loss + sum(aux_loss_dict.values())
+
+                loss_flat = [ce_loss.detach().unsqueeze(0)]
+                # `loss` stands for the tokenwise cross-entropy loss
+                loss_flat_keys = ["loss"]
+                for k, v in aux_loss_dict.items():
+                    v = v.detach()
+                    # Convert to 1d tensor if it is a scalar
+                    if v.dim() == 0:
+                        v = v.unsqueeze(0)
+
+                    if v.dim() != 1:
+                        raise ValueError(
+                            f"Unsupported loss tensor dimension: {v.dim()}. Only 1D tensors are supported."
+                        )
+                    loss_flat.append(v)
+                    loss_flat_keys.append(k)
+                loss_flat = torch.cat(loss_flat, dim=0)
                 loss.backward()
             acc_loss += ce_loss.detach()
 
@@ -397,7 +411,8 @@ class SFTTrainer(LLMTrainer):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        self.model.step_hook()
+        step_hook_report_data = self.model.step_hook(train_step)
+        report_data = step_hook_report_data if step_hook_report_data is not None else {}
 
         end_event.record()
 
@@ -406,27 +421,41 @@ class SFTTrainer(LLMTrainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            global_avg_loss, global_max_loss = (  # noqa: F841
-                dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
-                dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+            global_avg_loss = loss_flat.clone()
+            global_max_loss = loss_flat.clone()
+            torch.distributed.all_reduce(
+                global_avg_loss,
+                op=torch.distributed.ReduceOp.AVG,
+                group=self.parallel_dims.mesh["dp_cp_tp"].get_group(),
             )
+            torch.distributed.all_reduce(
+                global_max_loss,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.parallel_dims.mesh["dp_cp_tp"].get_group(),
+            )
+            global_avg_loss = global_avg_loss.cpu()
+            global_max_loss = global_max_loss.cpu()
         else:
-            global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+            global_avg_loss = global_max_loss = loss_flat.cpu()
 
-        report_data = {}
         if self.config.logging.logger:
             if util.is_master_rank(self.parallel_dims, self.global_rank):
                 # Calculate last iteration time
                 assert end_event.query()
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
 
-                report_data = {
+                loss_metrics = {
                     "train/iteration_time": iter_time,
-                    "train/loss_avg": global_avg_loss,
-                    "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
+                for idx, name in enumerate(loss_flat_keys):
+                    loss_metrics[f"train/{name}_avg"] = global_avg_loss[idx]
+                    loss_metrics[f"train/{name}_max"] = global_max_loss[idx]
+
+                report_data.update(
+                    loss_metrics,
+                )
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.

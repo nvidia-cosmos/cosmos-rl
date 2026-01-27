@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import json
+from typing import Optional
 import os, sys
 import torch, re
+import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
@@ -24,7 +26,61 @@ from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 import cosmos_rl.policy.model.hf_models as hf_models
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.logging import logger
+try:
+    import wandb
+except ImportError:
+    wandb = None
+########################################################
+# Auxiliary helper functions for MoE load balancing tracking.
+########################################################
+
+def _to_cpu_np(x):
+    if torch.is_tensor(x):
+        return x.detach().float().cpu().numpy()
+    return np.asarray(x, dtype=np.float32)
+
+def _balance_metrics(counts_1d: np.ndarray):
+    counts = counts_1d.astype(np.float32)
+    total = float(counts.sum() + 1e-9)
+    p = counts / total
+    entropy = float(-(p * np.log(p + 1e-9)).sum())
+    max_fraction = float(p.max())
+    std = float(counts.std())
+    return entropy, max_fraction, std, total
+
+def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_every=10):
+    if len(loads_by_layer) == 0:
+        return None
+    if (step % log_every) != 0:
+        return None
+
+    layer_names = sorted(loads_by_layer.keys())
+    layer_loads = [_to_cpu_np(loads_by_layer[name]).reshape(-1) for name in layer_names]
+
+    if wandb is not None:
+        table = wandb.Table(columns=["step", "layer", "layer_name", "expert", "tokens", "frac"])
+        entropies, max_fracs, stds, totals = [], [], [], []
+        for li, (lname, counts) in enumerate(zip(layer_names, layer_loads)):
+            entropy, max_fraction, std, total = _balance_metrics(counts)
+            entropies.append(entropy); max_fracs.append(max_fraction); stds.append(std); totals.append(total)
+
+            frac = counts / (counts.sum() + 1e-9)
+            for ei in range(counts.shape[0]):
+                table.add_data(int(step), int(li), lname, int(ei), float(counts[ei]), float(frac[ei]))
+    else:
+        table = None
+
+    return {
+        f"{prefix}/layer_expert_table": table,
+        f"{prefix}/entropy_mean": float(np.mean(entropies)),
+        f"{prefix}/entropy_min": float(np.min(entropies)),
+        f"{prefix}/max_fraction_mean": float(np.mean(max_fracs)),
+        f"{prefix}/max_fraction_max": float(np.max(max_fracs)),
+        f"{prefix}/tokens_per_layer_mean": float(np.mean(totals)),
+        f"{prefix}/tokens_per_layer_std_mean": float(np.mean(stds)),
+    }
+
+########################################################
 
 def modify_messages(messages, max_pixels = None):
     for message in messages:
@@ -145,15 +201,32 @@ def patched_parallelize_fn(self):
     return parallelize, self
 
 # MoE: Aux-free load balancing update bias after each step update.
-def step_hook(self):
+def step_hook(self, step: int) -> Optional[dict]:
+    if not hasattr(self, "_stateful_expert_load_per_layer"):
+        self._stateful_expert_load_per_layer = {}
+
     enable_moe_load_balancing_training = self.cosmos_config.custom.get("enable_moe_load_balancing_training", True)
+    report_every = self.cosmos_config.custom.get("n_step_per_workload_report", 10)
+
     if enable_moe_load_balancing_training:
-        for _, module in self.language_model.named_modules():
+        for name, module in self.language_model.named_modules():
             if 'NemotronHBlock' in type(module).__name__ and module.block_type == "moe":
-                module.mixer.gate.update_bias()
+                local_expert_load = module.mixer.gate.update_bias()
+                with torch.no_grad():
+                    if name not in self._stateful_expert_load_per_layer:
+                        self._stateful_expert_load_per_layer[name] = local_expert_load
+                    else:
+                        self._stateful_expert_load_per_layer[name] += local_expert_load
     elif not hasattr(self, "_warn_moe_load_balancing_training_once"):
         self._warn_moe_load_balancing_training_once = True
         print("WARNING: MoE load balancing training is disabled. Please set enable_moe_load_balancing_training to True in the config['custom'] to enable it.")
+    
+    report_data = None
+    if step % report_every == 0:
+        report_data = report_moe_load_to_wandb(step, self._stateful_expert_load_per_layer, prefix="moe")
+        # reset window accumulation
+        self._stateful_expert_load_per_layer = {}
+    return report_data
 
 def get_dataset(config: CosmosConfig):
     return CustomDataset()
