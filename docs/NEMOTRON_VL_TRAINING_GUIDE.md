@@ -49,6 +49,8 @@ Image: `nvcr.io/nvidian/cosmos-rl:nemotron`
 ```bash
 # ASSUMED IN DOCKER
 
+# Remove the built-in version of cosmos-rl
+pip uninstall -y cosmos-rl
 # Clone the latest branch for nemotron-3-nano support
 git clone -b dev/nemotron https://github.com/nvidia-cosmos/cosmos-rl.git
 cd cosmos-rl && pip install -e . --no-deps
@@ -80,15 +82,10 @@ This command:
 
 ## Running Training
 
-### Single-Node Training
-
 ```bash
 # Basic training with default config
 cosmos-rl --config ./nemotron_vl/nemotron_vl.toml ./nemotron_vl/launcher.py
 ```
-
-### Multi-Node Training
-
 
 
 ## Configuration
