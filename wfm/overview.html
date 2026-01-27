@@ -119,7 +119,26 @@
 <p>Cosmos-RL provides native support for SFT and RL of world foundational models.</p>
 <section id="sft">
 <h2>SFT<a class="headerlink" href="#sft" title="Link to this heading"></a></h2>
-<p>(Coming soon)</p>
+<p><strong>Supported Models</strong></p>
+<ul class="simple">
+<li><p>SD3</p></li>
+<li><p>Cosmos-Predict2.5</p></li>
+<li><p>SANA-Image/Video</p></li>
+</ul>
+<p>We construct the WFM SFT training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.</p>
+<p>We support both LoRA and full model finetuning for SFT.</p>
+<p><strong>Quick start</strong>: A quick start guide for world foundational model’s SFT (Take SD3 as an example):</p>
+<ol class="arabic">
+<li><p>Configure the training recipe by editing toml files under <code class="docutils literal notranslate"><span class="pre">configs/stable-diffusion-3-5/</span></code>. For LoRA finetuning, you can refer to the example config file <code class="docutils literal notranslate"><span class="pre">stable-diffusion-3-5-image-sft-lora.toml</span></code>. For full model finetuning, you can refer to <code class="docutils literal notranslate"><span class="pre">stable-diffusion-3-5-image-sft.toml</span></code>.</p></li>
+<li><p>Configure the dataset and datapacker. The Cosmos-RL is very flexible for the user-customized dataset and input/output format. You can edit the <code class="docutils literal notranslate"><span class="pre">./cosmos_rl/tools/dataset/diffusers_dataset.py</span></code> launcher to customize your own dataset for training. For more details about the customization of dataset, please refer to <a class="reference external" href="https://nvidia-cosmos.github.io/cosmos-rl/quickstart/customization.html">Customization</a>.</p></li>
+<li><p>Launch the training script with the configured recipe:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">-</span><span class="n">image</span><span class="o">-</span><span class="n">sft</span><span class="o">-</span><span class="n">lora</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusers_dataset</span>
+</pre></div>
+</div>
+</li>
+<li><p>Monitor training progress via Wandb.</p></li>
+<li><p>Evaluate the trained world foundational model using the diffusers-based script (coming soon).</p></li>
+</ol>
 </section>
 <section id="rl">
 <h2>RL<a class="headerlink" href="#rl" title="Link to this heading"></a></h2>
@@ -131,12 +150,18 @@
 <li><p>SANA-Image/Video (coming soon)</p></li>
 </ul>
 <p>We construct the WFM RL training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.</p>
-<p><strong>Quick start</strong>: A quick start guide for world foundational model’s RL (Take DiffusionNFT with SD3 as an example):</p>
+<p><strong>Quick start</strong>: A quick start guide for world foundational model’s RL (Take DiffusionNFT with Cosmos-Predict2.5 as an example):</p>
 <ol class="arabic">
-<li><p>Configure the training recipe by editing toml files under <code class="docutils literal notranslate"><span class="pre">configs/stable-diffusion-3-5/</span></code>.</p></li>
+<li><p>Install the required dependencies:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="o">.</span><span class="p">[</span><span class="n">wfm</span><span class="p">]</span>
+<span class="n">pip</span> <span class="n">install</span> <span class="n">cosmos_guardrail</span> <span class="o">--</span><span class="n">no</span><span class="o">-</span><span class="n">deps</span> <span class="c1"># Required by the Cosmos2_5_PredictBasePipeline</span>
+</pre></div>
+</div>
+</li>
+<li><p>Configure the training recipe by editing toml files, you can take <code class="docutils literal notranslate"><span class="pre">configs/cosmos-predict2-5/cosmos-predict2-5_2b_720_nft.toml</span></code> as an example.</p></li>
 <li><p>Launch the reward service, you can refer docs here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.</p></li>
 <li><p>Launch the training script with the configured recipe:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">-</span><span class="n">medium_720_nft</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusion_nft</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">cosmos</span><span class="o">-</span><span class="n">predict2</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">cosmos</span><span class="o">-</span><span class="n">predict2</span><span class="o">-</span><span class="mi">5_2</span><span class="n">b_720_nft</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusion_nft</span>
 </pre></div>
 </div>
 </li>
