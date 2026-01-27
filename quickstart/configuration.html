@@ -3212,7 +3212,7 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>1</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="53"><ul class="simple">
+<tr class="row-odd"><td rowspan="57"><ul class="simple">
 <li><p>SFTDataConfig</p></li>
 </ul>
 </td>
@@ -3358,6 +3358,20 @@
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>data_dispatch_as_rank_in_mesh</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Data Dispatch As Rank In Mesh</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>conversation_column_name</p></li>
