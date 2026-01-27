@@ -35,11 +35,11 @@ For inference, you can see the Cosmos-Predict2.5 [document](https://github.com/n
 
 ## Tutorial
 
-For fully document about diffusion RL, you can find it at the [offical document](https://nvidia-cosmos.github.io/cosmos-rl/wfm/overview.html) of Cosmos-RL.
+For fully document about diffusion RL, you can find it at the [offical document](https://nvidia-cosmos.github.io/cosmos-rl/wfm/overview.html#rl-deprecated) of Cosmos-RL.
 
 ### Configuration
 
-**Experiment**: DDRL configurations can be found in `configs/wfm`. 
+**Experiment**: DDRL configurations can be found in `configs/cosmos-predict2-5`. 
 
 - The 2B experiment from the pre-trained checkpoint is `cosmos-predict2-5_2b_720_reason_embedding_ddrl.toml`.
 - The 14B experiment from the pre-trained checkpoint is `cosmos-predict2-5_14b_720_reason_embedding_ddrl.toml`.
@@ -145,7 +145,7 @@ datasets/example/
 ### Launch Training Job
 
 ```bash
-cosmos-rl --config ./configs/wfm/cosmos-predict2-5_2b_720_reason_embedding_ddrl.toml --wfm-mode ./cosmos_rl/tools/dataset/wfm_rl.py 
+cosmos-rl --config ./configs/cosmos-predict2-5/cosmos-predict2-5_2b_720_reason_embedding_ddrl.toml --wfm-mode cosmos_rl.tools.dataset.wfm_rl 
 ```
 
 ## Citation
