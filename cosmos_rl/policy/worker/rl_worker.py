@@ -351,7 +351,7 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        self.p2r_collective_manager.setup_nccl(command)
+        self.p2r_collective_manager.setup_manager(command)
         assert (
             self.trainer.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
