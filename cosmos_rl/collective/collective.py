@@ -17,7 +17,7 @@
 import zmq
 import os
 import torch
-
+from typing import Optional
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -32,7 +32,10 @@ from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils import network_util as net
 import cosmos_rl.utils.distributed as dist_util
-from cosmos_rl.collective.ipc_tensor import _SharedTensorRebuildMethodRegistry
+from cosmos_rl.collective.ipc_tensor import (
+    _SharedTensorRebuildMethodRegistry,
+    SharedTensorContainer,
+)
 
 _SharedTensorRebuildMethodRegistry.initialize()
 
@@ -81,7 +84,7 @@ class P2RCollectiveManager:
         self, command: PolicyToRolloutUnicastCommand
     ):
         # init replica to replica communicators
-        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        mesh_key = self.generate_mesh_key(command)
         nccl_unique_id = None
         if self.role != Role.ROLLOUT:
             # policy initialization
@@ -153,7 +156,9 @@ class P2RCollectiveManager:
             p_rank = self.global_rank
             for r_rank in range(command.dst_replica_size):
                 if p_rank != r_rank:
-                    mesh_key = f"{self.replica_name}_{command.dst_replica_name}_{p_rank}_{r_rank}"
+                    mesh_key = self.generate_mesh_key(
+                        command, p_rank, r_rank, is_p2p=True
+                    )
                     if mesh_key not in self.unique_ids_cache:
                         # create p2p unique id for each non-same device pair
                         p2p_unique_id = create_nccl_uid()
@@ -186,7 +191,9 @@ class P2RCollectiveManager:
             r_rank = self.global_rank
             for p_rank in range(command.src_replica_size):
                 if r_rank != p_rank:
-                    mesh_key = f"{command.src_replica_name}_{self.replica_name}_{p_rank}_{r_rank}"
+                    mesh_key = self.generate_mesh_key(
+                        command, p_rank, r_rank, is_p2p=True
+                    )
                     if mesh_key not in self.unique_ids_cache:
                         nccl_unique_id = self.api_client.post_nccl_comm_acceptor(
                             mesh_key
@@ -222,38 +229,6 @@ class P2RCollectiveManager:
         else:
             self._setup_inter_replica_communicators(command)
 
-    def send(
-        self, mesh_key_or_comm_index: str | int, tensor: torch.Tensor, r_rank: int
-    ):
-        """
-        Send data to a peer.
-        """
-        if isinstance(mesh_key_or_comm_index, str):
-            comm_index = self.nccl_comm_cache[mesh_key_or_comm_index]
-        else:
-            comm_index = mesh_key_or_comm_index
-
-        if self.rl_mode == "colocated_separated":
-            pass
-        else:
-            nccl_send(tensor, self.world_size + r_rank, comm_index)
-
-    def recv(
-        self, mesh_key_or_comm_index: str | int, tensor: torch.Tensor, p_rank: int
-    ):
-        """
-        Receive data from a peer.
-        """
-        if isinstance(mesh_key_or_comm_index, str):
-            comm_index = self.nccl_comm_cache[mesh_key_or_comm_index]
-        else:
-            comm_index = mesh_key_or_comm_index
-
-        if self.rl_mode == "colocated_separated":
-            pass
-        else:
-            nccl_recv(tensor, p_rank, comm_index)
-
     def query_nccl_comm_index(self, mesh_key: str):
         """
         Query the nccl communicator index for a given mesh key.
@@ -279,10 +254,9 @@ class P2RCollectiveManager:
                     f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
                 )
             # Each pair of policy and rollout share the same device will have one IPC socket.
-            base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
             p_rank = self.global_rank
             r_rank = self.global_rank
-            mesh_key = f"{base_mesh_key}_{p_rank}_{r_rank}_ipc"
+            mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
                 # FIXME: Temporarily use local ip and port, but we have to change this in production.
                 local_ip = net.get_local_ip()[0]
@@ -305,10 +279,9 @@ class P2RCollectiveManager:
                 raise RuntimeError(
                     f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
                 )
-            base_mesh_key = command.dst_replica_name + "_" + command.src_replica_name
             r_rank = self.global_rank
             p_rank = self.global_rank
-            mesh_key = f"{base_mesh_key}_{p_rank}_{r_rank}_ipc"
+            mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
                 # query ipc addr from controller
                 ipc_addr = self.api_client.query_ipc_info(mesh_key)
@@ -332,3 +305,121 @@ class P2RCollectiveManager:
         if self.zmq_context is not None:
             self.zmq_context.term()
             self.zmq_context = None
+
+    def generate_mesh_key(
+        self,
+        base_mesh_key_or_command: PolicyToRolloutUnicastCommand | str,
+        p_rank: Optional[int] = None,
+        r_rank: Optional[int] = None,
+        is_p2p: bool = False,
+        is_ipc: bool = False,
+    ):
+        """
+        Generate the mesh key for the collective communication.
+        Arguments:
+            base_mesh_key_or_command: PolicyToRolloutUnicastCommand | str If it is a str, it should be in format of "{src_replica_name}_{dst_replica_name}"
+            p_rank: Optional[int] The rank of the policy
+            r_rank: Optional[int] The rank of the rollout
+            is_p2p: bool Whether the communication is a p2p communication in colocated separated mode
+            is_ipc: bool Whether the communication is a ipc communication in colocated separated mode
+        """
+        if isinstance(base_mesh_key_or_command, PolicyToRolloutUnicastCommand):
+            base_mesh_key = (
+                base_mesh_key_or_command.src_replica_name
+                + "_"
+                + base_mesh_key_or_command.dst_replica_name
+            )
+        else:
+            base_mesh_key = base_mesh_key_or_command
+
+        if is_p2p:
+            return base_mesh_key + f"_{p_rank}_{r_rank}"
+
+        if is_ipc:
+            return base_mesh_key + f"_{p_rank}_{r_rank}_ipc"
+
+        return base_mesh_key
+
+    def send(self, mesh_key: str, tensor: torch.Tensor, r_rank: int):
+        """
+        Send data to a peer.
+        Arguments:
+            mesh_key: str The mesh key shoule in format of "{src_replica_name}_{dst_replica_name}"
+            tensor: torch.Tensor
+            r_rank: int
+        """
+        assert self.role == Role.POLICY, "Only policy can send data."
+
+        if self.rl_mode == "colocated_separated":
+            # in colocated separated mode, we use two ways to send data:
+            # 1. for the same device, we use IPC
+            # 2. for the different device, we use NCCL
+            p_rank = self.global_rank
+            if p_rank == r_rank:
+                # for the same device, we use IPC
+                ipc_mesh_key = self.generate_mesh_key(
+                    mesh_key, p_rank, r_rank, is_ipc=True
+                )
+                assert (
+                    ipc_mesh_key in self.ipc_comm_cache
+                ), "IPC socket not found for mesh key: {ipc_mesh_key}"
+                socket = self.ipc_comm_cache[ipc_mesh_key]
+                shared_tensor = SharedTensorContainer.from_tensor(tensor)
+                socket.send_pyobj(shared_tensor.dump_to_dict())
+            else:
+                # for the different device, we use NCCL
+                nccl_mesh_key = self.generate_mesh_key(
+                    mesh_key, p_rank, r_rank, is_p2p=True
+                )
+                assert (
+                    nccl_mesh_key in self.nccl_comm_cache
+                ), "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                comm_index = self.nccl_comm_cache[nccl_mesh_key]
+                nccl_send(tensor, 1, comm_index)
+        else:
+            assert (
+                mesh_key in self.nccl_comm_cache
+            ), "NCCL communicator index not found for mesh key: {mesh_key_or_comm_index}"
+            comm_index = self.nccl_comm_cache[mesh_key]
+            nccl_send(tensor, self.world_size + r_rank, comm_index)
+
+    def recv(self, mesh_key: str, tensor: torch.Tensor, p_rank: int):
+        """
+        Receive data from a peer.
+        Arguments:
+            mesh_key: str The mesh key shoule in format of "{src_replica_name}_{dst_replica_name}"
+            tensor: torch.Tensor
+            p_rank: int
+        """
+        assert self.role == Role.ROLLOUT, "Only rollout can receive data."
+
+        if self.rl_mode == "colocated_separated":
+            r_rank = self.global_rank
+            if r_rank == p_rank:
+                # for the same device, we use IPC
+                ipc_mesh_key = self.generate_mesh_key(
+                    mesh_key, p_rank, r_rank, is_ipc=True
+                )
+                assert (
+                    ipc_mesh_key in self.ipc_comm_cache
+                ), "IPC socket not found for mesh key: {ipc_mesh_key}"
+                socket = self.ipc_comm_cache[ipc_mesh_key]
+                shared_tensor_dict = socket.recv_pyobj()
+                shared_tensor = SharedTensorContainer.from_dict(shared_tensor_dict)
+                tensor.copy_(shared_tensor.get_local_view())
+            else:
+                # for the different device, we use NCCL
+                nccl_mesh_key = self.generate_mesh_key(
+                    mesh_key, p_rank, r_rank, is_p2p=True
+                )
+                assert (
+                    nccl_mesh_key in self.nccl_comm_cache
+                ), "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                comm_index = self.nccl_comm_cache[nccl_mesh_key]
+                nccl_recv(tensor, 0, comm_index)
+        else:
+            assert (
+                mesh_key in self.nccl_comm_cache
+            ), "NCCL communicator index not found for mesh key: {mesh_key}"
+            comm_index = self.nccl_comm_cache[mesh_key]
+            nccl_recv(tensor, p_rank, comm_index)
