@@ -237,9 +237,9 @@ class P2RCollectiveManager:
 
     def _setup_ipc(self, command: PolicyToRolloutUnicastCommand):
         if self.rl_mode != "colocated_separated":
-            raise ValueError(
-                f"IPC is only supported in colocated separated mode, but got {self.rl_mode}"
-            )
+            logger.info("For non-colocated-separated mode, IPC setting is skipped.")
+            return
+
         if self.role != Role.ROLLOUT:
             # Policy initialization
             assert (

@@ -122,9 +122,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # rank in current rollout replicas.
         self.rank_in_rollout_repicas = -1
 
-        # cache for NCCL communicators for P2R.
-        self.policy_to_rollout_nccl_communicators = {}
-
         self.batch_size = self.config.rollout.batch_size
         if self.config.validation.enable:
             self.val_batch_size = self.config.validation.batch_size or self.batch_size
