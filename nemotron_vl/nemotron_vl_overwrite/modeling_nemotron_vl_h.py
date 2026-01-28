@@ -2098,8 +2098,11 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
 
         image_mask = None
         video_mask = None
+        skip_visual_embedding = False
+        if pixel_values is None and pixel_values_videos is None:
+            skip_visual_embedding = True
 
-        if pixel_values is None:
+        elif pixel_values is None:
             final_pixel_value = pixel_values_videos
             final_thw = video_grid_thw
             num_image = 0
@@ -2112,7 +2115,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
             final_thw = torch.cat([image_grid_thw, video_grid_thw], dim=0)
             num_image = image_grid_thw.shape[0]
 
-        if final_pixel_value is not None:
+        if not skip_visual_embedding:
             image_embeds, video_embeds, deepstack_image_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
         else:
             image_embeds = None
@@ -2203,6 +2206,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         #             delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
         #         position_ids = position_ids.add(delta)
         #         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
         nemotron_h_outputs = self.language_model(
             input_ids=None,
             position_ids=position_ids,

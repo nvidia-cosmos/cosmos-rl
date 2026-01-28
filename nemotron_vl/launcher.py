@@ -252,6 +252,6 @@ if __name__ == "__main__":
     # Launch the worker
     cosmos_rl.launcher.worker_entry.main(
         # Uncomment this if you want to use a custom dataset
-        # dataset=get_dataset,
+        dataset=get_dataset,
     )
 

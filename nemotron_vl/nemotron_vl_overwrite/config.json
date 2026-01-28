@@ -17,7 +17,7 @@
     "bos_token_id": 1,
     "chunk_size": 128,
     "conv_kernel": 4,
-    "eos_token_id": 2,
+    "eos_token_id": 11,
     "expand": 2,
     "head_dim": 128,
     "hidden_dropout": 0.0,
