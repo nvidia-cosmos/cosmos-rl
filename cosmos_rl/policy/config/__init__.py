@@ -165,11 +165,46 @@ class SFTDataConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    enable_dataloader_dynamic_batching: bool = Field(
+        default=False,
+        description="Enable load-balanced dynamic batching to balance tokens across DP ranks.",
+    )
+
+    load_balanced_pool_size: int = Field(
+        default=32,
+        description="Size of the sample pool maintained by each DP rank for load-balanced batching.",
+    )
+
+    load_balanced_max_tokens_for_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum tokens per batch (batch_size * max_seq_len) for load-balanced batching. "
+        "If None, will be set to train_batch_per_replica * model_max_length.",
+    )
+
+    load_balanced_batching_strategy: str = Field(
+        default="prefer_closest",
+        description="Batching strategy: 'prefer_first' (FIFO) or 'prefer_closest' (minimize padding).",
+    )
+
+    load_balanced_max_steps: int = Field(
+        default=100,
+        description="Maximum number of steps to run for load-balanced batching. If None, will run until the dataset is exhausted.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
+        if self.enable_dataloader_dynamic_batching:
+            if self.load_balanced_batching_strategy not in [
+                "prefer_first",
+                "prefer_closest",
+            ]:
+                raise ValueError(
+                    f"load_balanced_batching_strategy must be 'prefer_first' or 'prefer_closest', "
+                    f"got {self.load_balanced_batching_strategy}"
+                )
         return self
 
 
