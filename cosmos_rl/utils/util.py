@@ -167,9 +167,8 @@ def is_port_free(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
-def find_available_port(start_port):
-    max_port = 65535  # Maximum port number
-    for port in range(start_port, max_port + 1):
+def find_available_port(start_port, max_port=65536):
+    for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("localhost", port))

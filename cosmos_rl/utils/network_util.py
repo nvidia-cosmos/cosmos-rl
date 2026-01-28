@@ -267,9 +267,8 @@ def get_eth_ips():
     return [x["ip"] for x in ip_info]
 
 
-def find_available_port(start_port):
-    max_port = 65535  # Maximum port number
-    for port in range(start_port, max_port + 1):
+def find_available_port(start_port, max_port=65536):
+    for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("localhost", port))

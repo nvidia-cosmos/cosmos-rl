@@ -1101,9 +1101,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                 pending_groups += 1
                 if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                    nccl_group_end(comm_id)
+                    if self.rl_mode != "colocated_separated":
+                        nccl_group_end(comm_id)
                     flush_completions(pending_bytes, pending_completions)
-                    nccl_group_start(comm_id)
+                    if self.rl_mode != "colocated_separated":
+                        nccl_group_start(comm_id)
                     pending_groups = 0
 
             if self.rl_mode != "colocated_separated":

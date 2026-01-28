@@ -378,6 +378,7 @@ def replica_placement_per_role(
     gpu_devices: List[str],
     control_urls: List[str],
     output_files: List[str],
+    envs: List[Dict[str, str]],
     global_launch_settings: List[SingleWorkerCommands],
     global_worker_idx: int,
     global_available_gpus: List[List[int]],
@@ -405,13 +406,15 @@ def replica_placement_per_role(
     ):
         # If the number of GPUs needed for one replica of this role is more than available GPUs, we need to allocate a new worker
         if gpu_idx > 0:
-            commands = []
-            gpu_devices = []
-            control_urls = []
-            output_files = []
+            commands: List[str] = []
+            gpu_devices: List[str] = []
+            control_urls: List[str] = []
+            output_files: List[str] = []
+            envs: List[Dict[str, str]] = []
+
             tmp_worker_commands = SingleWorkerCommands(global_worker_idx)
             tmp_worker_commands.extend_commands(
-                commands, gpu_devices, control_urls, output_files
+                commands, gpu_devices, control_urls, output_files, envs
             )
             global_launch_settings.append(tmp_worker_commands)
             gpu_idx = 0
@@ -460,9 +463,18 @@ def replica_placement_per_role(
                 control_urls.append(control_url_for_node)
                 output_files.append(output_file_for_node)
 
+                env_for_node = None
+                if rl_mode != "colocated_separated":
+                    # If in colocated-separated mode, this config will cause
+                    # CUDA IPC broken.
+                    env_for_node = {
+                        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+                    }
+                envs.append(env_for_node)
+
                 worker_commands = SingleWorkerCommands(global_worker_idx)
                 worker_commands.extend_commands(
-                    commands, gpu_devices, control_urls, output_files
+                    commands, gpu_devices, control_urls, output_files, envs
                 )
 
                 if rl_mode == "colocated_separated" and role == "policy":
@@ -480,6 +492,7 @@ def replica_placement_per_role(
                         gpu_devices_for_node,
                         control_url_for_node,
                         output_file_for_rollout,
+                        env_for_node,
                     )
 
                 global_launch_settings.append(worker_commands)
@@ -488,6 +501,7 @@ def replica_placement_per_role(
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
         else:
@@ -496,7 +510,7 @@ def replica_placement_per_role(
             ):
                 worker_commands = SingleWorkerCommands(global_worker_idx)
                 worker_commands.extend_commands(
-                    commands, gpu_devices, control_urls, output_files
+                    commands, gpu_devices, control_urls, output_files, envs
                 )
                 global_launch_settings.append(worker_commands)
 
@@ -504,6 +518,7 @@ def replica_placement_per_role(
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
@@ -522,11 +537,17 @@ def replica_placement_per_role(
                 if output_dir is not None
                 else None
             )
+            env_for_replica = None
+            if rl_mode != "colocated_separated":
+                env_for_replica = {
+                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+                }
 
             gpu_devices.append(gpu_devices_for_replica)
             commands.append(command_for_replica)
             control_urls.append(control_url_for_replica)
             output_files.append(output_file_for_replica)
+            envs.append(env_for_replica)
 
             if rl_mode == "colocated_separated" and role == "policy":
                 rollout_launch_command = command_for_replica.replace(
@@ -542,10 +563,19 @@ def replica_placement_per_role(
                 commands.append(rollout_launch_command)
                 control_urls.append(control_url_for_replica)
                 output_files.append(output_file_for_rollout)
+                envs.append(env_for_replica)
 
             gpu_idx += min_n_gpus_replica
 
-    return gpu_idx, global_worker_idx, commands, gpu_devices, control_urls, output_files
+    return (
+        gpu_idx,
+        global_worker_idx,
+        commands,
+        gpu_devices,
+        control_urls,
+        output_files,
+        envs,
+    )
 
 
 def replica_placement(
@@ -568,10 +598,11 @@ def replica_placement(
     script_args: Optional[List[Any]] = None,
     rl_mode: str = "disaggregated",
 ) -> List[List[str]]:
-    commands = []
-    gpu_devices = []
-    control_urls = []
-    output_files = []
+    commands: List[str] = []
+    gpu_devices: List[str] = []
+    control_urls: List[str] = []
+    output_files: List[str] = []
+    envs: List[Dict[str, str]] = []
     assert len(available_gpus) in [
         1,
         2,
@@ -606,11 +637,13 @@ def replica_placement(
             gpu_devices,
             control_urls,
             output_files,
+            envs,
         ) = replica_placement_per_role(
             commands=commands,
             gpu_devices=gpu_devices,
             control_urls=control_urls,
             output_files=output_files,
+            envs=envs,
             global_launch_settings=global_launch_settings,
             global_worker_idx=global_worker_idx,
             global_available_gpus=global_available_gpus,
@@ -636,7 +669,7 @@ def replica_placement(
     if len(commands) > 0:
         worker_commands = SingleWorkerCommands(global_worker_idx)
         worker_commands.extend_commands(
-            commands, gpu_devices, control_urls, output_files
+            commands, gpu_devices, control_urls, output_files, envs
         )
         global_launch_settings.append(worker_commands)
     return global_launch_settings
@@ -1087,6 +1120,7 @@ cosmos-rl --config config.toml"""
             os.path.join(output_dir, "controller.log")
             if output_dir is not None
             else None,
+            env=None,
         )
         controller_process = launch_processes(command_collections)
         controller_id = len(processes)

@@ -380,9 +380,10 @@ class CommandItem(NamedTuple):
     gpu_devices: Optional[str]
     control_url: Optional[str]
     output_file: Optional[str]
+    env: Optional[Dict[str, str]]
 
     def __repr__(self) -> str:
-        return f"CommandItem(command={self.command}, gpu_devices={self.gpu_devices}, control_url={self.control_url}, output_file={self.output_file})"
+        return f"CommandItem(command={self.command}, gpu_devices={self.gpu_devices}, control_url={self.control_url}, output_file={self.output_file}, env={self.env})"
 
 
 class SingleWorkerCommands:
@@ -395,14 +396,15 @@ class SingleWorkerCommands:
         self,
         command: str,
         gpu_devices: Optional[str],
-        control_urls: Optional[str],
-        output_files: Optional[str],
+        control_url: Optional[str],
+        output_file: Optional[str],
+        env: Optional[Dict[str, str]] = None,
     ):
         logger.info(
-            f"Appending command: {command} with gpu devices: {gpu_devices}, control URLs: {control_urls}, output files: {output_files}"
+            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}"
         )
         self.command_items.append(
-            CommandItem(command, gpu_devices, control_urls, output_files)
+            CommandItem(command, gpu_devices, control_url, output_file, env)
         )
 
     def extend_commands(
@@ -411,6 +413,7 @@ class SingleWorkerCommands:
         gpu_devices: List[str],
         control_urls: List[str],
         output_files: List[str],
+        envs: Optional[List[Dict[str, str]]] = None,
     ):
         logger.info(
             f"Extending commands for worker {self.global_worker_idx} with {len(commands)} commands"
@@ -418,10 +421,11 @@ class SingleWorkerCommands:
         assert (
             len(commands) == len(gpu_devices) == len(control_urls) == len(output_files)
         ), "The number of commands, gpu devices, control URLs, and output files must be the same"
-        for command, gpu_device, control_url, output_file in zip(
-            commands, gpu_devices, control_urls, output_files
+        envs = envs or [None] * len(commands)
+        for command, gpu_device, control_url, output_file, env in zip(
+            commands, gpu_devices, control_urls, output_files, envs
         ):
-            self.append_command(command, gpu_device, control_url, output_file)
+            self.append_command(command, gpu_device, control_url, output_file, env)
 
     def __iter__(self) -> Iterator[CommandItem]:
         yield from self.command_items
@@ -435,7 +439,6 @@ class SingleWorkerCommands:
 
 def launch_processes(
     command_collections: SingleWorkerCommands,
-    extra_env: Optional[Dict[str, str]] = None,
 ) -> List[subprocess.Popen]:
     """
     Launch multiple subprocesses and return their process objects.
@@ -448,6 +451,7 @@ def launch_processes(
         gpu_id = command_item.gpu_devices
         url = command_item.control_url
         ofile = command_item.output_file
+        command_env = command_item.env
         try:
             # Prepare environment variables
             env = dict(os.environ)
@@ -455,8 +459,8 @@ def launch_processes(
                 env["CUDA_VISIBLE_DEVICES"] = gpu_id
             if url is not None:
                 env["COSMOS_CONTROLLER_HOST"] = url
-            if extra_env is not None:
-                env.update(extra_env)
+            if command_env is not None:
+                env.update(command_env)
             if ofile is not None:
                 f = open(ofile, "wb")
                 cout = f

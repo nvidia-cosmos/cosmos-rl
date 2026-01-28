@@ -1,6 +1,7 @@
 import importlib
 from functools import wraps
-import warnings
+
+from cosmos_rl.utils.logging import logger
 
 if importlib.util.find_spec("xformers") is not None:
     # Fix xformers non-compatible, for environment with xformers installed
@@ -15,7 +16,7 @@ if importlib.util.find_spec("xformers") is not None:
         return _orig_find_spec(name, *args, **kwargs)
 
     importlib.util.find_spec = blocked_find_spec
-    warnings.warn("xformers is not compatible with our framework, please uninstall it")
+    logger.warning("xformers is not compatible with our framework, please uninstall it")
 
 from diffusers import DiffusionPipeline
 
