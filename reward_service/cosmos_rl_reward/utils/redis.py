@@ -26,7 +26,7 @@ import subprocess
 import sys
 import uuid
 import tempfile
-import cosmos_rl.utils.util as util
+import cosmos_rl.utils.network_util as network_util
 from cosmos_rl_reward.utils.util import make_request_with_retry
 
 
@@ -214,7 +214,7 @@ def start_redis_server(redis_port: int, redis_logfile_path: str = "/tmp/redis.lo
     if redis_port is None or redis_port <= 0:
         logger.info("Redis port is not set or invalid, skipping Redis server start.")
         return -1
-    redis_free_port = util.find_available_port(redis_port)
+    redis_free_port = network_util.find_available_port(redis_port)
 
     random_db_file_name = f"cosmos_rl_{str(uuid.uuid4())}.rdb"
     config_file_path = tempfile.NamedTemporaryFile(
@@ -224,7 +224,7 @@ def start_redis_server(redis_port: int, redis_logfile_path: str = "/tmp/redis.lo
 maxmemory 5G
 maxmemory-policy allkeys-lfu
 """
-    redis_cfg_path = util.write_redis_config(
+    redis_cfg_path = network_util.write_redis_config(
         redis_free_port,
         redis_logfile_path,
         file_path=config_file_path.name,

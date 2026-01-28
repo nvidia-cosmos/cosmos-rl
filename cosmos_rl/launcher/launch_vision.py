@@ -33,7 +33,6 @@ import os
 import sys
 from typing import List, Optional, Callable, Dict
 from cosmos_rl.utils.logging import logger
-import cosmos_rl.utils.network_util as network_util
 
 
 def replica_placement(
@@ -272,7 +271,7 @@ cosmos-rl --config config.toml --wfm-mode"""
 
     logger.info(f"Number of World foundational model replicas: {num_replicas}")
 
-    import cosmos_rl.utils.util as util
+    from cosmos_rl.utils import network_util
 
     # Get available GPUs
     available_gpus = get_available_gpus()
@@ -344,7 +343,7 @@ cosmos-rl --config config.toml --wfm-mode"""
         ip, port = args.url.split(":")
         if ip in get_local_ip():
             # If the IP is the local IP, launch the controller on the local machine
-            port = util.find_available_port(int(port))
+            port = network_util.find_available_port(int(port))
             logger.info(f"Using local IP: {ip} so launching controller on port {port}")
         else:
             control_url = args.url
@@ -363,12 +362,12 @@ cosmos-rl --config config.toml --wfm-mode"""
             control_url = f"{primary_hostname}:{args.port}"
         elif "LEPTON_JOB_WORKER_INDEX" in os.environ:
             # If we're in a Lepton job prime node, check if the port is available
-            if not util.is_port_free(args.port):
+            if not network_util.is_port_free(args.port):
                 raise RuntimeError(f"Port {args.port} is not available")
             else:
                 port = args.port
         else:
-            port = util.find_available_port(args.port)
+            port = network_util.find_available_port(args.port)
 
     if control_url is None:
         logger.info(f"Controller will be launched locally on port {port}.")

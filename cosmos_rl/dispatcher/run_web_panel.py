@@ -49,7 +49,7 @@ from cosmos_rl.dispatcher.protocol import (
     QueryIpcInfoRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-import cosmos_rl.utils.util as util
+from cosmos_rl.utils.network_util import find_available_port
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import COSMOS_ROLLOUT_SCAN_INTERVAL
 from cosmos_rl.utils.api_suffix import (
@@ -669,7 +669,7 @@ def main(
         )
 
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=util.find_available_port(args.port), access_log=False
+        app, host="0.0.0.0", port=find_available_port(args.port), access_log=False
     )
     global server
     server = uvicorn.Server(config)

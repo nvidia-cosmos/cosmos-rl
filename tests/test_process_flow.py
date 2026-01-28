@@ -19,9 +19,10 @@ os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 import unittest
 import subprocess
 import sys
-from cosmos_rl.utils import util
 import toml
 import tempfile
+
+from cosmos_rl.utils import network_util
 
 
 class TestProcessFlow(unittest.TestCase):
@@ -29,7 +30,7 @@ class TestProcessFlow(unittest.TestCase):
         """Test grpo all processes exit cleanly."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 2
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",
@@ -122,7 +123,7 @@ class TestProcessFlow(unittest.TestCase):
         """Test sft all processes exit cleanly."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 2
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",

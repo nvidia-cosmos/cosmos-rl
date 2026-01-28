@@ -33,7 +33,7 @@ from cosmos_rl_reward.utils.protocol import (
     COSMOS_RL_REWARD_REDIS_PUSH_API_SUFFIX,
     COSMOS_RL_REWARD_REDIS_PULL_API_SUFFIX,
 )
-from cosmos_rl.utils.util import find_available_port
+from cosmos_rl.utils.network_util import find_available_port
 import uvicorn
 from cosmos_rl_reward.handler.process import RewardProcessHandler
 from cosmos_rl_reward.handler.score_kv import KeyValueHandler
