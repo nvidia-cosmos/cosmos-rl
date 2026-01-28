@@ -22,11 +22,10 @@ import toml
 import re
 import threading
 import time
-
-
-from cosmos_rl.utils import util
 import torch
 import signal
+
+from cosmos_rl.utils import network_util
 
 try:
     import psutil
@@ -148,7 +147,7 @@ def run_smoke(cfg_name: str, need_rollout: bool):
     with open(cfg_file, "r") as f:
         cfg_dict = toml.load(f)
 
-    port = util.find_available_port(13000)
+    port = network_util.find_available_port(13000)
 
     controller = _launch_controller(cfg_file, port)
     os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"

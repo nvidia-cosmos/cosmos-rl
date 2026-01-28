@@ -16,45 +16,50 @@
 import os
 
 os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
 import unittest
 import subprocess
 import sys
-from cosmos_rl.utils import network_util
 import toml
 import tempfile
 
+from cosmos_rl.utils import network_util
+from launch_test_worker import load_simple_grpo_config
 
-class TestColocated(unittest.TestCase):
-    def test_colocated(self):
+
+class TestColocatedSeparated(unittest.TestCase):
+    def test_colocated_separated(self):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
-        world_size = 4
+        # 2 policy replicas and 2 rollout replicas, they share the same devices.
+        world_size = 2
+        cuda_visible_devices = ",".join(str(i) for i in range(world_size))
         port = network_util.find_available_port(8123)
-        config_path = os.path.join(
-            cur_dir,
-            "configs",
-            "test_simple_grpo.toml",
-        )
-        with open(config_path, "r") as f:
-            config = toml.load(f)
+
+        config = load_simple_grpo_config()
+
+        config["mode"] = "colocated_separated"
+        # lower the gpu memory utilization for rollout to avoid OOM when Policy and Rollout share the same devices.
+        config["rollout"]["gpu_memory_utilization"] = 0.3
 
         config["train"]["epoch"] = 1
-        config["train"]["train_batch_per_replica"] = 32
+        config["train"]["train_batch_per_replica"] = 64
         config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+        config["train"]["force_use_hf"] = True
         config["train"]["train_policy"]["mini_batch"] = 1
+
         config["rollout"]["n_generation"] = 8
         config["rollout"]["batch_size"] = 1
+        config["rollout"]["backend"] = "vllm"
         config["rollout"]["max_response_length"] = 128
-        config["mode"] = "colocated"
-        config["train"]["force_use_hf"] = True
-        config["rollout"]["backend"] = "example_hf"
-        config["rollout"]["parallelism"]["tp_size"] = 1
-        config["rollout"]["parallelism"]["dp_shard_size"] = 4
+
+        config["rollout"]["parallelism"]["tp_size"] = 2
+        config["rollout"]["parallelism"]["n_init_replicas"] = 1
+
         config["policy"]["parallelism"]["tp_size"] = 1
-        config["policy"]["parallelism"]["dp_shard_size"] = 4
-        config["rollout"]["parallelism"]["n_init_replicas"] = 2
-        config["policy"]["parallelism"]["n_init_replicas"] = 2
+        config["policy"]["parallelism"]["dp_shard_size"] = 2
+        config["policy"]["parallelism"]["n_init_replicas"] = 1
         if "logging" not in config:
             config["logging"] = {}
         config["logging"]["logger"] = ["console"]
@@ -79,37 +84,46 @@ class TestColocated(unittest.TestCase):
         # Create the Python command for torchrun
         policy_cmd = [
             "torchrun",
-            f"--nproc_per_node={world_size}",  # Use 4 GPUs
+            f"--nproc_per_node={world_size}",
             "--role=rank",
             "--tee=3",
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "utils", "mock_policy_entrance.py"),
-            "--test",
-            "colocated",
         ]
 
         policy_env = dict(os.environ)
-        policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+        policy_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         # Start the process
-        policy_process0 = subprocess.Popen(
+        policy_process = subprocess.Popen(
             policy_cmd,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
         )
 
-        policy_env = dict(os.environ)
-        policy_env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+        # rollout
+        rollout_cmd = [
+            "torchrun",
+            f"--nproc_per_node={world_size}",
+            "--role=rank",
+            "--tee=3",
+            "--rdzv_backend=c10d",
+            "--rdzv_endpoint=localhost:0",
+            os.path.join(cur_dir, "utils", "mock_rollout_entrance.py"),
+        ]
+
+        rollout_env = dict(os.environ)
+        rollout_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         # Start the process
-        policy_process1 = subprocess.Popen(
-            policy_cmd,
+        rollout_process = subprocess.Popen(
+            rollout_cmd,
             stdout=sys.stderr,
             stderr=sys.stderr,
-            env=policy_env,
+            env=rollout_env,
         )
 
-        processes = [controller_process, policy_process0, policy_process1]
+        processes = [controller_process, policy_process, rollout_process]
 
         # Wait for process to complete
         for process in processes:

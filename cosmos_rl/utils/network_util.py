@@ -267,9 +267,14 @@ def get_eth_ips():
     return [x["ip"] for x in ip_info]
 
 
-def find_available_port(start_port):
-    max_port = 65535  # Maximum port number
-    for port in range(start_port, max_port + 1):
+def is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def find_available_port(start_port, max_port=65536):
+    for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("localhost", port))
@@ -278,3 +283,57 @@ def find_available_port(start_port):
             continue
 
     raise RuntimeError("No available port found in the specified range.")
+
+
+def write_redis_config(
+    port, logfile, file_path="/opt/redis_config.conf", custom_config=None
+):
+    """
+    Write the redis config file.
+    redis_config_path: the path to the redis config file.
+    port: the port for Redis to listen on.
+    logfile: the logfile for Redis.
+
+    return the actual path of the redis config file.
+    """
+    config_content = f"""# Redis configuration file example for insecure connections
+
+# Bind to all network interfaces (use with caution)
+bind 0.0.0.0
+
+# Set the port for Redis to listen on (default is {port})
+port {port}
+
+# Disable TLS by setting the tls-port to 0
+tls-port 0
+
+# Disable authentication by commenting out the requirepass directive
+# requirepass yourpassword
+
+# Other configuration settings can remain as default or be customized as needed
+timeout 0
+tcp-keepalive 300
+protected-mode no
+# enable-protected-configs yes
+# enable-debug-command yes
+# enable-module-command yes
+daemonize yes
+supervised no
+loglevel notice
+logfile {logfile}
+databases 16
+save 900 1
+save 300 10
+save 60 10000
+stop-writes-on-bgsave-error yes
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump.rdb
+dir /opt
+"""
+    if custom_config is not None:
+        config_content += "\n" + custom_config + "\n"
+
+    with open(file_path, "w") as file:
+        file.write(config_content)
+    return file_path
