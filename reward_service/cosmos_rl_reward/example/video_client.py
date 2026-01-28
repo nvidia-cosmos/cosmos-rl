@@ -46,13 +46,6 @@ token = None  # If authentication is needed, set the token here.
 # "api/reward/enqueue" endpoint expects only encoded latent tensor in the request body.
 use_fake = True  # Set to True to use a fake video tensor for demonstration purposes.
 if use_fake:
-    # Create a sample fake video tensor in the shape [B, T, C, H, W].
-    # The sample video tensor is generated with random values in the range of [0, 255].
-    fake_video = (
-        (np.random.rand(2, 3, 96, 432, 786) * 255.0).clip(0, 255).astype(np.uint8)
-    )  # Example tensor shape [2, 3, 96, 432, 786]
-    sample_video = fake_video
-
     # Example fake video info data.
     # This is a dictionary containing video information such as FPS.
     # The video info is used to provide additional context about the video.

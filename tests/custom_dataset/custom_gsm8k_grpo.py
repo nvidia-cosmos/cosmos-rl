@@ -1,11 +1,9 @@
+import sys
+
 from cosmos_rl.dispatcher.data.packer import worker_entry_parser
-from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.tools.dataset.gsm8k_grpo import (
     GSM8kDataset,
     GSM8kValDataset,
-    custom_reward_fn,
-    custom_logger_fn,
-    GSM8kDataPacker,
 )
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -40,9 +38,9 @@ if __name__ == "__main__":
         args = parser.parse_args()
         assert args.x_arg == "cosmos_rl"
         assert args.foo == "cosmos"
-    except SystemExit as e:
+    except SystemExit:
         logger.error("Error parsing arguments.")
-        raise e
+        sys.exit(3)  # return a non-usual code.
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         return MinimalGSM8kDataset()
@@ -50,12 +48,12 @@ if __name__ == "__main__":
     def get_val_dataset(config: CosmosConfig) -> Dataset:
         return MinimalGSM8kValDataset()
 
-    launch_worker(
-        dataset=get_dataset,
-        val_dataset=get_val_dataset,
-        reward_fns=[custom_reward_fn],
-        data_packer=GSM8kDataPacker(),
-        val_data_packer=GSM8kDataPacker(),
-        custom_logger_fns=[custom_logger_fn],
-        args=args,  # Note: args must be passed if you want to use custom arguments
-    )
+    # launch_worker(
+    #     dataset=get_dataset,
+    #     val_dataset=get_val_dataset,
+    #     reward_fns=[custom_reward_fn],
+    #     data_packer=GSM8kDataPacker(),
+    #     val_data_packer=GSM8kDataPacker(),
+    #     custom_logger_fns=[custom_logger_fn],
+    #     args=args,  # Note: args must be passed if you want to use custom arguments
+    # )

@@ -234,6 +234,8 @@ class ParallelDims:
         dp_cp_mesh_dim_names = []
         # Mesh for model parallel
         mp_mesh_dim_names = []
+        # Mesh for non-data-parallel which shares the same data piece
+        pp_cp_tp_mesh_dim_names = []
 
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
@@ -250,11 +252,16 @@ class ParallelDims:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_tp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
+            pp_cp_tp_mesh_dim_names.append("cp")
         if self.tp_enabled:
             dp_cp_tp_mesh_dim_names.append("tp")
             mp_mesh_dim_names.append("tp")
+            pp_cp_tp_mesh_dim_names.append("tp")
+        if os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0") == "1":
+            dp_mesh_dim_names.append("tp")
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
+            pp_cp_tp_mesh_dim_names.append("pp")
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
@@ -269,6 +276,9 @@ class ParallelDims:
 
         if mp_mesh_dim_names != []:
             mesh[tuple(mp_mesh_dim_names)]._flatten(mesh_dim_name="mp")
+
+        if pp_cp_tp_mesh_dim_names != []:
+            mesh[tuple(pp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="pp_cp_tp")
 
         self.mesh = mesh
         return mesh
@@ -322,8 +332,6 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self) -> bool:
-        # alway warp model with fsdp
-        # to ensure consistent mix precision trainning strategy controled by mp_policy
         return self.dp_shard >= 1
 
     @property
@@ -423,6 +431,15 @@ class ParallelDims:
                 tuple(("mp",))
             ].size()
 
+    @property
+    def pp_cp_tp_coord(self):
+        if not self.pp_enabled and not self.cp_enabled and not self.tp_enabled:
+            return 0, 1
+        else:
+            return self.mesh[tuple(("pp_cp_tp",))].get_local_rank(), self.mesh[
+                tuple(("pp_cp_tp",))
+            ].size()
+
     def build_mesh_info(self):
         dims = ["pp", "dp_replicate", "dp_shard", "cp", "tp"]
         dim_paras = {
@@ -453,6 +470,7 @@ class ParallelDims:
         self.full_world_size_info["dp_cp_tp"] = (
             self.dp_replicate * self.dp_shard * self.cp * self.tp
         )
+        self.full_world_size_info["pp_cp_tp"] = self.cp * self.tp * self.pp
 
         for i in range(self.world_size):
             self.full_rank_info[i]["dp_cp_tp"] = (
@@ -471,6 +489,12 @@ class ParallelDims:
             self.full_rank_info[i]["dp"] = (
                 self.full_rank_info[i]["dp_replicate"] * self.dp_shard
                 + self.full_rank_info[i]["dp_shard"]
+            )
+
+            self.full_rank_info[i]["pp_cp_tp"] = (
+                self.full_rank_info[i]["pp"] * self.tp * self.cp
+                + self.full_rank_info[i]["cp"] * self.tp
+                + self.full_rank_info[i]["tp"]
             )
 
         self.global_rank = int(os.environ.get("RANK", 0))

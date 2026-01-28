@@ -33,6 +33,8 @@ def populate_for_none_fields(payload: RLPayload):
         payload.completions = [None] * len_of_rewards
     if payload.completed_conversations is None:
         payload.completed_conversations = [None] * len_of_rewards
+    if payload.n_ignore_prefix_tokens is None:
+        payload.n_ignore_prefix_tokens = [0] * len_of_rewards
 
 
 def extract_rollouts(
@@ -49,12 +51,17 @@ def extract_rollouts(
             # if this func is called for validation, we don't need to check the length of `completions`.
             assert (
                 len(payload.completions)
-                == len(payload.completed_conversations)
                 == len(payload.rewards)
                 == len(payload.advantages)
-                == len(payload.n_ignore_prefix_tokens)
-            ), "Length of completions, completed_conversations, rewards, advantages and n_ignore_prefix_tokens must be the same"
-
+            ), "Length of completions, rewards and advantages must be the same"
+            if payload.completed_conversations is not None:
+                assert len(payload.completions) == len(
+                    payload.completed_conversations
+                ), "Length of completions and completed_conversations must be the same"
+            if payload.n_ignore_prefix_tokens is not None:
+                assert len(payload.completions) == len(
+                    payload.n_ignore_prefix_tokens
+                ), "Length of completions and n_ignore_prefix_tokens must be the same"
         populate_for_none_fields(payload)
 
         rollouts = [
@@ -75,6 +82,7 @@ def extract_rollouts(
                 report_metrics=report_metrics,
                 teacher_result_uuid=teacher_result_uuid,
                 prompt_logprobs=payload.prompt_logprobs,
+                prompt_token_ids=payload.prompt_token_ids,
             )
             for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs, report_metrics, teacher_result_uuid in zip(
                 payload.completions,
@@ -89,6 +97,26 @@ def extract_rollouts(
                 payload.teacher_result_uuids,
             )
         ]
+        # Extract the item from extra_info dict to single rollout's extra_info
+        if payload.extra_info is None:
+            for rollout in rollouts:
+                rollout.extra_info = {}
+        else:
+            for idx, rollout in enumerate(rollouts):
+                rollout.extra_info = {}
+                for key, value in payload.extra_info.items():
+                    # If the value is a list or numpy array or torch tensor and has the same length as rollouts,
+                    # we assume it is a list of values for each rollout.
+                    if isinstance(value, (list, tuple)) and len(value) == len(rollouts):
+                        rollout.extra_info[key] = value[idx]
+                    elif (
+                        hasattr(value, "shape")
+                        and len(value.shape) > 0
+                        and value.shape[0] == len(rollouts)
+                    ):
+                        rollout.extra_info[key] = value[idx]
+                    else:
+                        rollout.extra_info[key] = value
         assert all(
             rollout.prompt_idx >= 0 for rollout in rollouts
         ), "All rollouts should have a valid prompt index"

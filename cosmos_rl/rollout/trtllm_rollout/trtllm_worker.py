@@ -55,6 +55,7 @@ from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
     ShutdownInstruction,
     RolloutWrapperInstruction,
 )
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 trtllm_version = tensorrt_llm.__version__
 logger.info(f"[Rollout] Using trtllm version: {trtllm_version}")
@@ -111,7 +112,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
             self.parallel_dims = parallel_dims
 
             # build the mesh
-            self.parallel_dims.build_mesh(device_type="cuda")
+            self.parallel_dims.build_mesh(device_type=cosmos_device_type)
 
             self.post_init(cosmos_config, parallel_dims)
 

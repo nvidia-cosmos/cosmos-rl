@@ -370,7 +370,7 @@ def pack_sequences_for_logprobs(
     return args_dict
 
 
-def pack_sequences_for_teacher_logprobs(
+def pack_sequences_for_extra_tensor(
     teacher_logprobs: torch.Tensor,
     valid_input_len: torch.Tensor,
     logprobs_seq_dim: int = 1,

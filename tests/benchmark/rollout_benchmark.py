@@ -35,10 +35,11 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data import CosmosDataset
 from cosmos_rl.utils import util
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 
 def main(args: argparse.Namespace):
-    init_distributed()
+    init_distributed(cpu_enabled=True)
 
     config = [
         None,
@@ -83,7 +84,7 @@ def main(args: argparse.Namespace):
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.rollout.parallelism
     )
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     batch_size = config.rollout.batch_size
 

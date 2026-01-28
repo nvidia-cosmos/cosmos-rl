@@ -136,6 +136,8 @@ class RLPolicyWorker(PolicyWorkerBase):
         # For teacher model interaction
         self.teacher_interact_queue = Queue()
         self.teacher_interact_thread: Optional[threading.Thread] = None
+        self.teacher_prefetch_queue = Queue()
+        self.teacher_uuid_to_dp_shard = {}
 
     def setup(
         self,
@@ -261,9 +263,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                     f"[Policy] Failed to get rollouts: {e}, wait for next round"
                 )
             for rollout in rollouts:
-                if rollout.teacher_result_uuid:
-                    self.teacher_interact_queue.put_nowait(rollout.teacher_result_uuid)
                 self.data_queue.put_nowait(rollout)
+                if rollout.teacher_result_uuid:
+                    self.teacher_prefetch_queue.put_nowait(rollout.teacher_result_uuid)
 
     def pre_P2R_collect_parameters(self):
         needed_tensors = []
@@ -300,7 +302,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -328,7 +331,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -623,6 +627,46 @@ class RLPolicyWorker(PolicyWorkerBase):
             for c in command:
                 self.command_buffer.put_nowait(c)
 
+    def prepare_teacher_uuids_for_prefetch(self, prefetch_dp_id, batch_for_this_step):
+        if self.config.distillation.enable:
+            if self.global_rank == 0:
+                prefetch_list = [[]]
+                prefetch_scatter_list = [[] for _ in range(self.dp_world_size)]
+                for _ in range(self.teacher_prefetch_queue.qsize()):
+                    teacher_result_uuid = self.teacher_prefetch_queue.get_nowait()
+                    self.teacher_uuid_to_dp_shard[teacher_result_uuid] = prefetch_dp_id
+                    prefetch_scatter_list[prefetch_dp_id].append(teacher_result_uuid)
+                    prefetch_dp_id += 1
+                    if prefetch_dp_id >= self.dp_world_size:
+                        prefetch_dp_id = 0
+                if self.parallel_dims.dp_coord[1] > 1:
+                    dist.scatter_object_list(
+                        prefetch_list,
+                        prefetch_scatter_list,
+                        group=self.parallel_dims.mesh["dp"].get_group(),
+                        group_src=0,
+                    )
+                else:
+                    prefetch_list[0] = prefetch_scatter_list[0]
+                if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+                    for item in prefetch_list[0]:
+                        self.teacher_interact_queue.put_nowait(item)
+            else:
+                for _ in range(batch_for_this_step):
+                    prefetch_list = [[]]
+                    prefetch_scatter_list = [[] for _ in range(self.dp_world_size)]
+                    if self.parallel_dims.dp_coord[1] > 1:
+                        dist.scatter_object_list(
+                            prefetch_list,
+                            prefetch_scatter_list,
+                            group=self.parallel_dims.mesh["dp"].get_group(),
+                            group_src=0,
+                        )
+                    if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+                        for item in prefetch_list[0]:
+                            self.teacher_interact_queue.put_nowait(item)
+        return prefetch_dp_id
+
     def dispatch_rollouts(self) -> List[Rollout]:
         def preprocess_rollouts(rollouts: List[Rollout]) -> List[Rollout]:
             """
@@ -636,6 +680,15 @@ class RLPolicyWorker(PolicyWorkerBase):
             ), "All rollouts from controller should have a valid prompt index"
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                        for rollout in rollouts:
+                            assert (
+                                rollout.prompt_idx
+                                % len(self.inter_policy_nccl.replica_name_to_rank)
+                                == self.inter_policy_nccl.replica_name_to_rank[
+                                    self.replica_name
+                                ]
+                            ), f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
                     # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
@@ -648,21 +701,29 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         rollouts = [[]]
         scattered_rollouts = [[] for _ in range(self.world_size)]
+        batch_for_this_step = (
+            self.replica_batch_for_this_step // self.dp_world_size * self.dp_world_size
+        )
+        assert batch_for_this_step % self.dp_world_size == 0
         if self.global_rank == 0:
-            batch_for_this_step = (
-                self.replica_batch_for_this_step
-                // self.dp_world_size
-                * self.dp_world_size
-            )
-            assert batch_for_this_step % self.dp_world_size == 0
-
             dp_id = 0
+            prefetch_dp_id = 0
             for _ in range(batch_for_this_step):
                 try:
                     rollout = self.data_queue.get(block=True, timeout=None)
                 except Empty:
                     raise Empty(
                         "[Policy] Rollouts queue is empty, please check the dispatcher."
+                    )
+                prefetch_dp_id = self.prepare_teacher_uuids_for_prefetch(
+                    prefetch_dp_id, batch_for_this_step
+                )
+                if rollout.teacher_result_uuid:
+                    assert (
+                        self.teacher_uuid_to_dp_shard.pop(
+                            rollout.teacher_result_uuid, None
+                        )
+                        == dp_id
                     )
                 for i in range(self.world_size):
                     if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
@@ -671,6 +732,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                 dp_id += 1
                 if dp_id >= self.dp_world_size:
                     dp_id = 0
+        else:
+            self.prepare_teacher_uuids_for_prefetch(0, batch_for_this_step)
+
         if self.world_size == 1:
             return preprocess_rollouts(scattered_rollouts[0])
 
@@ -683,7 +747,6 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     def teacher_interact_loop(self):
         """Background task to interact with teacher model for distillation"""
-        assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
             if not self.teacher_interact_queue.empty():
                 teacher_result_uuid = self.teacher_interact_queue.get_nowait()
@@ -695,19 +758,13 @@ class RLPolicyWorker(PolicyWorkerBase):
                     teacher_result_uuid
                 )
                 if teacher_result is None:
-                    teacher_logprobs = None
                     logger.error(
                         f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
                     )
-                else:
-                    teacher_logprobs = teacher_result.get("teacher_logprobs", None)
-                logger.debug(
-                    f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
-                )
                 if not hasattr(self.trainer, "teacher_interact_results"):
                     self.trainer.teacher_interact_results = {}
                 self.trainer.teacher_interact_results[teacher_result_uuid] = (
-                    teacher_logprobs
+                    teacher_result
                 )
             time.sleep(0.01)
 
@@ -745,6 +802,11 @@ class RLPolicyWorker(PolicyWorkerBase):
                 daemon=True,
                 name="fetch_rollouts_thread",
             ).start()
+        if (
+            self.parallel_dims.pp_cp_tp_coord[0] == 0
+            and self.config.distillation.enable
+        ):
+            # Initiate teacher interaction thread once for each same dp group
             self.teacher_interact_thread = threading.Thread(
                 target=self.teacher_interact_loop,
                 daemon=True,

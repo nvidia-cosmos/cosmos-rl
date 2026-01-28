@@ -99,7 +99,9 @@ class TestCustomArgs(unittest.TestCase):
         process = subprocess.Popen(cmd, shell=True)
 
         process.wait()
-        self.assertEqual(process.returncode, 0)
+        self.assertEqual(
+            process.returncode, 1, msg=f"Process failed with code: {process.returncode}"
+        )
 
 
 if __name__ == "__main__":

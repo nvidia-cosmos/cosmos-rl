@@ -19,9 +19,7 @@ import io
 import json
 import numpy as np
 import os
-import random
 import requests
-import time
 from abc import ABC, abstractmethod
 from functools import partial
 from PIL import Image
@@ -32,6 +30,7 @@ import torch
 import torch.nn as nn
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.network_util import make_request_with_retry
 
 
 def convert_to_pil_image(generated_samples: torch.Tensor) -> List[Image.Image]:
@@ -63,51 +62,6 @@ def convert_to_pil_image(generated_samples: torch.Tensor) -> List[Image.Image]:
 
         images.append(image)
     return images
-
-
-def make_request_with_retry(
-    request_func,
-    urls: List[str] = None,
-    max_retries: int = 10,
-    retries_per_delay: int = 2,
-    initial_delay: float = 4.0,
-    max_delay: float = 10.0,
-    backoff_factor: float = 2.0,
-    timeout: float = 10.0,
-):
-    delay = initial_delay
-    last_exception = None
-    total_attempts = 0
-    url = urls[0]
-
-    while total_attempts < max_retries:
-        total_retries_cur_delay = 0
-        while total_retries_cur_delay < retries_per_delay:
-            try:
-                r = request_func(url, timeout=timeout)
-                if r.status_code != 200:
-                    raise Exception(f"Request failed: {r.status_code}: {r.text}")
-                return r
-
-            except Exception as e:
-                last_exception = e
-
-                total_retries_cur_delay += 1
-                total_attempts += 1
-                # log.warning(
-                #     f"Request failed: {e}. Attempt {total_attempts} of {max_retries} on {url if urls else 'N/A'}.")
-                if total_attempts >= max_retries:
-                    break
-
-                jitter = (1.0 + random.random()) * delay
-                time.sleep(jitter)
-
-        # Increase delay for next round of retries
-        delay = min(delay * backoff_factor, max_delay)
-    if last_exception is not None:
-        raise last_exception
-    else:
-        raise Exception(f"All retry attempts failed for all urls: {urls}")
 
 
 class BaseRewardModel(nn.Module, ABC):
@@ -209,6 +163,7 @@ class RemoteReward(BaseRewardModel):
                     "Content-Type": "application/octet-stream",
                     "Authorization": f"Bearer {self.token}",
                 },
+                timeout=10.0,
             ),
             [self.enqueue_url],
         )

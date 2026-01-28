@@ -25,6 +25,9 @@ from cosmos_rl.policy.model.pi05 import PI05
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 from cosmos_rl.policy.model.diffusers.sana_model import SanaModel
 from cosmos_rl.policy.model.diffusers.sd3_model import SD3Model
+from cosmos_rl.policy.model.diffusers.cosmos_predict2_5_model import (
+    CosmosPredict2_5Model,
+)
 
 __all__ = [
     "GPT",
@@ -36,9 +39,10 @@ __all__ = [
     "InternVLChatModel",
     "OpenVLA",
     "PI05",
+    "SanaModel",
+    "SD3Model",
+    "CosmosPredict2_5Model",
     "BaseModel",
     "WeightMapper",
     "ModelRegistry",
-    "SanaModel",
-    "SD3Model",
 ]

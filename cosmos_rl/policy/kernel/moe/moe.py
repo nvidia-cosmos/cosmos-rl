@@ -42,6 +42,7 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
 )
+from transformers.activations import ACT2FN
 
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
@@ -80,9 +81,16 @@ class MoEArgs:
     route_scale: float
     dim: int
     moe_inter_dim: int
+    shared_inter_dim: Optional[int] = None
     norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
     enable_router_bias: bool = False
+    enable_glu: bool = True
+    act_fn: Optional[str] = None
+
+    def __post_init__(self):
+        if self.shared_inter_dim is None:
+            self.shared_inter_dim = self.moe_inter_dim * self.n_shared_experts
 
 
 class MLP(nn.Module):
@@ -95,7 +103,14 @@ class MLP(nn.Module):
         up_proj (nn.Module): Additional linear layer for feature transformation.
     """
 
-    def __init__(self, dim: int, inter_dim: int, use_tp: bool = True):
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        enable_glu: bool = True,
+        act_fn: Optional[str] = None,
+        use_tp: bool = True,
+    ):
         """
         Initializes the MLP layer.
 
@@ -104,7 +119,10 @@ class MLP(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.gate_proj = nn.Linear(dim, inter_dim, bias=False)
+        self.enable_glu = enable_glu
+        self.act_fn = ACT2FN[act_fn] if act_fn is not None else None
+        if enable_glu:
+            self.gate_proj = nn.Linear(dim, inter_dim, bias=False)
         self.down_proj = nn.Linear(inter_dim, dim, bias=False)
         self.up_proj = nn.Linear(dim, inter_dim, bias=False)
 
@@ -118,7 +136,10 @@ class MLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor after MLP computation.
         """
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        if self.enable_glu:
+            return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        else:
+            return self.down_proj(self.act_fn(self.up_proj(x)))
 
 
 class GroupedExperts(nn.Module):
@@ -285,12 +306,25 @@ class GroupedExpertsDeepEP(nn.Module):
         """
         super().__init__()
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
+            torch.empty(
+                args.n_routed_experts,
+                args.moe_inter_dim * (2 if args.enable_glu else 1),
+                args.dim,
+            )
         )
         self.down_projs = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
         )
         self.args = args
+        self.enable_glu = args.enable_glu
+
+        if args.act_fn is not None:
+            from transformers.activations import ACT2FN
+
+            self.act_fn = ACT2FN[args.act_fn]
+            assert (
+                not self.enable_glu
+            ), "enable_glu must be False when act_fn is not None."
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
         self.ep_size = ep_mesh.size()
@@ -362,7 +396,12 @@ class GroupedExpertsDeepEP(nn.Module):
                 tokens_per_expert,
                 trans_b=True,
             )
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+
+            if self.enable_glu:
+                output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            else:
+                output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
+
             output2 = ops.gmm(
                 output1_,
                 self.down_projs.to_local(),
@@ -371,7 +410,10 @@ class GroupedExpertsDeepEP(nn.Module):
             )
         else:
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            if self.enable_glu:
+                output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            else:
+                output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
             output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
         y = self.token_dispatcher.token_unpermutation(output2)
@@ -530,10 +572,12 @@ class Gate(nn.Module):
         weights = original_scores.gather(1, indices)
 
         if self.score_func == "sigmoid" or self.norm_topk_prob:
-            weights /= weights.sum(dim=-1, keepdim=True)
+            weights = weights / weights.sum(dim=-1, keepdim=True)
         if self.score_func == "sigmoid":
-            original_scores /= original_scores.sum(dim=-1, keepdim=True)
-        weights *= self.route_scale
+            original_scores = original_scores / original_scores.sum(
+                dim=-1, keepdim=True
+            )
+        weights = weights * self.route_scale
 
         if self.bias_update_factor > 0 or self.aux_loss_coeff > 0:
             expert_load = self._compute_expert_load(indices, token_mask)
@@ -546,12 +590,16 @@ class Gate(nn.Module):
 
         aux_loss = None
         if self.aux_loss_coeff > 0 and self.training:
-            aux_loss = self._compute_aux_loss(
-                original_scores, expert_load, token_mask, cp_mesh
+            aux_loss = (
+                self._compute_aux_loss(
+                    original_scores, expert_load, token_mask, cp_mesh
+                )
+                * self.aux_loss_coeff
             )
 
         return weights.type_as(x), indices, aux_loss
 
+    @torch.no_grad()
     def update_bias(self) -> None:
         """
         Updates the correction bias used in the gate based on the popularity of experts.
@@ -585,9 +633,12 @@ class Gate(nn.Module):
             expert_load = DTensor.from_local(
                 expert_load,
                 device_mesh=self.e_score_correction_bias.device_mesh,
-                placements=[Partial()] * self.e_score_correction_bias.device_mesh.ndim,
+                placements=[Partial(reduce_op="sum")]
+                * self.e_score_correction_bias.device_mesh.ndim,
             )
-            expert_load = expert_load.full_tensor()
+            expert_load = expert_load.redistribute(
+                placements=[Replicate()] * expert_load.device_mesh.ndim
+            )
 
         # 2) Compute the bias update by comparing the expert load to the average expert load.
         expert_load = expert_load.float()
@@ -612,14 +663,20 @@ class Gate(nn.Module):
             )
 
         # 3) Update the correction bias using the bias update.
-        with torch.no_grad():
-            # Create full precision master weights
-            if self.e_score_correction_bias_master is None:
-                self.e_score_correction_bias_master = (
-                    self.e_score_correction_bias.clone().detach().float()
-                )
-            self.e_score_correction_bias_master += bias_update * self.bias_update_factor
-            self.e_score_correction_bias.copy_(self.e_score_correction_bias_master)
+        # Create full precision master weights
+        if self.e_score_correction_bias_master is None:
+            self.e_score_correction_bias_master = (
+                self.e_score_correction_bias.clone().detach().float()
+            )
+        delta = bias_update * self.bias_update_factor
+
+        delta_local = delta.to_local()
+        if isinstance(delta_local, DTensor):
+            delta_local = delta_local.to_local()
+        self.e_score_correction_bias_master.to_local().add_(delta_local)
+        self.e_score_correction_bias.to_local().copy_(
+            self.e_score_correction_bias_master.to_local()
+        )
 
     def _compute_expert_load(
         self,
@@ -746,7 +803,10 @@ class MoE(nn.Module):
             self.experts = GroupedExperts(args)
         if args.n_shared_experts > 0:
             self.shared_experts = MLP(
-                args.dim, args.n_shared_experts * args.moe_inter_dim
+                args.dim,
+                args.shared_inter_dim,
+                enable_glu=args.enable_glu,
+                act_fn=args.act_fn,
             )
         self.args = args
 

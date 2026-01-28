@@ -30,6 +30,7 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
+
 from transformers import (
     AutoConfig,
     AutoProcessor,
@@ -47,7 +48,11 @@ def test_hf_model_forward(model, inputs):
 
 def test_cosmos_hf_model(model, inputs):
     with torch.no_grad():
-        logits = model(**inputs)
+        output = model(**inputs)
+        if isinstance(output, torch.Tensor):
+            logits = output
+        else:
+            logits = output.logits
         return logits[:, -1, :]
 
 

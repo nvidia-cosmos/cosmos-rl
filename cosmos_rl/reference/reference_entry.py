@@ -17,7 +17,7 @@ import torch
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.distributed import init_distributed
+from cosmos_rl.utils.distributed import init_distributed, cosmos_device_type
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.reference.worker.teacher_worker import TeacherWorker
@@ -58,7 +58,7 @@ def reference_entry(args: Optional[argparse.Namespace] = None, **kwargs):
         parallesim_config=cosmos_config.distillation.parallelism
     )
     init_distributed()
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     custom_logger_fns = kwargs.get("custom_logger_fns", [])
     hook_fns = kwargs.get("hook_fns", {})

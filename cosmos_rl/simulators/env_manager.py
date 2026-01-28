@@ -168,6 +168,7 @@ class EnvManager:
         cfg,
         rank: int,
         env_cls: str,
+        use_subprocess: bool = True,
     ):
         self.cfg = cfg
         self.rank = rank
@@ -178,15 +179,24 @@ class EnvManager:
         self.state_buffer: Optional[bytes] = None
         self.env_cls = env_cls
         self.env = None
+        self.use_subprocess = use_subprocess
 
     def start_simulator(self):
-        """Start simulator process with shared memory queues"""
+        """Start simulator either in-process or in subprocess"""
         if self.env is not None:
+            return
+
+        # For simulators that can't be forked/spawned (OmniGibson/Isaac Sim), run in-process
+        if not self.use_subprocess:
+            self.env = self.env_cls(self.cfg, self.num_envs)
+            if self.state_buffer:
+                self.env.load_state(self.state_buffer)
             return
 
         if self.process is not None and self.process.is_alive():
             raise RuntimeError("Simulator already running")
 
+        # Use spawn for subprocess mode (safer than fork for CUDA)
         self.context = mp.get_context("spawn")
         # Create shared memory queues
         self.command_queue = self.context.Queue()
@@ -214,11 +224,16 @@ class EnvManager:
             raise RuntimeError(f"Simulator initialization failed: {result}")
 
     def stop_simulator(self):
+        # Handle in-process mode
         if self.env is not None:
+            if hasattr(self.env, "close"):
+                self.env.close()
+            self.env = None
             return
 
+        # Handle subprocess mode
         if self.process is None or not self.process.is_alive():
-            raise RuntimeError("No simulator running")
+            return  # Already stopped
 
         # Request state save
         self.command_queue.put({"method": "get_state", "args": [], "kwargs": {}})
@@ -281,6 +296,7 @@ class EnvManager:
             "env_cls",
             "env",
             "context",
+            "use_subprocess",
         ]:
             super().__setattr__(name, value)
             return

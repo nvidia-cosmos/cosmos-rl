@@ -371,16 +371,6 @@ class RedisStreamHandler:
                 for message_id, message_data in message_list:
                     teacher_request = msgpack.unpackb(message_data[b"teacher_request"])
                     try:
-                        # messages = make_request_with_retry(
-                        #     self.requests_for_alternative_clients(
-                        #         RedisOpType.XACK,
-                        #         self.teacher_request_stream,
-                        #         self.teacher_request_group,
-                        #         message_id,
-                        #     ),
-                        #     response_parser=None,
-                        #     max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                        # )
                         messages = make_request_with_retry(
                             self.requests_for_alternative_clients(
                                 RedisOpType.XDEL,
@@ -431,7 +421,7 @@ class RedisStreamHandler:
         self,
         uuid_value: str,
         timeout: float = constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT,
-    ) -> Dict:
+    ) -> bytes:
         """
         Get teacher result from Redis.
 
@@ -439,7 +429,7 @@ class RedisStreamHandler:
             uuid_value (str): The UUID of the teacher result to get.
 
         Returns:
-            Dict: The teacher result.
+            bytes: The teacher result data (packed).
         """
         start_time = time.time()
         while time.time() - start_time < float(timeout):
@@ -452,7 +442,7 @@ class RedisStreamHandler:
                 f"[Redis] Failed to get teacher result from Redis key {uuid_value}"
             )
             return None
-        return msgpack.unpackb(value)
+        return value
 
     def requests_for_alternative_clients(self, op: RedisOpType, *args, **kwargs):
         """

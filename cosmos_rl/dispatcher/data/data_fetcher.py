@@ -20,12 +20,14 @@ from tqdm import tqdm
 from abc import ABC
 
 import torch
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+import datasets
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, TensorDataset
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
+    RLDataset,
     RLPayload,
     CosmosValidationDataset,
 )
@@ -33,6 +35,7 @@ from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import split_train_n_val_dataset
 
 
 class DataFetcherBase(ABC):
@@ -120,8 +123,27 @@ class ControllerDataFetcher(DataFetcherBase):
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
 
+        # Buffers for undispatched fetched data when data_dispatch_as_rank_in_mesh is enabled.
+        self.fetched_data_buffer: List = []
+        self.fetched_data_buffer_for_validation: List = []
+        # Dict to track the number of data fetched for each policy at current step when data_dispatch_as_rank_in_mesh is enabled.
+        self.data_fetched_for_each_policy_at_step = {}
+
+        if self.config.train.train_policy.type == "sft":
+            assert (
+                self.config.train.train_policy.dataloader_batch_size
+            ), "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            # Set n_generation to 1 for SFT policy to avoid duplicated data counting when calculating the related value.
+            self.config.rollout.n_generation = 1
+
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
+
+    def set_rollout_global_mesh_size(self, global_mesh_size: int):
+        self.rollout_global_mesh_size = global_mesh_size
+
+    def set_policy_global_mesh_size(self, global_mesh_size: int):
+        self.policy_global_mesh_size = global_mesh_size
 
     def load_dataset(self):
         """
@@ -143,6 +165,26 @@ class ControllerDataFetcher(DataFetcherBase):
                 )
             else:
                 self.dataset = CosmosDataset(config=self.config)
+
+            if (
+                self.config.validation.enable
+                and self.val_dataset is None
+                and not self.config.validation.dataset.name
+            ):
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
+
+            if self.config.train.local_dataset:
+                train_index_set = RLDataset(
+                    TensorDataset(torch.arange(len(self.dataset.train_set))),
+                    self.config,
+                )
+                assert len(train_index_set) == len(self.dataset.train_set)
+                self.dataset.train_set = train_index_set
 
             remain_samples_num = (
                 (
@@ -173,12 +215,14 @@ class ControllerDataFetcher(DataFetcherBase):
                     rank=0,
                     shuffle=self.config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
+                    seed=self.config.train.train_policy.dataloader_seed,
                 )
+            self.train_sampler = train_sampler
             if self.batch_sampler is not None and isinstance(
                 self.batch_sampler, Callable
             ):
                 self.batch_sampler = self.batch_sampler(
-                    train_sampler,
+                    self.train_sampler,
                     batch_size=self.rollout_batch_size,
                     drop_last=False,
                 )
@@ -228,12 +272,18 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                     from cosmos_rl.policy.trainer.sampler import SkippingSampler
 
-                    train_sampler = SkippingSampler(
-                        base_sampler=train_sampler,
+                    if hasattr(self.train_sampler, "set_epoch"):
+                        # Here the epoch from 1 to total epoch count, not start from 0
+                        self.train_sampler.set_epoch(self.epoch)
+
+                    self.train_sampler = SkippingSampler(
+                        base_sampler=self.train_sampler,
                         skip_samples=train_dataloader_bias
                         // (
-                            len(list(islice(iter(train_sampler), 1))[0])
-                            if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                            len(list(islice(iter(self.train_sampler), 1))[0])
+                            if isinstance(
+                                list(islice(iter(self.train_sampler), 1))[0], list
+                            )
                             else 1
                         ),
                     )
@@ -275,7 +325,7 @@ class ControllerDataFetcher(DataFetcherBase):
                     num_workers=self.config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
-                    sampler=train_sampler,
+                    sampler=self.train_sampler,
                 )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
@@ -289,7 +339,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     self.val_batch_size > 0
                 ), "[DataFetcher] val_batch_size should be greater than 0."
                 if self.val_dataset is not None:
-                    assert isinstance(self.val_dataset, Dataset)
+                    assert isinstance(self.val_dataset, Dataset) or isinstance(
+                        self.val_dataset, datasets.arrow_dataset.Dataset
+                    )
                     self.val_dataset = CosmosValidationDataset(
                         config=self.config,
                         val_set=self.val_dataset,
@@ -299,6 +351,13 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                 else:
                     self.val_dataset = CosmosValidationDataset(config=self.config)
+                if self.config.train.local_dataset:
+                    val_index_set = RLDataset(
+                        TensorDataset(torch.arange(len(self.val_dataset.val_set))),
+                        self.config,
+                    )
+                    assert len(val_index_set) == len(self.val_dataset.val_set)
+                    self.val_dataset.val_set = val_index_set
                 if self.val_sampler is not None:
                     logger.info("[DataFetcher] Using provided sampler for validation")
                     if isinstance(self.val_sampler, Callable):
@@ -363,8 +422,17 @@ class ControllerDataFetcher(DataFetcherBase):
         self.remain_samples_num = remain_samples_num
 
     def get_batched_prompt(
-        self, n: int, validation_step: Optional[int] = None
+        self,
+        n: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
+        weight_version: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
+        if weight_version is not None:
+            self.data_fetched_for_each_policy_at_step.setdefault(weight_version, {})
+        prompt_batch_per_replica = math.ceil(
+            self.config.train.train_batch_per_replica / self.config.rollout.n_generation
+        )
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset
@@ -374,13 +442,16 @@ class ControllerDataFetcher(DataFetcherBase):
         is_end = False
 
         is_validation = validation_step is not None
+        weight_version = None if is_validation else weight_version
 
         if is_validation:
             iterator = self.validation_get_dataloader(validation_step)
             batch_size = self.val_batch_size
+            fetched_data_buffer = self.fetched_data_buffer_for_validation
         else:
             iterator = self.train_dataloader_iter
             batch_size = self.rollout_batch_size
+            fetched_data_buffer = self.fetched_data_buffer
 
         def _next_payload(
             iterator, add_answer: bool
@@ -403,44 +474,124 @@ class ControllerDataFetcher(DataFetcherBase):
                 updated_payloads.append(payload)
             return idxs, updated_payloads
 
-        for _ in range(math.ceil(n / batch_size)):
-            payload: RLPayload | None = None
-            try:
-                idxs, payloads = _next_payload(iterator, add_answer)
-            except StopIteration:
-                if not is_validation:
-                    self.epoch += 1
-                    if self.epoch <= self.config.train.epoch:
-                        logger.info(f"[Controller] Epoch {self.epoch} start.")
-                        iterator = iter(self.train_dataloader)
-                        self.train_dataloader_iter = iterator
-
-                        idxs, payloads = _next_payload(iterator, add_answer)
-                    else:
-                        if self.epoch == self.config.train.epoch + 1:
-                            # We only log this all finished information once.
-                            logger.info(
-                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            """
+            First use the fetched_data_buffer to fill the payloads_list.
+            Then fetch new data from the iterator until we have n payloads or the iterator is exhausted.
+            """
+            assert (
+                rank_in_mesh is not None
+            ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            while n - len(payloads_list) > 0:
+                found = False
+                for index, data in enumerate(fetched_data_buffer):
+                    if data[0] % self.rollout_global_mesh_size == rank_in_mesh and (
+                        weight_version is None
+                        or self.data_fetched_for_each_policy_at_step[
+                            weight_version
+                        ].get(data[0] % self.policy_global_mesh_size, 0)
+                        < prompt_batch_per_replica
+                    ):
+                        payloads_list.append(data[1])
+                        if weight_version is not None:
+                            self.data_fetched_for_each_policy_at_step[weight_version][
+                                data[0] % self.policy_global_mesh_size
+                            ] = (
+                                self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ].get(data[0] % self.policy_global_mesh_size, 0)
+                                + 1
                             )
+                        found = True
+                        break
+                if found:
+                    del fetched_data_buffer[index]
+                else:
+                    break
+
+        while n - len(payloads_list) > 0:
+            for _ in range(math.ceil(n / batch_size)):
+                payload: RLPayload | None = None
+                try:
+                    idxs, payloads = _next_payload(iterator, add_answer)
+                except StopIteration:
+                    if not is_validation:
+                        self.epoch += 1
+                        if hasattr(self.train_sampler, "set_epoch"):
+                            # Here the epoch from 1 to total epoch count, not start from 0
+                            self.train_sampler.set_epoch(self.epoch)
+                        if self.epoch <= self.config.train.epoch:
+                            logger.info(f"[Controller] Epoch {self.epoch} start.")
+                            iterator = iter(self.train_dataloader)
+                            self.train_dataloader_iter = iterator
+
+                            idxs, payloads = _next_payload(iterator, add_answer)
+                        else:
+                            if self.epoch == self.config.train.epoch + 1:
+                                # We only log this all finished information once.
+                                logger.info(
+                                    "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
+                                )
+                            is_end = True
+                            break
+                    else:
                         is_end = True
                         break
-                else:
-                    is_end = True
-                    break
-            assert len(idxs) == len(payloads)
-            for idx, payload in zip(idxs, payloads):
-                idx = idx.item() if isinstance(idx, torch.Tensor) else idx
-                if self.config.train.local_dataset:
-                    # If local dataset is enabled, we set prompt to None. And rollout worker will query
-                    # the prompt from local dataset.
-                    payload.prompt = None
-                    payload.conversation = None
-                    if not self.config.rollout.multi_turn_config.enable:
-                        # For non-multi-turn rollout, we set reference answer to None.
-                        payload.reference_answer = None
-
-                payloads_list.append(payload)
-
+                assert len(idxs) == len(payloads)
+                for idx, payload in zip(idxs, payloads):
+                    idx = idx.item() if isinstance(idx, torch.Tensor) else idx
+                    if self.config.train.local_dataset:
+                        # If local dataset is enabled, we set prompt to None. And rollout worker will query
+                        # the prompt from local dataset.
+                        payload.prompt = None
+                        payload.conversation = None
+                        if not self.config.rollout.multi_turn_config.enable:
+                            # For non-multi-turn rollout, we set reference answer to None.
+                            payload.reference_answer = None
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                        assert (
+                            rank_in_mesh is not None
+                        ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        if (
+                            idx % self.rollout_global_mesh_size == rank_in_mesh
+                            and (
+                                weight_version is None
+                                or self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ].get(idx % self.policy_global_mesh_size, 0)
+                                < prompt_batch_per_replica
+                            )
+                            and len(payloads_list) < n
+                        ):
+                            payloads_list.append(payload)
+                            if weight_version is not None:
+                                self.data_fetched_for_each_policy_at_step[
+                                    weight_version
+                                ][idx % self.policy_global_mesh_size] = (
+                                    self.data_fetched_for_each_policy_at_step[
+                                        weight_version
+                                    ].get(idx % self.policy_global_mesh_size, 0)
+                                    + 1
+                                )
+                        else:
+                            # For data_dispatch_as_rank_in_mesh, we store the fetched data into the buffer if not suitable for current rank_in_mesh.
+                            fetched_data_buffer.append((idx, payload))
+                    else:
+                        payloads_list.append(payload)
+            if (
+                is_end
+                or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+            ):
+                break
+        # For data_dispatch_as_rank_in_mesh, we only allow is_end to be True when there is no more data suitable for current rank_in_mesh.
+        is_end = is_end and (
+            len(fetched_data_buffer) == 0
+            or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+        )
+        if is_validation:
+            self.fetched_data_buffer_for_validation = fetched_data_buffer
+        else:
+            self.fetched_data_buffer = fetched_data_buffer
         return payloads_list, is_end
 
     def validation_activate_dataloader(self, validation_step: int):
@@ -518,6 +669,17 @@ class WorkerDataFetcher(DataFetcherBase):
                 )
                 logger.info(
                     "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                )
+            elif not self.config.validation.dataset.name:
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
+                self.val_dataset = CosmosValidationDataset(
+                    config=self.config,
+                    val_set=self.val_dataset,
                 )
             else:
                 self.val_dataset = CosmosValidationDataset(config=self.config)

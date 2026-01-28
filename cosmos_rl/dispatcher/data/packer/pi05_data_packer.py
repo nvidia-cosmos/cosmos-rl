@@ -156,8 +156,8 @@ class PI05DataPacker(BaseDataPacker):
             images=trajectory["images"].to(device),
             image_masks=trajectory["image_masks"].to(device),
             states=trajectory["states"].to(device),
-            tokenized_prompt=trajectory["tokenized_prompt"].to(device),
-            tokenized_prompt_mask=trajectory["tokenized_prompt_mask"].to(device),
+            tokenized_prompt=trajectory["input_ids"].to(device),
+            tokenized_prompt_mask=trajectory["attention_mask"].to(device),
             old_log_probs=trajectory["old_log_probs"].to(device),
         )
 
@@ -292,8 +292,8 @@ class PI05DataPacker(BaseDataPacker):
             "images": images,
             "image_masks": image_masks,
             "states": states,
-            "tokenized_prompt": tokenized_prompt,
-            "tokenized_prompt_mask": tokenized_prompt_mask,
+            "input_ids": tokenized_prompt,
+            "attention_mask": tokenized_prompt_mask,
             "old_log_probs": old_log_probs,
             "logprob_masks": logprob_masks,
         }

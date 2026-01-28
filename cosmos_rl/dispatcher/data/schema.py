@@ -76,7 +76,8 @@ class RLPayload(BaseModel):
     # In tensor native, video, or any other mode, it can be a list of any type of objects.
     # The object type can be defined by the `rollout_generation` implementation.
     # For non-text objects, it will be converted by the `get_rollout_output` of `data_packer` into final serializable format.
-    completions: Optional[List[Union[str, Any]]] = Field(
+    # The Any type is to support a torch tensor with shape (B, ...) for batch generation.
+    completions: Optional[Union[List[Union[str, Any]], Any]] = Field(
         default=None,
         description="The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.",
     )
@@ -109,22 +110,35 @@ class RLPayload(BaseModel):
         default=None, description="The filter reward for each completion."
     )
 
-    completion_token_ids: Optional[List[List[int]]] = Field(
-        default=None, description="The token ids of each completion."
+    completion_token_ids: Optional[List[List[List[int]]]] = Field(
+        default=None,
+        description="The token ids of each completion considering top-k tokens at each position.",
     )
 
-    completion_logprobs: Optional[List[List[float]]] = Field(
-        default=None, description="The logprobs of each completion."
+    completion_logprobs: Optional[List[List[List[float]]]] = Field(
+        default=None,
+        description="The logprobs of each completion considering top-k tokens at each position.",
     )
 
-    prompt_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of the input prompt."
+    prompt_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of the input prompt considering top-k tokens at each position.",
+    )
+
+    prompt_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of the input prompt considering top-k tokens at each position.",
     )
 
     # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
     cumulative_logprob: Optional[List[float]] = Field(
         default=None,
         description="The cumulative logprob of the generated completions which indicates the total probability of the generated completions.",
+    )
+
+    extra_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The extra information returned by the rollout engine.",
     )
 
     report_metrics: Optional[List[Dict[str, Any]]] = Field(
@@ -176,7 +190,7 @@ class Rollout(BaseModel):
         default="", description="The uuid of the teacher result."
     )
 
-    teacher_logprobs: Optional[List[float]] = Field(
+    teacher_logprobs: Optional[List[List[float]]] = Field(
         default=None, description="The logprobs of the teacher for the current rollout."
     )
 
@@ -198,16 +212,29 @@ class Rollout(BaseModel):
         default=0.0, description="The filter reward for the rollout."
     )
 
-    completion_token_ids: Optional[List[int]] = Field(
-        default=None, description="The token ids of current rollout's completion."
+    completion_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of current rollout's completion considering top-k tokens at each position.",
     )
 
-    completion_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of current rollout's completion."
+    completion_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of current rollout's completion considering top-k tokens at each position.",
     )
 
-    prompt_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of the input prompt."
+    prompt_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of the input prompt considering top-k tokens at each position.",
+    )
+
+    prompt_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of the input prompt considering top-k tokens at each position.",
+    )
+
+    extra_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The extra information returned by the rollout engine.",
     )
 
     weight_version: int = Field(
