@@ -383,7 +383,6 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
         worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
-        worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
