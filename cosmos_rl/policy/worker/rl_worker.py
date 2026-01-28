@@ -100,7 +100,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             global_rank=self.global_rank,
             api_client=self.api_client,
         )
-        self.rollouts_comm = {}
         self.kv_store = dist_util.DistKVStore(
             group=dist.distributed_c10d._get_default_group(),
             master_rank=0,
@@ -122,8 +121,6 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.fetch_rollouts_thread = None
 
         atexit.register(self.handle_shutdown)
-
-        self.p2r_nccl_uuids = {}
 
         # Flag for determining if the current replica is the master replica,
         # The master replica needs to:
