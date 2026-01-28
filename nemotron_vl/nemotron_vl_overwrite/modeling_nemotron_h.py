@@ -41,8 +41,6 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import (
     is_causal_conv1d_available,
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
     is_mamba_2_ssm_available,    
 )
 from .configuration_nemotron_h import NemotronHConfig
@@ -69,9 +67,6 @@ if is_causal_conv1d_available():
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 else:
     causal_conv1d_update, causal_conv1d_fn = None, None
-
-if is_flash_attn_2_available():
-    from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 is_fast_path_available = all(
     (
@@ -172,111 +167,112 @@ def apply_mask_to_padding_states(hidden_states, attention_mask):
 
 # Copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/jamba/modeling_jamba.py
 class HybridMambaAttentionDynamicCache(DynamicCache):
-    """
-    A dynamic cache that can handle both the attention cache (which has a seq_len dimension) and the mamba cache
-    (which has a constant shape regardless of seq_len).
-
-    This cache has two sets of lists of tensors: `key_cache` and `value_cache` for attention cache and `conv_states`
-    and `ssm_states` for mamba cache. Each of these lists has `num_layers` tensors. The expected shape for each tensor
-    For attention layers, `key_cache` and `value_cache` have a shape of `(batch_size, num_heads, seq_len, head_dim)`,
-    while `conv_states` and `ssm_states` have a shape of `(batch_size, 0)` (empty tensors).
-    For mamba layers, `key_cache` and `value_cache` have a shape of `(batch_size, 0)` (empty tensors),
-    while `conv_states` represents the convolution state and has a shape of `(batch_size, d_inner, d_conv)`,
-    and `ssm_states` represents the ssm state and has a shape of `(batch_size, d_inner, d_state)`.
-    """
-
     def __init__(self, config, batch_size, dtype=torch.float16, device=None):
         super().__init__()
         self.dtype = dtype
         self.hybrid_override_pattern = config.hybrid_override_pattern
         self.has_previous_state = False  # only used by mamba
-        intermediate_size = config.mamba_num_heads * config.mamba_head_dim
-        ssm_state_size = config.ssm_state_size
-        conv_kernel_size = config.conv_kernel
+        self.transformer_layers = []
+
+        # Needed by mixer code
+        self.conv_kernel_size = config.conv_kernel
+
+        # Mamba dimensions
+        self.num_heads = config.mamba_num_heads
+        self.head_dim = config.mamba_head_dim
+        self.intermediate_size = self.num_heads * self.head_dim
+        self.ssm_state_size = config.ssm_state_size
+        self.n_groups = config.n_groups
+
+        # conv_dim = intermediate + 2 * (groups * state)
+        self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
+
         self.conv_states = []
         self.ssm_states = []
-        self.transformer_layers = []
+
         for i in range(config.num_hidden_layers):
             if self.hybrid_override_pattern[i] == "M":
-                # Mamba layer
-                self.conv_states += [
-                    torch.zeros(batch_size, intermediate_size, conv_kernel_size, device=device, dtype=dtype)
-                ]
-                self.ssm_states += [
-                    torch.zeros(batch_size, intermediate_size, ssm_state_size, device=device, dtype=dtype)
-                ]
+                # conv_states: [B, conv_dim, conv_kernel]
+                self.conv_states.append(
+                    torch.zeros(batch_size, self.conv_dim, self.conv_kernel_size, device=device, dtype=dtype)
+                )
+                # ssm_states: [B, nheads, headdim, d_state]
+                self.ssm_states.append(
+                    torch.zeros(batch_size, self.num_heads, self.head_dim, self.ssm_state_size, device=device, dtype=dtype)
+                )
             else:
-                # Attention or MLP layer
-                self.conv_states += [torch.tensor([[]] * batch_size, device=device)]
-                self.ssm_states += [torch.tensor([[]] * batch_size, device=device)]
+                # Attention/MLP layers: keep empty tensors
+                self.conv_states.append(torch.empty(batch_size, 0, device=device))
+                self.ssm_states.append(torch.empty(batch_size, 0, device=device))
                 self.transformer_layers.append(i)
 
-        self.key_cache = [torch.tensor([[]] * batch_size, device=device) for _ in range(config.num_hidden_layers)]
-        self.value_cache = [torch.tensor([[]] * batch_size, device=device) for _ in range(config.num_hidden_layers)]
+        # Attention caches
+        self.key_cache = [torch.empty(batch_size, 0, device=device) for _ in range(config.num_hidden_layers)]
+        self.value_cache = [torch.empty(batch_size, 0, device=device) for _ in range(config.num_hidden_layers)]
 
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Update the cache
-        if self.key_cache[layer_idx].shape[-1] == 0:
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        # Attention KV update: concat on seq dim=2 (B, H, S, D)
+        if self.key_cache[layer_idx].numel() == 0:
             self.key_cache[layer_idx] = key_states
             self.value_cache[layer_idx] = value_states
         else:
             self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=2)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=2)
-
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
-        """Reorders the cache for beam search, given the selected beam indices."""
         for layer_idx in range(len(self.key_cache)):
-            device = self.key_cache[layer_idx].device
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
-            device = self.value_cache[layer_idx].device
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
+            if self.key_cache[layer_idx].numel() != 0:
+                device = self.key_cache[layer_idx].device
+                self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
+            if self.value_cache[layer_idx].numel() != 0:
+                device = self.value_cache[layer_idx].device
+                self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
 
-            device = self.conv_states[layer_idx].device
-            self.conv_states[layer_idx] = self.conv_states[layer_idx].index_select(0, beam_idx.to(device))
-            device = self.ssm_states[layer_idx].device
-            self.ssm_states[layer_idx] = self.ssm_states[layer_idx].index_select(0, beam_idx.to(device))
+            if self.conv_states[layer_idx].numel() != 0:
+                device = self.conv_states[layer_idx].device
+                self.conv_states[layer_idx] = self.conv_states[layer_idx].index_select(0, beam_idx.to(device))
+            if self.ssm_states[layer_idx].numel() != 0:
+                device = self.ssm_states[layer_idx].device
+                self.ssm_states[layer_idx] = self.ssm_states[layer_idx].index_select(0, beam_idx.to(device))
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        # take any layer that contains cache and not empty tensor
         layer_idx = self.transformer_layers[0] if layer_idx not in self.transformer_layers else layer_idx
-        if len(self.key_cache) <= layer_idx:
+        if len(self.key_cache) <= layer_idx or self.key_cache[layer_idx].numel() == 0:
             return 0
         return self.key_cache[layer_idx].shape[-2]
 
-    def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
-        raise NotImplementedError("HybridMambaAttentionDynamicCache does not have a legacy cache equivalent.")
-
-    @classmethod
-    def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "DynamicCache":
-        raise NotImplementedError("HybridMambaAttentionDynamicCache does not have a legacy cache equivalent.")
-
-    # Copied from modeling_mamba2.py
-    def update_conv_state(
-        self, layer_idx: int, new_conv_state: torch.Tensor, cache_init: bool = False
-    ) -> torch.Tensor:
+    def update_conv_state(self, layer_idx: int, new_conv_state: torch.Tensor, cache_init: bool = False):
+        # conv_states[layer]: [B, conv_dim, conv_kernel]
         if cache_init:
-            self.conv_states[layer_idx] = new_conv_state.to(self.conv_states.device)
+            self.conv_states[layer_idx] = new_conv_state.to(device=self.conv_states[layer_idx].device, dtype=self.conv_states[layer_idx].dtype)
         else:
-            self.conv_states[layer_idx] = self.conv_states[layer_idx].roll(shifts=-1, dims=-1)
-            self.conv_states[layer_idx][:, :, -1] = new_conv_state[:, 0, :].to(self.conv_states.device)
+            cs = self.conv_states[layer_idx]
+            cs = cs.roll(shifts=-1, dims=-1)
+            # new_conv_state in single-step path is [B, 1, conv_dim] or [B, conv_dim] depending on caller;
+            # normalize to [B, conv_dim]
+            if new_conv_state.dim() == 3:
+                new_last = new_conv_state[:, 0, :]
+            else:
+                new_last = new_conv_state
+            cs[:, :, -1] = new_last.to(device=cs.device, dtype=cs.dtype)
+            self.conv_states[layer_idx] = cs
         return self.conv_states[layer_idx]
 
     def update_ssm_state(self, layer_idx: int, new_ssm_state: torch.Tensor):
-        self.ssm_states[layer_idx] = new_ssm_state.to(self.ssm_states.device)
+        self.ssm_states[layer_idx] = new_ssm_state.to(device=self.ssm_states[layer_idx].device, dtype=self.ssm_states[layer_idx].dtype)
         return self.ssm_states[layer_idx]
 
     def reset(self):
-        self.conv_states.zero_()
-        self.ssm_states.zero_()
+        for i in range(len(self.conv_states)):
+            if self.conv_states[i].numel() != 0:
+                self.conv_states[i].zero_()
+            if self.ssm_states[i].numel() != 0:
+                self.ssm_states[i].zero_()
+        for i in range(len(self.key_cache)):
+            self.key_cache[i] = self.key_cache[i].new_empty(self.key_cache[i].shape[0], 0)
+            self.value_cache[i] = self.value_cache[i].new_empty(self.value_cache[i].shape[0], 0)
+
 
 class MambaRMSNormGated(torch.nn.Module):
     def __init__(self, hidden_size, group_size, eps=1e-5):
@@ -371,7 +367,7 @@ class NemotronHMamba2Mixer(nn.Module):
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
-        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
+        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
@@ -390,16 +386,28 @@ class NemotronHMamba2Mixer(nn.Module):
         ) // 2
 
         # Single step calculations via cache
-        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
-            _, _, gate, hidden_states_B_C, dt = projected_states.squeeze(1).split(
+        if (
+            past_key_values is not None
+            and cache_position is not None
+            and cache_position[0] > 0
+            and hidden_states.shape[1] == 1   # <-- critical
+        ):
+            # projected_states: (B, S, proj)
+            if projected_states.dim() == 3:
+                projected_step = projected_states[:, -1, :]   # (B, proj)  <-- FORCE ONE TOKEN
+            else:
+                projected_step = projected_states
+
+            _, _, gate, hidden_states_B_C, dt = projected_step.split(
                 [d_mlp, d_mlp, self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
             )
 
-            # 2. Convolution sequence transformation
+            # causal_conv1d_update expects x: (B, dim) or (B, dim, seqlen)
+            # We pass (B, dim)
             hidden_states_B_C = causal_conv1d_update(
-                hidden_states_B_C,
-                cache_params.conv_states[self.layer_idx],
-                self.conv1d.weight.squeeze(1),
+                hidden_states_B_C,            # (B, conv_dim)
+                past_key_values.conv_states[self.layer_idx],                  # (B, conv_dim, k)
+                self.conv1d.weight.squeeze(1),                            # (conv_dim, k)
                 self.conv1d.bias,
                 self.activation,
             )
@@ -420,7 +428,7 @@ class NemotronHMamba2Mixer(nn.Module):
             C = C.view(batch_size, self.n_groups, C.shape[1] // self.n_groups)
             hidden_states_reshaped = hidden_states.view(batch_size, self.num_heads, self.head_dim)
             hidden_states = selective_state_update(
-                cache_params.ssm_states[self.layer_idx],
+                past_key_values.ssm_states[self.layer_idx],
                 hidden_states_reshaped,
                 dt,
                 A,
@@ -443,7 +451,7 @@ class NemotronHMamba2Mixer(nn.Module):
             dt_limit_kwargs = {} if self.time_step_limit == (0.0, float("inf")) else {"dt_limit": self.time_step_limit}
 
             # 2-4. Fused kernel for conv1d, SSM, and the final projection
-            if self.training and cache_params is None:
+            if self.training and past_key_values is None:
                 out = mamba_split_conv1d_scan_combined(
                     projected_states,
                     self.conv1d.weight.squeeze(1),
@@ -472,13 +480,13 @@ class NemotronHMamba2Mixer(nn.Module):
 
                 # 2. Convolution sequence transformation
                 # Init cache
-                if cache_params is not None:
+                if past_key_values is not None:
                     hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)
                     conv_states = nn.functional.pad(
                         hidden_states_B_C_transposed,
-                        (cache_params.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0),
+                        (past_key_values.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0),
                     )
-                    cache_params.update_conv_state(
+                    past_key_values.update_conv_state(
                         layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True
                     )
 
@@ -518,8 +526,8 @@ class NemotronHMamba2Mixer(nn.Module):
                 )
 
                 # Init cache
-                if ssm_state is not None and cache_params is not None:
-                    cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
+                if ssm_state is not None and past_key_values is not None:
+                    past_key_values.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
 
                 scan_output = scan_output.view(batch_size, seq_len, -1)
 
@@ -531,7 +539,7 @@ class NemotronHMamba2Mixer(nn.Module):
         return out
 
     # fmt: off
-    def torch_forward(self, input_states, cache_params: Optional[HybridMambaAttentionDynamicCache]=None, cache_position:Optional[torch.LongTensor]=None, attention_mask: Optional[torch.Tensor]=None):
+    def torch_forward(self, input_states, past_key_values: Optional[HybridMambaAttentionDynamicCache]=None, cache_position:Optional[torch.LongTensor]=None, attention_mask: Optional[torch.Tensor]=None):
         batch_size, seq_len, _ = input_states.shape
         dtype = input_states.dtype
 
@@ -544,11 +552,11 @@ class NemotronHMamba2Mixer(nn.Module):
         )
 
         # 2. Convolution sequence transformation
-        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
-            cache_params.update_conv_state(layer_idx=self.layer_idx, new_conv_state=hidden_states_B_C, cache_init=False)
+        if past_key_values is not None and cache_position is not None and cache_position[0] > 0:
+            past_key_values.update_conv_state(layer_idx=self.layer_idx, new_conv_state=hidden_states_B_C, cache_init=False)
 
             # We need to guarantee that anything regarding the cache is on the same device
-            conv_states = cache_params.conv_states[self.layer_idx].to(device=self.conv1d.weight.device)
+            conv_states = past_key_values.conv_states[self.layer_idx].to(device=self.conv1d.weight.device)
 
             hidden_states_B_C = torch.sum(
                 conv_states * self.conv1d.weight.squeeze(1), dim=-1
@@ -558,12 +566,12 @@ class NemotronHMamba2Mixer(nn.Module):
             hidden_states_B_C = self.act(hidden_states_B_C)
         else:
             # Init cache
-            if cache_params is not None:
+            if past_key_values is not None:
                 hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)
                 conv_states = nn.functional.pad(
-                    hidden_states_B_C_transposed, (cache_params.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0)
+                    hidden_states_B_C_transposed, (past_key_values.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0)
                 )
-                cache_params.update_conv_state(layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True)
+                past_key_values.update_conv_state(layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True)
 
             hidden_states_B_C = self.act(self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2))
 
@@ -576,9 +584,9 @@ class NemotronHMamba2Mixer(nn.Module):
 
         # 3. SSM transformation
         A = -torch.exp(self.A_log.float())                            # [num_heads]
-        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
+        if past_key_values is not None and cache_position is not None and cache_position[0] > 0:
             # We need to guarantee that anything regarding the cache is on the same device
-            cache_device = cache_params.ssm_states.device
+            cache_device = past_key_values.ssm_states[self.layer_idx].device
 
             # Note: there is no need to pad parameter matrices here, as there is just one new token
             # for batched generation
@@ -608,9 +616,9 @@ class NemotronHMamba2Mixer(nn.Module):
             dBx = (dB * hidden_states[..., None]).to(device=cache_device)
 
             # State calculation
-            cache_params.update_ssm_state(
+            past_key_values.update_ssm_state(
                 layer_idx=self.layer_idx,
-                new_ssm_state=cache_params.ssm_states[self.layer_idx] * dA + dBx
+                new_ssm_state=past_key_values.ssm_states[self.layer_idx] * dA + dBx
             )
 
             # Subsequent output
@@ -620,7 +628,7 @@ class NemotronHMamba2Mixer(nn.Module):
             C = C.reshape(batch_size, -1, C.shape[-1])
             # [bsz, num_heads, head_dim]
 
-            ssm_states = cache_params.ssm_states[self.layer_idx].to(device=C.device, dtype=C.dtype)  # Shape: [b, h, d, n]
+            ssm_states = past_key_values.ssm_states[self.layer_idx].to(device=C.device, dtype=C.dtype)  # Shape: [b, h, d, n]
             # Reshape ssm_states to merge the first two dimensions
             ssm_states_reshaped = ssm_states.view(batch_size * self.num_heads, self.head_dim, self.ssm_state_size)  # Shape: [b*h, d, n]
             C_reshaped = C.view(batch_size * self.num_heads, self.ssm_state_size, 1)  # Shape: [b*h, n, 1]
@@ -681,8 +689,8 @@ class NemotronHMamba2Mixer(nn.Module):
 
             # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
             # (middle term of factorization of off-diag blocks; A terms)
-            if cache_params is not None and cache_position is not None and cache_position[0] > 0:
-                previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
+            if past_key_values is not None and cache_position is not None and cache_position[0] > 0:
+                previous_states = past_key_values.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
             else:
                 previous_states = torch.zeros_like(states[:, :1])
             states = torch.cat([previous_states, states], dim=1)
@@ -710,8 +718,8 @@ class NemotronHMamba2Mixer(nn.Module):
             y = y.reshape(batch_size, seq_len, -1)
 
             # Init cache
-            if ssm_state is not None and cache_params is not None:
-                cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
+            if ssm_state is not None and past_key_values is not None:
+                past_key_values.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
 
         scan_output = self.norm(y, gate)
 
@@ -725,18 +733,18 @@ class NemotronHMamba2Mixer(nn.Module):
     def forward(
         self,
         hidden_states,
-        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
+        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
-            return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
+            return self.cuda_kernels_forward(hidden_states, past_key_values, cache_position, attention_mask)
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
             hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
 
-        return self.torch_forward(hidden_states, cache_params, cache_position, attention_mask)
+        return self.torch_forward(hidden_states, past_key_values, cache_position, attention_mask)
 
 
 class NemotronHRMSNorm(nn.Module):
@@ -780,7 +788,7 @@ class NemotronHBlock(nn.Module):
     def forward(
         self,
         hidden_states,
-        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
+        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
@@ -796,13 +804,16 @@ class NemotronHBlock(nn.Module):
 
             if self.block_type == "mamba":
                 hidden_states = self.mixer(
-                    hidden_states, cache_params=cache_params, cache_position=cache_position
+                    hidden_states, past_key_values=past_key_values, cache_position=cache_position, attention_mask=attention_mask
                 )
             elif self.block_type == "attention":
-                hidden_states = self.mixer(
-                    hidden_states, cache_position=cache_position, position_embeddings=position_embeddings
+                attn_out, _ = self.mixer(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    attention_mask=attention_mask,
+                    past_key_value=past_key_values,   # <-- critical
                 )
-                hidden_states = hidden_states[0]
+                hidden_states = attn_out
             elif self.block_type in ["mlp", "moe"]:
                 moe_results = self.mixer(
                     hidden_states, padding_mask=padding_mask,
@@ -909,7 +920,7 @@ class NemotronHTopkRouter(nn.Module):
         self.norm_topk_prob = config.norm_topk_prob
 
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, config.hidden_size) , dtype=torch.float32))
-        self.register_buffer("e_score_correction_bias", torch.zeros(self.n_routed_experts, dtype=torch.float32))
+        self.e_score_correction_bias = nn.Parameter(torch.zeros(self.n_routed_experts, dtype=torch.float32, requires_grad=False))
 
     @torch.no_grad()
     def get_topk_indices(self, scores):
@@ -1232,7 +1243,7 @@ class NemotronHOutput(ModelOutput):
     Args:
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
             Sequence of hidden-states at the output of the last layer of the model.
-        cache_params (`HybridMambaAttentionDynamicCache`):
+        past_key_values (`HybridMambaAttentionDynamicCache`):
             The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
             avoid providing the old `input_ids`.
 
@@ -1245,7 +1256,7 @@ class NemotronHOutput(ModelOutput):
     """
 
     last_hidden_state: Optional[torch.FloatTensor] = None
-    cache_params: Optional[HybridMambaAttentionDynamicCache] = None
+    past_key_values: Optional[HybridMambaAttentionDynamicCache] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     aux_loss: Optional[torch.FloatTensor] = None
@@ -1262,7 +1273,7 @@ class NemotronHCausalLMOutput(ModelOutput):
             Language modeling loss (for next-token prediction).
         logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
             Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        cache_params (`HybridMambaAttentionDynamicCache`):
+        past_key_values (`HybridMambaAttentionDynamicCache`):
             The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
             avoid providing the old `input_ids`.
 
@@ -1277,7 +1288,7 @@ class NemotronHCausalLMOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     aux_loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
-    cache_params: Optional[HybridMambaAttentionDynamicCache] = None
+    past_key_values: Optional[HybridMambaAttentionDynamicCache] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
@@ -1303,7 +1314,7 @@ NEMOTRONH_INPUTS_DOCSTRING = r"""
         input_ids (`torch.LongTensor` of shape `(batch_size, input_ids_length)`, *optional*):
             Indices of input sequence tokens in the vocabulary.
 
-            If `cache_params.seqlen_offset>0`, only `input_ids` that do not have their past calculated should be passed as
+            If `past_key_values.seqlen_offset>0`, only `input_ids` that do not have their past calculated should be passed as
             `input_ids`.
 
             Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
@@ -1316,11 +1327,11 @@ NEMOTRONH_INPUTS_DOCSTRING = r"""
             model's internal embedding lookup matrix.
         position_ids (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Indices of positions of each input sequence tokens in the position embeddings.
-        cache_params (`HybridMambaAttentionDynamicCache`, *optional*):
+        past_key_values (`HybridMambaAttentionDynamicCache`, *optional*):
             If passed along, the model uses the previous state in all the blocks (which will give the output for the
             `input_ids` provided as if the model add `state_input_ids + input_ids` as context).
         use_cache (`bool`, *optional*):
-            If set to `True`, the `cache_params` is returned and can be used to quickly generate the next logits.
+            If set to `True`, the `past_key_values` is returned and can be used to quickly generate the next logits.
         output_attentions (`bool`, *optional*):
             Whether or not to return the attentions tensors of all attention layers.
         output_hidden_states (`bool`, *optional*):
@@ -1330,7 +1341,7 @@ NEMOTRONH_INPUTS_DOCSTRING = r"""
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         cache_position (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             The position of the current input in the cache. This is used to ensure that the cache is correctly updated.
-            If `cache_params` is passed, `cache_position` should also be passed.
+            If `past_key_values` is passed, `cache_position` should also be passed.
         attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
 
@@ -1381,7 +1392,7 @@ class NemotronHModel(NemotronHPreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
+        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1399,7 +1410,7 @@ class NemotronHModel(NemotronHPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
+        if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         # TODO(jiaxinc): Hardcode here since it is not consistent between `config.json` and `tokenizer_config.json`
@@ -1416,7 +1427,7 @@ class NemotronHModel(NemotronHPreTrainedModel):
             use_cache = False
 
         # From zamba_modeling.py
-        if use_cache and cache_params is None:
+        if use_cache and past_key_values is None:
             logger.warning_once(
                 "NemotronH requires an initialized `NemotronHHybridDynamicCache` to return a cache. None was "
                 "provided, so no cache will be returned."
@@ -1458,12 +1469,12 @@ class NemotronHModel(NemotronHPreTrainedModel):
 
             if self.gradient_checkpointing and self.training:
                 hidden_states, local_aux_loss = self._gradient_checkpointing_func(
-                    mixer_block.__call__, hidden_states, cache_params, cache_position, layer_mask, position_embeddings, padding_mask,
+                    mixer_block.__call__, hidden_states, past_key_values, cache_position, layer_mask, position_embeddings, padding_mask,
                 )
             else:
                 hidden_states, local_aux_loss = mixer_block(
                     hidden_states,
-                    cache_params=cache_params,
+                    past_key_values=past_key_values,
                     cache_position=cache_position,
                     attention_mask=layer_mask,
                     position_embeddings=position_embeddings,
@@ -1488,11 +1499,11 @@ class NemotronHModel(NemotronHPreTrainedModel):
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, cache_params, all_hidden_states] if v is not None)
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states] if v is not None)
 
         return NemotronHOutput(
             last_hidden_state=hidden_states,
-            cache_params=cache_params if use_cache else None,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             aux_loss=aux_loss,
@@ -1594,41 +1605,59 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         use_cache=True,
         **kwargs,
     ):
-        # Copy from https://github.com/huggingface/transformers/blob/main/src/transformers/models/jamba/modeling_jamba.py
-        # Overwitten -- uses `cache_params` as opposed to `past_key_values`
+        """
+        Nemotron-H hybrid (Mamba + Attention) generation prep.
+
+        Key invariants for correctness:
+        - When cache exists, we must pass ONLY the new/unprocessed tokens.
+        - cache_position MUST be sliced to match the number of tokens we pass this step.
+        - position_ids (if provided/created) MUST be sliced to match the tokens we pass this step.
+        """
         empty_past_kv = past_key_values is None
 
-        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
-        # Exception 1: when passing input_embeds, input_ids may be missing entries
-        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
-        # Exception 3: with synced GPUs cache_position may go out of bounds, but we only want dummy token in that case.
-        #              (we can't check exception 3 while compiling)
+        # If we have cache: slice input_ids through cache_position to keep only unprocessed tokens.
+        # Exceptions:
+        #   1) inputs_embeds present: input_ids may not include the same number of tokens
+        #   2) some generation methods do their own slicing
+        #   3) with synced GPUs cache_position may go out of bounds (keep dummy token)
         if not empty_past_kv:
-            if (
-                inputs_embeds is not None  # Exception 1
-                or cache_position[-1] >= input_ids.shape[1]  # Exception 3
-            ):
+            if inputs_embeds is not None or (cache_position is not None and cache_position[-1] >= input_ids.shape[1]):
+                # Keep the last `len(cache_position)` tokens (or whatever fits)
                 input_ids = input_ids[:, -cache_position.shape[0] :]
-            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+            elif cache_position is not None and input_ids.shape[1] != cache_position.shape[0]:
+                # Default: pick only the positions in cache_position
                 input_ids = input_ids[:, cache_position]
         else:
+            # Initialize our hybrid cache container on first step
             past_key_values = HybridMambaAttentionDynamicCache(
                 self.config, input_ids.shape[0], self.dtype, device=self.device
             )
 
+        # Create position_ids from attention_mask if needed (HF standard behavior)
         if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if not empty_past_kv:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        # ---- enforce cache_position & position_ids alignment with sliced input_ids ----
+        if cache_position is not None and input_ids is not None:
+            # cache_position must have same token count as input_ids we are passing this step
+            if cache_position.numel() != input_ids.shape[1]:
+                cache_position = cache_position[-input_ids.shape[1] :]
+
+        if position_ids is not None and input_ids is not None:
+            # position_ids must have same token count as input_ids we are passing this step
+            if position_ids.shape[1] != input_ids.shape[1]:
+                position_ids = position_ids[:, -input_ids.shape[1] :]
+
+        # If inputs_embeds are passed, we only use them in the 1st generation step
         if inputs_embeds is not None and empty_past_kv:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-            model_inputs = {"input_ids": input_ids.contiguous()}  # `contiguous()` needed for compilation use cases
+            model_inputs = {"input_ids": input_ids.contiguous()}  # contiguous needed for compile-friendly paths
 
+        # IMPORTANT: our forward() expects cache under `past_key_values`, not `past_key_values`
         model_inputs.update(
             {
                 "position_ids": position_ids,
@@ -1640,7 +1669,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
             }
         )
         return model_inputs
-
+        
     @add_start_docstrings_to_model_forward(NEMOTRONH_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1652,7 +1681,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         input_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        cache_params: Optional[HybridMambaAttentionDynamicCache] = None,
+        past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1677,7 +1706,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
 
         nemotron_h_outputs = self.backbone(
             input_ids,
-            cache_params=cache_params,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -1711,7 +1740,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         return NemotronHCausalLMOutput(
             loss=loss,
             logits=logits,
-            cache_params=nemotron_h_outputs.cache_params,
+            past_key_values=nemotron_h_outputs.past_key_values,
             hidden_states=nemotron_h_outputs.hidden_states,
             attentions=nemotron_h_outputs.attentions,
             aux_loss=aux_loss,
