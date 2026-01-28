@@ -239,6 +239,7 @@ class P2RCollectiveManager:
         if self.rl_mode != "colocated_separated":
             logger.info("For non-colocated-separated mode, IPC setting is skipped.")
             return
+        logger.info(f"Setting up IPC for {self.role} side with mode {self.rl_mode}")
 
         if self.role != Role.ROLLOUT:
             # Policy initialization
