@@ -373,6 +373,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             )
             self.data_packer = DecoderOnlyLLMDataPacker()
             self.val_data_packer = self.data_packer
+            self.replica_name = str(uuid.uuid4())
 
         def dummy(self):
             pass
