@@ -31,7 +31,7 @@ import argparse
 import re
 import os
 import sys
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.network_util as network_util
 
@@ -48,10 +48,11 @@ def replica_placement(
     control_url: Optional[str] = None,
     script: Optional[str] = None,
 ) -> List[List[str]]:
-    commands = []
-    gpu_devices = []
-    control_urls = []
-    output_files = []
+    commands: List[str] = []
+    gpu_devices: List[Optional[str]] = []
+    control_urls: List[Optional[str]] = []
+    output_files: List[Optional[str]] = []
+    envs: List[Optional[Dict[str, str]]] = []
     assert len(available_gpus_per_node) in [
         1,
         2,
@@ -98,9 +99,11 @@ def replica_placement(
                     if output_dir is not None
                     else None
                 )
+                envs.append(None)
+
                 worker_commands = SingleWorkerCommands(global_worker_idx)
                 worker_commands.extend_commands(
-                    commands, gpu_devices, control_urls, output_files
+                    commands, gpu_devices, control_urls, output_files, envs
                 )
                 global_launch_settings.append(worker_commands)
 
@@ -108,17 +111,19 @@ def replica_placement(
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus_per_node)
         else:
             if gpu_idx + min_n_gpus > len(global_available_gpus[global_worker_idx]):
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
+                    [commands, gpu_devices, control_urls, output_files, envs]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus_per_node)
@@ -145,12 +150,17 @@ def replica_placement(
                 if output_dir is not None
                 else None
             )
+            envs.append(None)
             gpu_idx += min_n_gpus
 
     if len(commands) > 0:
         worker_commands = SingleWorkerCommands(global_worker_idx)
         worker_commands.extend_commands(
-            commands, gpu_devices, control_urls, output_files
+            commands,
+            gpu_devices,
+            control_urls,
+            output_files,
+            envs,
         )
         global_launch_settings.append(worker_commands)
 
@@ -158,6 +168,7 @@ def replica_placement(
         gpu_devices = []
         control_urls = []
         output_files = []
+        envs = []
 
     return global_launch_settings
 
