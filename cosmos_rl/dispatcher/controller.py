@@ -254,6 +254,7 @@ maxmemory-policy allkeys-lfu
         )
 
         is_sft = self.config.train.train_policy.type == "sft"
+        # Need to control the number of fetched prompts with the corresponding weight version when it's not validation step, not sft and not colocated mode.
         step_fetched_count_control = (
             not is_validation and not is_sft and not self.config.mode == "colocated"
         )
@@ -389,6 +390,7 @@ maxmemory-policy allkeys-lfu
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
                 if is_sft:
+                    # For SFT with multiple replicas, we need to set the weight version, epoch and remain_samples_num for the replica side control
                     payloads_list[
                         i
                     ].weight_version = self.policy_status_manager.current_step

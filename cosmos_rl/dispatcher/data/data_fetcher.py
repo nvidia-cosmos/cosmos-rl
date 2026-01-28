@@ -171,6 +171,7 @@ class ControllerDataFetcher(DataFetcherBase):
                 and self.val_dataset is None
                 and not self.config.validation.dataset.name
             ):
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
                 train_dataset, val_dataset = split_train_n_val_dataset(
                     self.dataset.train_set.dataset, self.config
                 )
@@ -670,6 +671,7 @@ class WorkerDataFetcher(DataFetcherBase):
                     "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                 )
             elif not self.config.validation.dataset.name:
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
                 train_dataset, val_dataset = split_train_n_val_dataset(
                     self.dataset.train_set.dataset, self.config
                 )

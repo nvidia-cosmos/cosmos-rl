@@ -365,6 +365,7 @@ class SFTTrainer(LLMTrainer):
         gradient clipping using the global grad norm.
         """
         if inter_policy_nccl is not None:
+            # Reduce gradients across all replicas for multiple replicas case
             for model_part in self.model_parts:
                 # Model part may use same physical mesh for different logical mesh,
                 # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`

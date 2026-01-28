@@ -150,6 +150,7 @@ def construct_dataset(
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
         else:
+            # Split train/val from training dataset if no val dataset and no val dataset name provided
             train_dataset, test_dataset = util.split_train_n_val_dataset(
                 train_dataset, cosmos_config
             )

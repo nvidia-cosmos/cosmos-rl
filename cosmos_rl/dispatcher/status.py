@@ -873,9 +873,11 @@ class PolicyStatusManager:
         total_steps: int,
     ):
         if "val/avg_loss" in report_data:
+            # This is a validation ack from SFT validation step
             self.set_status(replica_name, PolicyStatus.VALIDATED)
             if self.all_with_status([PolicyStatus.VALIDATED]):
                 # First validation ack received in this step
+                # Trigger validation report
                 self.sft_report_summary(
                     train_step=step,
                     total_steps=total_steps,
@@ -892,6 +894,7 @@ class PolicyStatusManager:
                 self.data_fetcher.validation_activate_dataloader(self.current_step)
         self.set_status(replica_name, PolicyStatus.REDUCED)
         if self.all_reduced():
+            # All replicas have been reduced, trigger remain_samples_num update and report
             self.remain_samples_num -= (
                 self.config.train.train_batch_per_replica
             ) * len(self.get_all_atoms_arrived_replicas())
@@ -917,6 +920,7 @@ class PolicyStatusManager:
         self.report_data_list.append(report_data)
 
         if self.config.train.train_policy.type == "sft":
+            # For SFT with multiple replicas, we handle train_ack differently
             return self.sft_train_ack(
                 replica_name,
                 report_data,
@@ -1183,6 +1187,8 @@ class PolicyStatusManager:
                 self.current_step % self.config.train.ckpt.save_freq == 0
                 and self.current_step > 0
             )
+        # Finally check if checkpointing is enabled
+        # Only `do_save` when checkpointing is enabled
         return do_save and self.config.train.ckpt.enable_checkpoint
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
@@ -1275,7 +1281,7 @@ class PolicyStatusManager:
                     total_steps=self.total_steps,
                     # `remain_samples_num` is just for checkpointing the training progress
                     remain_samples_num=self.remain_samples_num,
-                    # Only `do_save` when checkpointing is enabled
+                    # do_save from `check_checkpoint_saving` indicates whether the replica should save checkpoint after this training step
                     do_save=do_save,
                     redis_handler=self.redis_handler,
                 )

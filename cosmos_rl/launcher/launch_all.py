@@ -721,6 +721,7 @@ def main():
     ):
         n_rollouts = 0
         n_reference = 0
+        # Whether to allow n_policy > 1 for SFT training, if False, we will set n_policy to 1 and scale up dp_replicate_size accordingly
         allow_sft_multi_replica = True
         if n_policy > 1 and not allow_sft_multi_replica:
             logger.warning(

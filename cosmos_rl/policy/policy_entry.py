@@ -75,6 +75,7 @@ def policy_entry(**kwargs):
         custom_sft_dataset = kwargs.get("dataset")
         custom_sft_data_packer = kwargs.get("data_packer")
         if cosmos_config.policy.parallelism.n_init_replicas > 1:
+            # Use MultiReplicaSFTPolicyWorker for multiple replicas SFT case
             sft_worker_cls = MultiReplicaSFTPolicyWorker
         else:
             sft_worker_cls = SFTPolicyWorker
