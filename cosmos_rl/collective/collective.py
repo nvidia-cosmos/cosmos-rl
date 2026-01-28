@@ -31,13 +31,9 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils import network_util as net
-import cosmos_rl.utils.distributed as dist_util
-from cosmos_rl.collective.ipc_tensor import (
-    _SharedTensorRebuildMethodRegistry,
-    SharedTensorContainer,
-)
+from cosmos_rl.utils.ipc.tensor_util import tensor_ipc_serialize, tensor_ipc_deserialize
 
-_SharedTensorRebuildMethodRegistry.initialize()
+import cosmos_rl.utils.distributed as dist_util
 
 
 class P2RCollectiveManager:
@@ -260,7 +256,12 @@ class P2RCollectiveManager:
             if mesh_key not in self.ipc_comm_cache:
                 # FIXME: Temporarily use local ip and port, but we have to change this in production.
                 local_ip = net.get_local_ip()[0]
-                free_port = net.find_available_port(23000)
+                # To avoid conflict with other processes, we use a fixed port range.
+                port_range = 65535 - 23000
+                base_port_offset = port_range // self.world_size
+                start_port = 23000 + base_port_offset * p_rank
+                end_port = start_port + base_port_offset
+                free_port = net.find_available_port(start_port, end_port)
 
                 ipc_addr = f"tcp://{local_ip}:{free_port}"
                 # create zmq socket
@@ -364,8 +365,8 @@ class P2RCollectiveManager:
                     ipc_mesh_key in self.ipc_comm_cache
                 ), "IPC socket not found for mesh key: {ipc_mesh_key}"
                 socket = self.ipc_comm_cache[ipc_mesh_key]
-                shared_tensor = SharedTensorContainer.from_tensor(tensor)
-                socket.send_pyobj(shared_tensor.dump_to_dict())
+                ipc_data = tensor_ipc_serialize(tensor)
+                socket.send_pyobj(ipc_data)
             else:
                 # for the different device, we use NCCL
                 nccl_mesh_key = self.generate_mesh_key(
@@ -404,9 +405,8 @@ class P2RCollectiveManager:
                     ipc_mesh_key in self.ipc_comm_cache
                 ), "IPC socket not found for mesh key: {ipc_mesh_key}"
                 socket = self.ipc_comm_cache[ipc_mesh_key]
-                shared_tensor_dict = socket.recv_pyobj()
-                shared_tensor = SharedTensorContainer.from_dict(shared_tensor_dict)
-                tensor.copy_(shared_tensor.get_local_view())
+                ipc_data = socket.recv_pyobj()
+                tensor.copy_(tensor_ipc_deserialize(ipc_data).cuda())
             else:
                 # for the different device, we use NCCL
                 nccl_mesh_key = self.generate_mesh_key(
