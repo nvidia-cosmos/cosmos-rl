@@ -302,7 +302,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -330,7 +331,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -800,7 +802,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 daemon=True,
                 name="fetch_rollouts_thread",
             ).start()
-        if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+        if (
+            self.parallel_dims.pp_cp_tp_coord[0] == 0
+            and self.config.distillation.enable
+        ):
             # Initiate teacher interaction thread once for each same dp group
             self.teacher_interact_thread = threading.Thread(
                 target=self.teacher_interact_loop,

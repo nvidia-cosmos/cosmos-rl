@@ -131,6 +131,11 @@ class SFTDataConfig(BaseModel):
         default=0, description="random seed for dataloader shuffling"
     )
 
+    dataloader_batch_size: Optional[int] = Field(
+        default=1,
+        description="Batch size for each iteration of the dataloader for when fetch data from controller. This is only the setting of the dataloader iterator on the controller side.",
+    )
+
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",

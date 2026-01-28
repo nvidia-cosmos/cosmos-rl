@@ -1774,7 +1774,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if not is_validation and not self._prompt_queue.empty():
             first_payload: RLPayload = self._prompt_queue.queue[0][0]
             is_valid_prompt_for_current_weight_version = (
-                first_payload.weight_version <= self.current_weight_version
+                first_payload.weight_version
+                <= self.current_weight_version
+                + self.config.train.train_policy.allowed_outdated_steps
             )
             if not is_valid_prompt_for_current_weight_version:
                 return 0, False
