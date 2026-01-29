@@ -352,7 +352,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             sig = inspect.signature(batch_sampler)
             kwargs = {
-                "dataset": train_dataset,
+                "dataset": train_dataset.dataset,
                 "num_replicas": self.dp_world_size,
                 "rank": self.dp_rank,
                 "num_workers": self.config.train.train_policy.dataloader_num_workers,
@@ -459,7 +459,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             if isinstance(val_batch_sampler, Callable):
                 sig = inspect.signature(val_batch_sampler)
                 kwargs = {
-                    "dataset": val_dataset,
+                    "dataset": val_dataset.dataset,
                     "num_replicas": self.dp_world_size,
                     "rank": self.dp_rank,
                     "num_workers": self.config.train.train_policy.dataloader_num_workers,
