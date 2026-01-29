@@ -222,7 +222,7 @@ class ControllerDataFetcher(DataFetcherBase):
                 self.batch_sampler, Callable
             ):
                 self.batch_sampler = self.batch_sampler(
-                    dataset=self.dataset.train_set,
+                    dataset=self.dataset.train_set.dataset,
                     num_replicas=1,
                     rank=0,
                     num_workers=self.config.train.train_policy.dataloader_num_workers,
@@ -377,7 +377,7 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                     if isinstance(self.val_batch_sampler, Callable):
                         self.val_batch_sampler = self.val_batch_sampler(
-                            dataset=self.val_dataset.val_set,
+                            dataset=self.val_dataset.val_set.dataset,
                             num_replicas=1,
                             rank=0,
                             num_workers=self.config.train.train_policy.dataloader_num_workers,
