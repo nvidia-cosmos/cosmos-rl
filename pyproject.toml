@@ -106,7 +106,6 @@ vla = [
     "thop",
     "timm<1",
     "wandb>0.13.1",
-    "vllm>=0.8.5",
 ]
 
 rl = [
