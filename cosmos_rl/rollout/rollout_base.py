@@ -239,11 +239,15 @@ class RolloutRegistry:
 
     @classmethod
     def register(
-        x,
+        cls,
         rollout_type: str,
         *,
         allow_override: bool = False,
     ):
+        from cosmos_rl.utils.logging import logger
+
+        logger.info(f"Registering rollout backend: {rollout_type}")
+
         def decorator(cls: Type) -> Type:
             assert issubclass(
                 cls, RolloutBase
