@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import inspect
 import os
 import torch
 from typing import Optional, Union, Callable, Dict, Any
@@ -349,13 +350,20 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.train_sampler = train_sampler
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
-            batch_sampler = batch_sampler(
-                dataset=train_dataset.dataset,
-                num_replicas=self.dp_world_size,
-                rank=self.dp_rank,
-                num_workers=self.config.train.train_policy.dataloader_num_workers,
-                config=self.config,
-            )
+            sig = inspect.signature(batch_sampler)
+            kwargs = {
+                "dataset": train_dataset,
+                "num_replicas": self.dp_world_size,
+                "rank": self.dp_rank,
+                "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                "config": self.config,
+                "sampler": self.train_sampler,
+                "batch_size": self.config.train.train_batch_per_replica,
+                "drop_last": False,
+            }
+            # Filter kwargs to only those the function accepts
+            filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+            batch_sampler = batch_sampler(**filtered)
 
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
@@ -449,13 +457,21 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )
             if isinstance(val_batch_sampler, Callable):
-                val_batch_sampler = val_batch_sampler(
-                    dataset=val_dataset.dataset,
-                    num_replicas=self.dp_world_size,
-                    rank=self.dp_rank,
-                    num_workers=self.config.train.train_policy.dataloader_num_workers,
-                    config=self.config,
-                )
+                sig = inspect.signature(val_batch_sampler)
+                kwargs = {
+                    "dataset": val_dataset,
+                    "num_replicas": self.dp_world_size,
+                    "rank": self.dp_rank,
+                    "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                    "config": self.config,
+                    "sampler": val_sampler,
+                    "batch_size": self.config.validation.batch_size
+                    or self.config.train.train_batch_per_replica,
+                    "drop_last": False,
+                }
+                # Filter kwargs to only those the function accepts
+                filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                val_batch_sampler = val_batch_sampler(**filtered)
             self.val_data_loader = DataLoader(
                 val_dataset,
                 num_workers=self.config.train.train_policy.dataloader_num_workers,
