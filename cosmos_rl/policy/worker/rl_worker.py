@@ -143,8 +143,8 @@ class RLPolicyWorker(PolicyWorkerBase):
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         # setup data packer first
         self.init_data_packer(
