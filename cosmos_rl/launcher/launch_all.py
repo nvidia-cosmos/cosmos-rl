@@ -808,11 +808,15 @@ def main():
     else:
         n_reference = args.reference
 
-    # If the training type is SFT, set n_rollouts to 0
-    if (
+    rl_mode = cosmos_config.get("mode", "disaggregated")
+    is_colocated = rl_mode in ["colocated", "colocated_separated"]
+    is_sft = (
         cosmos_config.get("train", {}).get("train_policy", {}).get("type", "grpo")
         == "sft"
-    ):
+    )
+
+    # If the training type is SFT, set n_rollouts to 0
+    if is_sft:
         n_rollouts = 0
         n_reference = 0
         # Whether to allow n_policy > 1 for SFT training, if False, we will set n_policy to 1 and scale up dp_replicate_size accordingly
@@ -830,11 +834,9 @@ def main():
             )
             min_n_gpus_policy = min_n_gpus_policy * n_policy
             n_policy = 1
+
     if not cosmos_config.get("distillation", {}).get("enable", False):
         n_reference = 0
-
-    rl_mode = cosmos_config.get("mode", "disaggregated")
-    is_colocated = rl_mode in ["colocated", "colocated_separated"]
 
     if is_colocated:
         assert (

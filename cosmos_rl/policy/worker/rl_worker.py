@@ -348,7 +348,15 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+        assert command.src_replica_size == self.world_size
+        if not command.src_replica_name == self.replica_name:
+            logger.error(
+                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+            )
+            return False
+
         self.p2r_collective_manager.setup_manager(command)
+
         assert (
             self.trainer.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."

@@ -983,6 +983,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         load_format = "auto" if is_for_weight_resume else "dummy"
         self.lazy_initialize_rollout_engine(load_format)
 
+        if command.dst_replica_name != self.replica_name:
+            return
+
         self.p2r_collective_manager.setup_manager(command)
 
         comm_id = None

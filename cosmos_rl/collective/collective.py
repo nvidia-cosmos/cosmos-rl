@@ -237,9 +237,7 @@ class P2RCollectiveManager:
 
     def _setup_ipc(self, command: PolicyToRolloutUnicastCommand):
         if self.rl_mode != "colocated_separated":
-            logger.info("For non-colocated-separated mode, IPC setting is skipped.")
             return
-        logger.info(f"Setting up IPC for {self.role} side with mode {self.rl_mode}")
 
         if self.role != Role.ROLLOUT:
             # Policy initialization
@@ -255,7 +253,9 @@ class P2RCollectiveManager:
             r_rank = self.global_rank
             mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
-                # FIXME: Temporarily use local ip and port, but we have to change this in production.
+                logger.info(
+                    f"Setting up IPC for {self.role} side with mode {self.rl_mode}"
+                )
                 local_ip = net.get_local_ip()[0]
                 # To avoid conflict with other processes, we use a fixed port range.
                 port_range = 65535 - 23000
@@ -285,6 +285,9 @@ class P2RCollectiveManager:
             p_rank = self.global_rank
             mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
+                logger.info(
+                    f"Setting up IPC for {self.role} side with mode {self.rl_mode}"
+                )
                 # query ipc addr from controller
                 ipc_addr = self.api_client.query_ipc_info(mesh_key)
                 # create zmq socket
