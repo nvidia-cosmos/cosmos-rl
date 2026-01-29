@@ -222,9 +222,11 @@ class ControllerDataFetcher(DataFetcherBase):
                 self.batch_sampler, Callable
             ):
                 self.batch_sampler = self.batch_sampler(
-                    self.train_sampler,
-                    batch_size=self.rollout_batch_size,
-                    drop_last=False,
+                    dataset=self.dataset.train_set,
+                    num_replicas=1,
+                    rank=0,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    config=self.config,
                 )
             if self.config.train.resume:
                 try:
@@ -375,17 +377,11 @@ class ControllerDataFetcher(DataFetcherBase):
                     )
                     if isinstance(self.val_batch_sampler, Callable):
                         self.val_batch_sampler = self.val_batch_sampler(
-                            self.val_sampler
-                            if self.val_sampler is not None
-                            else DistributedSampler(
-                                self.val_dataset.val_set,
-                                num_replicas=1,
-                                rank=0,
-                                shuffle=False,
-                                drop_last=False,
-                            ),
-                            batch_size=self.val_batch_size,
-                            drop_last=False,
+                            dataset=self.val_dataset.val_set,
+                            num_replicas=1,
+                            rank=0,
+                            num_workers=self.config.train.train_policy.dataloader_num_workers,
+                            config=self.config,
                         )
                         self.val_dataloader = DataLoader(
                             self.val_dataset.val_set,

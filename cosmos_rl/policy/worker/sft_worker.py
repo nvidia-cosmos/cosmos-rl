@@ -350,9 +350,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
-                self.train_sampler,
-                batch_size=self.config.train.train_batch_per_replica,
-                drop_last=False,
+                dataset=train_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                num_workers=self.config.train.train_policy.dataloader_num_workers,
+                config=self.config,
             )
 
         def get_train_data_loader(
@@ -448,10 +450,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
             if isinstance(val_batch_sampler, Callable):
                 val_batch_sampler = val_batch_sampler(
-                    val_sampler,
-                    batch_size=self.config.validation.batch_size
-                    or self.config.train.train_batch_per_replica,
-                    drop_last=False,
+                    dataset=val_dataset,
+                    num_replicas=self.dp_world_size,
+                    rank=self.dp_rank,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    config=self.config,
                 )
             self.val_data_loader = DataLoader(
                 val_dataset,
