@@ -449,10 +449,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        self.train_data_loader = get_train_data_loader(
-            self.train_sampler, batch_sampler
-        )
-        if val_batch_sampler is not None:
+        if hasattr(train_dataset.dataset, "data_loader"):
+            self.train_data_loader = train_dataset.dataset.data_loader
+        else:
+            self.train_data_loader = get_train_data_loader(
+                self.train_sampler, batch_sampler
+            )
+
+        if hasattr(val_dataset.dataset, "data_loader"):
+            self.val_data_loader = val_dataset.dataset.data_loader
+        elif val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )

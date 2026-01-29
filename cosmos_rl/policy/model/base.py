@@ -366,6 +366,54 @@ class BaseModel(torch.nn.Module, ABC):
 
         return {"pattern_counts": pattern_counts}
 
+    def apply_trainable_pattern(self, trainable_pattern: List[str]) -> dict:
+        """
+        Apply pattern-based training to parameters using regex matching.
+
+        Args:
+            trainable_pattern: List of regex patterns to match against parameter names.
+                    Matched parameters will be set to require_grad=True, others will be set to require_grad=False.
+
+        Returns:
+            A dict with pattern match counts.
+        """
+        import re
+
+        compiled_patterns = [(p, re.compile(p)) for p in trainable_pattern if p]
+
+        pattern_counts: Dict[str, int] = {p: 0 for p in trainable_pattern if p}
+        total_params = 0
+        trainable_params = 0
+
+        for param_name, param in self.named_parameters():
+            total_params += param.numel()
+            param.requires_grad = False  # Default to frozen
+            for pattern_str, pattern_re in compiled_patterns:
+                if pattern_re.search(param_name):
+                    param.requires_grad = True
+                    pattern_counts[pattern_str] += 1
+                    util.rank0_print(
+                        f"[trainable_pattern] train '{param_name}' (matched '{pattern_str}')"
+                    )
+                    break
+
+            if param.requires_grad:
+                trainable_params += param.numel()
+
+        # Log summary
+        for pattern, count in pattern_counts.items():
+            if count > 0:
+                util.rank0_print(
+                    f"[trainable_pattern] '{pattern}' matched {count} params"
+                )
+
+        util.rank0_print(
+            f"[trainable_pattern] Total={total_params / 1e9:.2f}B, "
+            f"Trainable={trainable_params:,}, Frozen={total_params - trainable_params:,}"
+        )
+
+        return {"pattern_counts": pattern_counts}
+
     """
     Abstract methods
     """
@@ -568,6 +616,11 @@ class ModelRegistry:
 
             if config.policy.enable_liger_kernel:
                 util.replace_with_liger_equivalents(model)
+
+            # Apply pattern-based trainable configuration
+            trainable_pattern = getattr(config.policy, "trainable_pattern", None)
+            if trainable_pattern is not None:
+                model.apply_trainable_pattern(trainable_pattern)
 
             # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
             if config.policy.trainable_map is not None:
