@@ -17,9 +17,10 @@ import torch
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.distributed import init_distributed
+from cosmos_rl.utils.distributed import init_distributed, cosmos_device_type
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
+from cosmos_rl.policy.worker.multi_replica_sft_worker import MultiReplicaSFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
@@ -44,7 +45,7 @@ def policy_entry(**kwargs):
         parallesim_config=cosmos_config.policy.parallelism
     )
     init_distributed()
-    parallel_dims.build_mesh(device_type="cuda")
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
 
     custom_logger_fns = kwargs.get("custom_logger_fns", [])
     hook_fns = kwargs.get("hook_fns", {})
@@ -73,7 +74,12 @@ def policy_entry(**kwargs):
     elif policy_type == "sft":
         custom_sft_dataset = kwargs.get("dataset")
         custom_sft_data_packer = kwargs.get("data_packer")
-        policy_worker = SFTPolicyWorker(
+        if cosmos_config.policy.parallelism.n_init_replicas > 1:
+            # Use MultiReplicaSFTPolicyWorker for multiple replicas SFT case
+            sft_worker_cls = MultiReplicaSFTPolicyWorker
+        else:
+            sft_worker_cls = SFTPolicyWorker
+        policy_worker = sft_worker_cls(
             config=cosmos_config,
             parallel_dims=parallel_dims,
             dataset=custom_sft_dataset,

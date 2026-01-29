@@ -31,12 +31,16 @@ model_name_or_path = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
 is_diffusers = true
 model_gradient_checkpointing = true
 
-[policy.diffusers_config]
+[policy.diffusers]
 offload = true
 is_video = true
 max_prompt_length = 300
 weighting_scheme = "logit_normal"
 inference_size = [480, 832]
+
+[policy.diffusers.sample]
+num_steps = 50
+guidance_scale = 4.5
 
 [logging]
 logger = ['console', 'wandb']

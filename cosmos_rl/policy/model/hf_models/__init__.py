@@ -93,6 +93,12 @@ class HFModel(BaseModel):
         # cosmos_default_dtype is config.train.master_dtype
         # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
         self.model = self.model.to(dtype=torch.get_default_dtype())
+        try:
+            self.model.set_attn_implementation("flash_attention_2")
+        except Exception as e:
+            logger.warning(
+                f"Set attn_implementation to flash_attention_2 failed with error: {e}"
+            )
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
@@ -157,7 +163,7 @@ class HFModel(BaseModel):
             *args,
             **kwargs_filtered,
         )
-        return out.logits
+        return out
 
     @property
     def image_token_id(self):
@@ -441,9 +447,22 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
-            target_tensor = self_state_dict[dest_name]
+            if dest_name is None and sharded_weight is None:
+                # Only skip weights that are not loaded, like expert weight not belonging to the current GPU process
+                continue
+            elif isinstance(dest_name, Callable):
+                # For expert weight, `experts.$ID.gate_and_up_projs` -> `experts.gate_and_up_projs[$ID]`
+                target_tensor = dest_name(self_state_dict)
+            else:
+                target_tensor = self_state_dict[dest_name]
+
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
@@ -469,7 +488,12 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
             if dest_name in self_state_dict:
                 target_tensor = self_state_dict[dest_name]
@@ -549,7 +573,12 @@ class HFModel(BaseModel):
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, sharded_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                tp_slice_dim=tp_slice_dim,
+                hf_config=self.model.config,
             )
 
             target_tensor = self_state_dict[dest_name]

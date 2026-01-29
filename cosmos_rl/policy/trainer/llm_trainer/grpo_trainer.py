@@ -1519,7 +1519,11 @@ class GRPOTrainer(LLMTrainer):
                                         )
                                 else:
                                     with self.act_offloading_ctx_manager:
-                                        raw_logits = self.model(**user_mini_batch)
+                                        model_output = self.model(**user_mini_batch)
+                                        if isinstance(model_output, torch.Tensor):
+                                            raw_logits = model_output
+                                        else:
+                                            raw_logits = model_output.logits
 
                                     if self.parallel_dims.cp_enabled:
                                         # reset the position ids and input ids
@@ -2012,6 +2016,7 @@ class GRPOTrainer(LLMTrainer):
                 # Need to reload again from checkpoint to make sure the model is in the correct state
                 self.model_resume_from_checkpoint()
                 model_loaded = True
+                logger.info("[Policy] Model loaded from checkpoint.")
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
                     logger.info(
@@ -2023,14 +2028,15 @@ class GRPOTrainer(LLMTrainer):
                     )
                 if not model_loaded:
                     self.model_load_from_hf()
+                    logger.info("[Policy] Model loaded from HuggingFace.")
                     model_loaded = True
         elif not model_loaded:
             logger.info("[Policy] Resume not set. Trying to load from HuggingFace...")
             self.model_load_from_hf()
+            logger.info("[Policy] Model loaded from HuggingFace.")
             model_loaded = True
 
         assert model_loaded, "Model weight must be populated before training starts."
-        logger.info("[Policy] Model loaded from checkpoint.")
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."

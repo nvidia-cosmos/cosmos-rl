@@ -7,7 +7,11 @@ dynamic = ["version"]
 dependencies = [
     "fastapi",
     "uvicorn",
+<<<<<<< HEAD
     "transformers>=4.57.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+=======
+    "transformers>=4.51.1,!=4.52.*,!=4.53.*,<5.0.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+>>>>>>> main
     "datasets>=4.4.1",
     "pydantic",
     "math_verify",
@@ -35,7 +39,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffusers",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@ec37629", # For cosmos-predict2.5
     "peft",
     "flash-attn>=2.8.3",
 ]
@@ -85,6 +89,10 @@ wfm = [
     "webdataset",
     "decord",
     "trimesh",
+    "opencv-python-headless",
+    "better_profanity",
+    "nltk",
+    "retinaface-py",
 ]
 vla = [
     "bddl",

@@ -214,8 +214,19 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=0,
+            prompt_logprobs=None,
         )
+
+        # control the prompt logprobs for vllm
+        prompt_logprobs = None
+        if self.config.distillation.top_k > 0:
+            if self.config.distillation.rollout_top_k_recompute:
+                prompt_logprobs = 0
+            else:
+                prompt_logprobs = self.config.distillation.top_k
+        elif self.config.train.train_policy.collect_rollout_logprobs:
+            prompt_logprobs = 0
+
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,
             logprobs=0
@@ -229,9 +240,7 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=0
-            if self.config.distillation.rollout_top_k_recompute
-            else self.config.distillation.top_k,
+            prompt_logprobs=prompt_logprobs,
         )
 
     def init_engine(
@@ -277,9 +286,6 @@ class vLLMRollout(RolloutBase):
 
             policy_config = self.config.policy
 
-            if seed is not None and seed < 0:
-                seed = None
-
             self.rollout_engine = LLM(
                 model=model_path,
                 enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
@@ -305,7 +311,7 @@ class vLLMRollout(RolloutBase):
                 enable_prefix_caching=False,
                 trust_remote_code=trust_remote_code,
                 quantization=self.quantization,
-                seed=seed,
+                seed=seed or 42,
                 load_format=load_format,
                 # Set max_logprobs for distillation, default is 20
                 max_logprobs=max(self.config.distillation.top_k, 20),

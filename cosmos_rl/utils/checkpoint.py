@@ -379,7 +379,7 @@ class CheckpointMananger:
                 heapq.heappush(self.saved_steps, (step, "step"))
 
             # remove the old checkpoints
-            if len(self.saved_steps) > self.max_keep:
+            if len(self.saved_steps) > self.max_keep and self.max_keep != -1:
                 oldest_val, oldest_type = heapq.heappop(self.saved_steps)
                 oldest_identifier = f"{oldest_type}_{oldest_val}"
                 ckpt_dir = os.path.join(self.ckpt_output_dir, oldest_identifier)

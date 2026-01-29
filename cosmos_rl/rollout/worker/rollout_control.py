@@ -68,7 +68,7 @@ from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
     CompletedRollout,
 )
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 import torch.distributed as dist
 
@@ -94,6 +94,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         super(DisaggregatedRolloutControlWorker, self).__init__(config, parallel_dims)
 
         self.state = State()
+        self.is_diffusers = self.config.policy.is_diffusers
 
         if self.config.rollout.parallelism.dp_shard_size == -1:
             self.config.rollout.parallelism.dp_shard_size = parallel_dims.dp_shard
@@ -116,10 +117,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.config.rollout.backend
         )(self.config, self.parallel_dims, self.device)
 
-        self.eos_token = util.setup_tokenizer(
-            self.config.policy.model_name_or_path
-        ).eos_token
-
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
         # rank in current rollout replicas.
@@ -140,29 +137,37 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.teacher_interact_thread: threading.Thread | None = None
         self.teacher_interact_queue: Queue = Queue()
 
-        # For Polocy to Rollout weight mapping
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        model_type = hf_config.model_type
-        if self.quantization_type == "mxfp4":
+        if self.is_diffusers:
             assert (
-                model_type == "gpt_oss"
-            ), "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
+                self.config.train.non_text
+            ), "[Rollout] Diffusers rollout only support non-text training now."
+            model_type = "diffusers"
+        else:
+            self.eos_token = util.setup_tokenizer(
+                self.config.policy.model_name_or_path
+            ).eos_token
 
-        if not ModelRegistry.check_model_type_supported(model_type):
-            logger.warning(
-                f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path, trust_remote_code=True
             )
-            model_type = constant.COSMOS_HF_MODEL_TYPES
-        self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
 
-        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
-        if hasattr(model_cls, "preprocess_hf_config"):
-            hf_config = model_cls.preprocess_hf_config(self.config)
+            model_type = hf_config.model_type
+            if not ModelRegistry.check_model_type_supported(model_type):
+                logger.warning(
+                    f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+                )
+                model_type = constant.COSMOS_HF_MODEL_TYPES
+            self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
 
-        self.model_config = hf_config
+            model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+            if hasattr(model_cls, "preprocess_hf_config"):
+                hf_config = model_cls.preprocess_hf_config(self.config)
+
+            self.model_config = hf_config
+            if self.quantization_type == "mxfp4":
+                assert (
+                    model_type == "gpt_oss"
+                ), "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
 
         atexit.register(self.handle_shutdown)
 
@@ -355,6 +360,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 f"[Rollout] Replica {self.replica_name} not found in registered replicas."
             )
         self.rank_in_rollout_repicas = replica_name_to_rank[self.replica_name]
+        # update the replcia_name to rank dict
+        self.replica_name_to_rank = replica_name_to_rank
 
         if len(replica_name_to_rank) == 1:
             # only one rollout replica now, no need to build mesh.
@@ -393,8 +400,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.global_commnicator_idex = create_nccl_comm(
             nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
         )
-        # update the replcia_name to rank dict
-        self.replica_name_to_rank = replica_name_to_rank
 
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
@@ -836,6 +841,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.val_batch_size,
                     validation_queue,
                     validation_step=self.current_step,
+                    rank_in_mesh=self.rank_in_rollout_repicas,
                 )
                 if not validation_queue.empty():
                     payloads_list: List[RLPayload] = validation_queue.get()
@@ -859,6 +865,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     p.prompt_token_ids = rr.prompt_token_ids
                     p.weight_version = self.current_weight_version
                     p.cumulative_logprob = rr.cumulative_logprob
+                    p.extra_info = rr.extra_info
                     if self.config.rollout.multi_turn_config.enable:
                         p.completed_conversations = rr.completed_conversations
                     if self.config.train.local_dataset:
@@ -1307,6 +1314,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     payload["prompt_idx"] >= 0 for payload in payloads
                 ), "All payloads should have a valid prompt index"
 
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    for payload in payloads:
+                        assert (
+                            payload["prompt_idx"] % len(self.replica_name_to_rank)
+                            == self.rank_in_rollout_repicas
+                        ), f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
                 is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
@@ -1543,7 +1556,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # try fetching new prompts if no ending signal is set
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
-                    self.batch_size, self._prompt_queue
+                    self.batch_size,
+                    self._prompt_queue,
+                    rank_in_mesh=self.rank_in_rollout_repicas,
                 )
                 if no_more_prompts:
                     logger.info(
@@ -1569,7 +1584,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 # Check if the prompt is valid for the current weight version
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
                 is_valid_prompt_for_current_weight_version = (
-                    first_payload.weight_version <= self.current_weight_version
+                    first_payload.weight_version
+                    <= self.current_weight_version
+                    + self.config.train.train_policy.allowed_outdated_steps
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
@@ -1661,6 +1678,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.prompt_token_ids = result.prompt_token_ids
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
+                old_payload.extra_info = result.extra_info
                 if self.config.rollout.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
                 if self.config.train.local_dataset:
@@ -1744,7 +1762,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             return 0, False
 
         is_end = self.request_new_prompts(
-            request_prompts_count, prompt_queue, validation_step=validation_step
+            request_prompts_count,
+            prompt_queue,
+            validation_step=validation_step,
+            rank_in_mesh=self.rank_in_rollout_repicas,
         )
 
         is_validation = validation_step is not None
@@ -1753,7 +1774,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if not is_validation and not self._prompt_queue.empty():
             first_payload: RLPayload = self._prompt_queue.queue[0][0]
             is_valid_prompt_for_current_weight_version = (
-                first_payload.weight_version <= self.current_weight_version
+                first_payload.weight_version
+                <= self.current_weight_version
+                + self.config.train.train_policy.allowed_outdated_steps
             )
             if not is_valid_prompt_for_current_weight_version:
                 return 0, False

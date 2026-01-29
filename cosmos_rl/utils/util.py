@@ -59,6 +59,7 @@ from cosmos_rl.utils.constant import CACHE_DIR
 from cosmos_rl.policy.config import Config as CosmosConfig
 import math
 import numpy as np
+from torch.utils.data import Dataset
 
 
 def create_cached_dir_if_needed():
@@ -1408,3 +1409,57 @@ def aggregate_report_data(
                     [data.get(k, 0) for data in report_data_list]
                 )
     return report_data
+
+
+def copy_weights(src_params, tgt_params):
+    for src_param, tgt_param in zip(src_params, tgt_params, strict=True):
+        tgt_param.data.copy_(src_param.detach().data)
+        assert src_param is not tgt_param
+
+
+def split_train_n_val_dataset(
+    train_dataset: Dataset,
+    cosmos_config: CosmosConfig,
+) -> Tuple[Dataset, Dataset]:
+    """
+    Split the train dataset into train and validation datasets based on the config.
+    Returns:
+        Tuple[Dataset, Dataset]: The train and validation datasets.
+    """
+    config = cosmos_config.train.train_policy
+    logger.warning(
+        "No validation dataset provided, using split of training dataset for validation."
+    )
+    if isinstance(train_dataset, torch.utils.data.Dataset):
+        # Define the split ratio (e.g., 80% train, 20% test)
+        if config.dataset.test_size is None:
+            logger.warning(
+                "No test size specified, using 10% of the training dataset for testing."
+            )
+            config.dataset.test_size = 0.1
+        if isinstance(config.dataset.test_size, float):
+            n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+        else:
+            n_test_samples = config.dataset.test_size
+        n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
+
+        # Generate deterministic indices
+        indices = list(range(len(train_dataset)))
+        test_indices = indices[:n_test_samples]
+        train_indices = indices[n_test_samples:]
+
+        test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
+        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+    else:
+        assert hasattr(
+            train_dataset, "train_test_split"
+        ), "train_dataset must have train_test_split method"
+        split = train_dataset.train_test_split(
+            test_size=config.dataset.test_size, shuffle=False
+        )
+        train_dataset = split["train"]
+        test_dataset = split["test"]
+    logger.info(
+        f"Split train dataset into {len(train_dataset)} train samples and {len(test_dataset)} {type(test_dataset)} test samples."
+    )
+    return train_dataset, test_dataset

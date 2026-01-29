@@ -302,7 +302,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -330,7 +331,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -678,6 +680,15 @@ class RLPolicyWorker(PolicyWorkerBase):
             ), "All rollouts from controller should have a valid prompt index"
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                        for rollout in rollouts:
+                            assert (
+                                rollout.prompt_idx
+                                % len(self.inter_policy_nccl.replica_name_to_rank)
+                                == self.inter_policy_nccl.replica_name_to_rank[
+                                    self.replica_name
+                                ]
+                            ), f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
                     # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
@@ -791,7 +802,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 daemon=True,
                 name="fetch_rollouts_thread",
             ).start()
-        if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+        if (
+            self.parallel_dims.pp_cp_tp_coord[0] == 0
+            and self.config.distillation.enable
+        ):
             # Initiate teacher interaction thread once for each same dp group
             self.teacher_interact_thread = threading.Thread(
                 target=self.teacher_interact_loop,

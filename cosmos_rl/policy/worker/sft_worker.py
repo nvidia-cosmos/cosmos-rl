@@ -78,7 +78,11 @@ class SFTDataset(Dataset):
         self.cache = None
 
         # Determine if cache should be enabled
-        should_enable_cache = enable_cache if enable_cache is not None else self.config.enable_dataset_cache
+        should_enable_cache = (
+            enable_cache
+            if enable_cache is not None
+            else self.config.enable_dataset_cache
+        )
 
         if should_enable_cache:
             # TODO(zjx): can we reuse the cache between different training jobs?
@@ -172,38 +176,10 @@ def construct_dataset(
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
         else:
-            logger.warning(
-                "No validation dataset provided, using split of training dataset for validation."
+            # Split train/val from training dataset if no val dataset and no val dataset name provided
+            train_dataset, test_dataset = util.split_train_n_val_dataset(
+                train_dataset, cosmos_config
             )
-            if isinstance(train_dataset, torch.utils.data.Dataset):
-                # Define the split ratio (e.g., 80% train, 20% test)
-                if config.dataset.test_size is None:
-                    logger.warning(
-                        "No test size specified, using 10% of the training dataset for testing."
-                    )
-                    config.dataset.test_size = 0.1
-                if isinstance(config.dataset.test_size, float):
-                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
-                else:
-                    n_test_samples = config.dataset.test_size
-                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
-
-                # Generate deterministic indices
-                indices = list(range(len(train_dataset)))
-                test_indices = indices[:n_test_samples]
-                train_indices = indices[n_test_samples:]
-
-                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-            else:
-                assert hasattr(
-                    train_dataset, "train_test_split"
-                ), "train_dataset must have train_test_split method"
-                split = train_dataset.train_test_split(
-                    test_size=config.dataset.test_size, shuffle=False
-                )
-                train_dataset = split["train"]
-                test_dataset = split["test"]
     else:
 
         class EmptyDataset(Dataset):
@@ -224,7 +200,9 @@ def construct_dataset(
         else config.enable_dataset_cache
     )
 
-    logger.info(f"Dataset cache settings - train: {train_enable_cache}, val: {val_enable_cache}")
+    logger.info(
+        f"Dataset cache settings - train: {train_enable_cache}, val: {val_enable_cache}"
+    )
 
     train_sft_dataset = SFTDataset(
         config,
@@ -349,7 +327,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
         # Training hooks
         self.pre_training_hook = self.hook_fns.get("pre_training_hook", None)
         self.pre_training_step_hook = self.hook_fns.get("pre_training_step_hook", None)
-        self.post_training_step_hook = self.hook_fns.get("post_training_step_hook", None)
+        self.post_training_step_hook = self.hook_fns.get(
+            "post_training_step_hook", None
+        )
         self.post_training_hook = self.hook_fns.get("post_training_hook", None)
 
         # Validation hooks
@@ -430,11 +410,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 rank=self.dp_rank,
                 shuffle=self.config.train.train_policy.dataloader_shuffle,
                 drop_last=False,
+                seed=self.config.train.train_policy.dataloader_seed,
             )
+        self.train_sampler = train_sampler
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
-                train_sampler,
+                self.train_sampler,
                 batch_size=self.config.train.train_batch_per_replica,
                 drop_last=False,
             )
@@ -469,24 +451,25 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         if self.config.train.resume and self.train_step > 0:
             """
-            Note: Here we assume there is no data shuffling across epochs.
-            Otherwise, we need to call `set_epoch` on the sampler after each epoch.
+            Note: Here both shuffle and no shuffle samplers are supported for deterministic resuming.
             """
             # Resume training from the last checkpoint if needed
             total_steps_per_epoch = len(
-                get_train_data_loader(train_sampler, batch_sampler)
+                get_train_data_loader(self.train_sampler, batch_sampler)
             )
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= self.config.train.train_batch_per_replica
             logger.info(
                 f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
             )
-            train_sampler = SkippingSampler(
-                train_sampler,
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(self.train_step // total_steps_per_epoch)
+            self.train_sampler = SkippingSampler(
+                self.train_sampler,
                 skip_samples=data_loader_bias
                 // (
-                    len(list(islice(iter(train_sampler), 1))[0])
-                    if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                    len(list(islice(iter(self.train_sampler), 1))[0])
+                    if isinstance(list(islice(iter(self.train_sampler), 1))[0], list)
                     else 1
                 ),
             )
@@ -580,8 +563,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self.config.train.ckpt.save_freq_in_epoch > 0:
             # Use save_freq_in_epoch to calculate the save frequency in priority
             # For epoch-based saving, don't divide by dp_world_size as we want to save at epoch boundaries
-            self._save_freq = (
-                self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
+            self._save_freq = self.config.train.ckpt.save_freq_in_epoch * len(
+                self.train_data_loader
             )
             logger.info(
                 f"Checkpoint will be saved every {self._save_freq} steps, which is every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
@@ -592,6 +575,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def validate(self, current_epoch: int, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
+
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
 
@@ -604,7 +588,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             should_validate = True
         elif self.train_step != 0:
             # Check for epoch-based validation (takes priority if configured)
-            freq_in_epoch = getattr(self.config.validation, 'freq_in_epoch', 0)
+            freq_in_epoch = getattr(self.config.validation, "freq_in_epoch", 0)
             if freq_in_epoch > 0:
                 steps_per_epoch = len(self.train_data_loader)
                 # Calculate validation steps: end of each freq_in_epoch epochs
@@ -662,14 +646,22 @@ class SFTPolicyWorker(PolicyWorkerBase):
             # This ensures post_per_step_validation_hook receives the averaged batch loss
             local_batch_loss = val_score / batch_samples if batch_samples > 0 else 0.0
             if self.dp_world_size > 1 and dist.is_initialized():
-                batch_loss_tensor = torch.tensor([val_score], dtype=torch.float64, device=self.trainer.device)
-                batch_samples_tensor = torch.tensor([batch_samples], dtype=torch.float64, device=self.trainer.device)
+                batch_loss_tensor = torch.tensor(
+                    [val_score], dtype=torch.float64, device=self.trainer.device
+                )
+                batch_samples_tensor = torch.tensor(
+                    [batch_samples], dtype=torch.float64, device=self.trainer.device
+                )
                 dist.all_reduce(batch_loss_tensor, op=dist.ReduceOp.SUM)
                 dist.all_reduce(batch_samples_tensor, op=dist.ReduceOp.SUM)
                 global_batch_loss = batch_loss_tensor.item()
                 global_batch_samples = int(batch_samples_tensor.item())
                 # Compute per-sample average loss for this batch across all ranks
-                avg_batch_loss = global_batch_loss / global_batch_samples if global_batch_samples > 0 else 0.0
+                avg_batch_loss = (
+                    global_batch_loss / global_batch_samples
+                    if global_batch_samples > 0
+                    else 0.0
+                )
                 logger.debug(
                     f"[Validation] Batch {batch_index}: rank={self.global_rank}, "
                     f"local_loss={local_batch_loss:.6f}, local_samples={batch_samples}, "
@@ -699,12 +691,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
         # Aggregate validation loss across all data-parallel ranks
         # Each rank processes a different subset of the validation data due to DistributedSampler
         # We need to sum losses and sample counts across ranks, then compute global average
-        local_avg_loss = val_total_loss / val_total_samples if val_total_samples > 0 else 0.0
+        local_avg_loss = (
+            val_total_loss / val_total_samples if val_total_samples > 0 else 0.0
+        )
 
         if self.dp_world_size > 1 and dist.is_initialized():
             # Create tensors for reduction
-            loss_tensor = torch.tensor([val_total_loss], dtype=torch.float64, device=self.trainer.device)
-            samples_tensor = torch.tensor([val_total_samples], dtype=torch.float64, device=self.trainer.device)
+            loss_tensor = torch.tensor(
+                [val_total_loss], dtype=torch.float64, device=self.trainer.device
+            )
+            samples_tensor = torch.tensor(
+                [val_total_samples], dtype=torch.float64, device=self.trainer.device
+            )
 
             # Sum across all DP ranks
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
@@ -712,7 +710,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
             global_total_loss = loss_tensor.item()
             global_total_samples = int(samples_tensor.item())
-            val_avg_loss = global_total_loss / global_total_samples if global_total_samples > 0 else 0.0
+            val_avg_loss = (
+                global_total_loss / global_total_samples
+                if global_total_samples > 0
+                else 0.0
+            )
 
             # Log per-rank loss (info level)
             logger.info(
@@ -781,7 +783,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
-
         # Call pre_training_hook before training starts
         if self.pre_training_hook is not None:
             pre_training_data = {
@@ -792,9 +793,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
             }
             self.pre_training_hook(self, report_data=pre_training_data)
 
+        stop_training = False
+
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
@@ -875,6 +880,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps
                 ):
+                    stop_training = True
                     break  # break outer epoch loop
 
                 val_avg_loss = self.validate(
@@ -893,6 +899,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
                 self.profiler.step()
 
+            if stop_training:
+                break
             cur_epoch += 1
 
         # Finally: validation and save checkpoint
@@ -900,7 +908,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self._last_validation_step != self.train_step:
             val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
         else:
-            logger.info(f"Skipping final validation - already validated at step {self.train_step}")
+            logger.info(
+                f"Skipping final validation - already validated at step {self.train_step}"
+            )
             val_avg_loss = None
 
         # Check if we already saved at this step during regular checkpointing
@@ -922,7 +932,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 steps_per_epoch=len(self.train_data_loader),
             )
         else:
-            logger.info(f"Skipping final checkpoint - already saved at step {self.train_step}")
+            logger.info(
+                f"Skipping final checkpoint - already saved at step {self.train_step}"
+            )
 
         # Call post_training_hook after training completes
         if self.post_training_hook is not None:

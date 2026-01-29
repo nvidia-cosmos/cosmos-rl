@@ -37,9 +37,8 @@ from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.utils import async_utils
-from cosmos_rl.reward.reward_calculator import RewardCalculator
+from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
 
 def override_environment(port: int = 29500) -> dict[str, str]:
@@ -103,7 +102,10 @@ class MockAPIClient(APIClient):
         logger.info(f"[MockAPIClient] Unregister: {replica_name}")
 
     def get_next_prompt(
-        self, batch_size: int, validation_step: Optional[int] = None
+        self,
+        batch_size: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[Tuple[int, str]], bool]:
         # masked validation_step for testing
         validation_step = None
@@ -165,12 +167,10 @@ class TestAsyncVLLMRollout(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment()
-        init_distributed()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        destroy_distributed()
 
     def get_rollout_engine_and_data_packer(
         self, config: CosmosConfig
@@ -285,16 +285,14 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
     def setUp(self):
         self.old_env = override_environment(port=29501)
-        init_distributed()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        destroy_distributed()
 
-        # clean singleton instance of RewardCalculator
-        if hasattr(RewardCalculator, "_instance"):
-            delattr(RewardCalculator, "_instance")
+        # clean singleton instance of LocalRewardCalculator
+        if hasattr(LocalRewardCalculator, "_instance"):
+            delattr(LocalRewardCalculator, "_instance")
 
     def test_async_rollout_worker_1gpu(self):
         """Test async rollout worker."""
