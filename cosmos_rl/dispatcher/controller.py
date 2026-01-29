@@ -320,6 +320,7 @@ maxmemory-policy allkeys-lfu
         if (
             step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
+            and self.config.train.train_policy.on_policy
         ):
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
