@@ -1,3 +1,23 @@
+# Copyright 2026 NVIDIA CORPORATION & AFFILIATES.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This file uses PaliGemma model components which are subject to the
+# Gemma Terms of Use: https://ai.google.dev/gemma/terms
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 
@@ -5,6 +25,7 @@ from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 from cosmos_rl.policy.model.pi05.model_utils import get_config
 from cosmos_rl.policy.model.pi05.model_utils import PaliGemmaWithExpertModel
 from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
+from cosmos_rl.dispatcher.data.packer.pi05_data_packer import PI05DataPacker
 
 import logging
 import math
@@ -143,8 +164,6 @@ def preprocess_observation_pytorch(
             image = torch.cat(
                 [image, *(observation.images[k] for k in meta_image_keys)], dim=0
             )  # b + m * b
-
-        # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
         # Handle both [B, C, H, W] and [B, H, W, C] formats
         is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
 
@@ -388,10 +407,7 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
-from cosmos_rl.dispatcher.data.packer.pi_data_packer import PIDataPacker
-
-
-@ModelRegistry.register(Pi05WeightMapper, default_data_packer_cls=PIDataPacker)
+@ModelRegistry.register(Pi05WeightMapper, default_data_packer_cls=PI05DataPacker)
 class PI05(BaseModel):
     def __init__(self, model_name_or_path: str, hf_config):
         """
@@ -415,7 +431,6 @@ class PI05(BaseModel):
         self.num_steps = hf_config.num_steps
         self.action_chunk = hf_config.action_chunk
         self.action_env_dim = hf_config.action_env_dim
-        # Optional knobs: if not specified in toml, fall back to code defaults.
         self.noise_method = getattr(hf_config, "noise_method", "flow_sde")
         self.noise_level = getattr(hf_config, "noise_level", 0.5)
         self.noise_anneal = getattr(hf_config, "noise_anneal", False)
@@ -424,7 +439,6 @@ class PI05(BaseModel):
         self.joint_logprob = getattr(hf_config, "joint_logprob", False)
         self.safe_get_logprob = getattr(hf_config, "safe_get_logprob", False)
         self.ignore_last = getattr(hf_config, "ignore_last", False)
-        self.train_expert_only = hf_config.train_expert_only
         self.discrete_state_input = hf_config.discrete_state_input
         self.max_token_len = hf_config.max_token_len
         self.global_step = 0  # Used for noise annealing
@@ -477,6 +491,15 @@ class PI05(BaseModel):
                 noise_logvar_range=self.noise_logvar_range,
                 noise_scheduler_type="learn",
             )
+        self.model_input_keys = [
+            "input_ids",
+            "attention_mask",
+            "images",
+            "image_masks",
+            "states",
+        ]
+        self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
+        self.model_train_keys = self.model_input_keys + self.model_output_keys
 
 
     def get_trained_model_state_dict(self):
@@ -551,15 +574,13 @@ class PI05(BaseModel):
 
     def _prepare_attention_masks_4d(self, att_2d_masks):
         """Helper method to prepare 4D attention masks for transformer."""
-        att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        att_2d_masks_4d = att_2d_masks[:, None, :, :].bool()
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
     def _preprocess_observation(self, observation, *, train=True):
         """Helper method to preprocess observation."""
         observation = preprocess_observation_pytorch(observation, train=train)
         imgs = list(observation.images.values())
-        # if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
-        #     imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
         return (
             imgs,
             list(observation.image_masks.values()),
@@ -591,7 +612,6 @@ class PI05(BaseModel):
         embs = []
         pad_masks = []
         att_masks = []
-        _debug_img_embs = []
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
@@ -600,7 +620,6 @@ class PI05(BaseModel):
                 return self.paligemma_with_expert.embed_image(img)
 
             img_emb = self._apply_checkpoint(image_embed_func, img)
-            _debug_img_embs.append(img_emb)
 
             bsize, num_img_embs = img_emb.shape[:2]
 
@@ -719,36 +738,6 @@ class PI05(BaseModel):
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
         return embs, pad_masks, att_masks, adarms_cond
-
-    def _move_tensors_to_device(self, obj, device):
-        """Recursively move all tensors inside a (possibly nested) object to `device`."""
-        if isinstance(obj, torch.Tensor):
-            return obj.to(device=device)
-        if isinstance(obj, dict):
-            return {k: self._move_tensors_to_device(v, device) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return type(obj)(self._move_tensors_to_device(v, device) for v in obj)
-        if hasattr(obj, "__dict__"):
-            new_obj = object.__new__(type(obj))
-            for k, v in vars(obj).items():
-                setattr(new_obj, k, self._move_tensors_to_device(v, device))
-            return new_obj
-        return obj
-
-    def _to_cpu_detach(self, obj):
-        """Recursively detach tensors and move them to CPU for safe pickling."""
-        if isinstance(obj, torch.Tensor):
-            return obj.detach().cpu()
-        if isinstance(obj, dict):
-            return {k: self._to_cpu_detach(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return type(obj)(self._to_cpu_detach(v) for v in obj)
-        if hasattr(obj, "__dict__"):
-            new_obj = object.__new__(type(obj))
-            for k, v in vars(obj).items():
-                setattr(new_obj, k, self._to_cpu_detach(v))
-            return new_obj
-        return obj
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
@@ -935,7 +924,7 @@ class PI05(BaseModel):
             log_probs = log_probs[torch.arange(log_probs.shape[0]), denoise_inds[:, 0]]
 
         return {
-            "actions": x_0,
+            "actions": x_0[..., : self.action_env_dim],
             "chains": chains,
             "old_log_probs": log_probs,
             "denoise_inds": denoise_inds,
@@ -1025,8 +1014,7 @@ class PI05(BaseModel):
             else:
                 raise ValueError(f"Invalid noise method: {self.noise_method}")
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
-        return x_t_mean, x_t_std
-
+        return x_t_mean.to(device), x_t_std.to(device)
 
     def get_suffix_out(
         self,
@@ -1149,7 +1137,7 @@ class PI05(BaseModel):
         sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
         entropy = 0.5 * torch.log(2 * math.pi * math.e * (sigma_safe**2))
         return entropy
-    
+
     def get_log_prob_value(
         self,
         images,
@@ -1181,7 +1169,6 @@ class PI05(BaseModel):
             use_cache=True,
         )
         chains_log_probs = []
-        chains_values = []
         chains_entropy = []
 
         # get log prob
@@ -1222,7 +1209,6 @@ class PI05(BaseModel):
         else:
             chains_entropy = torch.zeros_like(chains_log_probs)
         return chains_log_probs, chains_entropy
-
 
     @staticmethod
     def supported_model_types():
