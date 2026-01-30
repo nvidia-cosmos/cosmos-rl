@@ -2090,20 +2090,20 @@ def run_sft_data_packer_factory():
     )
 
     # Verify factory functions were called
-    assert factory_call_count["data_packer"] == 1, (
-        f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
-    )
-    assert factory_call_count["val_data_packer"] == 1, (
-        f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
-    )
+    assert (
+        factory_call_count["data_packer"] == 1
+    ), f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
+    assert (
+        factory_call_count["val_data_packer"] == 1
+    ), f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
 
     # Verify data packers are properly set
-    assert isinstance(sft_worker.data_packer, DecoderOnlyLLMDataPacker), (
-        f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
-    )
-    assert isinstance(sft_worker.val_data_packer, DecoderOnlyLLMDataPacker), (
-        f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
-    )
+    assert isinstance(
+        sft_worker.data_packer, DecoderOnlyLLMDataPacker
+    ), f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
+    assert isinstance(
+        sft_worker.val_data_packer, DecoderOnlyLLMDataPacker
+    ), f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
 
     # Verify data loaders work
     cnt = 0
