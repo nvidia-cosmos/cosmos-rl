@@ -70,6 +70,84 @@ The configuration `toml` file specifies the basic setting of the service includi
 
 By modifying the settings in configuration `toml`, the properties of the service can be adjust.
 
+#### Deployment Modes (Embedded Redis vs. External Redis)
+
+The reward service stores computed reward scores in a Redis-backed key-value store. For deployment, there are two recommended modes:
+
+##### Mode A: One-command start (embedded Redis)
+
+This is the default mode for quick bring-up. `cosmos-rl-reward` starts the reward service and also starts a Redis server locally (on the same node/pod) for storing scores.
+
+Pros:
+- Easiest for quick testing and development
+
+Cons:
+- Redis is coupled to the compute service instance, which makes horizontal scaling harder (each compute instance has its own Redis)
+
+Command example:
+
+```bash
+# Starts the reward service and auto-starts an embedded Redis
+cosmos-rl-reward --config cosmos_rl_reward/configs/rewards.toml
+```
+
+Architecture (Mode A):
+
+```text
+Client
+  |
+  v
+Reward Service (FastAPI + reward workers)
+  |
+  v
+Embedded Redis (scores)  [same node/pod]
+```
+
+##### Mode B: External/shared Redis (recommended for scaling)
+
+In this mode, you start the Redis service independently, and point one or more reward service instances to the same Redis by setting `redis_host` and `redis_port` in the service TOML config.
+
+Pros:
+- Easy to scale: one Redis server can serve multiple compute service replicas
+- Results are shared across compute replicas (clients can poll any replica behind a load balancer)
+
+Cons:
+- Requires running and managing Redis separately
+
+Command examples:
+
+```bash
+# 1) Start the Redis server (typically on a dedicated node/service)
+cosmos-rl-reward-redis --port 6379
+
+# 2) Configure the reward service to use that Redis in your TOML:
+#    redis_host = "<redis-hostname-or-ip>"
+#    redis_port = 6379
+
+# 3) Start one or more reward service instances
+cosmos-rl-reward --config cosmos_rl_reward/configs/rewards.toml
+```
+
+Architecture (Mode B):
+
+```text
+                 +---------------------------+
+Client  -------> |  Reward Service Replica  | \
+                 | (FastAPI + reward workers)|  \
+                 +---------------------------+   \
+                          |                   \   \
+                          v                    v   v
+                      +--------------------------------+
+                      |      Shared Redis (scores)     |
+                      +--------------------------------+
+                          ^                    ^   ^
+                          |                   /   /
+                 +---------------------------+   /
+                 |  Reward Service Replica  |  /
+                 | (FastAPI + reward workers)| /
+                 +---------------------------+/
+```
+
 
 ### 3.3 Test with Example Client
 
@@ -88,6 +166,58 @@ This example demonstrates how to:
 - Receive and process results
 - The host url in the example can be adjust accordingly.
 
+### 3.4 Latency Benchmark
+
+Run the latency benchmark to test connection and latency with the service:
+
+`cosmos_rl_reward/example/latency_benchmark.py` measures end-to-end latency of the reward service:
+
+- Sends `/api/reward/enqueue` requests and then polls `/api/reward/pull` until results are ready.
+- Reports per-request latency and summary statistics (mean/min/max and p50/p90/p95).
+- Supports both image and video payload formats.
+
+If the server returns `replica_id` in the enqueue response (e.g., in Lepton deployments), the benchmark will automatically pin subsequent pull requests to the same replica via the `X-Lepton-Replica-Target` header.
+
+Examples:
+
+```bash
+# Image benchmark (default: --media-type image)
+python cosmos_rl_reward/example/latency_benchmark.py \
+  --host http://localhost:8080 \
+  --reward-fn hpsv2 \
+  --num-requests 20
+
+# Image benchmark with multiple reward types and custom shape
+python cosmos_rl_reward/example/latency_benchmark.py \
+  --host http://localhost:8080 \
+  --reward-fn hpsv2 --reward-fn pickscore \
+  --shape 2,512,512,3 \
+  --num-requests 20
+
+# Video benchmark (typical latent shape: 1,16,24,54,96)
+python cosmos_rl_reward/example/latency_benchmark.py \
+  --host http://localhost:8080 \
+  --media-type video \
+  --reward-fn cosmos_reason1 \
+  --shape 1,16,24,54,96 \
+  --video-dtype bfloat16 \
+  --num-requests 10
+
+# Print pull responses (useful for debugging)
+python cosmos_rl_reward/example/latency_benchmark.py \
+  --host http://localhost:8080 \
+  --reward-fn hpsv2 \
+  --num-requests 5 \
+  --print-response last
+```
+
+Common tuning flags:
+
+- `--enqueue-timeout`: increases timeout for the enqueue upload (useful for large video payloads).
+- `--assume-upload-mbps`: used to auto-recommend a larger enqueue timeout based on payload size.
+- `--max-wait` / `--poll-interval` / `--pull-timeout`: controls pull polling behavior.
+
+
 ## 4. Configuration
 
 The service is configured through `cosmos_rl_reward/configs/rewards.toml`. Key configuration options include:
@@ -101,7 +231,12 @@ The cosmos-rl-reward service is launched at the following `host:port` url. Clien
 | `port` | integer | The port number for the service endpoint |
 
 ### 4.2 Redis Configuration
-A Redis server is launched for recording the calculated scores inside the cosmos-rl-reward service. The following specifies the properties of the Redis service:
+A Redis server is used for recording the calculated scores. You can run Redis in two ways:
+
+- **Embedded Redis** (default): `cosmos-rl-reward` starts a local Redis instance for fast bring-up.
+- **External/shared Redis** (recommended for scaling): start Redis separately (e.g., with `cosmos-rl-reward-redis` or your own Redis deployment) and point the reward service to it via the TOML config.
+
+The following fields specify the Redis connection used for score storage:
 
 | Field | Type | Description |
 |-------|------|-------------|

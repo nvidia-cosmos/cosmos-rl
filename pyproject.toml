@@ -13,7 +13,6 @@ dependencies = [
     "math_verify",
     "nest_asyncio",
     "pybind11[global]",
-    "vllm>=0.8.5",
     "torch>=2.6.0",
     "torchvision>=0.21.0",
     "torchao>=0.10.0",
@@ -89,6 +88,7 @@ wfm = [
     "nltk",
     "retinaface-py",
 ]
+
 vla = [
     "bddl",
     "easydict",
@@ -107,8 +107,13 @@ vla = [
     "timm<1",
     "wandb>0.13.1",
 ]
+
+rl = [
+    "vllm>=0.8.5",
+]
+
 all = [
-    "cosmos_rl[wfm,vla]",
+    "cosmos_rl[wfm,vla,rl]",
 ]
 
 [tool.uv.sources]

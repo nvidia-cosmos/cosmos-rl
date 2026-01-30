@@ -704,6 +704,8 @@ class DistKVStore:
         if self.world_size == 1:
             return
 
+        dist.barrier(group=self.group)
+
         if self.rank == self.master_rank:
             local_ips = network_util.get_eth_ips()
             assert len(local_ips) > 0, "No IP addresses found"

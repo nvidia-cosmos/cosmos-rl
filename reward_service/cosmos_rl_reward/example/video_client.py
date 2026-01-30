@@ -20,6 +20,11 @@ import json
 import torch
 import time
 
+
+def log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
 """
 Cosmos-Reason1, DanceGRPO VQ and MQ reward functions are supported currently.
 """
@@ -40,6 +45,17 @@ api_ping = "/api/reward/ping"  # For check the server availability.
 api_enqueue = "/api/reward/enqueue"  # For enqueueing reward calculation tasks.
 api_reward = "/api/reward/pull"  # For pulling reward calculation results.
 token = None  # If authentication is needed, set the token here.
+
+
+def make_headers(replica_id: str | None = None, extra: dict | None = None) -> dict:
+    headers: dict = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if replica_id:
+        headers["X-Lepton-Replica-Target"] = replica_id
+    if extra:
+        headers.update(extra)
+    return headers
 
 # The folllowing code is an example of how to generate encoded latents from video using the Wan2pt1TokenizerHelper.
 # The generated latents can be sent to the "/api/reward/enqueue" endpoint for calculating rewards.
@@ -68,7 +84,6 @@ else:
     from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
     import torchvision
     import numpy as np
-    from cosmos_rl.utils.logging import logger
 
     # Initialize the tokenizer for latent encoding.
     # The Wan2pt1TokenizerHelper is used to encode video tensors into latents.
@@ -107,8 +122,8 @@ else:
     # The video tensor should be in the range of [0, 255] before normalization.
     video = video.float()  # Ensure the video tensor is in float format
     video = (video - 127.5) / 127.5  # Normalize to [-1, 1]
-    logger.info(f"Sample video shape: {video.shape}")
-    logger.info(f"Sample video range: [{video.min():.3f}, {video.max():.3f}]")
+    log(f"Sample video shape: {video.shape}")
+    log(f"Sample video range: [{video.min():.3f}, {video.max():.3f}]")
 
     # Create video info dictionary to record the video info data from the read_video function.
     # The info usually contains fps about the video, Example: {'video_fps': 30.0}
@@ -116,7 +131,7 @@ else:
 
     # Encode the normalized [-1, 1] video tensor to latents.
     latents = demo.encode_video(video)
-    logger.info(
+    log(
         f"Latent range: [{latents.min():.3f}, {latents.max():.3f}] shape: {latents.shape} dtype: {latents.dtype}"
     )
 
@@ -144,15 +159,15 @@ data = {
 
 # The following code is an example of how to check the server availability using the "/api/reward/ping" endpoint.
 # This endpoint is used to check if the server is running and can be accessed.
-print("Checking server availability...")
+log("Checking server availability...")
 url = host + api_ping
 response = requests.post(
     url,
     data={"info_data": json.dumps(data)},
-    headers={"Authorization": f"Bearer {token}"},
+    headers=make_headers(),
 )
-print("Status Code:", response.status_code)
-print("Response:", response.json())
+log(f"Status Code: {response.status_code}")
+log(f"Response: {response.json()}")
 
 
 # How to make the reward calculation request to the "/api/reward/enqueue" endpoint.
@@ -173,20 +188,24 @@ for i in range(1):
     response = requests.post(
         url,
         data=payload,
-        headers={
-            "Content-Type": "application/octet-stream",
-            "Authorization": f"Bearer {token}",
-        },
+        headers=make_headers(extra={"Content-Type": "application/octet-stream"}),
     )
-    print("Status Code:", response.status_code)
-    print("Response:", response.json())
-    pending_requests.append((response.json()["uuid"], list(data["reward_fn"].keys())))
+    log(f"Status Code: {response.status_code}")
+    log(f"Response: {response.json()}")
+    response_json = response.json()
+    pending_requests.append(
+        (
+            response_json["uuid"],
+            response_json.get("replica_id"),
+            list(data["reward_fn"].keys()),
+        )
+    )
 
-for uuid, reward_types in pending_requests:
+for uuid, replica_id, reward_types in pending_requests:
     url = host + api_reward
     # Send the recorded uuid with reward type as a POST request to the "/api/reward/pull" endpoint to get the reward calculation results.
     for reward_type in reward_types:
-        print(f"Pulling reward results for UUID: {uuid}, reward type: {reward_type}...")
+        log(f"Pulling reward results for UUID: {uuid}, reward type: {reward_type}...")
         while True:
             response = requests.post(
                 url,
@@ -194,10 +213,10 @@ for uuid, reward_types in pending_requests:
                     "uuid": uuid,
                     "type": reward_type,
                 },
-                headers={"Authorization": f"Bearer {token}"},
+                headers=make_headers(replica_id=replica_id),
             )
-            print("Status Code:", response.status_code)
-            print("Response:", response.json())
+            log(f"Status Code: {response.status_code}")
+            log(f"Response: {response.json()}")
             if response.status_code == 200:
                 # Successfully got the reward results, exit the loop.
                 # The response contains the reward scores for the requested reward type.
