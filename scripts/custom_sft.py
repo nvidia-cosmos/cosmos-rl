@@ -51,8 +51,8 @@ try:
         Status,
         Verbosity,
         set_status_logger,
-        get_status_logger,
     )
+
     HAS_TAO_CORE = True
 except ImportError:
     HAS_TAO_CORE = False
@@ -62,6 +62,7 @@ except ImportError:
 try:
     from cosmos_reason1_utils.text import create_conversation
     from cosmos_reason1_utils.vision import VisionConfig
+
     HAS_COSMOS_REASON1_UTILS = True
 except ImportError:
     HAS_COSMOS_REASON1_UTILS = False
@@ -170,11 +171,11 @@ class CustomDataset(torch.utils.data.Dataset):
 
 def _get_results_dir() -> str:
     """Get the results directory based on TAO environment variables."""
-    job_id = os.environ.get('TAO_API_JOB_ID')
+    job_id = os.environ.get("TAO_API_JOB_ID")
     if job_id:
-        results_base = os.environ.get('TAO_API_RESULTS_DIR', '/results')
+        results_base = os.environ.get("TAO_API_RESULTS_DIR", "/results")
         return os.path.join(results_base, job_id)
-    return './results'
+    return "./results"
 
 
 def _is_master_rank() -> bool:
@@ -199,6 +200,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
             # your code here
             pass
     """
+
     def decorator(func):
         def wrapper(*args, **kwargs):
             s_logger = None
@@ -213,7 +215,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                     filename=status_file,
                     is_master=True,
                     verbosity=Verbosity.INFO,
-                    append=True
+                    append=True,
                 )
                 set_status_logger(s_logger)
                 logger.info(f"Job lifecycle status will be logged to: {status_file}")
@@ -221,7 +223,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                 # Log STARTED
                 s_logger.write(
                     status_level=Status.STARTED,
-                    message=f"Starting {experiment_name} training"
+                    message=f"Starting {experiment_name} training",
                 )
                 logger.info(f"Job STARTED: {experiment_name}")
 
@@ -232,7 +234,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                 if s_logger:
                     s_logger.write(
                         status_level=Status.RUNNING,
-                        message=f"{experiment_name} training completed successfully"
+                        message=f"{experiment_name} training completed successfully",
                     )
                     logger.info(f"Job SUCCESS: {experiment_name}")
 
@@ -244,7 +246,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                         s_logger.write(
                             status_level=Status.FAILURE,
                             verbosity_level=Verbosity.WARNING,
-                            message=f"{experiment_name} training was interrupted: {str(e)}"
+                            message=f"{experiment_name} training was interrupted: {str(e)}",
                         )
                     except Exception:
                         pass
@@ -257,7 +259,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                         s_logger.write(
                             status_level=Status.FAILURE,
                             verbosity_level=Verbosity.ERROR,
-                            message=f"{experiment_name} training failed: {str(e)}"
+                            message=f"{experiment_name} training failed: {str(e)}",
                         )
                     except Exception:
                         pass
@@ -265,6 +267,7 @@ def monitor_status(experiment_name: str = "Cosmos-RL finetuning"):
                 raise
 
         return wrapper
+
     return decorator
 
 
@@ -296,11 +299,15 @@ def main():
         logger.info(f"Saved config to {config_path}")
 
     # Factory function for training dataset
-    def get_train_dataset(config: cosmos_rl.policy.config.Config) -> torch.utils.data.Dataset:
+    def get_train_dataset(
+        config: cosmos_rl.policy.config.Config,
+    ) -> torch.utils.data.Dataset:
         """Factory function to create training dataset."""
         custom_cfg = CustomConfig.model_validate(config.model_dump().get("custom", {}))
 
-        logger.info(f"Creating training dataset from: {custom_cfg.train_dataset.annotation_path}")
+        logger.info(
+            f"Creating training dataset from: {custom_cfg.train_dataset.annotation_path}"
+        )
         return CustomDataset(
             config=config,
             custom_config=custom_cfg,
@@ -309,7 +316,9 @@ def main():
         )
 
     # Factory function for validation dataset (optional)
-    def get_val_dataset(config: cosmos_rl.policy.config.Config) -> torch.utils.data.Dataset:
+    def get_val_dataset(
+        config: cosmos_rl.policy.config.Config,
+    ) -> torch.utils.data.Dataset:
         """Factory function to create validation dataset."""
         custom_cfg = CustomConfig.model_validate(config.model_dump().get("custom", {}))
 
@@ -317,7 +326,9 @@ def main():
             logger.info("No validation dataset specified, skipping validation dataset")
             return None
 
-        logger.info(f"Creating validation dataset from: {custom_cfg.val_dataset.annotation_path}")
+        logger.info(
+            f"Creating validation dataset from: {custom_cfg.val_dataset.annotation_path}"
+        )
         return CustomDataset(
             config=config,
             custom_config=custom_cfg,
@@ -339,10 +350,14 @@ def main():
         custom_logger_fns.append(tao_logger.log_status)
         hook_fns = tao_logger.get_hooks()
 
-        logger.info(f"TAO status will be logged to: {tao_logger._get_status_file_path()}")
+        logger.info(
+            f"TAO status will be logged to: {tao_logger._get_status_file_path()}"
+        )
     else:
         if custom_config.tao_logging_enabled:
-            logger.info("TAO logging enabled but TAO_API_JOB_ID not set - skipping TAO status logging")
+            logger.info(
+                "TAO logging enabled but TAO_API_JOB_ID not set - skipping TAO status logging"
+            )
 
     # Launch worker with factory functions and TAO logging
     val_dataset_factory = get_val_dataset if custom_config.val_dataset else None
