@@ -40,7 +40,7 @@ dp_replicate_size = 8
 
 [logging]
 logger = ["console", "wandb"]
-project_name = "cosmos_rl-behavior-sft"
+project_name = "sft-debug"
 experiment_name = "cosmos-rl-test"
 
 [train.train_policy]
