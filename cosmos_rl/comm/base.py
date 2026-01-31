@@ -15,7 +15,7 @@
 
 import torch.distributed as dist
 import uuid
-from typing import Dict, Callable, Type, Optional, Any
+from typing import Dict, Callable, Type, Optional, Any, Union
 import copy
 import time
 import atexit
@@ -102,8 +102,8 @@ class CommMixin:
 
     def init_data_packer(
         self,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         if not self.config.policy.is_diffusers:
             hf_config = util.retry(AutoConfig.from_pretrained)(
@@ -116,10 +116,15 @@ class CommMixin:
             is_vlm = False
 
         if data_packer:
-            assert isinstance(
-                data_packer, BaseDataPacker
-            ), "data_packer must be a BaseDataPacker instance"
-            self.data_packer = data_packer
+            if isinstance(data_packer, Callable):
+                self.data_packer = data_packer(self.config)
+            elif isinstance(data_packer, BaseDataPacker):
+                self.data_packer = data_packer
+            else:
+                raise ValueError(
+                    "Data packer must be a BaseDataPacker instance or a factory function that "
+                    " returns a BaseDataPacker instance"
+                )
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
             try:
@@ -136,10 +141,15 @@ class CommMixin:
         util.call_setup(self.data_packer, self.config)
 
         if val_data_packer:
-            assert isinstance(
-                val_data_packer, BaseDataPacker
-            ), "val_data_packer must be a BaseDataPacker instance"
-            self.val_data_packer = val_data_packer
+            if isinstance(val_data_packer, Callable):
+                self.val_data_packer = val_data_packer(self.config)
+            elif isinstance(val_data_packer, BaseDataPacker):
+                self.val_data_packer = val_data_packer
+            else:
+                raise ValueError(
+                    "Validation data packer must be a BaseDataPacker instance or a factory function that "
+                    " returns a BaseDataPacker instance"
+                )
             logger.info(
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
