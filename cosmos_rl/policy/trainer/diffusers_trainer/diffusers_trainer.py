@@ -22,7 +22,7 @@ from cosmos_rl.policy.trainer.base import Trainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.trainer.optm import build_optimizers
-
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.checkpoint import CheckpointMananger
@@ -94,7 +94,7 @@ class DiffusersTrainer(Trainer):
         self.build_optimizers()
         self.lr_schedulers = None
 
-        self.is_video = config.policy.diffusers_config.is_video
+        self.is_video = config.policy.diffusers.is_video
         self.is_lora = config.policy.lora is not None
 
     def build_optimizers(self):
@@ -123,4 +123,4 @@ class DiffusersTrainer(Trainer):
 
     def model_load_from_hf(self):
         # TODO (yy): meta init not support now
-        pass
+        logger.critical("[Policy] Meta init not supported for diffusers trainer.")

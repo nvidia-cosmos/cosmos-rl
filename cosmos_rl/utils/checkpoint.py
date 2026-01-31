@@ -363,7 +363,7 @@ class CheckpointMananger:
         if is_master_rank(self.parallel_dims, self.global_rank):
             heapq.heappush(self.saved_steps, step)
             # remove the old checkpoints
-            if len(self.saved_steps) > self.max_keep:
+            if len(self.saved_steps) > self.max_keep and self.max_keep != -1:
                 oldest = heapq.heappop(self.saved_steps)
                 ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{oldest}")
                 safetensors_dir = os.path.join(

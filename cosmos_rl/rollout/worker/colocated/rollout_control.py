@@ -182,6 +182,11 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         ), f"Invalid command type: {type(executed_cmd)}"
         return executed_cmd
 
+    def prepare_shard_infos_for_weight_sync_insts(self):
+        # Diffusers models do not need weight sync in colocated mode
+        if not self.config.policy.is_diffusers:
+            return super().prepare_shard_infos_for_weight_sync_insts()
+
 
 # Register command handlers
 ColocatedRolloutControlWorker.register_rollout_command_handler(

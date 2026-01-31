@@ -30,6 +30,7 @@ IGNORE_LABEL_ID = -100
 
 
 def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
+    # This only handles the case of single image, not video.
     image_inputs = []
     video_inputs = []
     for x in sample:
@@ -456,6 +457,12 @@ class Qwen3_VL_DataPacker(DataPacker):
                         elif isinstance(content, dict):
                             assert "text" in content, f"text not in content: {content}"
                             assistant_contents.append(content["text"])
+                        elif isinstance(content, list):
+                            for _, item in enumerate(content):
+                                assert (
+                                    "text" in item
+                                ), f"text not in content of assistant: {item}"
+                                assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
                                 f"Unsupported content type: {type(content)}"

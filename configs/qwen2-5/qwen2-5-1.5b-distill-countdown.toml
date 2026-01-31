@@ -1,0 +1,117 @@
+redis = "12800"
+
+[train]
+resume = false
+epoch = 1
+output_dir = "./outputs/qwen3-8b-distillation-countdown"
+epsilon = 1e-8
+optm_name = "Adam"
+optm_lr = 1e-4
+optm_impl = "fused"
+optm_weight_decay = 0.0
+optm_decay_ratio = 0.0
+optm_betas = [ 0.9, 0.95,]
+optm_warmup_steps = 0
+optm_grad_norm_clip = 0.0
+async_tp_enabled = false
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 128
+sync_weight_interval = 1
+
+[rollout]
+gpu_memory_utilization = 0.5
+enable_chunked_prefill = false
+n_generation = 4
+batch_size = 16
+quantization = "none"
+max_response_length = 1024
+seed = 42
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-1.5B-Instruct"
+model_max_length = 26624
+model_gradient_checkpointing = true
+
+[logging]
+logger = ['console', 'wandb']
+project_name = "cosmos_rl"
+experiment_name = "None"
+
+[train.train_policy]
+type = "grpo"
+loss_type = "token-sum"
+dataset.name = "HuggingFaceTB/Countdown-Task-GOLD"
+dataset.subset = "verified_Qwen2.5-7B-Instruct"
+dataset.split = "train"
+prompt_column_name = "question"
+temperature = 1.0
+epsilon_low = -1.0
+epsilon_high = -1.0
+lower_bound_ratio = 100.0
+kl_beta = 0.0
+mu_iterations = 1
+mini_batch = 4
+min_filter_prefix_tokens = 1
+allowed_outdated_steps = 0
+use_rollout_logprobs_for_loss = false
+
+[validation]
+temperature = 0.0
+max_response_length = 1024
+dataset.name = "HuggingFaceTB/Countdown-Task-GOLD"
+dataset.subset = "test"
+dataset.split = "test"
+dataset.test_size = 0.01
+enable = true
+freq = 1
+batch_size = 16
+val_before_train = true
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 30
+save_mode = "async"
+
+[rollout.parallelism]
+n_init_replicas = 1
+tp_size = 2
+pp_size = 1
+
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 4
+pp_size = 1
+dp_replicate_size = 1
+
+[distillation]
+enable = true
+model_name_or_path = "Qwen/Qwen2.5-7B-Instruct"
+compile = true
+mini_batch = 8
+master_dtype = "float32"
+param_dtype = "bfloat16"
+logprob_dtype = "float32"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+batch_size_per_replica = 16
+top_k = 256
+jsd_beta = 1
+include_prompt = false
+trainer_token_ids_from_teacher = true
+rollout_top_k_recompute = false
+
+[distillation.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 2
+pp_size = 1
+dp_replicate_size = 1

@@ -97,9 +97,9 @@ class PI05GRPOTrainer(GRPOTrainer):
                     log_probs_full, entropy_full = self.model.get_log_prob_value(
                         images=images_list,
                         img_masks=img_masks_list,
-                        lang_tokens=chunk_data["tokenized_prompt"],
-                        lang_masks=chunk_data["tokenized_prompt_mask"],
-                        state=chunk_data["state"],
+                        lang_tokens=chunk_data["input_ids"],
+                        lang_masks=chunk_data["attention_mask"],
+                        state=chunk_data["states"],
                         chains=chunk_data["chains"],
                         denoise_inds=chunk_data["denoise_inds"],
                         compute_values=False,
@@ -181,19 +181,6 @@ class PI05GRPOTrainer(GRPOTrainer):
 
                     loss = pg_loss / len(policy_inputs)
                     loss.backward()
-
-                    # Optional debug: synchronize to surface the *real* CUDA error at the first
-                    # failing kernel, instead of later at an unrelated call (e.g., cuda events).
-                    if str(
-                        os.getenv("COSMOS_CUDA_SYNC_DEBUG", "0")
-                    ).strip().lower() in {
-                        "1",
-                        "true",
-                        "yes",
-                        "y",
-                        "on",
-                    }:
-                        torch.cuda.synchronize()
 
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())

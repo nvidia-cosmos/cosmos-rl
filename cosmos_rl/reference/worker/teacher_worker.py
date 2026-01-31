@@ -138,7 +138,7 @@ class TeacherWorker(PolicyWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -201,6 +201,9 @@ class TeacherWorker(PolicyWorkerBase):
                     rollout_item = copy.deepcopy(rollout)
                     rollout_item["completion_token_ids"] = tokens
                     rollout_item["teacher_result_uuid"] = uuid
+                    rollout_item["prompt_token_ids"] = rollout.get(
+                        "prompt_token_ids", None
+                    )
                     self.data_queue.put_nowait(rollout_item)
                 if "is_end" in rollout:
                     logger.info("[Reference] Exiting fetch rollouts")
@@ -223,6 +226,7 @@ class TeacherWorker(PolicyWorkerBase):
                         prompt_idx=rollouts[i]["prompt_idx"],
                         teacher_result_uuid=rollouts[i]["teacher_result_uuid"],
                         completion_token_ids=rollouts[i]["completion_token_ids"],
+                        prompt_token_ids=rollouts[i].get("prompt_token_ids", None),
                     )
                 )
             return updated_rollouts

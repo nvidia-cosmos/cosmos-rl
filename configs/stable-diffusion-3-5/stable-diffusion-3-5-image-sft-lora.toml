@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/sft_sd3_image"
+output_dir = "./outputs/stable-diffusion-3-5_image-sft-lora"
 epsilon = 1e-5
 optm_name = "AdamW"
 optm_lr = 1e-4
@@ -37,12 +37,16 @@ lora_alpha = 64
 init_lora_weights = "gaussian"
 target_modules = ["attn.add_k_proj", "attn.add_q_proj", "attn.add_v_proj", "attn.to_add_out", "attn.to_k", "attn.to_out.0", "attn.to_q", "attn.to_v"]
 
-[policy.diffusers_config]
+[policy.diffusers]
 offload = true
 is_video = false
 max_prompt_length = 300
 weighting_scheme = "logit_normal"
 inference_size = [1024, 1024]
+
+[policy.diffusers.sample]
+num_steps = 50
+guidance_scale = 4.5
 
 [logging]
 logger = ['console', 'wandb']

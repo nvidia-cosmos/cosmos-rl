@@ -153,6 +153,7 @@ class SFTTrainer(LLMTrainer):
         total_steps: int,
         train_step: int,
         save_freq: int,
+        inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
@@ -294,7 +295,7 @@ class SFTTrainer(LLMTrainer):
                         pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                         seq_len_multiple=self.seq_len_multiple,
                     )
-                loss = (
+                ce_loss = (
                     torch.mean(torch.stack(losses)).to(self.device)
                     if pp_last_stage
                     else torch.tensor([-1.0], device=self.device)
@@ -329,27 +330,51 @@ class SFTTrainer(LLMTrainer):
                 # return
                 #########################################################################################
 
+                aux_loss = None
                 with self.act_offloading_ctx_manager:
-                    logits = self.model(**batch)
+                    output = self.model(**batch)
+                    if isinstance(output, torch.Tensor):
+                        logits = output
+                    else:
+                        logits = output.logits
+                        # Enumerate the output to involve any `loss` like output
+                        for k, v in output.items():
+                            if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                                aux_loss = v if aux_loss is None else aux_loss + v
 
-                loss = self.loss_fn(
+                ce_loss = self.loss_fn(
                     logits,
                     labels,
                     output_packing_mask=batch.get("input_packing_mask", None),
                     target_packing_mask=batch.get("label_packing_mask", None),
                     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                 )
+                if aux_loss is not None:
+                    loss = ce_loss + aux_loss
+                else:
+                    loss = ce_loss
                 # # Hint FSDP to do all-reduce on the last backward pass
                 # if hasattr(self.model, "set_is_last_backward"):
                 #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
                 #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
                 loss.backward()
-            acc_loss += loss.detach()
+            acc_loss += ce_loss.detach()
 
         """
         Compute the global grad norm on all parameters and then apply
         gradient clipping using the global grad norm.
         """
+        if inter_policy_nccl is not None:
+            # Reduce gradients across all replicas for multiple replicas case
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], inter_policy_nccl
+                    )
+
         all_params = [
             p
             for m in [model for model in self.model_parts if model is not None]
@@ -367,6 +392,8 @@ class SFTTrainer(LLMTrainer):
 
         self.optimizers.step()
         self.lr_schedulers.step()
+
+        self.model.step_hook()
 
         end_event.record()
 
@@ -416,8 +443,6 @@ class SFTTrainer(LLMTrainer):
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
         if not self.config.validation.enable:
-            return
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
 
         self.model.eval()
@@ -500,7 +525,17 @@ class SFTTrainer(LLMTrainer):
                 val_logits = self.model(**val_batch)
 
                 val_loss = self.loss_fn(val_logits, val_labels)
-        return val_loss.item() * val_inputs.size(0)
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+        ):
+            val_loss = (  # noqa: F841
+                dist_util.dist_mean(val_loss, self.parallel_dims.mesh["dp"])
+            ) * self.parallel_dims.mesh["dp"].size()
+        else:
+            val_loss = val_loss.item()  # noqa: F841
+
+        return val_loss * val_inputs.size(0)
 
     def checkpointing(
         self,
@@ -510,9 +545,11 @@ class SFTTrainer(LLMTrainer):
         is_last_step: bool = False,
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
+        do_save: bool = False,
+        **kwargs,
     ):
         if (
-            is_last_step or (train_step % save_freq == 0 and train_step > 0)
+            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             # save safetensors
             # TODO(dinghaoy): support export safetensors asynchronously.
@@ -541,6 +578,7 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    **kwargs,
                 )
                 self.ckpt_manager.save_check(
                     step=train_step,
@@ -586,6 +624,12 @@ class SFTTrainer(LLMTrainer):
                     group=self.parallel_dims.mesh["dp_replicate"].get_group(),
                     group_src=0,
                 )
+                train_step = dist_util.broadcast_object_cpu(
+                    train_step,
+                    group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                    group_src=0,
+                )
+
                 if (
                     self.parallel_dims.dp_replicate_coord[0] != 0
                     and ckpt_total_steps is not None

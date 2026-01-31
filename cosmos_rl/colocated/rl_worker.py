@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch.utils.data import Dataset
+from typing import Callable, Optional, List
+
 from cosmos_rl.colocated.controller import ColocatedController
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
-from torch.utils.data import Dataset
-from typing import Callable, Optional
 from cosmos_rl.utils.logging import logger
-from typing import List
 from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.policy.worker.colocated.policy_control import (
     ColocatedPolicyControlWorker,
@@ -35,6 +35,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
     DataFetchCommand,
 )
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 
 class ColocatedRLControlWorker(WorkerBase):
@@ -62,7 +63,7 @@ class ColocatedRLControlWorker(WorkerBase):
         )
         # Setting up rollout parallel dims
         rollout_parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
-        rollout_parallel_dims.build_mesh(device_type="cuda")
+        rollout_parallel_dims.build_mesh(device_type=cosmos_device_type)
         assert (
             rollout_parallel_dims.world_size == parallel_dims.world_size
         ), "Rollout and Policy parallel dims must have the same world size in colocated mode."

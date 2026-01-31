@@ -21,6 +21,7 @@ from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
+from cosmos_rl.utils.distributed import cosmos_device_type
 from cosmos_rl.dispatcher.api.client import APIClient
 
 
@@ -65,7 +66,7 @@ def run_rollout(*args, **kwargs):
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
             init_distributed()
-            parallel_dims.build_mesh(device_type="cuda")
+            parallel_dims.build_mesh(device_type=cosmos_device_type)
             rollout_worker = DisaggregatedRolloutControlWorker(
                 cosmos_rollout_config, parallel_dims, **kwargs
             )

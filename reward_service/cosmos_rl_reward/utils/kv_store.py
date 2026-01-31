@@ -15,6 +15,8 @@
 
 from collections import OrderedDict
 
+from cosmos_rl.utils.logging import logger
+
 
 class RecentDict:
     """
@@ -81,6 +83,7 @@ class SimpleKeyValueStore:
 
     async def set_key_value(self, key: str, value: str):
         self.store[key] = value
+        logger.info(f"[SimpleKeyValueStore] Set key {key} with value {value}")
 
     async def get_key_value(self, key: str):
         return self.store.get(key, None)

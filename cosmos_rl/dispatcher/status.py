@@ -75,6 +75,7 @@ class PolicyStatus(StrEnum):
     RUNNING: The policy is running.
     REDUCED: The policy has finished reduce.
     END: The policy has finished.
+    VALIDATED: The policy has finished validation.
     """
 
     UNINITIALIZED = "uninitialized"
@@ -82,6 +83,7 @@ class PolicyStatus(StrEnum):
     RUNNING = "running"
     REDUCED = "reduced"
     END = "end"
+    VALIDATED = "validated"
 
 
 class PolicyStatusManager:
@@ -129,6 +131,9 @@ class PolicyStatusManager:
 
         # Record filter rewards distribution for dynamic sampling
         self.filter_records = {}
+
+        # For rank specific data dispatch
+        self.rollout_buffer_per_rank: List[Queue] = []
 
     def setup(
         self,
@@ -268,6 +273,12 @@ class PolicyStatusManager:
         Check if all policies have the given status.
         """
         return all([x in status for x in self.status.values()])
+
+    def any_with_status(self, status: List[PolicyStatus]) -> bool:
+        """
+        Check if any policies have the given status.
+        """
+        return any([x in status for x in self.status.values()])
 
     def all_reduced(self) -> bool:
         """
@@ -431,7 +442,7 @@ class PolicyStatusManager:
                         command.RolloutToRolloutBroadcastCommand.trigger(
                             src_replica=any_valid_rollout_replica,
                             dst_replicas=valid_rollout_replicas,
-                            weight_step=None,
+                            weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                             total_steps=None,
                             redis_handler=self.redis_handler,
                         )
@@ -457,6 +468,25 @@ class PolicyStatusManager:
             sorted_valid_replicas, redis_handler=self.redis_handler
         )
         self.recompute_total_steps()
+        self.data_fetcher.set_policy_global_mesh_size(len(sorted_valid_replicas))
+        self.rearrange_rollout_buffer_after_mesh_rebuild(sorted_valid_replicas)
+
+    def rearrange_rollout_buffer_after_mesh_rebuild(
+        self, sorted_valid_replicas: List[Replica]
+    ):
+        # Only handle the case when data dispatch as rank in mesh is enabled for GRPO
+        # Currently SFT does not support rank specific data dispatch
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            new_rollout_buffer_per_rank: List[Queue[Rollout]] = [
+                Queue() for _ in range(len(sorted_valid_replicas))
+            ]
+            for q in self.rollout_buffer_per_rank:
+                while not q.empty():
+                    rollout: Rollout = q.get()
+                    new_rollout_buffer_per_rank[
+                        rollout.prompt_idx % len(sorted_valid_replicas)
+                    ].put(rollout)
+            self.rollout_buffer_per_rank = new_rollout_buffer_per_rank
 
     def post_register_hook(
         self,
@@ -501,6 +531,7 @@ class PolicyStatusManager:
                 command.PolicyToPolicyBroadcastCommand.trigger(
                     src_replica=initialized_replica,
                     dst_replicas=valid_replicas,
+                    total_steps=self.total_steps,
                     redis_handler=self.redis_handler,
                 )
             # Set all policy replicas to `ready`
@@ -570,6 +601,7 @@ class PolicyStatusManager:
             command.PolicyToPolicyUnicastCommand.trigger(
                 src_replica=initialized_replica,
                 dst_replica=target_replica,
+                total_steps=self.total_steps,
                 redis_handler=self.redis_handler,
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
@@ -668,6 +700,8 @@ class PolicyStatusManager:
         """
         Get the total pending rollouts.
         """
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            return sum(q.qsize() for q in self.rollout_buffer_per_rank)
         return self.rollout_buffer.qsize()
 
     def get_all_atoms_arrived_replicas(self) -> List[Replica]:
@@ -696,7 +730,12 @@ class PolicyStatusManager:
                         rollout.completed_conversation[
                             -1
                         ].content += self.tokenizer.eos_token
-        self.rollout_buffer.put(rollout)
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            # Dispatch based on prompt idx
+            target_rank = rollout.prompt_idx % len(self.rollout_buffer_per_rank)
+            self.rollout_buffer_per_rank[target_rank].put(rollout)
+        else:
+            self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 
     def put_rollouts(self, rollouts: List[Rollout]):
@@ -779,6 +818,91 @@ class PolicyStatusManager:
         )
         return filtered_rollouts
 
+    def sft_report_summary(
+        self,
+        train_step: int,
+        total_steps: int,
+        is_validation: bool = False,
+    ):
+        try:
+            report_data = {}
+            report_data = aggregate_report_data(self.report_data_list, report_data)
+            self.report_data_list = []
+            report_data_str = ", ".join([f"{k}: {v}" for k, v in report_data.items()])
+            logger.debug(
+                f"[Controller] {'Validation' if is_validation else 'Train'} report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} data batch: {report_data_str}"
+            )
+            if "wandb" in self.config.logging.logger and is_wandb_available():
+                log_wandb(
+                    data=report_data,
+                    step=train_step,
+                )
+            if "console" in self.config.logging.logger:
+                if is_validation:
+                    logger.info(
+                        f"[SFT] Validation Loss: {report_data['val/avg_loss']:.5f} at step {train_step}/{total_steps}, epoch {self.data_fetcher.epoch - 1}."
+                    )
+                else:
+                    logger.info(
+                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                    )
+            for custom_logger_fn in self.custom_logger_fns:
+                # We add a separate try-except block to handle the error of custom logger function.
+                # This is to avoid the error of custom logger function affecting the fundamental logging system.
+                for custom_logger_fn in self.custom_logger_fns:
+                    try:
+                        custom_logger_fn(report_data, train_step)
+                    except Exception as e:
+                        logger.warning(
+                            f"[Controller] Error calling custom logger function: {e}"
+                        )
+        except Exception as e:
+            import traceback
+
+            logger.warning(
+                f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
+            )
+        for replica in self.get_all_atoms_arrived_replicas():
+            self.set_status(replica.name, PolicyStatus.RUNNING)
+
+    def sft_train_ack(
+        self,
+        replica_name: str,
+        report_data: Dict[str, Any],
+        step: int,
+        total_steps: int,
+    ):
+        if "val/avg_loss" in report_data:
+            # This is a validation ack from SFT validation step
+            self.set_status(replica_name, PolicyStatus.VALIDATED)
+            if self.all_with_status([PolicyStatus.VALIDATED]):
+                # First validation ack received in this step
+                # Trigger validation report
+                self.sft_report_summary(
+                    train_step=step,
+                    total_steps=total_steps,
+                    is_validation=True,
+                )
+            return
+        if not self.any_with_status([PolicyStatus.REDUCED]):
+            # For SFT, we increment current_step at first train_ack received in each step
+            self.current_step += 1
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            ):
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
+        self.set_status(replica_name, PolicyStatus.REDUCED)
+        if self.all_reduced():
+            # All replicas have been reduced, trigger remain_samples_num update and report
+            self.remain_samples_num -= (
+                self.config.train.train_batch_per_replica
+            ) * len(self.get_all_atoms_arrived_replicas())
+            self.sft_report_summary(
+                train_step=step,
+                total_steps=total_steps,
+            )
+
     def train_ack(
         self,
         replica_name: str,
@@ -791,12 +915,21 @@ class PolicyStatusManager:
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
 
-        self.set_status(replica_name, PolicyStatus.REDUCED)
-
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
-
         self.report_data_list.append(report_data)
+
+        if self.config.train.train_policy.type == "sft":
+            # For SFT with multiple replicas, we handle train_ack differently
+            return self.sft_train_ack(
+                replica_name,
+                report_data,
+                step,
+                total_steps,
+            )
+
+        self.set_status(replica_name, PolicyStatus.REDUCED)
+
         if self.all_reduced():
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
                 self.get_all_atoms_arrived_replicas()
@@ -1010,10 +1143,53 @@ class PolicyStatusManager:
             # Colocated mode always has enough rollouts since they are locally prepared.
             return True
 
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            # In this dispatch mode, each rank has its own rollout buffer.
+            return all(
+                q.qsize() >= self.config.train.train_batch_per_replica
+                for q in self.rollout_buffer_per_rank
+            )
+
         return self.total_pending_rollouts() >= (
             self.config.train.train_batch_per_replica
             * len(self.get_all_atoms_arrived_replicas())
         )
+
+    def check_checkpoint_saving(self, required_rollouts: int):
+        # Decide whether to save checkpoint
+        # First check if we need to save checkpoint based on epoch
+        do_save = False
+        if self.current_step == self.total_steps:
+            # Always save checkpoint at the last step
+            do_save = True
+        elif self.config.train.ckpt.save_freq_in_epoch > 0:
+            # Checkpointing based on epoch if `save_freq_in_epoch` is set
+            if (
+                self.remain_samples_num + required_rollouts - 1
+            ) // self.samples_per_epoch != (
+                self.remain_samples_num - 1
+            ) // self.samples_per_epoch:
+                # New epoch begins and old epoch ends
+                # So check the epoch number against save_freq_in_epoch for saving checkpoint
+                epoch = (
+                    self.config.train.epoch
+                    - (self.remain_samples_num + required_rollouts - 1)
+                    // self.samples_per_epoch
+                )
+                do_save = epoch % self.config.train.ckpt.save_freq_in_epoch == 0
+                if do_save:
+                    logger.info(
+                        f"[Controller] Epoch {epoch} ends, triggering checkpoint saving at step {self.current_step}"
+                    )
+        else:
+            # Checkpointing based on step if `save_freq_in_epoch` is not set
+            do_save = (
+                self.current_step % self.config.train.ckpt.save_freq == 0
+                and self.current_step > 0
+            )
+        # Finally check if checkpointing is enabled
+        # Only `do_save` when checkpointing is enabled
+        return do_save and self.config.train.ckpt.enable_checkpoint
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
@@ -1063,43 +1239,39 @@ class PolicyStatusManager:
             # Interleave-style data dispatch
             if not self.config.mode == "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
-                for _ in range(items_count):
-                    for replica in arrived_replicas:
-                        rollout = self.rollout_buffer.get()
-                        replica.put_rollout(rollout, self.redis_handler)
-                        rollouts_of_this_step.append(rollout)
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    # Helper function to sort a queue by item.prompt_idx
+                    def sort_queue_by_prompt_idx(q):
+                        # Step 1: Extract all items
+                        items: List[Rollout] = []
+                        while not q.empty():
+                            items.append(q.get())
+
+                        # Step 2: Sort by prompt_idx
+                        items.sort(key=lambda item: item.prompt_idx)
+
+                        # Step 3: Put sorted items back
+                        for item in items:
+                            q.put(item)
+
+                    sorted_valid_replicas = sorted(
+                        arrived_replicas, key=lambda x: x.start_time
+                    )
+                    for index, replica in enumerate(sorted_valid_replicas):
+                        sort_queue_by_prompt_idx(self.rollout_buffer_per_rank[index])
+                        for _ in range(items_count):
+                            rollout = self.rollout_buffer_per_rank[index].get()
+                            replica.put_rollout(rollout, self.redis_handler)
+                            rollouts_of_this_step.append(rollout)
+                else:
+                    for _ in range(items_count):
+                        for replica in arrived_replicas:
+                            rollout = self.rollout_buffer.get()
+                            replica.put_rollout(rollout, self.redis_handler)
+                            rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
-            # First check if we need to save checkpoint based on epoch
-            do_save = False
-            if self.current_step == self.total_steps:
-                # Always save checkpoint at the last step
-                do_save = True
-            elif self.config.train.ckpt.save_freq_in_epoch > 0:
-                # Checkpointing based on epoch if `save_freq_in_epoch` is set
-                if (
-                    self.remain_samples_num + required_rollouts - 1
-                ) // self.samples_per_epoch != (
-                    self.remain_samples_num - 1
-                ) // self.samples_per_epoch:
-                    # New epoch begins and old epoch ends
-                    # So check the epoch number against save_freq_in_epoch for saving checkpoint
-                    epoch = (
-                        self.config.train.epoch
-                        - (self.remain_samples_num + required_rollouts - 1)
-                        // self.samples_per_epoch
-                    )
-                    do_save = epoch % self.config.train.ckpt.save_freq_in_epoch == 0
-                    if do_save:
-                        logger.info(
-                            f"[Controller] Epoch {epoch} ends, triggering checkpoint saving at step {self.current_step}"
-                        )
-            else:
-                # Checkpointing based on step if `save_freq_in_epoch` is not set
-                do_save = (
-                    self.current_step % self.config.train.ckpt.save_freq == 0
-                    and self.current_step > 0
-                )
+            do_save = self.check_checkpoint_saving(required_rollouts)
 
             for replica in arrived_replicas:
                 command.DataFetchCommand.trigger(
@@ -1109,8 +1281,8 @@ class PolicyStatusManager:
                     total_steps=self.total_steps,
                     # `remain_samples_num` is just for checkpointing the training progress
                     remain_samples_num=self.remain_samples_num,
-                    # Only `do_save` when checkpointing is enabled
-                    do_save=do_save and self.config.train.ckpt.enable_checkpoint,
+                    # do_save from `check_checkpoint_saving` indicates whether the replica should save checkpoint after this training step
+                    do_save=do_save,
                     redis_handler=self.redis_handler,
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)
@@ -1183,9 +1355,15 @@ class RolloutStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
+        policy_status_manager: PolicyStatusManager,
+        data_fetcher: ControllerDataFetcher,
     ):
         self.redis_handler = redis_handler
         self.config = config
+        # Rollout status manager has to access some information throug policy status manager.
+        self.policy_status_manager = policy_status_manager
+        # Data fetcher is needed to set global mesh size when rebuilding mesh for replica specific dispatch.
+        self.data_fetcher = data_fetcher
         """
         Maintain the life status of the policy and rollout replicas.
         """
@@ -1351,6 +1529,7 @@ class RolloutStatusManager:
         command.BuildMeshCommand.trigger(
             sorted_valid_replicas, redis_handler=self.redis_handler
         )
+        self.data_fetcher.set_rollout_global_mesh_size(len(sorted_valid_replicas))
 
     def post_register_hook(
         self,
@@ -1424,7 +1603,7 @@ class RolloutStatusManager:
                 command.RolloutToRolloutBroadcastCommand.trigger(
                     src_replica=any_loaded_rollout_replica,
                     dst_replicas=valid_replicas,
-                    weight_step=None,
+                    weight_step=self.policy_status_manager.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                     total_steps=None,
                     redis_handler=self.redis_handler,
                 )

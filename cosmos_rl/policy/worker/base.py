@@ -43,6 +43,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         else:
             self.hf_config = util.retry(diffusers_config_fn)(
                 self.config.policy.model_name_or_path,
+                revision=config.policy.model_revision or "main",
                 trust_remote_code=True,
             )
 

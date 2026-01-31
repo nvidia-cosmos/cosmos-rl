@@ -7,13 +7,12 @@ dynamic = ["version"]
 dependencies = [
     "fastapi",
     "uvicorn",
-    "transformers>=4.51.1,!=4.52.*,!=4.53.*", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+    "transformers>=4.51.1,!=4.52.*,!=4.53.*,<5.0.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
     "datasets>=4.4.1",
     "pydantic",
     "math_verify",
     "nest_asyncio",
     "pybind11[global]",
-    "vllm>=0.8.5",
     "torch>=2.6.0",
     "torchvision>=0.21.0",
     "torchao>=0.10.0",
@@ -35,7 +34,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffusers",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@ec37629", # For cosmos-predict2.5
     "peft",
     "flash-attn>=2.8.3",
 ]
@@ -84,7 +83,12 @@ wfm = [
     "webdataset",
     "decord",
     "trimesh",
+    "opencv-python-headless",
+    "better_profanity",
+    "nltk",
+    "retinaface-py",
 ]
+
 vla = [
     "bddl",
     "easydict",
@@ -103,8 +107,13 @@ vla = [
     "timm<1",
     "wandb>0.13.1",
 ]
+
+rl = [
+    "vllm>=0.8.5",
+]
+
 all = [
-    "cosmos_rl[wfm,vla]",
+    "cosmos_rl[wfm,vla,rl]",
 ]
 
 [tool.uv.sources]

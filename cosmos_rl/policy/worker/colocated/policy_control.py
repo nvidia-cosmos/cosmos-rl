@@ -13,16 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import torch
+from typing import Type
+
 from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.utils.logging import logger
-import copy
 from cosmos_rl.dispatcher.command import (
     Command,
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
 )
-from typing import Type
 
 
 class ColocatedPolicyControlWorker(RLPolicyWorker):
@@ -123,6 +125,12 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
         logger.debug(f"[Policy] Executing command: {cmd}")
         abort = self.execute_command(cmd)
         return abort
+
+    @torch.no_grad()
+    def prepare_shard_infos_for_weight_sync_insts(self):
+        # Diffusers models do not need weight sync in colocated mode
+        if not self.config.policy.is_diffusers:
+            super().prepare_shard_infos_for_weight_sync_insts()
 
 
 # Register command handlers

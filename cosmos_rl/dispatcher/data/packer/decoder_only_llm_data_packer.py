@@ -223,6 +223,8 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                     if x["role"] == "assistant":
                         assistant_contents.append(x["content"])
                         x["content"] = pad_token * pad_run_length
+                    elif x["role"] is None:
+                        x["role"] = "assistant"
 
                 token_ids = self.tokenizer.apply_chat_template(
                     sample,

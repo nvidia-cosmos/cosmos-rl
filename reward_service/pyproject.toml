@@ -24,6 +24,7 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 [project.scripts]
 cosmos-rl-reward = "cosmos_rl_reward.launcher.reward_serve:main"
 cosmos-rl-reward-prepare = "cosmos_rl_reward.setup.env_prepare:main"
+cosmos-rl-reward-redis = "cosmos_rl_reward.launcher.redis_serve:main"
 
 [tool.setuptools]
 include-package-data = true

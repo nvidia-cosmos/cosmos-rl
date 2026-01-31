@@ -54,7 +54,7 @@ from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
 )
-from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 
@@ -156,11 +156,11 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
     ):
         # setup data packer first
@@ -449,6 +449,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         valid_payloads,
                         False,
                         0,
+                        bypass_reward=self.config.train.train_policy.bypass_reward,
                     )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():

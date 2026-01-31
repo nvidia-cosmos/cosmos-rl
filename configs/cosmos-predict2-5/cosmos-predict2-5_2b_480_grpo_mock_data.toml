@@ -30,9 +30,6 @@ pipeline_model_parallel_size = 1
 pipeline_parallel_size = 1
 context_parallel_size = 1
 
-[trainer]
-max_iter = 2001
-
 [[trainer.callbacks]]
 name = "grad_clip"
 [trainer.callbacks.args]
@@ -59,8 +56,8 @@ save_s3 = true
 
 [[trainer.callbacks]]
 name = "heart_beat"
-step_size = 1
 [trainer.callbacks.args]
+step_size = 1
 update_interval_in_minute = 20
 save_s3 = true
 every_n = 10
@@ -75,6 +72,11 @@ upload_every_n_mul = 10
 log_memory_detail = true
 
 [[trainer.callbacks]]
+name = "verify_data_batch_keys"
+[trainer.callbacks.args]
+check_first_n = 10
+
+[[trainer.callbacks]]
 name = "manual_gc"
 [trainer.callbacks.args]
 warm_up = 5
@@ -83,7 +85,7 @@ every_n = 5
 [[trainer.callbacks]]
 name = "compile_tokenizer"
 [trainer.callbacks.args]
-enabled = true
+enabled = false
 compile_after_iterations = 4
 dynamic = false
 
@@ -110,7 +112,7 @@ is_ema = false
 use_negative_prompt = false
 show_all_frames = false
 fps = 16
-every_n = 16
+every_n = 2
 
 [[trainer.callbacks]]
 name = "every_n_sample_ema"
@@ -128,7 +130,7 @@ is_ema = true
 use_negative_prompt = false
 show_all_frames = false
 fps = 16
-every_n = 16
+every_n = 2
 
 [[trainer.callbacks]]
 name = "wandb"
@@ -161,50 +163,102 @@ save_s3 = true
 [trainer.grad_scaler_args]
 enabled = false
 
-[optimizer]
-lr = 1e-5
-weight_decay = 1e-4
-
-[scheduler]
-f_start = [1e-6]
-f_max = [1.0]
-f_min = [1.0]
-warm_up_steps = [50]
-cycle_lengths = [400000]
-
 [dataloader_train]
-type = 'local'
+type = 'web'
+
+[dataloader_train.image_dataloader]
+ratio = 0
+
+  [dataloader_train.image_dataloader.dataloader]
+  use_cache = false
+  cache_size = 8
+  concat_size = 1
+  cache_replay_name = "image_dataloader"
+  batch_size = 12
+  num_workers = 6
+  pin_memory = true
+  webdataset = false
+
+    [dataloader_train.image_dataloader.dataloader.cache_augment_fn]
+    name = "duplicate_batches"
+    args = {n = 1}
+
+    [dataloader_train.image_dataloader.dataloader.dataset]
+    dataset_resolution_type = "gt720p"
+    caption_type = "qwen2p5_7b_v4"
+    resolution = "480"
+    len_t5 = 512
+    t5_dim = 1024
 
 [dataloader_train.video_dataloader]
 ratio = 1
-dataset_dir = 'path_to_your_local_train_dataset'
-batch_size = 1
-num_workers = 8
-pin_memory = true
-num_frames = 93
-video_size = [768, 432]
-offline_text_embedding = true
+
+  [dataloader_train.video_dataloader.dataloader]
+  use_cache = false
+  cache_size = 16
+  concat_size = 1
+  cache_replay_name = "video_dataloader"
+  batch_size = 1
+  num_workers = 8
+  pin_memory = true
+  webdataset = false
+
+    [dataloader_train.video_dataloader.dataloader.cache_augment_fn]
+    name = "duplicate_batches_random"
+    args = {n = 1.8}
+
+    [dataloader_train.video_dataloader.dataloader.dataset]
+    resolution = "480"
+    len_t5 = 512
+    t5_dim = 1024
+    num_video_frames = 93
+    video_decoder_name = "video_naive_bytes"
+    augmentor_name = "video_basic_augmentor_v2"
+    caption_type = "t2w_qwen2p5_7b"
+    embedding_type = "t5_xxl"
 
 [dataloader_val]
-type = 'local'
+type = 'web'
+
+[dataloader_val.image_dataloader]
+ratio = 1
+
+  [dataloader_val.image_dataloader.dataloader]
+  use_cache = false
+  cache_size = 32
+  concat_size = 1
+  cache_replay_name = "image_dataloader"
+  batch_size = 2
+  num_workers = 8
+  pin_memory = true
+  webdataset = false
+
+    [dataloader_val.image_dataloader.dataloader.dataset]
+    resolution = "512"
+    len_t5 = 512
+    t5_dim = 1024
 
 [dataloader_val.video_dataloader]
 ratio = 1
-dataset_dir = 'path_to_your_local_val_dataset'
-batch_size = 1
-num_workers = 8
-pin_memory = true
-num_frames = 93
-video_size = [768, 432]
-offline_text_embedding = true
+
+  [dataloader_val.video_dataloader.dataloader]
+  use_cache = false
+  cache_size = 32
+  concat_size = 1
+  cache_replay_name = "video_dataloader"
+  batch_size = 1
+  num_workers = 8
+  pin_memory = true
+  webdataset = false
+
+    [dataloader_val.video_dataloader.dataloader.dataset]
+    resolution = "512"
+    len_t5 = 512
+    t5_dim = 1024
+    num_video_frames = 136
 
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos_predict2-5_2b_480_grpo"
+name = "cosmos-predict2-5_2b_480_grpo_mock_data"
 wandb_mode = "online"
-
-[checkpoint]
-type = "distributed"
-load_path = "nvidia/Cosmos-Predict2.5-2B"
-model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"

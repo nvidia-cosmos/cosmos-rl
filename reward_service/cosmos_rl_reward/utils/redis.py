@@ -68,8 +68,9 @@ class RedisAsyncHandler:
                 response_parser=None,
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
+            logger.info(f"[RedisAsyncHandler] Set key {key} in Redis with value {value}")
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream {key}: {e}")
+            logger.error(f"[RedisAsyncHandler] Failed to write to Redis stream {key}: {e}")
 
     async def get_key_value(self, key: str):
         """
@@ -91,7 +92,7 @@ class RedisAsyncHandler:
             )
             return value
         except Exception as e:
-            logger.error(f"Failed to read from Redis key {key}: {e}")
+            logger.error(f"[RedisAsyncHandler] Failed to read from Redis key {key}: {e}")
             return None
 
     async def remove_key(self, key: str):
@@ -112,7 +113,7 @@ class RedisAsyncHandler:
             )
             return deleted_count
         except Exception as e:
-            logger.error(f"Failed to delete key {key} from Redis: {e}")
+            logger.error(f"[RedisAsyncHandler] Failed to delete key {key} from Redis: {e}")
             return 0
 
     def requests_for_alternative_clients(self, op: RedisOpType, *args, **kwargs):
@@ -181,9 +182,9 @@ class RedisAsyncHandler:
 
         def make_timed_call(call):
             async def timed_call(*args, **kwargs):
-                logger.info(f"Executing Redis call: {call.args}")
+                logger.info(f"[RedisAsyncHandler] Executing Redis call: {call.args}")
                 res = await call(*args, **kwargs)
-                logger.info(f"Executed Redis call: {call.args}")
+                logger.info(f"[RedisAsyncHandler] Executed Redis call: {call.args}")
                 return res
 
             return timed_call
@@ -202,7 +203,7 @@ class RedisAsyncHandler:
                 max_retries=COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
             )
         except Exception as e:
-            logger.error(f"Failed to ping Redis when init Redis: {e}")
+            logger.error(f"[RedisAsyncHandler] Failed to ping Redis when init Redis: {e}")
             raise e
 
 
@@ -212,7 +213,7 @@ def start_redis_server(redis_port: int, redis_logfile_path: str = "/tmp/redis.lo
     """
 
     if redis_port is None or redis_port <= 0:
-        logger.info("Redis port is not set or invalid, skipping Redis server start.")
+        logger.info("[RedisAsyncHandler] Redis port is not set or invalid, skipping Redis server start.")
         return -1
     redis_free_port = util.find_available_port(redis_port)
 
@@ -248,6 +249,6 @@ maxmemory-policy allkeys-lfu
         )
     else:
         logger.info(
-            f"[Controller] Redis server started on port {redis_free_port} with command {redis_server_cmd}"
+            f"[RedisAsyncHandler] Redis server started on port {redis_free_port} with command {redis_server_cmd}"
         )
     return redis_free_port

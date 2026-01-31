@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/sft_sd3_image"
+output_dir = "./outputs/stable-diffusion-3-5_image-sft"
 epsilon = 1e-5
 optm_name = "AdamW"
 optm_lr = 1e-4
@@ -31,12 +31,16 @@ model_name_or_path = "stabilityai/stable-diffusion-3.5-medium"
 is_diffusers = true
 model_gradient_checkpointing = true
 
-[policy.diffusers_config]
+[policy.diffusers]
 offload = true
 is_video = false
 max_prompt_length = 300
 weighting_scheme = "logit_normal"
 inference_size = [1024, 1024]
+
+[policy.diffusers.sample]
+num_steps = 50
+guidance_scale = 4.5
 
 [logging]
 logger = ['console', 'wandb']
