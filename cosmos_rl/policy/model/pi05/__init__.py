@@ -17,7 +17,6 @@
 #
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 
@@ -25,19 +24,18 @@ from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 from cosmos_rl.policy.model.pi05.model_utils import get_config
 from cosmos_rl.policy.model.pi05.model_utils import PaliGemmaWithExpertModel
 from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
-from cosmos_rl.dispatcher.data.packer.pi05_data_packer import PI05DataPacker
 
 import logging
 import math
 import os
 import random
-from types import SimpleNamespace
+import numpy as np
 
 import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
-from typing import Callable, List, Optional, Tuple, Literal
+from typing import Callable, List, Optional, Tuple, Dict
 
 from collections.abc import Sequence
 
@@ -45,6 +43,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
 from transformers import AutoConfig
 from safetensors import safe_open
+from cosmos_rl.dispatcher.data.packer.pi05_data_packer import PI05DataPacker
 
 
 IMAGE_KEYS = (
@@ -54,7 +53,6 @@ IMAGE_KEYS = (
 )
 
 IMAGE_RESOLUTION = (224, 224)
-
 
 
 def resize_with_pad_torch(
@@ -137,6 +135,7 @@ def resize_with_pad_torch(
 
     return padded_images
 
+
 def preprocess_observation_pytorch(
     observation,
     *,
@@ -155,15 +154,10 @@ def preprocess_observation_pytorch(
 
     batch_shape = observation.state.shape[:-1]
 
-    meta_image_keys = [k for k in observation.images if k not in image_keys]
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
 
-        if key == "base_0_rgb":
-            image = torch.cat(
-                [image, *(observation.images[k] for k in meta_image_keys)], dim=0
-            )  # b + m * b
         # Handle both [B, C, H, W] and [B, H, W, C] formats
         is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
 
@@ -171,8 +165,15 @@ def preprocess_observation_pytorch(
             # Convert [B, C, H, W] to [B, H, W, C] for processing
             image = image.permute(0, 2, 3, 1)
 
+        # Align with OpenPI Observation.from_dict(): if image is uint8 in [0,255],
+        # convert to float32 in [-1, 1] before any resizing/augmentations.
+        if image.dtype == torch.uint8:
+            image = image.to(torch.float32) / 255.0 * 2.0 - 1.0
+
         if image.shape[1:3] != image_resolution:
-            logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
+            logging.info(
+                f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}"
+            )
             image = resize_with_pad_torch(image, *image_resolution)
 
         if train:
@@ -180,9 +181,9 @@ def preprocess_observation_pytorch(
             image = image / 2.0 + 0.5
 
             # Apply PyTorch-based augmentations
-            if key == "base_0_rgb":
+            if "wrist" not in key:
                 # Geometric augmentations for non-wrist cameras
-                batch, height, width = image.shape[:3]
+                height, width = image.shape[1:3]
 
                 # Random crop and resize
                 crop_height = int(height * 0.95)
@@ -196,7 +197,10 @@ def preprocess_observation_pytorch(
                     start_h = torch.randint(0, max_h + 1, (1,), device=image.device)
                     start_w = torch.randint(0, max_w + 1, (1,), device=image.device)
                     image = image[
-                        :, start_h : start_h + crop_height, start_w : start_w + crop_width, :
+                        :,
+                        start_h : start_h + crop_height,
+                        start_w : start_w + crop_width,
+                        :,
                     ]
 
                 # Resize back to original size
@@ -246,15 +250,6 @@ def preprocess_observation_pytorch(
                         align_corners=False,
                     ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
-                # split back into base_image and meta_images
-                split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
-                image = split_images[0]
-                for i, meta_key in enumerate(meta_image_keys):
-                    meta_image = split_images[i + 1]
-                    if is_channels_first:
-                        meta_image = split_images[i + 1].permute(0, 3, 1, 2)
-                    out_images[meta_key] = meta_image * 2.0 - 1.0
-
             # Color augmentations for all cameras
             # Random brightness
             # Use tensor operations instead of .item() for torch.compile compatibility
@@ -286,19 +281,6 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
-        elif key == "base_0_rgb":
-            batch, height, width = image.shape[:3]
-
-            # split back into base_image and meta_images
-            split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
-            image = split_images[0]
-            for i, meta_key in enumerate(meta_image_keys):
-                if is_channels_first:
-                    meta_image = split_images[i + 1].permute(0, 3, 1, 2)
-                else:
-                    meta_image = split_images[i + 1]
-                out_images[meta_key] = meta_image
-
         # Convert back to [B, C, H, W] format if it was originally channels-first
         if is_channels_first:
             image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
@@ -328,8 +310,6 @@ def preprocess_observation_pytorch(
         state=observation.state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        token_ar_mask=observation.token_ar_mask,
-        token_loss_mask=observation.token_loss_mask,
     )
 
 
@@ -407,6 +387,8 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
+
+
 @ModelRegistry.register(Pi05WeightMapper, default_data_packer_cls=PI05DataPacker)
 class PI05(BaseModel):
     def __init__(self, model_name_or_path: str, hf_config):
@@ -431,16 +413,15 @@ class PI05(BaseModel):
         self.num_steps = hf_config.num_steps
         self.action_chunk = hf_config.action_chunk
         self.action_env_dim = hf_config.action_env_dim
-        self.noise_method = getattr(hf_config, "noise_method", "flow_sde")
-        self.noise_level = getattr(hf_config, "noise_level", 0.5)
-        self.noise_anneal = getattr(hf_config, "noise_anneal", False)
-        self.noise_params = getattr(hf_config, "noise_params", [0.7, 0.3, 400])
-        self.noise_logvar_range = getattr(hf_config, "noise_logvar_range", [0.08, 0.16])
-        self.joint_logprob = getattr(hf_config, "joint_logprob", False)
-        self.safe_get_logprob = getattr(hf_config, "safe_get_logprob", False)
-        self.ignore_last = getattr(hf_config, "ignore_last", False)
-        self.discrete_state_input = hf_config.discrete_state_input
-        self.max_token_len = hf_config.max_token_len
+        self.noise_method = hf_config.noise_method
+        self.noise_level = hf_config.noise_level
+        self.noise_anneal = hf_config.noise_anneal
+        self.noise_params = hf_config.noise_params
+        self.noise_logvar_range = hf_config.noise_logvar_range
+        self.joint_logprob = hf_config.joint_logprob
+        self.safe_get_logprob = hf_config.safe_get_logprob
+        self.ignore_last = hf_config.ignore_last
+        self.train_expert_only = hf_config.train_expert_only
         self.global_step = 0  # Used for noise annealing
         paligemma_variant = hf_config.paligemma_variant
         action_expert_variant = hf_config.action_expert_variant
@@ -491,6 +472,7 @@ class PI05(BaseModel):
                 noise_logvar_range=self.noise_logvar_range,
                 noise_scheduler_type="learn",
             )
+
         self.model_input_keys = [
             "input_ids",
             "attention_mask",
@@ -519,10 +501,32 @@ class PI05(BaseModel):
         )
         hf_config.cosmos_compile = bool(getattr(config.train, "compile", False))
 
-        # Unified assignment via the toml's custom field
-        if hasattr(config, "custom"):
-            for k, v in config.custom.items():
-                setattr(hf_config, k, v)
+        # Runtime PI05 overrides live under `config.custom["pi05"]` (optional).
+        overrides = {}
+        if hasattr(config, "custom") and isinstance(config.custom, dict):
+            overrides = config.custom.get("pi05", {}) or {}
+
+        # Defaults (RLinf-style)
+        defaults = {
+            "num_steps": 10,
+            "action_chunk": 5,
+            "action_env_dim": 7,
+            "noise_method": "flow_sde",
+            "noise_level": 0.5,
+            "noise_anneal": False,
+            "noise_params": [0.7, 0.3, 400],
+            "noise_logvar_range": [0.08, 0.16],
+            "joint_logprob": False,
+            "safe_get_logprob": False,
+            "ignore_last": False,
+            "train_expert_only": True,
+            "discrete_state_input": False,
+            "max_token_len": 200,
+        }
+        for k, v in defaults.items():
+            setattr(hf_config, k, overrides.get(k, getattr(hf_config, k, v)))
+
+        hf_config.dataset_name = config.train.train_policy.dataset.name
 
         return hf_config
 
@@ -581,6 +585,8 @@ class PI05(BaseModel):
         """Helper method to preprocess observation."""
         observation = preprocess_observation_pytorch(observation, train=train)
         imgs = list(observation.images.values())
+        if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
+            imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
         return (
             imgs,
             list(observation.image_masks.values()),
@@ -615,6 +621,16 @@ class PI05(BaseModel):
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
+            # NOTE: SigLIP vision tower expects NCHW (B, 3, H, W).
+            # Online rollout path usually goes through `_preprocess_observation()` which already converts,
+            # but GRPO replay/data-packer path can pass NHWC tensors here.
+            if torch.is_tensor(img):
+                if img.dtype == torch.uint8:
+                    img = img.to(torch.float32) / 255.0 * 2.0 - 1.0
+                if img.ndim == 4 and img.shape[-1] == 3 and img.shape[1] != 3:
+                    img = img.permute(0, 3, 1, 2).contiguous()
+                elif img.ndim == 3 and img.shape[-1] == 3 and img.shape[0] != 3:
+                    img = img.permute(2, 0, 1).unsqueeze(0).contiguous()
 
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
@@ -741,8 +757,8 @@ class PI05(BaseModel):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
-            observation, train=True
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=True)
         )
 
         if noise is None:
@@ -755,10 +771,16 @@ class PI05(BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
+            self.embed_suffix(state, x_t, time)
+        )
         if (
-            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            self.paligemma_with_expert.paligemma.language_model.layers[
+                0
+            ].self_attn.q_proj.weight.dtype
             == torch.bfloat16
         ):
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
@@ -925,7 +947,7 @@ class PI05(BaseModel):
 
         return {
             "actions": x_0[..., : self.action_env_dim],
-            "chains": chains,
+            "chains": chains[..., : self.action_env_dim],
             "old_log_probs": log_probs,
             "denoise_inds": denoise_inds,
         }
@@ -1262,7 +1284,7 @@ class PI05(BaseModel):
     ):
         """
         Load PI05 weights from a HuggingFace-style checkpoint directory/repo.
-        Uses safetensors.torch.load_model to preserve original dtypes (e.g., float32 for vision embeddings).
+        Simple DDP-compatible version that loads weights directly.
         """
         logger.info(f"Loading PI05 weights from {model_name_or_path}")
 
@@ -1272,6 +1294,12 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
+        if any(p.is_meta for p in self.parameters()) or any(
+            b.is_meta for b in self.buffers()
+        ):
+            self.to_empty(device=device)
+        else:
+            self.to(device)
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
@@ -1287,9 +1315,9 @@ class PI05(BaseModel):
 
         missing, unexpected = self.load_state_dict(state_dict, strict=True)
         if missing:
-            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys: {missing}")
+            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
         if unexpected:
-            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys: {unexpected}")
+            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)")
 
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
@@ -1298,3 +1326,42 @@ class PI05(BaseModel):
     def check_tp_compatible(self, tp_size: int):
         raise ValueError("PI05 does not support tensor parallelism")
 
+    def _unnormalize_pi05_actions(self, actions: np.ndarray) -> np.ndarray:
+        """official_openpi Unnormalize(use_quantiles=True): map actions from [-1, 1] back using q01/q99."""
+        a_stats = self.norm_stats.get("actions") or self.norm_stats.get("action")
+        x = np.asarray(actions, dtype=np.float32)
+        dim = x.shape[-1]
+        q01 = np.asarray(a_stats["q01"], dtype=np.float32).reshape(-1)
+        q99 = np.asarray(a_stats["q99"], dtype=np.float32).reshape(-1)
+        if q01.size < dim:
+            # official_openpi: apply to first dim(q01), keep the rest unchanged
+            y0 = (x[..., : q01.size] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+            return np.concatenate([y0, x[..., q01.size :]], axis=-1)
+        q01 = q01[:dim]
+        q99 = q99[:dim]
+        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+
+    def generate_action(
+        self, inputs: Dict[str, torch.Tensor], is_valid: bool = False, **kwargs
+    ):
+        """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
+
+        Args:
+            inputs: PI05 inputs object
+            is_valid: Whether to generate in validation mode
+        """
+
+        mode = "eval" if is_valid else "train"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = self.sample_actions(inputs, mode=mode)
+            actions = outputs["actions"]
+
+        actions = actions[
+            :, : self.hf_config.action_horizon, : self.hf_config.action_env_dim
+        ].to(torch.float32)
+        actions_np = actions.detach().cpu().numpy()
+        outputs["action"] = torch.tensor(
+            self._unnormalize_pi05_actions(actions_np), device=actions.device
+        )
+        # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
+        return outputs

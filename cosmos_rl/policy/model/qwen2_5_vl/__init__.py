@@ -978,7 +978,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             rank_tensor_metadata,
             device,
         ):
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
             if dest_name in lm_state_dict:
@@ -993,10 +993,10 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight)
+                local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]

@@ -17,7 +17,7 @@ import os
 import torch
 
 from transformers import AutoConfig
-from diffusers import DiffusionPipeline
+from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
 
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.comm.base import CommMixin
@@ -41,8 +41,9 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 trust_remote_code=True,
             )
         else:
-            self.hf_config = util.retry(DiffusionPipeline.load_config)(
+            self.hf_config = util.retry(diffusers_config_fn)(
                 self.config.policy.model_name_or_path,
+                revision=config.policy.model_revision or "main",
                 trust_remote_code=True,
             )
 

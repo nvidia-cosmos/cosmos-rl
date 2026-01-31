@@ -74,6 +74,5 @@ echo "[hpsv2 setup] Installing Python dependencies into venv..."
 echo "[hpsv2 setup] Done."
 echo "[hpsv2 setup] Checkpoint path: ${OUT_FILE}"
 echo "[hpsv2 setup] Service derives ckpt from download_path → ${OUT_FILE}"
-echo "[hpsv2 setup] Ensure rewards.toml has hpsv2.download_path = \"${DOWNLOAD_PATH}\""
 
 

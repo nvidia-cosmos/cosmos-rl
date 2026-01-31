@@ -480,13 +480,21 @@ class APIClient(object):
             )
 
     def get_next_prompt(
-        self, batch_size: int, validation_step: Optional[int] = None
+        self,
+        batch_size: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], bool]:
         try:
+            params = {
+                "n": batch_size,
+                "validation_step": validation_step,
+                "rank_in_mesh": rank_in_mesh,
+            }
             r = make_request_with_retry(
                 partial(
                     requests.get,
-                    params={"n": batch_size, "validation_step": validation_step},
+                    params=params,
                 ),
                 self.get_alternative_urls(COSMOS_API_NEXT_PROMPT_SUFFIX),
                 max_retries=self.max_retries,

@@ -16,7 +16,6 @@
 import math
 import numpy as np
 import libero.libero.benchmark as benchmark
-from typing import Dict
 
 
 LIBERO_MAX_STEPS_MAP = {
@@ -105,82 +104,3 @@ def get_benchmark_overridden(benchmark_name) -> benchmark.Benchmark:
     # Register for discoverability/help
     benchmark.BENCHMARK_MAPPING["libero_all"] = LIBERO_ALL
     return LIBERO_ALL
-
-
-def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:
-    """
-    Normalize gripper action from [0,1] to [-1,+1] range.
-
-    This is necessary for some environments because the dataset wrapper
-    standardizes gripper actions to [0,1]. Note that unlike the other action
-    dimensions, the gripper action is not normalized to [-1,+1] by default.
-
-    Normalization formula: y = 2 * (x - orig_low) / (orig_high - orig_low) - 1
-
-    Args:
-        action: Action array with gripper action in the last dimension
-        binarize: Whether to binarize gripper action to -1 or +1
-
-    Returns:
-        np.ndarray: Action array with normalized gripper action
-    """
-    # Create a copy to avoid modifying the original
-    normalized_action = action.copy()
-
-    # Normalize the last action dimension to [-1,+1]
-    orig_low, orig_high = 0.0, 1.0
-    normalized_action[..., -1] = (
-        2 * (normalized_action[..., -1] - orig_low) / (orig_high - orig_low) - 1
-    )
-
-    if binarize:
-        # Binarize to -1 or +1
-        normalized_action[..., -1] = np.sign(normalized_action[..., -1])
-
-    return normalized_action
-
-
-def invert_gripper_action(action: np.ndarray) -> np.ndarray:
-    """
-    Flip the sign of the gripper action (last dimension of action vector).
-
-    This is necessary for environments where -1 = open, +1 = close, since
-    the RLDS dataloader aligns gripper actions such that 0 = close, 1 = open.
-
-    Args:
-        action: Action array with gripper action in the last dimension
-
-    Returns:
-        np.ndarray: Action array with inverted gripper action
-    """
-    # Create a copy to avoid modifying the original
-    inverted_action = action.copy()
-
-    # Invert the gripper action
-    inverted_action[..., -1] = inverted_action[..., -1] * -1.0
-
-    return inverted_action
-
-
-def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
-    """
-    Convert environment observation to VLA model input format
-
-    Args:
-        obs: Raw observation dict from environment
-        is_robotwin: Whether this is RoboTwin format (default: False for LIBERO)
-
-    Returns:
-        Dict with 'full_image' (and 'state' for RoboTwin)
-    """
-
-    def resize_image(img: np.ndarray, resolution: int = 224) -> np.ndarray:
-        if img.shape[0] != resolution or img.shape[1] != resolution:
-            from PIL import Image
-
-            pil_img = Image.fromarray(img.astype(np.uint8))
-            pil_img = pil_img.resize((resolution, resolution), Image.Resampling.LANCZOS)
-            img = np.array(pil_img, dtype=np.uint8)
-        return img
-
-    return resize_image(obs, 224)

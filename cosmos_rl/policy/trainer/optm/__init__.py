@@ -231,6 +231,7 @@ def build_optimizers(
             "lr": lr_i,
             "betas": config.train.optm_betas,
             "weight_decay": config.train.optm_weight_decay,
+            "eps": config.train.epsilon,
             "fused": fused_i,
             "foreach": foreach_i,
         }

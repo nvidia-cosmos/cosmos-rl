@@ -35,6 +35,7 @@ from cosmos_rl.dispatcher.protocol import MESH_NAMES
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 
 WORK_DIR = f"/tmp/{os.path.basename(__file__)}"
@@ -129,7 +130,7 @@ class TestHANccl(CommMixin):
         self.parallel_dims = ParallelDims.from_config_for_analysis(
             config.policy.parallelism, world_size=1
         )
-        self.parallel_dims.build_mesh(device_type="cuda")
+        self.parallel_dims.build_mesh(device_type=cosmos_device_type)
 
         # init redis
         self.init_redis()

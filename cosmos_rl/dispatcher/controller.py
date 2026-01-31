@@ -113,7 +113,12 @@ class Controller:
                 "Wandb is not available. Please install it to use wandb logging features."
             )
 
-        self.is_rl = task_type != "sft"
+        # Treat SFT with multiple replicas as RL for controller data fetcher
+        # It can be regarded as RL without rollout workers
+        self.is_rl = (
+            task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
+        )
+        self.is_diffusers = self.config.policy.is_diffusers
         self.weight_version_to_prompt_num = {}  # Only for on-policy.
 
         self.data_fetcher = ControllerDataFetcher(
@@ -182,14 +187,16 @@ maxmemory-policy allkeys-lfu
             if self.is_rl
             else 0,
             tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
-            if self.is_rl
+            if (self.is_rl and not self.is_diffusers)
             else None,
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
             hook_fns=hook_fns,
         )
-        self.rollout_status_manager.setup(config, self.redis_controller)
+        self.rollout_status_manager.setup(
+            config, self.redis_controller, self.policy_status_manager, self.data_fetcher
+        )
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):
@@ -231,6 +238,7 @@ maxmemory-policy allkeys-lfu
         self,
         n: int,
         validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
         # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
@@ -245,7 +253,13 @@ maxmemory-policy allkeys-lfu
             self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
         )
 
-        if not is_validation and not self.config.mode == "colocated":
+        is_sft = self.config.train.train_policy.type == "sft"
+        # Need to control the number of fetched prompts with the corresponding weight version when it's not validation step, not sft and not colocated mode.
+        step_fetched_count_control = (
+            not is_validation and not is_sft and not self.config.mode == "colocated"
+        )
+
+        if step_fetched_count_control:
             # Throttle the generation speed:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
@@ -304,9 +318,8 @@ maxmemory-policy allkeys-lfu
                         )
 
         if (
-            (not is_validation)
+            step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
-            and not self.config.mode == "colocated"
         ):
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
@@ -325,7 +338,12 @@ maxmemory-policy allkeys-lfu
                     )
 
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step
+                n,
+                validation_step,
+                rank_in_mesh,
+                weight_version=weight_version_for_current_batch
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
+                else None,
             )
             current_fetch_count = len(payloads_list)
             # record the number of valid prompts for current weight version
@@ -362,11 +380,32 @@ maxmemory-policy allkeys-lfu
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
-                n, validation_step
+                n,
+                validation_step,
+                rank_in_mesh,
+                weight_version=weight_version_for_current_batch
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
+                else None,
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
-                payloads_list[i].weight_version = 0
+                if is_sft:
+                    # For SFT with multiple replicas, we need to set the weight version, epoch and remain_samples_num for the replica side control
+                    payloads_list[
+                        i
+                    ].weight_version = self.policy_status_manager.current_step
+                    payloads_list[i].extra_info = (
+                        {}
+                        if payloads_list[i].extra_info is None
+                        else payloads_list[i].extra_info
+                    )
+                    # The epoch in data_fetcher starts from 1 and need to minus 1 to be consistent with the worker side.
+                    payloads_list[i].extra_info["epoch"] = self.data_fetcher.epoch - 1
+                    payloads_list[i].extra_info["remain_samples_num"] = (
+                        self.policy_status_manager.remain_samples_num
+                    )
+                else:
+                    payloads_list[i].weight_version = 0
         if not is_validation:
             self.policy_status_manager.samples_on_the_fly += (
                 current_fetch_count * self.config.rollout.n_generation

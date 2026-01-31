@@ -17,10 +17,8 @@ import os
 import time
 from types import SimpleNamespace
 import torch
-from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 from typing import Optional, List, Dict, Any
-from PIL import Image
 from transformers import AutoConfig
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
@@ -33,70 +31,87 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils import util
-from cosmos_rl.simulators.libero.utils import (
-    normalize_gripper_action,
-    invert_gripper_action,
-    obs_to_vla_input,
-    LIBERO_MAX_STEPS_MAP,
-)
+
 from cosmos_rl.simulators.env_manager import EnvManager
-from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
 
 
-def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
-    """Normalize proprioception data using norm stats"""
-    mean = norm_stats.get("mean", 0.0)
-    std = norm_stats.get("std", 1.0)
-    return (proprio - mean) / std
+def get_physical_gpu_id():
+    """Get the physical GPU ID, accounting for CUDA_VISIBLE_DEVICES.
 
+    When torchrun is used with CUDA_VISIBLE_DEVICES=[4,5,6,7], PyTorch sees
+    GPUs 0-3, but we want to return the actual physical IDs 4-7 for logging.
 
-def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
+    Returns:
+        int: Physical GPU ID
     """
-    Center crop image with 0.9 scale then resize (matching SimpleVLA-RL)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
-    This function mimics SimpleVLA-RL's TensorFlow-based center crop:
-    - Crops to 90% of the center (zoom in effect)
-    - Resizes back to 224x224
+    # Parse CUDA_VISIBLE_DEVICES if set
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if cuda_visible:
+        # Handle formats: "4,5,6,7" or "[4,5,6,7]" or "4 5 6 7"
+        cuda_visible = cuda_visible.strip("[]").replace(" ", ",")
+        gpu_ids = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
 
-    Replaced TensorFlow with torchvision for better compatibility.
+        # Map local rank to physical GPU ID
+        if local_rank < len(gpu_ids):
+            return gpu_ids[local_rank]
+
+    # Fallback to local rank if CUDA_VISIBLE_DEVICES not set
+    return local_rank
+
+
+def get_simulator_type(config: Config) -> str:
+    """Determine simulator type based on dataset subset.
+
+    Args:
+        config: Training configuration
+
+    Returns:
+        "b1k" or "libero"
     """
-    import torchvision.transforms.functional as TF
-
-    crop_scale = 0.9  # Match SimpleVLA-RL
-
-    # Get original image dimensions
-    width, height = image.size
-
-    # Calculate crop dimensions (sqrt of scale to match TF implementation)
-    crop_ratio = np.sqrt(crop_scale)  # ~0.9487
-    crop_height = int(height * crop_ratio)
-    crop_width = int(width * crop_ratio)
-
-    # Calculate offsets for center crop
-    top = (height - crop_height) // 2
-    left = (width - crop_width) // 2
-
-    # Perform center crop
-    cropped_image = TF.crop(image, top, left, crop_height, crop_width)
-
-    # Resize to 224x224 (matching SimpleVLA-RL)
-    result_image = TF.resize(
-        cropped_image, [224, 224], interpolation=TF.InterpolationMode.BILINEAR
-    )
-
-    # Ensure RGB format
-    result_image = result_image.convert("RGB")
-
-    return result_image
+    subset = config.validation.dataset.subset.lower()
+    if "b1k" in subset:
+        return "b1k"
+    elif "libero" in subset:
+        return "libero"
+    else:
+        # Default to libero for backward compatibility
+        logger.warning(
+            f"Unknown dataset subset '{subset}', defaulting to libero simulator"
+        )
+        return "libero"
 
 
 def extract_simulator_config(config: Config):
+    """Extract simulator configuration based on simulator type.
+
+    Args:
+        config: Training configuration
+
+    Returns:
+        SimpleNamespace with simulator-specific configuration
+    """
     cfg = SimpleNamespace()
-    cfg.task_suite_name = config.validation.dataset.subset
-    cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
     cfg.num_envs = config.vla.num_envs
+
+    sim_type = get_simulator_type(config)
+
+    if sim_type == "b1k":
+        # B1K-specific config
+        cfg.height = getattr(config.vla, "height", 256)
+        cfg.width = getattr(config.vla, "width", 256)
+    elif sim_type == "libero":
+        # Libero-specific config
+        from cosmos_rl.simulators.libero.utils import (
+            LIBERO_MAX_STEPS_MAP,
+        )
+
+        cfg.task_suite_name = config.validation.dataset.subset
+        cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+
     return cfg
 
 
@@ -113,11 +128,9 @@ class OpenVLARollout(RolloutBase):
         self.num_envs = config.vla.num_envs
 
         self.obs_keys = ["full_images", "wrist_images", "states"]
-        self.vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
-        self.vla_output_keys = ["responses", "old_log_probs"]
-        self.vla_train_keys = self.vla_input_keys + self.vla_output_keys
 
     def post_init_hook(self, **kwargs):
+        self._model_param_map = None  # Required by RolloutBase.model_param_map()
         self.model_type = self.config.vla.vla_type
 
         model_cls = ModelRegistry._MODEL_REGISTRY[self.model_type]
@@ -128,17 +141,42 @@ class OpenVLARollout(RolloutBase):
                 self.config.policy.model_name_or_path
             )
 
+        # Determine which environment wrapper to use based on simulator type
+        sim_type = get_simulator_type(self.config)
+        if sim_type == "b1k":
+            from cosmos_rl.simulators.b1k.env_wrapper import (
+                B1KEnvWrapper as EnvWrapperCls,
+            )
+
+            # B1K/OmniGibson cannot run in subprocess due to Isaac Sim's complex GPU/thread management
+            # - "spawn": causes pidfd_getfd permission errors (needs CAP_SYS_PTRACE)
+            # - "fork": causes segmentation fault (GPU contexts copied in bad state)
+            # Solution: Run in-process
+            use_subprocess = False
+            logger.info("Initializing B1K simulator in-process (no subprocess)")
+        elif sim_type == "libero":
+            from cosmos_rl.simulators.libero.env_wrapper import (
+                LiberoEnvWrapper as EnvWrapperCls,
+            )
+
+            # Libero works fine in subprocess with spawn method
+            use_subprocess = True
+            logger.info("Initializing LIBERO simulator in subprocess (spawn)")
+        else:
+            raise ValueError(f"Invalid simulator type: {sim_type}")
+
         self.env_manager = EnvManager(
             cfg=extract_simulator_config(self.config),
-            rank=torch.distributed.get_rank(),
-            env_cls=LiberoEnvWrapper,
+            rank=get_physical_gpu_id(),
+            env_cls=EnvWrapperCls,
+            use_subprocess=use_subprocess,
         )
         self.env_manager.start_simulator()
 
         # Initialize tracing system (if enabled via config)
         trace_verbosity = getattr(self.config.vla, "trace_verbosity", 0)
         self.tracing_manager = create_tracing_manager(
-            rank=torch.distributed.get_rank(),
+            rank=get_physical_gpu_id(),
             output_dir=self.config.train.output_dir,
             trace_verbosity=trace_verbosity,
         )
@@ -174,6 +212,9 @@ class OpenVLARollout(RolloutBase):
                 torch.device("cuda"),
             )
         self.model.eval()
+        self.vla_input_keys = self.model.model_input_keys
+        self.vla_output_keys = self.model.model_output_keys
+        self.vla_train_keys = self.model.model_train_keys
         self._engine_initialized = True
         logger.info("[Rollout] Engine initialized.")
 
@@ -264,7 +305,7 @@ class OpenVLARollout(RolloutBase):
                     sim_results[key] = np.zeros(
                         data_shape, dtype=images_and_states[key].dtype
                     )
-            sim_results[key][wait_env_ids] = images_and_states[key].copy()
+                sim_results[key][wait_env_ids] = images_and_states[key].copy()
             for i, env_id in enumerate(wait_env_ids):
                 sim_results["task_descriptions"][env_id] = task_descriptions[i]
             for env_id in wait_env_ids:
@@ -366,14 +407,16 @@ class OpenVLARollout(RolloutBase):
                 enqueue_payload_list.append(payload)
                 enqueued_payloads += 1
 
-            self._wait_init_results(sim_results, async_wait_envs)
+            # self._wait_init_results(sim_results, async_wait_envs)
             if available_env_ids:
-                # self._get_init_results(sim_results, available_env_ids, enqueue_payload_list, is_validation)
-                self._setup_parallel_envs_async(
-                    enqueue_payload_list, available_env_ids, is_validation
+                self._get_init_results(
+                    sim_results, available_env_ids, enqueue_payload_list, is_validation
                 )
-                for env_id in available_env_ids:
-                    async_wait_envs[env_id] = 10
+                # self._setup_parallel_envs_async(
+                #     enqueue_payload_list, available_env_ids, is_validation
+                # )
+                # for env_id in available_env_ids:
+                #     async_wait_envs[env_id] = 10
 
             active_env_ids = [
                 i
@@ -389,9 +432,6 @@ class OpenVLARollout(RolloutBase):
             if not active_env_ids:
                 continue
 
-            # if torch.distributed.get_rank() == 0:
-            #     logger.info(sim_results)
-
             active_sim_results = {"task_descriptions": []}
             for k in self.obs_keys:
                 active_sim_results[k] = sim_results[k][active_env_ids]
@@ -404,8 +444,13 @@ class OpenVLARollout(RolloutBase):
             with self.tracing_manager.trace(
                 "inference", env_ids=active_env_ids, batch_size=len(active_env_ids)
             ):
-                vla_input = self._process_input(active_sim_results)
-                vla_output = self._generate_one_step_oft(vla_input)
+                vla_input = self.model.process_input(active_sim_results)
+                vla_output = self.model.generate_action(
+                    vla_input,
+                    is_valid=is_validation,
+                    temperature=self.config.rollout.sampling_config.temperature,
+                    unnorm_key="libero_10_no_noops",
+                )
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
                 for key in self.vla_input_keys:
@@ -471,168 +516,6 @@ class OpenVLARollout(RolloutBase):
         )
         return results
 
-    def _process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """
-        Process inputs for VLA model (matching SimpleVLA-RL's process_input)
-
-        Args:
-            inputs: List of observation dictionaries
-            task_descriptions: List of task description strings
-
-        Returns:
-            Processed batch data for VLA model
-        """
-        full_images = inputs["full_images"]
-        wrist_images = inputs["wrist_images"]
-        task_descriptions = inputs["task_descriptions"]
-
-        vla_type = self.config.vla.vla_type
-
-        batchdata = {"input_ids": [], "attention_mask": [], "pixel_values": []}
-
-        batch_size = full_images.shape[0]
-        for i in range(batch_size):
-            full_image = obs_to_vla_input(full_images[i])
-            full_image = Image.fromarray(full_image).convert("RGB")
-            full_image = center_crop_image(full_image)
-            desp = task_descriptions[i]
-
-            prompt = f"In: What action should the robot take to {desp.lower()}?\nOut:"
-            batch_feature = self.processor(prompt, full_image)
-            input_ids = batch_feature["input_ids"]
-            attention_mask = batch_feature.get(
-                "attention_mask", torch.ones_like(input_ids)
-            )
-            pixel_values = batch_feature["pixel_values"]
-
-            if (
-                hasattr(self.config, "use_wrist_camera")
-                and self.config.use_wrist_camera
-            ):
-                wrist_image = obs_to_vla_input(wrist_images[i])
-                wrist_image = Image.fromarray(wrist_images[i]).convert("RGB")
-                wrist_image = center_crop_image(wrist_image)
-                wrist_feature = self.processor(prompt, wrist_image)
-                pixel_values = torch.cat(
-                    [pixel_values, wrist_feature["pixel_values"]], dim=1
-                )
-
-            # Handle OpenVLA-OFT specific formatting
-            if vla_type == "openvla-oft":
-                # Add space token if needed (matching SimpleVLA-RL)
-                space_token_id = 29871  # Space token for LLaMA-based models
-                if not torch.all(input_ids[:, -1] == space_token_id):
-                    input_ids = torch.cat(
-                        (
-                            input_ids,
-                            torch.tensor(
-                                [[space_token_id]],
-                                dtype=input_ids.dtype,
-                                device=input_ids.device,
-                            ),
-                        ),
-                        dim=1,
-                    )
-                    attention_mask = torch.cat(
-                        (
-                            attention_mask,
-                            torch.tensor(
-                                [[True]],
-                                dtype=attention_mask.dtype,
-                                device=attention_mask.device,
-                            ),
-                        ),
-                        dim=1,
-                    )
-
-            batchdata["input_ids"].append(input_ids)
-            batchdata["attention_mask"].append(attention_mask)
-            batchdata["pixel_values"].append(pixel_values)
-
-        # Device placement
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if vla_type == "openvla-oft":
-            # OpenVLA-OFT specific batch processing
-            batchdata["input_ids"] = [x.transpose(0, 1) for x in batchdata["input_ids"]]
-            batchdata["attention_mask"] = [
-                x.transpose(0, 1) for x in batchdata["attention_mask"]
-            ]
-
-            batchdata["input_ids"] = (
-                pad_sequence(
-                    batchdata["input_ids"],
-                    batch_first=True,
-                    padding_value=self.pad_token_id,
-                )
-                .squeeze(-1)
-                .to(device)
-            )
-            batchdata["attention_mask"] = (
-                pad_sequence(
-                    batchdata["attention_mask"], batch_first=True, padding_value=0
-                )
-                .squeeze(-1)
-                .to(device)
-            )
-
-            # Handle padding and sorting (matching SimpleVLA-RL)
-            padding_mask = batchdata["input_ids"].ne(self.pad_token_id)
-            padding_mask = ~padding_mask
-            padding_mask = padding_mask.int()
-            sorted_indices = torch.argsort(
-                padding_mask, dim=1, descending=True, stable=True
-            )
-            batchdata["input_ids"] = torch.gather(
-                batchdata["input_ids"], 1, sorted_indices
-            )
-            batchdata["attention_mask"] = torch.gather(
-                batchdata["attention_mask"], 1, sorted_indices
-            )
-
-            batchdata["pixel_values"] = torch.cat(batchdata["pixel_values"], dim=0).to(
-                device
-            )
-        else:
-            # Standard batch processing
-            for key in ["input_ids", "attention_mask", "pixel_values"]:
-                batchdata[key] = torch.cat(batchdata[key], dim=0).to(device)
-        return batchdata
-
-    def _generate_one_step_oft(
-        self, prompts: Dict[str, torch.Tensor], is_valid: bool = False
-    ) -> Dict[str, Any]:
-        """Generate one step for OpenVLA-OFT (matching SimpleVLA-RL)"""
-        input_ids = prompts["input_ids"]
-        attention_mask = prompts["attention_mask"]
-        pixel_values = prompts["pixel_values"]
-        proprio = prompts.get("proprio", None)
-
-        # Generation parameters
-        temperature = self.config.rollout.sampling_config.temperature
-
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # Try to call the VLA model's generation method
-            actions, responses, logprobs = self.model.model.generate_action(
-                input_ids=input_ids,
-                pixel_values=pixel_values,
-                proprio=proprio,
-                attention_mask=attention_mask,
-                padding_idx=self.pad_token_id,
-                do_sample=not is_valid,
-                unnorm_key=getattr(self.config, "unnorm_key", "libero_10_no_noops"),
-                temperature=temperature,
-            )
-
-            actions = normalize_gripper_action(actions)
-            actions = invert_gripper_action(actions)
-
-            return {
-                "action": actions,
-                "responses": responses,
-                "old_log_probs": logprobs,
-            }
-
     def _pack_grpo_results(
         self,
         n_generation: int,
@@ -679,6 +562,14 @@ class OpenVLARollout(RolloutBase):
             input_ids: List[torch.Tensor], attention_mask: List[torch.Tensor]
         ):
             """Remove padding tokens from input_ids using attention_mask."""
+
+            # Check if all tensors have the same length - if so, skip trimming
+            if len(input_ids) > 0:
+                first_len = input_ids[0].shape[0]
+                if all(tensor.shape[0] == first_len for tensor in input_ids):
+                    # All tensors have the same length, no trimming needed
+                    return input_ids, attention_mask
+
             trimmed_input_ids, trimmed_attention_mask = [], []
             for step_input_ids, step_attention_mask in zip(input_ids, attention_mask):
                 # Convert to CPU for indexing if needed, then create boolean mask
@@ -701,13 +592,7 @@ class OpenVLARollout(RolloutBase):
                 record["input_ids"], record["attention_mask"] = _trim_input_ids(
                     record["input_ids"], record["attention_mask"]
                 )
-                for key in [
-                    "input_ids",
-                    "attention_mask",
-                    "pixel_values",
-                    "responses",
-                    "old_log_probs",
-                ]:
+                for key in self.vla_train_keys:
                     traj[key] = torch.stack(record[key], dim=0)
 
                 trajectory_id = (

@@ -260,11 +260,11 @@ class LiberoEnvWrapper(gym.Env):
                 for k, v in images_and_states.items():
                     self.env_states[env_id].current_obs[k] = v[i]
 
-                    if self.env_states[env_id].do_validation:
-                        for img_key in ["full_images", "wrist_images"]:
-                            self.env_states[env_id].valid_pixels[img_key].append(
-                                images_and_states[img_key][i]
-                            )
+                if self.env_states[env_id].do_validation:
+                    for img_key in ["full_images", "wrist_images"]:
+                        self.env_states[env_id].valid_pixels[img_key].append(
+                            images_and_states[img_key][i]
+                        )
 
         completes = np.array([self.env_states[env_id].complete for env_id in env_ids])
         active = np.array([self.env_states[env_id].active for env_id in env_ids])

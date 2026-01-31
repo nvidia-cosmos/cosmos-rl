@@ -54,7 +54,7 @@ from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
 )
-from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 
@@ -449,6 +449,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         valid_payloads,
                         False,
                         0,
+                        bypass_reward=self.config.train.train_policy.bypass_reward,
                     )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():

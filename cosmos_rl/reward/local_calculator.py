@@ -14,162 +14,20 @@
 # limitations under the License.
 
 from typing import List, Dict, Optional, Callable, Tuple
-from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
+from cosmos_rl.reward.base import RolloutGroup
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.util as util
-from queue import Queue
 
 
-class RolloutGroup:
+class LocalRewardCalculator:
     """
-    RolloutGroup is a data structure that contains the prompt and completions of a rollout.
-    For MutliModal-LM, image/video/audio could be included in the extra_info.
-    """
-
-    def __init__(
-        self,
-        prompt_idx: int,
-        payload: RLPayload,
-        is_end: bool,
-        reference_answer: str,
-    ):
-        self.prompt_idx: int = prompt_idx
-        self.payload: RLPayload = payload
-        self.is_end: bool = is_end
-        self.reference_answer: str = reference_answer
-
-    def compute_rollouts(self, algo: RuleBasedAlgo) -> List[Rollout]:
-        """
-        Compute rewards and advantages for the rollouts in the group.
-        Args:
-            algo (RuleBasedAlgo): The reward algorithm to compute rewards and advantages.
-        Returns:
-            List[Rollout]: List of Rollout with rewards and advantages.
-        """
-        assert (
-            self.reference_answer is not None
-        ), "[RolloutGroup] Reference answer is not provided"
-        assert (
-            self.payload.completions is not None and len(self.payload.completions) > 0
-        ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
-        rewards = [
-            # completion can be any objects such as tensors and videos in tensor native or video modes,
-            # so that reward functions can compute reward directly from tensors or videos
-            algo.compute_reward(
-                completion,
-                self.reference_answer,
-                prompt=self.payload.prompt,
-            )
-            for i, completion in enumerate(self.payload.completions)
-        ]
-        logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        advantages = algo.compute_advantage([r[0] for r in rewards])
-        logger.debug(f"[RolloutGroup] Advantages: {advantages}")
-
-        if self.payload.cumulative_logprob is not None:
-            # Find the best reward and cumulative logprob from the group by the cumulative logprob
-            # We need calculate the most likely mode reward which is the reward of the completion
-            # with the highest cumulative logprob and highest probability
-            assert (
-                len(self.payload.cumulative_logprob) == len(rewards)
-            ), "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"
-            best_reward = None
-            best_cumulative_logprob = None
-            for i, reward in enumerate(rewards):
-                if self.payload.cumulative_logprob[i] is None:
-                    continue
-                if (
-                    best_cumulative_logprob is None
-                    or self.payload.cumulative_logprob[i] > best_cumulative_logprob
-                ):
-                    best_reward = reward[0]
-                    best_cumulative_logprob = self.payload.cumulative_logprob[i]
-            if best_reward is not None:
-                # Only assign the best reward to the first rollout in the group
-                rewards[0][2]["most_likely_mode_reward_mean"] = best_reward
-                rewards[0][2]["most_likely_mode_reward_count"] = 1
-
-        # If the completed_conversations is not provided, we use None for all the rollouts
-        if self.payload.completed_conversations is not None:
-            completed_conversations = self.payload.completed_conversations
-        else:
-            completed_conversations = [[] for _ in range(len(self.payload.completions))]
-
-        if self.payload.completion_logprobs is None:
-            self.payload.completion_logprobs = [
-                [] for _ in range(len(self.payload.completions))
-            ]
-
-        if self.payload.completion_token_ids is None:
-            self.payload.completion_token_ids = [
-                [] for _ in range(len(self.payload.completions))
-            ]
-
-        return [
-            Rollout(
-                prompt=self.payload.prompt,
-                conversation=self.payload.conversation,
-                completion=completion,
-                completed_conversation=completed_conversation,
-                is_end=self.is_end,
-                reward=reward[0],
-                advantage=advantage,
-                prompt_idx=self.payload.prompt_idx,
-                filter_reward=reward[1],
-                completion_logprobs=logprobs,
-                completion_token_ids=token_ids,
-                report_metrics=reward[2],
-            )
-            for completion, completed_conversation, reward, advantage, logprobs, token_ids in zip(
-                self.payload.completions,
-                completed_conversations,
-                rewards,
-                advantages,
-                self.payload.completion_logprobs,
-                self.payload.completion_token_ids,
-            )
-        ]
-
-
-class BatchedRolloutGroup:
-    """
-    Batched Wrapper of the RolloutGroup
-    """
-
-    def __init__(self):
-        self.rollout_groups: List[RolloutGroup] = []
-
-    def __len__(self):
-        return len(self.rollout_groups)
-
-    def __getitem__(self, idx: int) -> RolloutGroup:
-        return self.rollout_groups[idx]
-
-    def __setitem__(self, idx: int, rollout_group: RolloutGroup):
-        self.rollout_groups[idx] = rollout_group
-
-    def __delitem__(self, idx: int):
-        del self.rollout_groups[idx]
-
-    @classmethod
-    def from_rollout_groups(
-        cls, rollout_groups: List[RolloutGroup]
-    ) -> "BatchedRolloutGroup":
-        batched_rollout_group = cls()
-        batched_rollout_group.rollout_groups = rollout_groups
-        return batched_rollout_group
-
-
-class RewardCalculator:
-    """
-    RewardCalculator is responsible for calculating the rewards for the rollouts.
+    LocalRewardCalculator is responsible for calculating the rewards for the rollouts locally.
     It adds rewards and advantages to the RLPayload.
     It supports dynamic sampling to filter out rollouts that have the same filter rewards with valid=False.
     It also supports finding shared prefix among rollouts and ignore the prefix tokens during training.
@@ -185,7 +43,7 @@ class RewardCalculator:
         val_data_packer: Optional[BaseDataPacker] = None,
     ) -> None:
         """
-        Setup the RewardCalculator with the given configuration and data packers.
+        Setup the LocalRewardCalculator with the given configuration and data packers.
         Args:
             config (Config): The configuration for the reward calculator.
             reward_fns (Optional[List[Callable]]): The list of reward functions for training.
@@ -196,7 +54,7 @@ class RewardCalculator:
         """
         if hasattr(self, "rl_algo"):
             logger.warning(
-                "[RewardCalculator] RewardCalculator is already setup, returning directly."
+                "[LocalRewardCalculator] LocalRewardCalculator is already setup, returning directly."
             )
             return
         self.config = config
@@ -238,11 +96,11 @@ class RewardCalculator:
             )
 
     @classmethod
-    def get_instance(cls) -> "RewardCalculator":
+    def get_instance(cls) -> "LocalRewardCalculator":
         """
-        Get the singleton instance of the RewardCalculator.
+        Get the singleton instance of the LocalRewardCalculator.
         Returns:
-            RewardCalculator: The singleton instance of the RewardCalculator.
+            LocalRewardCalculator: The singleton instance of the LocalRewardCalculator.
         """
         if not hasattr(cls, "_instance"):
             cls._instance = cls()
@@ -276,7 +134,7 @@ class RewardCalculator:
                 is_end=True,
                 reference_answer=payload.reference_answer,
             )
-            for _, payload in enumerate(payloads)
+            for payload in payloads
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -315,6 +173,7 @@ class RewardCalculator:
                     cumulative_logprob=payloads[idx].cumulative_logprob,
                     teacher_result_uuids=payloads[idx].teacher_result_uuids,
                     prompt_logprobs=payloads[idx].prompt_logprobs,
+                    prompt_token_ids=payloads[idx].prompt_token_ids,
                 )
             )
         return payload_list, True, step
@@ -354,7 +213,7 @@ class RewardCalculator:
                 is_end=False,
                 reference_answer=payload.reference_answer,
             )
-            for _, payload in enumerate(payloads)
+            for payload in payloads
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -368,7 +227,7 @@ class RewardCalculator:
                 rollout_tokens = []
             else:
                 rollout_tokens = [
-                    rollout.completion_token_ids
+                    [t[0] for t in rollout.completion_token_ids]
                     if self.config.train.train_policy.rollout_as_token_ids
                     else self.tokenizer(
                         rollout.completion, add_special_tokens=False
@@ -448,6 +307,7 @@ class RewardCalculator:
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
                         prompt_logprobs=payloads[idx].prompt_logprobs,
+                        prompt_token_ids=payloads[idx].prompt_token_ids,
                     )
                 )
             else:
@@ -493,156 +353,7 @@ class RewardCalculator:
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
                         prompt_logprobs=payloads[idx].prompt_logprobs,
+                        prompt_token_ids=payloads[idx].prompt_token_ids,
                     )
                 )
         return payload_list, False, step
-
-
-class RewardDispatcher:
-    """
-    RewardDispatcher is responsible for dispatching the reward calculation tasks to the RewardCalculator.
-    It uses a ProcessPoolExecutor to parallelize the reward calculation.
-    It also uses a Queue to store the tasks and results.
-    """
-
-    def __init__(self, payload_per_task: int = 1):
-        self.reward_calculator = RewardCalculator()
-        self.task_queue = Queue()
-        self.payload_per_task = payload_per_task
-
-    def setup(
-        self,
-        config: Config,
-        reward_fns: Optional[List[Callable]] = None,
-        filter_reward_fns: Optional[List[Callable]] = None,
-        val_reward_fns: Optional[List[Callable]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
-        num_workers: int = 2,
-    ) -> None:
-        """
-        Setup the RewardCalculator with the given configuration and data packers.
-        Args:
-            config (Config): The configuration for the reward calculator.
-            reward_fns (Optional[List[Callable]]): The list of reward functions for training.
-            filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
-            val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
-            data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
-            val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
-            num_workers (int): The number of worker processes for parallel reward calculation.
-        """
-
-        def worker_init(
-            config,
-            reward_fns,
-            filter_reward_fns,
-            val_reward_fns,
-            data_packer,
-            val_data_packer,
-        ):
-            reward_calculator = RewardCalculator.get_instance()
-            reward_calculator.setup(
-                config=config,
-                reward_fns=reward_fns,
-                filter_reward_fns=filter_reward_fns,
-                val_reward_fns=val_reward_fns,
-                data_packer=data_packer,
-                val_data_packer=val_data_packer,
-            )
-
-        worker_init(
-            config,
-            reward_fns,
-            filter_reward_fns,
-            val_reward_fns,
-            data_packer,
-            val_data_packer,
-        )
-        if num_workers > 0:
-            # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor in non-text mode.
-            # Unlike ProcessPoolExecutor, ThreadPoolExecutor can parse the tensors, videos, images directly
-            executor = (
-                ThreadPoolExecutor if config.train.non_text else ProcessPoolExecutor
-            )
-            self.executor = executor(
-                max_workers=num_workers,
-                initializer=worker_init,
-                initargs=(
-                    config,
-                    reward_fns,
-                    filter_reward_fns,
-                    val_reward_fns,
-                    data_packer,
-                    val_data_packer,
-                ),
-            )
-        else:
-            self.executor = None
-
-    @staticmethod
-    def compute_rewards(payloads, is_validation, step):
-        """
-        Static method to compute rewards using the singleton RewardCalculator instance.
-        Args:
-            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
-            is_validation (bool): Whether the payloads are from validation set.
-            step (int): The weight step where the payloads are generated.
-        Returns:
-            Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
-                payloads: List of RLPayload with rewards and advantages
-                is_validation: whether the payloads are from validation set
-                step: the weight step where the payloads are generated
-        """
-        reward_calculator = RewardCalculator.get_instance()
-        return reward_calculator.compute_rewards(payloads, is_validation, step)
-
-    def enqueue_rewards_cal(
-        self,
-        payloads: List[RLPayload],
-        is_validation: bool,
-        step: int,
-    ) -> None:
-        """
-        Enqueue the reward calculation task.
-        The task will be executed in
-        a separate process and the result will be stored in the task queue.
-        Args:
-            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
-            is_validation (bool): Whether the payloads are from validation set.
-            step (int): The weight step where the payloads are generated.
-        """
-        for i in range(0, len(payloads), self.payload_per_task):
-            self.task_queue.put(
-                self.executor.submit(
-                    RewardDispatcher.compute_rewards,
-                    payloads[i : i + self.payload_per_task],
-                    is_validation,
-                    step,
-                )
-            )
-
-    def dequeue_rewards_cal(
-        self,
-    ) -> Tuple[Optional[List[RLPayload]], bool, int, bool]:
-        """
-        Dequeue the reward calculation result.
-        If the task queue is empty, return None.
-        If the task is not done, return None.
-        If the task is done, return the result.
-        If the task queue is empty and all tasks are done, return None and True.
-
-        Returns:
-            Tuple[List[RLPayload], bool, int, bool]: (payloads, is_validation, step, all_done)
-                payloads: List of RLPayload with rewards and advantages
-                is_validation: whether the payloads are from validation set
-                step: the weight step where the payloads are generated
-                all_done: whether all pending tasks are done
-        """
-        if not self.task_queue.empty():
-            if self.task_queue.queue[0].done():
-                payloads, is_validation, step = self.task_queue.get().result()
-                return payloads, is_validation, step, False
-            else:
-                return None, False, -1, False
-        else:
-            return None, False, -1, True

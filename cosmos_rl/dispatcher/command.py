@@ -154,25 +154,38 @@ class PolicyToPolicyBroadcastCommand(Command):
     Only used for policy weight init during initialization. (After `WeightResumeCommand` on `src_replica_name`)
     """
 
-    def __init__(self, src_replica_name: str, dst_replica_names: List[str], **kwargs):
+    def __init__(
+        self,
+        src_replica_name: str,
+        dst_replica_names: List[str],
+        total_steps: Optional[int] = None,
+        **kwargs,
+    ):
         kwargs["scope"] = CommandScope.GLOBAL
         kwargs["command_type"] = CommandType.POLICY_TO_POLICY_BROADCAST
         super().__init__(**kwargs)
         self.src_replica_name = src_replica_name
         self.dst_replica_names = dst_replica_names
+        self.total_steps = total_steps
 
     src_replica_name: str
     dst_replica_names: List[str]
+    total_steps: Optional[int]
 
     @classmethod
     def trigger(
         cls,
         src_replica: Replica,
         dst_replicas: List[Replica],
+        total_steps: Optional[int],
         redis_handler: RedisStreamHandler,
     ):
         # dst_replicas will contains the src_replica
-        cmd = cls(src_replica.name, [replica.name for replica in dst_replicas])
+        cmd = cls(
+            src_replica.name,
+            [replica.name for replica in dst_replicas],
+            total_steps,
+        )
         for replica in dst_replicas:
             redis_handler.publish_command(cmd.pack(), replica.name)
             replica.weights_loaded_in_view_of_command = True
@@ -187,24 +200,33 @@ class PolicyToPolicyUnicastCommand(Command):
     Used for policy dynamic scaling.
     """
 
-    def __init__(self, src_replica_name: str, dst_replica_name: str, **kwargs):
+    def __init__(
+        self,
+        src_replica_name: str,
+        dst_replica_name: str,
+        total_steps: Optional[int] = None,
+        **kwargs,
+    ):
         kwargs["scope"] = CommandScope.LOCAL
         kwargs["command_type"] = CommandType.POLICY_TO_POLICY_UNICAST
         super().__init__(**kwargs)
         self.src_replica_name = src_replica_name
         self.dst_replica_name = dst_replica_name
+        self.total_steps = total_steps
 
     src_replica_name: str
     dst_replica_name: str
+    total_steps: Optional[int]
 
     @classmethod
     def trigger(
         cls,
         src_replica: Replica,
         dst_replica: Replica,
+        total_steps: Optional[int],
         redis_handler: RedisStreamHandler,
     ):
-        cmd = cls(src_replica.name, dst_replica.name)
+        cmd = cls(src_replica.name, dst_replica.name, total_steps)
         redis_handler.publish_command(cmd.pack(), src_replica.name)
         redis_handler.publish_command(cmd.pack(), dst_replica.name)
         dst_replica.weights_loaded_in_view_of_command = True

@@ -23,7 +23,8 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
-from diffusers import DiffusionPipeline
+from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
+
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
@@ -390,6 +391,12 @@ class BaseModel(torch.nn.Module, ABC):
         """
         raise NotImplementedError
 
+    def step_hook(self):
+        """
+        Hook to be called after each step update.
+        """
+        pass
+
     @abstractmethod
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """
@@ -519,9 +526,13 @@ class ModelRegistry:
     def check_model_type_supported(cls, model_type: str) -> bool:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
-    def build_hf_model(self, config, hf_config_args={}):
+    @classmethod
+    def build_hf_model(cls, config: CosmosConfig, hf_config_args=None):
         model_name_or_path = config.policy.model_name_or_path
         model = None
+        hf_config_args = hf_config_args if hf_config_args is not None else {}
+        for k, v in hf_config_args.items():
+            logger.info(f"Set hf config args {k} to {v}")
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )
@@ -640,25 +651,30 @@ class ModelRegistry:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
 
-    def build_diffusers_model(self, config, diffusers_config_args={}):
+    @classmethod
+    def build_diffusers_model(cls, config, diffusers_config_args=None):
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
+        model_revision = config.policy.model_revision or "main"
         model = None
-        model_type = util.retry(DiffusionPipeline.load_config)(model_name_or_path)[
-            "_class_name"
-        ]
+        model_type = util.retry(diffusers_config_fn)(
+            model_name_or_path, revision=model_revision
+        )["_class_name"]
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
-
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
             else config.train.param_dtype
         )
 
-        def _load_model_with_config(model_cls, config, model_name_or_path):
+        def _load_model_with_config(
+            model_cls, config, model_name_or_path, model_revision
+        ):
             """Load model and apply post-processing configurations."""
-            model = model_cls.from_pretrained(config, model_name_or_path)
+            model = model_cls.from_pretrained(
+                config, model_name_or_path, model_revision
+            )
             return model
 
         def _get_init_context_for_model_build(device):
@@ -672,7 +688,7 @@ class ModelRegistry:
             with util.cosmos_default_dtype(cosmos_default_dtype):
                 try:
                     model = _load_model_with_config(
-                        model_cls, config, model_name_or_path
+                        model_cls, config, model_name_or_path, model_revision
                     )
 
                 except Exception as e:
@@ -684,11 +700,11 @@ class ModelRegistry:
         return model
 
     @classmethod
-    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+    def build_model(cls, config: CosmosConfig, hf_config_args=None):
         if not config.policy.is_diffusers:
-            return cls.build_hf_model(cls, config, hf_config_args)
+            return cls.build_hf_model(config, hf_config_args)
         else:
-            return cls.build_diffusers_model(cls, config, hf_config_args)
+            return cls.build_diffusers_model(config, hf_config_args)
 
 
 class WeightMapper(ABC):

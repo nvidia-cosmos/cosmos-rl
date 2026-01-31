@@ -357,6 +357,39 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             group_keys.append((compatible_key, param))
         return group_keys
 
+    @torch.no_grad()
+    def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tensor):
+        # name is HF naming convention
+        def yield_weight(n_experts, expert_weight, w_name, layer_id):
+            for expert_id in range(n_experts):
+                single_expert_weight = expert_weight[expert_id].contiguous()
+                yield (
+                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
+                    single_expert_weight,
+                )
+
+        if match := re.search(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)\.(weight)",
+            name,
+        ):
+            layer_id = int(match.group(1))
+            w_name = match.group(2)
+            n_experts = expert_weight.shape[0]
+            if w_name == "gate_up_proj":
+                # for deepseek moe, gate_up_proj is split into gate_proj and up_proj and stored.
+                # shape: [experts, 2 * ffn_dim, hidden_dim]
+                part = expert_weight.shape[1] // 2
+                gate_proj_weight = expert_weight[:, :part, :]
+                up_proj_weight = expert_weight[:, part:, :]
+                yield from yield_weight(
+                    n_experts, gate_proj_weight, "gate_proj", layer_id
+                )
+                yield from yield_weight(n_experts, up_proj_weight, "up_proj", layer_id)
+            else:
+                yield from yield_weight(n_experts, expert_weight, w_name, layer_id)
+        else:
+            yield name, expert_weight
+
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
 

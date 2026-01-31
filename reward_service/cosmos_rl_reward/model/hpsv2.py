@@ -133,8 +133,22 @@ class HPSv2Reward(BaseRewardHandler):
             self.model = None
 
     def calculate_reward(self, images, metadata):
+        def _error(msg: str):
+            logger.error(msg)
+            return {
+                "error": msg,
+                "scores": None,
+                "input_info": metadata.get("input_info", {}),
+                "duration": "0.00",
+                "decoded_duration": metadata.get("decode_duration", "N/A"),
+                "type": self.reward_name,
+            }
+        if images is None:
+            return _error("[hpsv2] images tensor is None.")
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
-            raise ValueError(f"Hpsv2 expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+            return _error(f"[hpsv2] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+        if images.shape[0] == 0:
+            return _error("[hpsv2] images batch size is zero.")
         start = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
         end = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
         if start is not None:
@@ -146,9 +160,14 @@ class HPSv2Reward(BaseRewardHandler):
             x = x.permute(0, 3, 1, 2).contiguous()
         x = x / 255.0
         x = self.preprocess(x.to(device=self.device, non_blocking=True))
-        prompts = metadata.get("prompts", [""] * x.shape[0])
+        prompts = metadata.get("prompts")
+        if prompts is None:
+            return _error("[hpsv2] prompts are required and cannot be None.")
         if isinstance(prompts, str):
-            prompts = [prompts] * x.shape[0]
+            prompts = [prompts]
+        if len(prompts) != x.shape[0]:
+            msg = f"[hpsv2] prompts length ({len(prompts)}) must match batch size ({x.shape[0]})."
+            return _error(msg)
         text = self.tokenizer(prompts).to(device=self.device, non_blocking=True)
         with torch.no_grad():
             outputs = self.model(x, text)

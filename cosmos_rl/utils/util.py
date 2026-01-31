@@ -59,6 +59,7 @@ from cosmos_rl.utils.constant import CACHE_DIR
 from cosmos_rl.policy.config import Config as CosmosConfig
 import math
 import numpy as np
+from torch.utils.data import Dataset
 
 
 def create_cached_dir_if_needed():
@@ -1065,6 +1066,68 @@ def compute_logprobs(
     return logps, cu_seqlens, metrics_dict
 
 
+def compute_logprobs_for_top_k_indices(
+    input_ids_batch: torch.Tensor,  # [batch_size, max_len, top_k]
+    logprob_masks: torch.Tensor,  # [batch_size, max_len],
+    logits: torch.Tensor,  # [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size] if is_full_logits is False
+    is_full_logits: bool = False,
+    label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+    input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute the log probabilities considering top-k tokens at each position.
+
+    Args:
+        input_ids_batch: the top_k input_ids of the model at each position [batch_size, max_len, top_k]
+        logprob_masks: the logprob_masks of the model [batch_size, max_len]
+        logits: the logits of the model [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size]
+        is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
+        label_packing_mask: the packing mask for the labels, if using packed sequences
+        input_packing_mask: the packing mask for the inputs, if using packed sequences
+
+    Returns:
+        logps: the log probabilities for the top-k tokens
+        cu_seqlens: the cumulative sequence lengths of the logps
+    """
+    # Shift token_ids
+    if label_packing_mask is not None:
+        assert (
+            input_packing_mask is not None
+        ), "input_packing_mask must be provided if label_packing_mask is used"
+        shifted_input_ids = torch.zeros_like(input_ids_batch)
+        shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
+    else:
+        shifted_input_ids = torch.empty_like(input_ids_batch)
+        shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
+        shifted_input_ids[:, -1] = 0
+
+    if is_full_logits:
+        assert (
+            logits.shape[:2] == shifted_input_ids.shape[:2]
+        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        effective_logits = logits[logprob_masks]
+    else:
+        effective_logits = logits
+    bsz = input_ids_batch.shape[0]
+
+    effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens, top_k]
+
+    masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
+    cu_seqlens = torch.zeros(
+        bsz + 1, dtype=torch.int32, device=logits.device
+    )  # [bsz + 1,]
+    cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
+    per_token_logps = []
+    for row_logits, row_labels in zip(
+        effective_logits, effective_input_ids
+    ):  # loop to reduce peak mem consumption
+        row_logps = F.log_softmax(row_logits, dim=-1)
+        row_per_token_logps = row_logps.gather(dim=-1, index=row_labels)
+        per_token_logps.append(row_per_token_logps)
+    per_token_logps = torch.stack(per_token_logps)
+    return per_token_logps, cu_seqlens
+
+
 def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, Any]:
     """
     Dynamically import either:
@@ -1346,3 +1409,57 @@ def aggregate_report_data(
                     [data.get(k, 0) for data in report_data_list]
                 )
     return report_data
+
+
+def copy_weights(src_params, tgt_params):
+    for src_param, tgt_param in zip(src_params, tgt_params, strict=True):
+        tgt_param.data.copy_(src_param.detach().data)
+        assert src_param is not tgt_param
+
+
+def split_train_n_val_dataset(
+    train_dataset: Dataset,
+    cosmos_config: CosmosConfig,
+) -> Tuple[Dataset, Dataset]:
+    """
+    Split the train dataset into train and validation datasets based on the config.
+    Returns:
+        Tuple[Dataset, Dataset]: The train and validation datasets.
+    """
+    config = cosmos_config.train.train_policy
+    logger.warning(
+        "No validation dataset provided, using split of training dataset for validation."
+    )
+    if isinstance(train_dataset, torch.utils.data.Dataset):
+        # Define the split ratio (e.g., 80% train, 20% test)
+        if config.dataset.test_size is None:
+            logger.warning(
+                "No test size specified, using 10% of the training dataset for testing."
+            )
+            config.dataset.test_size = 0.1
+        if isinstance(config.dataset.test_size, float):
+            n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+        else:
+            n_test_samples = config.dataset.test_size
+        n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
+
+        # Generate deterministic indices
+        indices = list(range(len(train_dataset)))
+        test_indices = indices[:n_test_samples]
+        train_indices = indices[n_test_samples:]
+
+        test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
+        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+    else:
+        assert hasattr(
+            train_dataset, "train_test_split"
+        ), "train_dataset must have train_test_split method"
+        split = train_dataset.train_test_split(
+            test_size=config.dataset.test_size, shuffle=False
+        )
+        train_dataset = split["train"]
+        test_dataset = split["test"]
+    logger.info(
+        f"Split train dataset into {len(train_dataset)} train samples and {len(test_dataset)} {type(test_dataset)} test samples."
+    )
+    return train_dataset, test_dataset

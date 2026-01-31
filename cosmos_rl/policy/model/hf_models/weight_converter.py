@@ -15,7 +15,7 @@
 
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 
 
 def convert_weight_from_hf(
@@ -25,6 +25,7 @@ def convert_weight_from_hf(
     parallel_dims: ParallelDims,
     tp_slice_dim: Optional[int] = None,
     ignore_unknown_weights: bool = False,
+    hf_config: Optional[Any] = None,
 ) -> Tuple[str, torch.Tensor]:
     load_weight_test = not hasattr(parallel_dims, "mesh")
     if not load_weight_test:

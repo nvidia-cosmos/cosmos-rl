@@ -61,7 +61,7 @@ def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
                         logger.error(
                             f"Process {process.pid} exited with code {process.returncode}. Exiting."
                         )
-                        sys.exit(1)
+                        sys.exit(process.returncode)
                     else:
                         logger.error(
                             f"Process {process.pid} exited as soon as launched. Exiting."
@@ -721,7 +721,9 @@ def main():
     ):
         n_rollouts = 0
         n_reference = 0
-        if n_policy > 1:
+        # Whether to allow n_policy > 1 for SFT training, if False, we will set n_policy to 1 and scale up dp_replicate_size accordingly
+        allow_sft_multi_replica = True
+        if n_policy > 1 and not allow_sft_multi_replica:
             logger.warning(
                 "Warning: n_init_replicas for rollout is set to 0 for SFT training, but n_init_replicas for policy is more than 1."
             )

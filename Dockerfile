@@ -96,7 +96,7 @@ RUN pip install \
     torchao==0.13.0 \
     flash_attn==${FLASH_ATTN_VERSION} \
     vllm==0.11.0 \
-    flashinfer-python \
+    flashinfer-python==0.6.1 \
     transformer_engine[pytorch] --no-build-isolation
 
 # install apex

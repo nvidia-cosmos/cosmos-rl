@@ -131,6 +131,13 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             group_keys.append((compatible_key, param))
         return group_keys
 
+    @torch.no_grad()
+    def policy_map_local_key_for_export_tensor(self, name, weight: torch.Tensor):
+        if "mlp.experts.gate_up_proj" in name or "mlp.experts.down_proj" in name:
+            yield name, weight.transpose(1, 2).contiguous()
+        else:
+            yield name, weight
+
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if name.startswith("model.") and "visual" not in name:

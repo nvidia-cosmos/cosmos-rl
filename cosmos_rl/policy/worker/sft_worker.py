@@ -150,38 +150,10 @@ def construct_dataset(
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
         else:
-            logger.warning(
-                "No validation dataset provided, using split of training dataset for validation."
+            # Split train/val from training dataset if no val dataset and no val dataset name provided
+            train_dataset, test_dataset = util.split_train_n_val_dataset(
+                train_dataset, cosmos_config
             )
-            if isinstance(train_dataset, torch.utils.data.Dataset):
-                # Define the split ratio (e.g., 80% train, 20% test)
-                if config.dataset.test_size is None:
-                    logger.warning(
-                        "No test size specified, using 10% of the training dataset for testing."
-                    )
-                    config.dataset.test_size = 0.1
-                if isinstance(config.dataset.test_size, float):
-                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
-                else:
-                    n_test_samples = config.dataset.test_size
-                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
-
-                # Generate deterministic indices
-                indices = list(range(len(train_dataset)))
-                test_indices = indices[:n_test_samples]
-                train_indices = indices[n_test_samples:]
-
-                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-            else:
-                assert hasattr(
-                    train_dataset, "train_test_split"
-                ), "train_dataset must have train_test_split method"
-                split = train_dataset.train_test_split(
-                    test_size=config.dataset.test_size, shuffle=False
-                )
-                train_dataset = split["train"]
-                test_dataset = split["test"]
     else:
 
         class EmptyDataset(Dataset):
@@ -354,6 +326,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             user_provided_val_dataset=val_dataset,
         )
+        # For sampler, we won't drop data for un-even distribution DP.
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
             if isinstance(sampler, Callable):
@@ -373,11 +346,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 rank=self.dp_rank,
                 shuffle=self.config.train.train_policy.dataloader_shuffle,
                 drop_last=False,
+                seed=self.config.train.train_policy.dataloader_seed,
             )
+        self.train_sampler = train_sampler
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
-                train_sampler,
+                self.train_sampler,
                 batch_size=self.config.train.train_batch_per_replica,
                 drop_last=False,
             )
@@ -406,30 +381,31 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
-                    drop_last=False,
+                    drop_last=self.config.train.train_policy.dataloader_drop_last,
                 )
             return data_loader
 
         if self.config.train.resume and self.train_step > 0:
             """
-            Note: Here we assume there is no data shuffling across epochs.
-            Otherwise, we need to call `set_epoch` on the sampler after each epoch.
+            Note: Here both shuffle and no shuffle samplers are supported for deterministic resuming.
             """
             # Resume training from the last checkpoint if needed
             total_steps_per_epoch = len(
-                get_train_data_loader(train_sampler, batch_sampler)
+                get_train_data_loader(self.train_sampler, batch_sampler)
             )
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= self.config.train.train_batch_per_replica
             logger.info(
                 f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
             )
-            train_sampler = SkippingSampler(
-                train_sampler,
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(self.train_step // total_steps_per_epoch)
+            self.train_sampler = SkippingSampler(
+                self.train_sampler,
                 skip_samples=data_loader_bias
                 // (
-                    len(list(islice(iter(train_sampler), 1))[0])
-                    if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                    len(list(islice(iter(self.train_sampler), 1))[0])
+                    if isinstance(list(islice(iter(self.train_sampler), 1))[0], list)
                     else 1
                 ),
             )
@@ -465,7 +441,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
+        self.train_data_loader = get_train_data_loader(
+            self.train_sampler, batch_sampler
+        )
         if val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
@@ -493,7 +471,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
-                drop_last=False,
+                drop_last=self.config.train.train_policy.dataloader_drop_last,
             )
 
         steps_by_dataset = (
@@ -522,8 +500,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def validate(self, current_epoch: int, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
+
         if (
             (self.train_step == 0 and self.config.validation.val_before_train)
             or (
@@ -620,9 +597,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
+        stop_training = False
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
+            if hasattr(self.train_sampler, "set_epoch"):
+                self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
@@ -678,6 +658,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps
                 ):
+                    stop_training = True
                     break  # break outer epoch loop
 
                 val_avg_loss = self.validate(
@@ -695,6 +676,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
                 self.profiler.step()
 
+            if stop_training:
+                break
             cur_epoch += 1
 
         # Finally: validation and save checkpoint
