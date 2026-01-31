@@ -249,6 +249,8 @@ maxmemory-policy allkeys-lfu
             rollouts_per_global_batch / self.config.rollout.n_generation
         )  # global_batch_size: number of prompts needed for single policy step.
         rollouts_per_global_batch = rollouts_per_global_batch or 1
+        # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
+        # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
         weight_version_for_current_batch = (
             self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
         )
@@ -320,24 +322,7 @@ maxmemory-policy allkeys-lfu
         if (
             step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
-            and self.config.train.train_policy.on_policy
         ):
-            if self.config.train.train_policy.variant != "dapo":
-                # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
-                if (
-                    weight_version_for_current_batch
-                    not in self.weight_version_to_prompt_num
-                ):
-                    n = min(n, global_batch_size)
-                else:
-                    n = min(
-                        n,
-                        global_batch_size
-                        - self.weight_version_to_prompt_num[
-                            weight_version_for_current_batch
-                        ],
-                    )
-
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
                 validation_step,
@@ -347,18 +332,57 @@ maxmemory-policy allkeys-lfu
                 else None,
             )
             current_fetch_count = len(payloads_list)
-            # record the number of valid prompts for current weight version
-            if (
-                weight_version_for_current_batch
-                not in self.weight_version_to_prompt_num
-            ):
-                self.weight_version_to_prompt_num[weight_version_for_current_batch] = (
-                    current_fetch_count
-                )
+            if self.config.train.train_policy.variant != "dapo":
+                weight_version_for_each_payload = weight_version_for_current_batch
+                for payload in payloads_list:
+                    # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
+                    while (
+                        weight_version_for_each_payload
+                        in self.weight_version_to_prompt_num
+                        and self.weight_version_to_prompt_num[
+                            weight_version_for_each_payload
+                        ]
+                        >= global_batch_size
+                    ):
+                        assert (
+                            self.weight_version_to_prompt_num[
+                                weight_version_for_each_payload
+                            ]
+                            == global_batch_size
+                        ), f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
+                        weight_version_for_each_payload += 1
+                    # record the number of valid prompts for each weight version
+                    # tag the payload with the corresponding weight version
+                    if (
+                        weight_version_for_each_payload
+                        not in self.weight_version_to_prompt_num
+                    ):
+                        payload.weight_version = weight_version_for_each_payload
+                        self.weight_version_to_prompt_num[
+                            weight_version_for_each_payload
+                        ] = 1
+                    else:
+                        payload.weight_version = weight_version_for_each_payload
+                        self.weight_version_to_prompt_num[
+                            weight_version_for_each_payload
+                        ] += 1
             else:
-                self.weight_version_to_prompt_num[weight_version_for_current_batch] += (
-                    current_fetch_count
-                )
+                # record the number of valid prompts for current weight version
+                if (
+                    weight_version_for_current_batch
+                    not in self.weight_version_to_prompt_num
+                ):
+                    self.weight_version_to_prompt_num[
+                        weight_version_for_current_batch
+                    ] = current_fetch_count
+                else:
+                    self.weight_version_to_prompt_num[
+                        weight_version_for_current_batch
+                    ] += current_fetch_count
+                for i in range(current_fetch_count):
+                    # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
+                    # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
+                    payloads_list[i].weight_version = weight_version_for_current_batch
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
@@ -373,11 +397,6 @@ maxmemory-policy allkeys-lfu
                     raise RuntimeError(
                         f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
                     )
-
-            for i in range(current_fetch_count):
-                # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
-                # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
-                payloads_list[i].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
