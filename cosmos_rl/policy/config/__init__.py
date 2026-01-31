@@ -1068,6 +1068,15 @@ class PolicyConfig(BaseModel):
         "Example: freeze_pattern = ['^visual\\..*'] freezes all visual components; "
         "freeze_pattern = ['^model\\.layers\\.[0-9]+\\.'] freezes layers 0-9.",
     )
+    trainable_pattern: Optional[List[str]] = Field(
+        default=None,
+        description="Pattern-based configuration to train parts of the model. "
+        "A list of regex patterns that match against parameter names; "
+        "matched parameters will be set to require_grad=True otherwise require_grad=False. "
+        "Example: trainable_pattern = ['^visual\\..*'] trains all visual components; "
+        "trainable_pattern = ['^model\\.layers\\.[0-9]+\\.'] trains layers 0-9.",
+    )
+
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
@@ -1084,6 +1093,9 @@ class PolicyConfig(BaseModel):
         assert (
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        assert (
+            self.trainable_pattern is None or self.freeze_pattern is None
+        ), "trainable_pattern and freeze_pattern cannot be set at the same time"
         return self
 
 
