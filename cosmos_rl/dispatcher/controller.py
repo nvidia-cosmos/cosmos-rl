@@ -132,7 +132,7 @@ class Controller:
             is_rl=self.is_rl,
         )
 
-        redis_free_port = util.find_available_port(redis_port)
+        redis_free_port = network_util.find_available_port(redis_port)
         self.config.redis = str(redis_free_port)
 
         ips = network_util.get_eth_ips()
@@ -148,7 +148,7 @@ class Controller:
 maxmemory 500G
 maxmemory-policy allkeys-lfu
 """
-        redis_cfg_path = util.write_redis_config(
+        redis_cfg_path = network_util.write_redis_config(
             redis_free_port,
             redis_logfile_path,
             file_path=config_file_path.name,

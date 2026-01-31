@@ -22,6 +22,7 @@ from cosmos_rl.launcher.utility import (
     launch_lepton_job,
     launch_processes,
     resolve_host_blocking,
+    SingleWorkerCommands,
 )
 import tempfile
 import time
@@ -30,9 +31,8 @@ import argparse
 import re
 import os
 import sys
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict
 from cosmos_rl.utils.logging import logger
-import cosmos_rl.utils.network_util as network_util
 
 
 def replica_placement(
@@ -47,10 +47,11 @@ def replica_placement(
     control_url: Optional[str] = None,
     script: Optional[str] = None,
 ) -> List[List[str]]:
-    commands = []
-    gpu_devices = []
-    control_urls = []
-    output_files = []
+    commands: List[str] = []
+    gpu_devices: List[Optional[str]] = []
+    control_urls: List[Optional[str]] = []
+    output_files: List[Optional[str]] = []
+    envs: List[Optional[Dict[str, str]]] = []
     assert len(available_gpus_per_node) in [
         1,
         2,
@@ -74,21 +75,22 @@ def replica_placement(
             nodes_needed = min_n_gpus // len(global_available_gpus[global_worker_idx])
             rdzv_ip = "localhost"
             for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
+                gpu_devices_for_node = ",".join(
+                    [str(g) for g in global_available_gpus[global_worker_idx]]
                 )
-                commands.append(
-                    f"{replica_script} --type policy --wfm-mode True --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
+                gpu_devices.append(gpu_devices_for_node)
 
+                command_for_node = f"{replica_script} --type policy --wfm-mode True --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
                 if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                    command_for_node += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx, args)
                 else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                    command_for_node += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                if script is not None:
+                    command_for_node += f" --script {script}"
+
+                commands.append(command_for_node)
 
                 control_urls.append(control_url)
                 output_files.append(
@@ -96,24 +98,31 @@ def replica_placement(
                     if output_dir is not None
                     else None
                 )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
+                envs.append(None)
+
+                worker_commands = SingleWorkerCommands(global_worker_idx)
+                worker_commands.extend_commands(
+                    commands, gpu_devices, control_urls, output_files, envs
                 )
+                global_launch_settings.append(worker_commands)
+
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus_per_node)
         else:
             if gpu_idx + min_n_gpus > len(global_available_gpus[global_worker_idx]):
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
+                    [commands, gpu_devices, control_urls, output_files, envs]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
+                envs = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus_per_node)
@@ -140,16 +149,26 @@ def replica_placement(
                 if output_dir is not None
                 else None
             )
+            envs.append(None)
             gpu_idx += min_n_gpus
 
     if len(commands) > 0:
-        global_launch_settings.append(
-            [commands, gpu_devices, control_urls, output_files]
+        worker_commands = SingleWorkerCommands(global_worker_idx)
+        worker_commands.extend_commands(
+            commands,
+            gpu_devices,
+            control_urls,
+            output_files,
+            envs,
         )
-        control_urls = []
-        output_files = []
+        global_launch_settings.append(worker_commands)
+
         commands = []
         gpu_devices = []
+        control_urls = []
+        output_files = []
+        envs = []
+
     return global_launch_settings
 
 
@@ -252,7 +271,7 @@ cosmos-rl --config config.toml --wfm-mode"""
 
     logger.info(f"Number of World foundational model replicas: {num_replicas}")
 
-    import cosmos_rl.utils.util as util
+    from cosmos_rl.utils import network_util
 
     # Get available GPUs
     available_gpus = get_available_gpus()
@@ -324,7 +343,7 @@ cosmos-rl --config config.toml --wfm-mode"""
         ip, port = args.url.split(":")
         if ip in get_local_ip():
             # If the IP is the local IP, launch the controller on the local machine
-            port = util.find_available_port(int(port))
+            port = network_util.find_available_port(int(port))
             logger.info(f"Using local IP: {ip} so launching controller on port {port}")
         else:
             control_url = args.url
@@ -343,12 +362,12 @@ cosmos-rl --config config.toml --wfm-mode"""
             control_url = f"{primary_hostname}:{args.port}"
         elif "LEPTON_JOB_WORKER_INDEX" in os.environ:
             # If we're in a Lepton job prime node, check if the port is available
-            if not util.is_port_free(args.port):
+            if not network_util.is_port_free(args.port):
                 raise RuntimeError(f"Port {args.port} is not available")
             else:
                 port = args.port
         else:
-            port = util.find_available_port(args.port)
+            port = network_util.find_available_port(args.port)
 
     if control_url is None:
         logger.info(f"Controller will be launched locally on port {port}.")
@@ -380,26 +399,18 @@ cosmos-rl --config config.toml --wfm-mode"""
         len(global_launch_settings) > cur_work_idx
         and len(global_launch_settings[cur_work_idx]) != 0
     ):
-        commands = global_launch_settings[cur_work_idx][0]
-        gpu_devices = global_launch_settings[cur_work_idx][1]
-        control_urls = global_launch_settings[cur_work_idx][2]
-        output_files = global_launch_settings[cur_work_idx][3]
+        command_collections = global_launch_settings[cur_work_idx]
 
-        # Combine all commands
-        logger.info(f"Commands to be executed: {commands}")
-        logger.info(f"GPU devices to be used: {gpu_devices}")
-        logger.info(f"Control URLs to be used: {control_urls}")
-        logger.info(f"Output files: {output_files}")
-
-        # Check if the number of GPU devices matches the number of commands
         assert (
-            len(gpu_devices) == len(commands)
-        ), f"Number of GPU devices ({len(gpu_devices)}) does not match number of commands ({len(commands)})"
+            command_collections.global_worker_idx == cur_work_idx
+        ), f"Global worker index {command_collections.global_worker_idx} does not match current worker index {cur_work_idx}"
+
+        logger.info(
+            f"Command items to be executed for worker {command_collections.global_worker_idx}:\n{command_collections}"
+        )
 
         # Launch all processes
-        processes.extend(
-            launch_processes(commands, gpu_devices, control_urls, output_files)
-        )
+        processes.extend(launch_processes(command_collections))
 
     while len(processes) > 0:
         for i, process in enumerate(processes):

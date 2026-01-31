@@ -17,9 +17,10 @@ import unittest
 import os
 import subprocess
 import sys
-from cosmos_rl.utils import util
 import tempfile
 import toml
+
+from cosmos_rl.utils import network_util
 
 
 class TestGspo(unittest.TestCase):
@@ -135,7 +136,7 @@ class TestDecoupledLoss(unittest.TestCase):
         """Test grpo all processes exit cleanly."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 2
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",

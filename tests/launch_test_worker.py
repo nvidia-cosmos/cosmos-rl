@@ -95,6 +95,7 @@ from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
 import multiprocessing as mp
 from cosmos_rl.dispatcher.replica import Rollout
+from cosmos_rl.collective.collective import P2RCollectiveManager
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -281,6 +282,7 @@ class TestPolicyWorker:
     def __init__(
         self, name, policy_world_size, rollouts_comm, freeze_params: bool = False
     ):
+        self.replica_name = name
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -293,18 +295,28 @@ class TestPolicyWorker:
             policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type=cosmos_device_type)
-        self.replica_name = name
-        self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
 
-        self.p2r_nccl_uuids = rollouts_comm
-        self.train_stream = torch.cuda.Stream()
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         self.config.train.train_policy.dataset.name = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+        self.rl_mode = self.config.mode
+
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=None,
+            role=Role.POLICY,
+        )
+        self.p2r_collective_manager.unique_ids_cache = rollouts_comm
+        self.p2r_collective_manager.nccl_comm_cache = rollouts_comm
+
+        self.train_stream = torch.cuda.Stream()
+
         self.trainer = TestPolicyTrainer(
             config=self.config,
             parallel_dims=self.parallel_dims,
@@ -353,16 +365,15 @@ class TestRollout:
     def __init__(
         self, name, rollout_world_size, policies_comm, freeze_params: bool = False
     ):
+        self.replica_name = name
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
         self.role = Role.ROLLOUT
         self.world_size = rollout_world_size
-        self.policy_to_rollout_nccl_communicators = policies_comm
         rollout_parallelism_config = ParallelismConfig(
             dp_shard_size=1, cp_size=1, tp_size=4, pp_size=1
         )
-        self.replica_name = name
         self.parallel_dims = ParallelDims.from_config(
             rollout_parallelism_config,
         )
@@ -386,11 +397,22 @@ class TestRollout:
         self.quantization_type = None
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"  # keep the same as policy above.
+        self.rl_mode = self.config.mode
 
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         self.config.train.train_policy.dataset.name = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=None,
+            role=Role.ROLLOUT,
+        )
+        self.p2r_collective_manager.unique_ids_cache = policies_comm
+        self.p2r_collective_manager.nccl_comm_cache = policies_comm
 
         self.weight_inplace_view_map = compatibale_map
         self.recv_param_key_n_rank_list = compatibale_list

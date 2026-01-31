@@ -280,6 +280,23 @@ class TestAsyncVLLMRollout(unittest.TestCase):
             )
 
 
+# here dummy some functions to make the worker work
+def dummy_init_comm(self):
+    self.api_client = MockAPIClient(
+        config=self.config,
+        role="ROLLOUT",
+        remote_ips=["localhost"],
+        remote_port=8000,
+    )
+    self.data_packer = DecoderOnlyLLMDataPacker()
+    self.val_data_packer = self.data_packer
+    self.replica_name = str(uuid.uuid4())
+
+
+def dummy(self):
+    pass
+
+
 class TestAsyncRolloutWorker(unittest.TestCase):
     """Test AsyncRolloutWorker."""
 
@@ -309,26 +326,11 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             DisaggregatedRolloutControlWorker,
         )
 
-        # here dummy some functions to make the worker work
-        def dummy_init_comm(self):
-            self.api_client = MockAPIClient(
-                config=cosmos_config,
-                role="ROLLOUT",
-                remote_ips=["localhost"],
-                remote_port=8000,
-            )
-            self.data_packer = DecoderOnlyLLMDataPacker()
-            self.val_data_packer = self.data_packer
-
-        def dummy(self):
-            pass
-
         DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
         DisaggregatedRolloutControlWorker.init_redis = dummy
 
         worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
-        worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
@@ -363,26 +365,11 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             DisaggregatedRolloutControlWorker,
         )
 
-        # here dummy some functions to make the worker work
-        def dummy_init_comm(self):
-            self.api_client = MockAPIClient(
-                config=cosmos_config,
-                role="ROLLOUT",
-                remote_ips=["localhost"],
-                remote_port=8000,
-            )
-            self.data_packer = DecoderOnlyLLMDataPacker()
-            self.val_data_packer = self.data_packer
-
-        def dummy(self):
-            pass
-
         DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
         DisaggregatedRolloutControlWorker.init_redis = dummy
 
         worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
-        worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
