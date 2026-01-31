@@ -2020,6 +2020,107 @@ def run_sft_custom_sampler():
     assert cnt == 8
 
 
+def run_sft_data_packer_factory():
+    """Test that data_packer and val_data_packer can be passed as factory functions."""
+    config_dict = load_simple_sft_config()
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.validation.enable = True
+    config.validation.freq = 1
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        pass
+
+    CommMixin.init_comm = dummy
+
+    class TestDatasetSFT(TestDataset):
+        def setup(
+            self,
+            config: CosmosConfig,
+        ):
+            dataset = util.load_data_from_disk_or_hf(
+                config.validation.dataset.name,
+                config.validation.dataset.subset,
+                config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in config.validation.dataset.split:
+                dataset_list.append(dataset[split_name])
+            self.dataset = concatenate_datasets(dataset_list)
+
+        def __getitem__(self, idx):
+            return super().__getitem__(idx)["conversation"]
+
+        def __len__(self):
+            return 16
+
+    # Track factory function calls
+    factory_call_count = {"data_packer": 0, "val_data_packer": 0}
+
+    # Define factory functions for data_packer and val_data_packer
+    def data_packer_factory(cfg: CosmosConfig) -> DecoderOnlyLLMDataPacker:
+        factory_call_count["data_packer"] += 1
+        packer = DecoderOnlyLLMDataPacker()
+        return packer
+
+    def val_data_packer_factory(cfg: CosmosConfig) -> DecoderOnlyLLMDataPacker:
+        factory_call_count["val_data_packer"] += 1
+        packer = DecoderOnlyLLMDataPacker()
+        return packer
+
+    dataset = TestDatasetSFT(config)
+    dataset.setup(config)
+
+    # Test 1: Pass factory functions directly
+    sft_worker = SFTPolicyWorker(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        data_packer=data_packer_factory,
+        val_data_packer=val_data_packer_factory,
+    )
+
+    # Verify factory functions were called
+    assert (
+        factory_call_count["data_packer"] == 1
+    ), f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
+    assert (
+        factory_call_count["val_data_packer"] == 1
+    ), f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
+
+    # Verify data packers are properly set
+    assert isinstance(
+        sft_worker.data_packer, DecoderOnlyLLMDataPacker
+    ), f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
+    assert isinstance(
+        sft_worker.val_data_packer, DecoderOnlyLLMDataPacker
+    ), f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
+
+    # Verify data loaders work
+    cnt = 0
+    for it in sft_worker.train_data_loader:
+        assert len(it) > 0
+        cnt += 1
+    assert cnt > 0, "train_data_loader should have at least one batch"
+
+    cnt = 0
+    for it in sft_worker.val_data_loader:
+        assert len(it) > 0
+        cnt += 1
+    assert cnt > 0, "val_data_loader should have at least one batch"
+
+    logger.info("All data_packer factory tests passed!")
+
+
 def run_gspo_test():
     config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
@@ -2517,6 +2618,9 @@ async def main():
         exit(0)
     elif mode == "sft_for_custom_sampler":
         run_sft_custom_sampler()
+        exit(0)
+    elif mode == "sft_for_data_packer_factory":
+        run_sft_data_packer_factory()
         exit(0)
     elif mode == "reward_execution_check":
         run_reward_check()
