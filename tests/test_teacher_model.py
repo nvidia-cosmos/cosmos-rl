@@ -26,18 +26,18 @@ os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 import unittest
 import subprocess
 import sys
-from cosmos_rl.utils import util
 import toml
 import msgpack
 import tempfile
 from transformers import AutoTokenizer
+from cosmos_rl.utils import network_util
 
 
 class TestTeacherModel(unittest.TestCase):
     def test_teacher_model(self):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 4
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",
@@ -170,7 +170,7 @@ class TestTeacherModel(unittest.TestCase):
 class TestDistillationFlow(unittest.TestCase):
     def test_distillation_flow(self):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",

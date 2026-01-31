@@ -27,6 +27,7 @@ import toml
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.utils import util
+from cosmos_rl.utils import network_util
 from cosmos_rl.utils.payload import extract_rollouts
 from datasets import concatenate_datasets
 
@@ -226,7 +227,7 @@ class TestCustomRollout(unittest.TestCase):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 4
         rollout_world_size = 1
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",

@@ -45,9 +45,11 @@ from cosmos_rl.dispatcher.protocol import (
     NcclErrRequest,
     NcclStoreClearRequest,
     GetShardSendRecvInstsRequest,
+    IpcInfoRequest,
+    QueryIpcInfoRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-import cosmos_rl.utils.util as util
+from cosmos_rl.utils.network_util import find_available_port
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import COSMOS_ROLLOUT_SCAN_INTERVAL
 from cosmos_rl.utils.api_suffix import (
@@ -73,6 +75,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
+    COSMOS_API_IPC_INFO_SUFFIX,
+    COSMOS_API_QUERY_IPC_INFO_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
@@ -354,6 +358,21 @@ async def comm_acceptor(request: HandshakeAcceptorRequest):
             constant.ErrorCode.INTERNAL_ERROR, "Unique pair name not found"
         )
     return {"handle_base64": controller.temp_kv_store.get(request.unique_pair_name)}
+
+
+@app.post(COSMOS_API_IPC_INFO_SUFFIX)
+async def ipc_info(request: IpcInfoRequest):
+    await controller.update_kv_store(request.mesh_key, request.ipc_addr)
+    return {"message": "IPC info received"}
+
+
+@app.post(COSMOS_API_QUERY_IPC_INFO_SUFFIX)
+async def query_ipc_info(request: QueryIpcInfoRequest):
+    if request.mesh_key not in controller.temp_kv_store:
+        return create_error_response(
+            constant.ErrorCode.INTERNAL_ERROR, f"Mesh key {request.mesh_key} not found"
+        )
+    return {"ipc_addr": controller.temp_kv_store.get(request.mesh_key)}
 
 
 @app.post(COSMOS_API_NCCL_COMM_ERROR_SUFFIX)
@@ -650,7 +669,7 @@ def main(
         )
 
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=util.find_available_port(args.port), access_log=False
+        app, host="0.0.0.0", port=find_available_port(args.port), access_log=False
     )
     global server
     server = uvicorn.Server(config)
