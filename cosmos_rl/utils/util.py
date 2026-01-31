@@ -115,7 +115,7 @@ def resolve_model_path(model_path: str, revision: Optional[str] = None) -> str:
             )
 
             hf_fs = HfFileSystem(token=os.environ.get("HF_TOKEN", None))
-            files = hf_fs.ls(model_path, detail=False)
+            files = retry(hf_fs.ls)(model_path, detail=False)
             if (
                 os.path.join(model_path, "model.safetensors.index.json") in files
                 or os.path.join(model_path, "model.safetensors") in files
