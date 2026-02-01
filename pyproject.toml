@@ -21,7 +21,7 @@ dependencies = [
     "StrEnum",
     "redis",
     "msgpack",
-    "qwen_vl_utils",
+    "qwen-vl-utils",
     "pynvml",
     "boto3",
     "modelscope",
@@ -57,6 +57,7 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 
 [project.scripts]
 cosmos-rl = "cosmos_rl.launcher.launch_all:main"
+cosmos-rl-train = "cosmos_rl.launcher.launch_all:main"
 
 [tool.setuptools]
 include-package-data = true
