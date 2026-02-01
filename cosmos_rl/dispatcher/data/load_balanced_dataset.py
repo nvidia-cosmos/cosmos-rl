@@ -168,6 +168,7 @@ class LoadBalancedDataset(IterableDataset):
         seed: int = 0,
         dp_rank: int = 0,
         dp_world_size: int = 1,
+        accumulate_steps: int = 1,  # Number of batches to accumulate per iteration
     ):
         """
         Initialize the load-balanced dataset.
@@ -175,10 +176,11 @@ class LoadBalancedDataset(IterableDataset):
         Args:
             base_dataset: The underlying dataset (Dataset or IterableDataset)
             pool_size: Size of the sample pool maintained by each rank
-            max_tokens_for_batch: Maximum tokens per batch (batch_size * max_seq_len)
+            max_tokens_for_batch: Maximum tokens per batch
             length_key: Key to access sequence length in samples
             batching_strategy: "prefer_first" (FIFO) or "prefer_closest" (minimize padding)
             max_tokens_len: If a sample's length >= this, emit it alone
+            accumulate_steps: Number of batches to accumulate per iteration for gradient accumulation (default: 1)
             seq_packing_enabled: Whether sequence packing is enabled
             seed: Random seed for sampling (used if base_dataset is Dataset)
             dp_rank: Data parallel rank for sharding (default: 0)
@@ -190,10 +192,14 @@ class LoadBalancedDataset(IterableDataset):
         self.length_key = length_key
         self.batching_strategy = batching_strategy
         self.max_tokens_len = max_tokens_len or max_tokens_for_batch
+        self.accumulate_steps = accumulate_steps
         self.seq_packing_enabled = seq_packing_enabled
         self.seed = seed
         self.dp_rank = dp_rank
         self.dp_world_size = dp_world_size
+
+        if accumulate_steps < 1:
+            raise ValueError(f"accumulate_steps must be >= 1, got {accumulate_steps}")
 
         # Shard base_dataset according to dp_rank and convert to IterableDataset
         self.base_dataset = ShardedIterableDataset(
@@ -214,12 +220,18 @@ class LoadBalancedDataset(IterableDataset):
         logger.info(
             f"[LoadBalancedDataset] pool_size={pool_size}, max_tokens_for_batch={max_tokens_for_batch}, "
             f"batching_strategy={batching_strategy}, seq_packing_enabled={seq_packing_enabled}, "
-            f"dp_rank={dp_rank}, dp_world_size={dp_world_size}"
+            f"dp_rank={dp_rank}, dp_world_size={dp_world_size}, accumulate_steps={accumulate_steps}"
         )
 
     def __len__(self) -> int:
         """Return approximate length for progress tracking."""
-        return len(self.base_dataset)
+        base_len = len(self.base_dataset)
+        if base_len == 0:
+            return 0
+        # Approximate: divide by accumulate_steps when accumulating batches
+        if self.accumulate_steps > 1:
+            return (base_len + self.accumulate_steps - 1) // self.accumulate_steps
+        return base_len
 
     def _get_next_sample(self) -> Optional[Dict[str, Any]]:
         """
@@ -434,16 +446,17 @@ class LoadBalancedDataset(IterableDataset):
         self.accumulated_tokens_this_rank += total_tokens
         self.accumulated_samples_this_rank += len(chosen)
         # Log batch info (including rank info for distributed training)
-        logger.info(
+        logger.debug(
             f"[LoadBalancedDataset] Rank {self.dp_rank}: "
-            f"Batch: size={len(chosen)}, max_len={cur_max}, total_tokens={total_tokens} Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}"
+            f"Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}"
         )
 
         return chosen
 
     def __iter__(self):
         """
-        Iterate over batches.
+        Iterate over accumulated batches.
+        Yields a list of batches for gradient accumulation.
 
         The base_dataset is already sharded according to dp_rank in __init__,
         so we can directly iterate over it.
@@ -463,25 +476,35 @@ class LoadBalancedDataset(IterableDataset):
             )
         self._pool.clear()
 
-        # Iterate and yield batches
+        # Iterate and yield accumulated batches
         while True:
-            try:
-                batch = self._best_fit_batch()
-                yield batch
-            except StopIteration:
-                # Check if we can refill pool
-                self._fill_pool()
-                if not self._pool:
-                    # Dataset exhausted
-                    break
-                # Try again with refilled pool
+            accumulated_batches = []
+            for _ in range(self.accumulate_steps):
                 try:
                     batch = self._best_fit_batch()
-                    yield batch
+                    accumulated_batches.append(batch)
                 except StopIteration:
-                    break
+                    # Check if we can refill pool
+                    self._fill_pool()
+                    if not self._pool:
+                        # Dataset exhausted
+                        break
+                    # Try again with refilled pool
+                    try:
+                        batch = self._best_fit_batch()
+                        accumulated_batches.append(batch)
+                    except StopIteration:
+                        break
+
+            # Yield accumulated batches if we have any
+            if accumulated_batches:
+                yield accumulated_batches
+            else:
+                # No more batches
+                break
 
         logger.info(
             f"[LoadBalancedDataset] Iteration completed. "
-            f"dp_rank={self.dp_rank}/{self.dp_world_size}"
+            f"dp_rank={self.dp_rank}/{self.dp_world_size}, "
+            f"Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}"
         )

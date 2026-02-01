@@ -168,17 +168,19 @@ class SFTTrainer(LLMTrainer):
 
         acc_loss = torch.zeros(1, device=self.device)
         self.optimizers.zero_grad()
-        global_batch_size = len(global_batch)
-        # split global_batch into mini_batches
+
+        # When DP load balancing is enabled, each element in global_batch is already a batch of samples,
+        # so use mini_batch=1 to accumulate gradients correctly. Otherwise, use the configured mini_batch size.
         mini_batch = (
             self.config.train.train_policy.mini_batch
             if not self.enable_dp_load_balancing
-            else global_batch_size
+            else 1
         )
+        # split global_batch into mini_batches
         mini_batch_begin_idxs = list(
             range(
                 0,
-                global_batch_size,
+                len(global_batch),
                 mini_batch,
             )
         )
@@ -194,15 +196,19 @@ class SFTTrainer(LLMTrainer):
                 and not self.parallel_dims.pp_dynamic_shape
                 else None
             )
-            raw_batch = global_batch[i : i + mini_batch]
+            raw_batch = (
+                global_batch[i : i + mini_batch]
+                if not self.enable_dp_load_balancing
+                else global_batch[i]
+            )
             if fixed_length is None:
                 max_len = min(
                     self.config.policy.model_max_length,
                     self.data_packer.sft_compute_max_len(raw_batch),
                 )
-                logger.info(
-                    f"max_len: {max_len}, global_batch_size: {global_batch_size}"
-                )
+                # logger.info(
+                #     f"max_len: {max_len}, mini_batch_size: {len(raw_batch)}"
+                # )
             else:
                 max_len = fixed_length
 
@@ -661,7 +667,8 @@ class SFTTrainer(LLMTrainer):
         )
         if self.config.train.train_policy.enable_dp_load_balancing:
             loss_scaling_factor = (
-                1.0 / self.config.train.train_policy.load_balanced_accumulate_steps
+                1.0
+                / self.config.train.train_policy.load_balanced_batches_per_optimizer_step
             )
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()

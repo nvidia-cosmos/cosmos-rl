@@ -187,12 +187,22 @@ class SFTDataConfig(BaseModel):
 
     load_balanced_max_steps: int = Field(
         default=100,
-        description="Maximum number of steps to run for load-balanced batching. If None, will run until the dataset is exhausted.",
+        description=(
+            "Maximum number of optimizer steps (training steps) for load-balanced batching. "
+            "This is the number of times optimizer.step() will be called. "
+            "Note: The actual number of batches processed will be "
+            "load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
     )
 
-    load_balanced_accumulate_steps: int = Field(
+    load_balanced_batches_per_optimizer_step: int = Field(
         default=1,
-        description="Number of steps to accumulate for load-balanced batching.",
+        description=(
+            "Number of batches to accumulate per optimizer step for gradient accumulation. "
+            "Each DataLoader iteration will return this many batches, which are processed "
+            "before calling optimizer.step(). "
+            "The total number of batches processed = load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
     )
 
     @model_validator(mode="after")

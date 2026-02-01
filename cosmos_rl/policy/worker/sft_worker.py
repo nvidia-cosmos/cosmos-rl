@@ -373,6 +373,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     f"{max_tokens_for_batch} = {model_max_length}"
                 )
 
+            accumulate_steps = (
+                self.config.train.train_policy.load_balanced_batches_per_optimizer_step
+            )
             train_dataset = LoadBalancedDataset(
                 base_dataset=train_dataset,
                 pool_size=self.config.train.train_policy.load_balanced_pool_size,
@@ -384,11 +387,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 seed=self.config.train.train_policy.dataloader_seed,
                 dp_rank=self.dp_rank,
                 dp_world_size=self.dp_world_size,
+                accumulate_steps=accumulate_steps,
             )
             logger.info(
                 f"Wrapped training dataset with LoadBalancedDataset: "
                 f"pool_size={self.config.train.train_policy.load_balanced_pool_size}, "
-                f"max_tokens_for_batch={max_tokens_for_batch}"
+                f"max_tokens_for_batch={max_tokens_for_batch}, "
+                f"accumulate_steps={accumulate_steps}"
             )
 
         # For sampler, we won't drop data for un-even distribution DP.
