@@ -101,6 +101,7 @@ jobs:
           ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py"
           ${DOCKER_RUN} python tests/test_vllm_rollout_async.py
           ${DOCKER_RUN} python tests/test_custom_args.py
+          ${DOCKER_RUN} python tests/test_load_balanced_dataset.py
 
       - name: Cleanup
         if: always()
