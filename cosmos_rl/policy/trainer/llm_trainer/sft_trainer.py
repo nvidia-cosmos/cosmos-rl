@@ -146,8 +146,8 @@ class SFTTrainer(LLMTrainer):
             else None,
             cp_group=cp_group,
         )
-        self.enable_dataloader_dynamic_batching = (
-            self.config.train.train_policy.enable_dataloader_dynamic_batching
+        self.enable_dp_load_balancing = (
+            self.config.train.train_policy.enable_dp_load_balancing
         )
 
     def step_training(
@@ -172,7 +172,7 @@ class SFTTrainer(LLMTrainer):
         # split global_batch into mini_batches
         mini_batch = (
             self.config.train.train_policy.mini_batch
-            if not self.enable_dataloader_dynamic_batching
+            if not self.enable_dp_load_balancing
             else global_batch_size
         )
         mini_batch_begin_idxs = list(
@@ -659,8 +659,10 @@ class SFTTrainer(LLMTrainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
-        if self.config.train.train_policy.enable_dataloader_dynamic_batching:
-            loss_scaling_factor = 1.0
+        if self.config.train.train_policy.enable_dp_load_balancing:
+            loss_scaling_factor = (
+                1.0 / self.config.train.train_policy.load_balanced_accumulate_steps
+            )
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:

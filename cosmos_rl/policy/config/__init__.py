@@ -165,7 +165,7 @@ class SFTDataConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
-    enable_dataloader_dynamic_batching: bool = Field(
+    enable_dp_load_balancing: bool = Field(
         default=False,
         description="Enable load-balanced dynamic batching to balance tokens across DP ranks.",
     )
@@ -177,8 +177,7 @@ class SFTDataConfig(BaseModel):
 
     load_balanced_max_tokens_for_batch: Optional[int] = Field(
         default=None,
-        description="Maximum tokens per batch (batch_size * max_seq_len) for load-balanced batching. "
-        "If None, will be set to train_batch_per_replica * model_max_length.",
+        description="Maximum tokens per batch for load-balanced batching. ",
     )
 
     load_balanced_batching_strategy: str = Field(
@@ -191,12 +190,17 @@ class SFTDataConfig(BaseModel):
         description="Maximum number of steps to run for load-balanced batching. If None, will run until the dataset is exhausted.",
     )
 
+    load_balanced_accumulate_steps: int = Field(
+        default=1,
+        description="Number of steps to accumulate for load-balanced batching.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
-        if self.enable_dataloader_dynamic_batching:
+        if self.enable_dp_load_balancing:
             if self.load_balanced_batching_strategy not in [
                 "prefer_first",
                 "prefer_closest",

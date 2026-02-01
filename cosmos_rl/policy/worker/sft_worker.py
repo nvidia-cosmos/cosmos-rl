@@ -256,8 +256,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         self.train_step = 0
         self.start_epoch = 0
-        self.enable_dataloader_dynamic_batching = (
-            self.config.train.train_policy.enable_dataloader_dynamic_batching
+        self.enable_dp_load_balancing = (
+            self.config.train.train_policy.enable_dp_load_balancing
         )
 
         self.build_runner(
@@ -358,7 +358,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         )
 
         # Apply load-balanced dynamic batching if enabled
-        if self.enable_dataloader_dynamic_batching:
+        if self.enable_dp_load_balancing:
             logger.info("Enabling load-balanced dynamic batching for training dataset.")
             # Determine max_tokens_for_batch if not specified
             max_tokens_for_batch = (
@@ -392,9 +392,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         # For sampler, we won't drop data for un-even distribution DP.
-        # Note: If enable_dataloader_dynamic_batching, we don't need a sampler
+        # Note: If enable_dp_load_balancing, we don't need a sampler
         # as the LoadBalancedDataset handles data distribution internally
-        if self.enable_dataloader_dynamic_batching:
+        if self.enable_dp_load_balancing:
             train_sampler = None
             logger.info(
                 "Skipping sampler setup for load-balanced batching (LoadBalancedDataset handles distribution)."
@@ -433,7 +433,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             sampler: Union[Sampler[int], Sampler[list[int]]],
             sampler_in_batch: Optional[Sampler[list[int]]] = None,
         ):
-            if self.enable_dataloader_dynamic_batching:
+            if self.enable_dp_load_balancing:
                 # For IterableDataset with load-balanced batching, batches are already formed
                 # We set batch_size=None and let the dataset yield batches directly
                 logger.info(
@@ -476,7 +476,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             Note: Resume logic for load-balanced batching is handled differently since IterableDataset
             manages its own iteration state.
             """
-            if self.enable_dataloader_dynamic_batching:
+            if self.enable_dp_load_balancing:
                 logger.warning(
                     "Resume with load-balanced batching: IterableDataset will start from beginning. "
                     "For deterministic resuming, consider using a fixed seed and tracking epochs."
@@ -598,7 +598,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         else:
             self.total_steps = steps_by_dataset
 
-        if self.enable_dataloader_dynamic_batching:
+        if self.enable_dp_load_balancing:
             logger.info(
                 f"Total training steps set to load_balanced_max_steps={self.load_balanced_max_steps} for load-balanced dynamic batching"
             )
@@ -717,7 +717,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
-        if self.enable_dataloader_dynamic_batching:
+        if self.enable_dp_load_balancing:
             logger.info(
                 f"Epoch set to {cur_epoch + 1} for load-balanced dynamic batching"
             )
