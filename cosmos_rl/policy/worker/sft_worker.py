@@ -450,6 +450,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.epoch = self.config.train.epoch
 
         if hasattr(train_dataset.dataset, "data_loader"):
+            # Use custom data loader if provided by dataset
             self.train_data_loader = train_dataset.dataset.data_loader
         else:
             self.train_data_loader = get_train_data_loader(
@@ -457,6 +458,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         if hasattr(val_dataset.dataset, "data_loader"):
+            # Use custom data loader if provided by dataset
             self.val_data_loader = val_dataset.dataset.data_loader
         elif val_batch_sampler is not None:
             logger.info(
