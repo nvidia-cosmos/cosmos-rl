@@ -224,6 +224,14 @@ class SFTDataConfig(BaseModel):
                     f"load_balanced_batching_strategy must be 'prefer_first' or 'prefer_closest', "
                     f"got {self.load_balanced_batching_strategy}"
                 )
+            if self.load_balanced_max_steps <= 0:
+                raise ValueError(
+                    f"load_balanced_max_steps must be greater than 0, got {self.load_balanced_max_steps}"
+                )
+            if self.load_balanced_batches_per_optimizer_step <= 0:
+                raise ValueError(
+                    f"load_balanced_batches_per_optimizer_step must be greater than 0, got {self.load_balanced_batches_per_optimizer_step}"
+                )
         return self
 
 

@@ -308,7 +308,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
         )
         self.ckpt_total_steps, self.train_step = self.trainer.load_model()
-
+        # only for load-balanced batching
+        self.load_balanced_max_steps = (
+            self.config.train.train_policy.load_balanced_max_steps
+        )
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
@@ -464,19 +467,38 @@ class SFTPolicyWorker(PolicyWorkerBase):
             manages its own iteration state.
             """
             if self.enable_dp_load_balancing:
-                logger.warning(
-                    "Resume with load-balanced batching: IterableDataset will start from beginning. "
-                    "For deterministic resuming, consider using a fixed seed and tracking epochs."
+                # Calculate how many batch groups to skip based on train_step
+                # train_step represents the number of optimizer steps completed,
+                # which equals the number of batch groups (accumulated batches) processed
+
+                # For load-balanced batching, training is step-based (load_balanced_max_steps),
+                # not epoch-based. However, we still need to set epoch for deterministic data ordering.
+                # Since len(DataLoader) returns an approximate value based on sample count
+                # (not actual batch group count due to dynamic batching), we use a simpler approach:
+                # - Use load_balanced_max_steps as the "epoch size" in terms of optimizer steps
+                # - Calculate epoch based on how many full "epochs" (max_steps) we've completed
+                # - Skip batches within the current "epoch"
+
+                # Use load_balanced_max_steps as the epoch size
+                approximate_epoch = self.train_step // self.load_balanced_max_steps
+                batches_in_current_epoch = (
+                    self.train_step % self.load_balanced_max_steps
                 )
-                # For IterableDataset, we can't easily skip samples, but we can set epoch
-                # The dataset will reset its iteration state, so resuming may not be perfectly deterministic
-                # This is a limitation of IterableDataset-based approaches
+
+                # Set epoch for deterministic ordering (different epoch = different data order)
                 if hasattr(train_dataset, "set_epoch"):
-                    train_dataset.set_epoch(
-                        self.train_step // len(get_train_data_loader(None, None))
-                    )
-                self.start_epoch = self.train_step // len(
-                    get_train_data_loader(None, None)
+                    train_dataset.set_epoch(approximate_epoch)
+                self.start_epoch = approximate_epoch
+
+                # Skip batch groups within the current "epoch"
+                batches_to_skip = batches_in_current_epoch
+
+                # Skip batch groups that have already been processed
+                train_dataset.skip_batches(batches_to_skip)
+                logger.info(
+                    f"Resuming load-balanced training: epoch={self.start_epoch}, "
+                    f"skipping {batches_to_skip} batch groups in current epoch "
+                    f"(total train_step={self.train_step}, dp_rank={self.dp_rank})"
                 )
             else:
                 # Resume training from the last checkpoint if needed
@@ -584,9 +606,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             self.ckpt_total_steps
             if self.ckpt_total_steps > 0
             else len(self.train_data_loader) * self.epoch
-        )
-        self.load_balanced_max_steps = (
-            self.config.train.train_policy.load_balanced_max_steps
         )
 
         if self.config.train.max_num_steps is not None:

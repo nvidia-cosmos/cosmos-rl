@@ -80,9 +80,22 @@ class ShardedIterableDataset(IterableDataset):
         self.dp_rank = dp_rank
         self.dp_world_size = dp_world_size
         self.seed = seed
+        self._current_epoch = 0
         logger.debug(
             f"[ShardedIterableDataset] base_dataset type: {type(base_dataset)}, "
             f"dp_rank={dp_rank}, dp_world_size={dp_world_size}"
+        )
+
+    def set_epoch(self, epoch: int):
+        """
+        Set the epoch number for deterministic data ordering.
+
+        Args:
+            epoch: Epoch number (0-indexed)
+        """
+        self._current_epoch = epoch
+        logger.debug(
+            f"[ShardedIterableDataset] Set epoch to {epoch} (dp_rank={self.dp_rank})"
         )
 
     def __len__(self) -> int:
@@ -123,8 +136,9 @@ class ShardedIterableDataset(IterableDataset):
             f"total_shards={total_shards}, indices_count={len(indices)}"
         )
 
-        # Shuffle deterministically based on shard_id for reproducibility
-        rng = random.Random(self.seed + shard_id)
+        # Shuffle deterministically based on shard_id and epoch for reproducibility
+        # Adding epoch to seed ensures different ordering per epoch while maintaining determinism
+        rng = random.Random(self.seed + shard_id + self._current_epoch * 1000)
         rng.shuffle(indices)
 
         # Yield samples by index - this converts Dataset to IterableDataset
@@ -217,6 +231,10 @@ class LoadBalancedDataset(IterableDataset):
         self.accumulated_tokens_this_rank = 0
         self.accumulated_samples_this_rank = 0
         self.accumulated_batches_this_rank = 0
+
+        # For resume support: track how many batches to skip
+        self._skip_batches = 0
+        self._current_epoch = 0
 
         logger.info(
             f"[LoadBalancedDataset] pool_size={pool_size}, max_tokens_for_batch={max_tokens_for_batch}, "
@@ -455,6 +473,36 @@ class LoadBalancedDataset(IterableDataset):
 
         return chosen
 
+    def set_epoch(self, epoch: int):
+        """
+        Set the epoch number for deterministic data ordering.
+
+        Args:
+            epoch: Epoch number (0-indexed)
+        """
+        self._current_epoch = epoch
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(epoch)
+        logger.debug(
+            f"[LoadBalancedDataset] Set epoch to {epoch} (dp_rank={self.dp_rank})"
+        )
+
+    def skip_batches(self, num_batches: int):
+        """
+        Skip a certain number of batches when resuming training.
+
+        This method should be called before iterating the dataset to skip
+        batches that have already been processed in previous training runs.
+
+        Args:
+            num_batches: Number of batches to skip
+        """
+        self._skip_batches = num_batches
+        logger.info(
+            f"[LoadBalancedDataset] Will skip {num_batches} batches when resuming "
+            f"(dp_rank={self.dp_rank})"
+        )
+
     def __iter__(self):
         """
         Iterate over accumulated batches.
@@ -464,6 +512,10 @@ class LoadBalancedDataset(IterableDataset):
         so we can directly iterate over it.
         """
         # Create iterator from the already-sharded base_dataset
+        # If epoch is set, update it for deterministic ordering
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(self._current_epoch)
+
         self._dataset_iterator = iter(self.base_dataset)
 
         # Reset pool
@@ -477,6 +529,50 @@ class LoadBalancedDataset(IterableDataset):
                 "but may indicate premature iterator recreation."
             )
         self._pool.clear()
+
+        # Skip batches if resuming
+        batches_skipped = 0
+        if self._skip_batches > 0:
+            logger.info(
+                f"[LoadBalancedDataset] Skipping {self._skip_batches} batches for resume "
+                f"(dp_rank={self.dp_rank})"
+            )
+            while batches_skipped < self._skip_batches:
+                accumulated_batches = []
+                for _ in range(self.accumulate_steps):
+                    try:
+                        batch = self._best_fit_batch()
+                        accumulated_batches.append(batch)
+                    except StopIteration:
+                        # Check if we can refill pool
+                        self._fill_pool()
+                        if not self._pool:
+                            # Dataset exhausted before reaching skip target
+                            logger.warning(
+                                f"[LoadBalancedDataset] Dataset exhausted while skipping batches. "
+                                f"Skipped {batches_skipped}/{self._skip_batches} batches "
+                                f"(dp_rank={self.dp_rank})"
+                            )
+                            break
+                        # Try again with refilled pool
+                        try:
+                            batch = self._best_fit_batch()
+                            accumulated_batches.append(batch)
+                        except StopIteration:
+                            break
+
+                if not accumulated_batches:
+                    # No more batches to skip
+                    break
+
+                batches_skipped += 1
+
+            logger.info(
+                f"[LoadBalancedDataset] Skipped {batches_skipped} batches, "
+                f"resuming from batch {batches_skipped} (dp_rank={self.dp_rank})"
+            )
+            # Reset skip_batches after skipping (for next epoch)
+            self._skip_batches = 0
 
         # Iterate and yield accumulated batches
         while True:
