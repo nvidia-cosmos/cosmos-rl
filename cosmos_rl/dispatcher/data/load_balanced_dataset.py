@@ -216,6 +216,7 @@ class LoadBalancedDataset(IterableDataset):
         self._dataset_iterator: Optional[Any] = None
         self.accumulated_tokens_this_rank = 0
         self.accumulated_samples_this_rank = 0
+        self.accumulated_batches_this_rank = 0
 
         logger.info(
             f"[LoadBalancedDataset] pool_size={pool_size}, max_tokens_for_batch={max_tokens_for_batch}, "
@@ -445,10 +446,11 @@ class LoadBalancedDataset(IterableDataset):
 
         self.accumulated_tokens_this_rank += total_tokens
         self.accumulated_samples_this_rank += len(chosen)
+        self.accumulated_batches_this_rank += 1
         # Log batch info (including rank info for distributed training)
         logger.debug(
             f"[LoadBalancedDataset] Rank {self.dp_rank}: "
-            f"Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}"
+            f"Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}, batches={self.accumulated_batches_this_rank}"
         )
 
         return chosen
@@ -502,9 +504,3 @@ class LoadBalancedDataset(IterableDataset):
             else:
                 # No more batches
                 break
-
-        logger.info(
-            f"[LoadBalancedDataset] Iteration completed. "
-            f"dp_rank={self.dp_rank}/{self.dp_world_size}, "
-            f"Accumulated: tokens={self.accumulated_tokens_this_rank}, samples={self.accumulated_samples_this_rank}"
-        )
