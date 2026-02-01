@@ -426,9 +426,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             if self.enable_dp_load_balancing:
                 # For IterableDataset with load-balanced batching, batches are already formed
                 # We set batch_size=None and let the dataset yield batches directly
-                logger.info(
-                    "Creating DataLoader for load-balanced IterableDataset (batches formed by dataset)."
-                )
                 data_loader = DataLoader(
                     train_dataset,
                     batch_size=None,  # Batches are already formed by IterableDataset
