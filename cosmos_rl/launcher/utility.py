@@ -15,7 +15,7 @@
 
 import os
 import subprocess
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, NamedTuple, Iterator
 import time
 import argparse
 import sys
@@ -374,35 +374,84 @@ def launch_lepton_job(
     logger.info(f"ID: {new_job_id}")
 
 
+class CommandItem(NamedTuple):
+    command: str
+    # gpu device indexes used for this command
+    gpu_devices: Optional[str]
+    control_url: Optional[str]
+    output_file: Optional[str]
+    env: Optional[Dict[str, str]]
+
+    def __repr__(self) -> str:
+        return f"CommandItem(command={self.command}, gpu_devices={self.gpu_devices}, control_url={self.control_url}, output_file={self.output_file}, env={self.env})"
+
+
+class SingleWorkerCommands:
+    def __init__(self, global_worker_idx: int):
+        # Commands to be executed on this worker
+        self.global_worker_idx = global_worker_idx
+        self.command_items: List[CommandItem] = []
+
+    def append_command(
+        self,
+        command: str,
+        gpu_devices: Optional[str],
+        control_url: Optional[str],
+        output_file: Optional[str],
+        env: Optional[Dict[str, str]] = None,
+    ):
+        logger.info(
+            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}"
+        )
+        self.command_items.append(
+            CommandItem(command, gpu_devices, control_url, output_file, env)
+        )
+
+    def extend_commands(
+        self,
+        commands: List[str],
+        gpu_devices: List[str],
+        control_urls: List[str],
+        output_files: List[str],
+        envs: Optional[List[Dict[str, str]]] = None,
+    ):
+        logger.info(
+            f"Extending commands for worker {self.global_worker_idx} with {len(commands)} commands"
+        )
+        assert (
+            len(commands) == len(gpu_devices) == len(control_urls) == len(output_files)
+        ), "The number of commands, gpu devices, control URLs, and output files must be the same"
+        envs = envs or [None] * len(commands)
+        for command, gpu_device, control_url, output_file, env in zip(
+            commands, gpu_devices, control_urls, output_files, envs
+        ):
+            self.append_command(command, gpu_device, control_url, output_file, env)
+
+    def __iter__(self) -> Iterator[CommandItem]:
+        yield from self.command_items
+
+    def __len__(self) -> int:
+        return len(self.command_items)
+
+    def __repr__(self) -> str:
+        return "\n".join([repr(command_item) for command_item in self.command_items])
+
+
 def launch_processes(
-    commands: List[str],
-    gpu_devices: Optional[List[str]],
-    control_urls: Optional[List[str]],
-    output_files: Optional[List[str]],
-    extra_env: Optional[Dict[str, str]] = None,
+    command_collections: SingleWorkerCommands,
 ) -> List[subprocess.Popen]:
     """
     Launch multiple subprocesses and return their process objects.
-
-    Args:
-        commands: List of command strings to execute
-        gpu_devices: List of GPU device IDs to assign to each process (e.g., ["0", "1", "2"])
-        control_urls: List of controller URLs to assign to each process (e.g., ["localhost:8000"])
-        output_files: List of output files to redirect process output to (e.g., ["output1.log", "output2.log"])
-
     Returns:
         List of Popen objects for the launched processes
     """
     processes = []
-
-    if gpu_devices is None:
-        gpu_devices = [None] * len(commands)
-    elif len(gpu_devices) != len(commands):
-        raise ValueError("Number of GPU devices must match number of commands")
-
-    for cmd, gpu_id, url, ofile in zip(
-        commands, gpu_devices, control_urls, output_files
-    ):
+    for command_item in command_collections.command_items:
+        cmd = command_item.command
+        gpu_id = command_item.gpu_devices
+        url = command_item.control_url
+        ofile = command_item.output_file
+        command_env = command_item.env
         try:
             # Prepare environment variables
             env = dict(os.environ)
@@ -410,8 +459,8 @@ def launch_processes(
                 env["CUDA_VISIBLE_DEVICES"] = gpu_id
             if url is not None:
                 env["COSMOS_CONTROLLER_HOST"] = url
-            if extra_env is not None:
-                env.update(extra_env)
+            if command_env is not None:
+                env.update(command_env)
             if ofile is not None:
                 f = open(ofile, "wb")
                 cout = f

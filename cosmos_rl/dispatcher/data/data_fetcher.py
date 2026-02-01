@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from typing import Optional, Callable, List, Dict, Iterator, Tuple, Any
 from itertools import islice
 import math
@@ -20,6 +21,7 @@ from tqdm import tqdm
 from abc import ABC
 
 import torch
+import datasets
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, TensorDataset
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
@@ -34,6 +36,7 @@ from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import split_train_n_val_dataset
 
 
 class DataFetcherBase(ABC):
@@ -127,6 +130,13 @@ class ControllerDataFetcher(DataFetcherBase):
         # Dict to track the number of data fetched for each policy at current step when data_dispatch_as_rank_in_mesh is enabled.
         self.data_fetched_for_each_policy_at_step = {}
 
+        if self.config.train.train_policy.type == "sft":
+            assert (
+                self.config.train.train_policy.dataloader_batch_size
+            ), "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            # Set n_generation to 1 for SFT policy to avoid duplicated data counting when calculating the related value.
+            self.config.rollout.n_generation = 1
+
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
 
@@ -156,6 +166,18 @@ class ControllerDataFetcher(DataFetcherBase):
                 )
             else:
                 self.dataset = CosmosDataset(config=self.config)
+
+            if (
+                self.config.validation.enable
+                and self.val_dataset is None
+                and not self.config.validation.dataset.name
+            ):
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
 
             if self.config.train.local_dataset:
                 train_index_set = RLDataset(
@@ -200,11 +222,20 @@ class ControllerDataFetcher(DataFetcherBase):
             if self.batch_sampler is not None and isinstance(
                 self.batch_sampler, Callable
             ):
-                self.batch_sampler = self.batch_sampler(
-                    self.train_sampler,
-                    batch_size=self.rollout_batch_size,
-                    drop_last=False,
-                )
+                sig = inspect.signature(self.batch_sampler)
+                kwargs = {
+                    "dataset": self.dataset.train_set.dataset,
+                    "num_replicas": 1,
+                    "rank": 0,
+                    "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                    "config": self.config,
+                    "sampler": self.train_sampler,
+                    "batch_size": self.rollout_batch_size,
+                    "drop_last": False,
+                }
+                # Filter kwargs to only those the function accepts
+                filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                self.batch_sampler = self.batch_sampler(**filtered)
             if self.config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
@@ -318,7 +349,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     self.val_batch_size > 0
                 ), "[DataFetcher] val_batch_size should be greater than 0."
                 if self.val_dataset is not None:
-                    assert isinstance(self.val_dataset, Dataset)
+                    assert isinstance(self.val_dataset, Dataset) or isinstance(
+                        self.val_dataset, datasets.arrow_dataset.Dataset
+                    )
                     self.val_dataset = CosmosValidationDataset(
                         config=self.config,
                         val_set=self.val_dataset,
@@ -351,8 +384,14 @@ class ControllerDataFetcher(DataFetcherBase):
                         "[DataFetcher] Using custom batch Sampler that yields list of indices for validation dataset."
                     )
                     if isinstance(self.val_batch_sampler, Callable):
-                        self.val_batch_sampler = self.val_batch_sampler(
-                            self.val_sampler
+                        sig = inspect.signature(self.val_batch_sampler)
+                        kwargs = {
+                            "dataset": self.val_dataset.val_set.dataset,
+                            "num_replicas": 1,
+                            "rank": 0,
+                            "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                            "config": self.config,
+                            "sampler": self.val_sampler
                             if self.val_sampler is not None
                             else DistributedSampler(
                                 self.val_dataset.val_set,
@@ -361,9 +400,14 @@ class ControllerDataFetcher(DataFetcherBase):
                                 shuffle=False,
                                 drop_last=False,
                             ),
-                            batch_size=self.val_batch_size,
-                            drop_last=False,
-                        )
+                            "batch_size": self.val_batch_size,
+                            "drop_last": False,
+                        }
+                        # Filter kwargs to only those the function accepts
+                        filtered = {
+                            k: v for k, v in kwargs.items() if k in sig.parameters
+                        }
+                        self.val_batch_sampler = self.val_batch_sampler(**filtered)
                         self.val_dataloader = DataLoader(
                             self.val_dataset.val_set,
                             num_workers=self.config.train.train_policy.dataloader_num_workers,
@@ -646,6 +690,17 @@ class WorkerDataFetcher(DataFetcherBase):
                 )
                 logger.info(
                     "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                )
+            elif not self.config.validation.dataset.name:
+                # If validation is enabled but no val_dataset or validation dataset name is provided, split from training dataset.
+                train_dataset, val_dataset = split_train_n_val_dataset(
+                    self.dataset.train_set.dataset, self.config
+                )
+                self.dataset.train_set.dataset = train_dataset
+                self.val_dataset = val_dataset
+                self.val_dataset = CosmosValidationDataset(
+                    config=self.config,
+                    val_set=self.val_dataset,
                 )
             else:
                 self.val_dataset = CosmosValidationDataset(config=self.config)

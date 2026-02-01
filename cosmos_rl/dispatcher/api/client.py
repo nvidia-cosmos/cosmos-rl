@@ -56,6 +56,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
+    COSMOS_API_IPC_INFO_SUFFIX,
+    COSMOS_API_QUERY_IPC_INFO_SUFFIX,
 )
 from cosmos_rl.utils.parallelism_map import WeightSyncInstructionsGroup
 from cosmos_rl.utils.util import list_to_b64, sanitize, b64_to_list
@@ -236,6 +238,39 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to set trace path to controller: {e}")
             raise e
+
+    def post_ipc_info(self, mesh_key: str, ipc_addr: str):
+        try:
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json={"mesh_key": mesh_key, "ipc_addr": ipc_addr},
+                ),
+                self.get_alternative_urls(COSMOS_API_IPC_INFO_SUFFIX),
+                max_retries=self.max_retries,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to post ipc info for mesh key {mesh_key} to controller: {e}"
+            )
+            raise e
+
+    def query_ipc_info(self, mesh_key: str) -> str:
+        try:
+            r = make_request_with_retry(
+                partial(
+                    requests.post,
+                    json={"mesh_key": mesh_key},
+                ),
+                self.get_alternative_urls(COSMOS_API_QUERY_IPC_INFO_SUFFIX),
+                max_retries=self.max_retries,
+            )
+            ipc_addr = r.json()["ipc_addr"]
+            return ipc_addr
+        except Exception as e:
+            raise RuntimeError(
+                f"[{self.role}] Failed in get ipc_addr for mesh key {mesh_key} from controller after retries {e}."
+            )
 
     def post_nccl_comm_initiator(self, unique_pair_name: str, nccl_uuid: List[int]):
         base64_nccl_group_id = list_to_b64(nccl_uuid)

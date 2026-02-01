@@ -41,9 +41,6 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
 from cosmos_rl.utils.pynccl import (
-    create_nccl_uid,
-    create_nccl_comm,
-    nccl_send,
     nccl_group_start,
     nccl_group_end,
 )
@@ -59,6 +56,7 @@ from cosmos_rl.dispatcher.command import (
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
+from cosmos_rl.collective.collective import P2RCollectiveManager
 
 
 class RLPolicyWorker(PolicyWorkerBase):
@@ -102,7 +100,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             global_rank=self.global_rank,
             api_client=self.api_client,
         )
-        self.rollouts_comm = {}
         self.kv_store = dist_util.DistKVStore(
             group=dist.distributed_c10d._get_default_group(),
             master_rank=0,
@@ -125,8 +122,6 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         atexit.register(self.handle_shutdown)
 
-        self.p2r_nccl_uuids = {}
-
         # Flag for determining if the current replica is the master replica,
         # The master replica needs to:
         # - Save the checkpoint/safetensors
@@ -139,12 +134,21 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.teacher_prefetch_queue = Queue()
         self.teacher_uuid_to_dp_shard = {}
 
+        # Init P2R collective manager
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=self.api_client,
+            role=self.role,
+        )
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -302,7 +306,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -330,7 +335,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
+            reference_model=hasattr(self.config.train.train_policy, "kl_beta")
+            and self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -349,37 +355,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             )
             return False
 
-        comm_id = {}
-        # Create nccl id for one policy replica to another rollout replica
-        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        if mesh_key not in self.p2r_nccl_uuids:
-            nccl_uuid = None
-            if self.global_rank == 0:
-                # Only create nccl group id in rank 0.
-                nccl_uuid = create_nccl_uid()
-                logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                self.api_client.post_nccl_comm_initiator(mesh_key, nccl_uuid)
-            # broadcast the nccl group id to all ranks
-            nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
-            self.p2r_nccl_uuids[mesh_key] = nccl_uuid
+        self.p2r_collective_manager.setup_manager(command)
 
-        if mesh_key not in self.rollouts_comm:
-            assert mesh_key in self.p2r_nccl_uuids
-            nccl_uuid = self.p2r_nccl_uuids[mesh_key]
-            logger.debug(
-                f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
-            )
-            comm_id = create_nccl_comm(
-                nccl_uuid,
-                self.global_rank,
-                self.world_size + command.dst_replica_size,
-            )
-            logger.debug(
-                f"[Policy] `P2R` nccl comm: {comm_id} for `P2R` with mesh_key: {mesh_key} is created."
-            )
-            self.rollouts_comm[mesh_key] = comm_id
-        else:
-            comm_id = self.rollouts_comm[mesh_key]
         assert (
             self.trainer.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
@@ -395,6 +372,13 @@ class RLPolicyWorker(PolicyWorkerBase):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
+        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        comm_id = (
+            None
+            if self.rl_mode == "colocated_separated"
+            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
+        )
+
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 try:
@@ -412,17 +396,18 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
 
                     def grouped_send(grouped_send_ops):
-                        nccl_group_start(comm_id)
+                        if self.rl_mode != "colocated_separated":
+                            # Only in non-colocated-separated mode, we could use NCCL group feature.
+                            nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
                             logger.debug(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
-                            nccl_send(
-                                view,
-                                self.world_size + r_rank,
-                                comm_id,
+                            self.p2r_collective_manager.send(
+                                base_mesh_key, view, r_rank
                             )
-                        nccl_group_end(comm_id)
+                        if self.rl_mode != "colocated_separated":
+                            nccl_group_end(comm_id)
                         grouped_send_ops.clear()
 
                     grouped_send_ops = []
@@ -800,7 +785,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 daemon=True,
                 name="fetch_rollouts_thread",
             ).start()
-        if self.parallel_dims.pp_cp_tp_coord[0] == 0:
+        if (
+            self.parallel_dims.pp_cp_tp_coord[0] == 0
+            and self.config.distillation.enable
+        ):
             # Initiate teacher interaction thread once for each same dp group
             self.teacher_interact_thread = threading.Thread(
                 target=self.teacher_interact_loop,

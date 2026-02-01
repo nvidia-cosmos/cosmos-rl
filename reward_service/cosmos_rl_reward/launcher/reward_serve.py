@@ -33,7 +33,7 @@ from cosmos_rl_reward.utils.protocol import (
     COSMOS_RL_REWARD_REDIS_PUSH_API_SUFFIX,
     COSMOS_RL_REWARD_REDIS_PULL_API_SUFFIX,
 )
-from cosmos_rl.utils.util import find_available_port
+from cosmos_rl.utils.network_util import find_available_port
 import uvicorn
 from cosmos_rl_reward.handler.process import RewardProcessHandler
 from cosmos_rl_reward.handler.score_kv import KeyValueHandler
@@ -74,8 +74,9 @@ async def enqueue(request: Request):
     raw_body = await request.body()
     try:
         controller = DecodeHandler.get_instance()
-        uuis = str(uuid.uuid4())
-        controller.task_queue.put((uuis, raw_body))
+        uuid_str = str(uuid.uuid4())
+        response_dict = {"uuid": uuid_str}
+        controller.task_queue.put((uuid_str, raw_body))
         if not controller.loop.is_set():
             controller.loop.set()
             controller.threading_pool.submit(
@@ -84,7 +85,9 @@ async def enqueue(request: Request):
                 controller.max_pending_tasks,
                 controller.loop,
             )
-        return {"uuid": uuis}
+        if os.environ.get("LEPTON_REPLICA_ID", None) is not None:
+            response_dict["replica_id"] = os.environ["LEPTON_REPLICA_ID"]
+        return response_dict
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -209,6 +212,7 @@ async def pull_scores(
             res = JSONResponse(
                 status_code=400, content={"message": f"Not found scores for {uuid}"}
             )
+            logger.info(f"Scores for {uuid} not found.")
         else:
             res = json.loads(
                 value.decode("utf-8") if isinstance(value, bytes) else value

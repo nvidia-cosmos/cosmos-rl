@@ -156,11 +156,11 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
     ):
         # setup data packer first

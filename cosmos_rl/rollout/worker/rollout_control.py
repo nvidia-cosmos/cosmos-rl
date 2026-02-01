@@ -19,6 +19,10 @@ import uuid
 import torch
 import atexit
 
+import torch.distributed as dist
+
+from torch.utils.data import Dataset
+
 from queue import Queue, Empty as QueueEmpty
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union, Tuple
@@ -46,7 +50,6 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     nccl_broadcast,
-    nccl_recv,
     nccl_group_start,
     nccl_group_end,
 )
@@ -70,10 +73,7 @@ from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
-import torch.distributed as dist
-
-from torch.utils.data import Dataset
-
+from cosmos_rl.collective.collective import P2RCollectiveManager
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -121,9 +121,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.global_commnicator_idex = -1
         # rank in current rollout replicas.
         self.rank_in_rollout_repicas = -1
-
-        # cache for NCCL communicators for P2R.
-        self.policy_to_rollout_nccl_communicators = {}
 
         self.batch_size = self.config.rollout.batch_size
         if self.config.validation.enable:
@@ -182,6 +179,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
         self.data_fetcher = None
 
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=self.api_client,
+            role=self.role,
+        )
+
         # initialize variable for async rollout.
         self._is_async_rollout = False
         self.scheduler: Optional[RolloutTaskScheduler] = None
@@ -205,11 +210,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
     ):
         # setup data packer first
@@ -444,7 +449,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self,
         global_rank_of_rollout: int,
         insts_group: WeightSyncInstructionsGroup,
-        communicator_index: int,
+        mesh_key: str,
         trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
@@ -568,7 +573,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 logger.debug(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {underlying_tensor_view.shape} of {target_tensor.shape} with dtype {recv_tensor.dtype}."
                 )
-                nccl_recv(recv_tensor, p_rank, communicator_index)
+                self.p2r_collective_manager.recv(mesh_key, recv_tensor, p_rank)
 
                 # inplace copy
                 if not inplace:
@@ -980,37 +985,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         if command.dst_replica_name != self.replica_name:
             return
-        # get the nccl_unique_id from the controller
-        communicator_index = {}
-        nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
-        if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
-            logger.debug(
-                f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
-            )
-            communicator_index = self.policy_to_rollout_nccl_communicators[
-                nccl_unique_id_key
-            ]
-        else:
-            logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
-            # query the nccl group id from controller
-            nccl_group_id = self.query_nccl_unique_id_from_controller(
-                nccl_unique_id_key
-            )
-            if nccl_group_id is None:
-                raise RuntimeError(
-                    "[Rollout] Failed to query nccl group_id from controller!"
-                )
-            # create the communicator index
-            # p_rank is the rank in policy, r_rank is the rank in rollout
-            communicator_index = create_nccl_comm(
-                nccl_group_id,
-                self.global_rank + command.src_replica_size,
-                self.world_size + command.src_replica_size,
-            )
-            # cache the communicator index
-            self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
-                communicator_index
-            )
+
+        self.p2r_collective_manager.setup_manager(command)
+
+        comm_id = None
+        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        comm_id = (
+            None
+            if self.rl_mode == "colocated_separated"
+            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
+        )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             logger.info(
@@ -1067,7 +1051,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
-            nccl_group_start(communicator_index)
+            if self.rl_mode != "colocated_separated":
+                # Only in non-colocated-separated mode, we could use NCCL group feature.
+                nccl_group_start(comm_id)
 
             skipped_params_cnt = 0
             transferred_params_cnt = 0
@@ -1084,7 +1070,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ) = self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
-                    communicator_index,
+                    base_mesh_key,
                     command.trainable_only,
                     command.do_weight_sync_check,
                 )
@@ -1115,12 +1101,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                 pending_groups += 1
                 if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                    nccl_group_end(communicator_index)
+                    if self.rl_mode != "colocated_separated":
+                        nccl_group_end(comm_id)
                     flush_completions(pending_bytes, pending_completions)
-                    nccl_group_start(communicator_index)
+                    if self.rl_mode != "colocated_separated":
+                        nccl_group_start(comm_id)
                     pending_groups = 0
 
-            nccl_group_end(communicator_index)
+            if self.rl_mode != "colocated_separated":
+                nccl_group_end(comm_id)
+
             flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):
@@ -1774,7 +1764,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if not is_validation and not self._prompt_queue.empty():
             first_payload: RLPayload = self._prompt_queue.queue[0][0]
             is_valid_prompt_for_current_weight_version = (
-                first_payload.weight_version <= self.current_weight_version
+                first_payload.weight_version
+                <= self.current_weight_version
+                + self.config.train.train_policy.allowed_outdated_steps
             )
             if not is_valid_prompt_for_current_weight_version:
                 return 0, False

@@ -113,7 +113,11 @@ class Controller:
                 "Wandb is not available. Please install it to use wandb logging features."
             )
 
-        self.is_rl = task_type != "sft"
+        # Treat SFT with multiple replicas as RL for controller data fetcher
+        # It can be regarded as RL without rollout workers
+        self.is_rl = (
+            task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
+        )
         self.is_diffusers = self.config.policy.is_diffusers
         self.weight_version_to_prompt_num = {}  # Only for on-policy.
 
@@ -128,7 +132,7 @@ class Controller:
             is_rl=self.is_rl,
         )
 
-        redis_free_port = util.find_available_port(redis_port)
+        redis_free_port = network_util.find_available_port(redis_port)
         self.config.redis = str(redis_free_port)
 
         ips = network_util.get_eth_ips()
@@ -144,7 +148,7 @@ class Controller:
 maxmemory 500G
 maxmemory-policy allkeys-lfu
 """
-        redis_cfg_path = util.write_redis_config(
+        redis_cfg_path = network_util.write_redis_config(
             redis_free_port,
             redis_logfile_path,
             file_path=config_file_path.name,
@@ -249,7 +253,13 @@ maxmemory-policy allkeys-lfu
             self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
         )
 
-        if not is_validation and not self.config.mode == "colocated":
+        is_sft = self.config.train.train_policy.type == "sft"
+        # Need to control the number of fetched prompts with the corresponding weight version when it's not validation step, not sft and not colocated mode.
+        step_fetched_count_control = (
+            not is_validation and not is_sft and not self.config.mode == "colocated"
+        )
+
+        if step_fetched_count_control:
             # Throttle the generation speed:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
@@ -308,9 +318,8 @@ maxmemory-policy allkeys-lfu
                         )
 
         if (
-            (not is_validation)
+            step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
-            and not self.config.mode == "colocated"
         ):
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
@@ -333,7 +342,7 @@ maxmemory-policy allkeys-lfu
                 validation_step,
                 rank_in_mesh,
                 weight_version=weight_version_for_current_batch
-                if self.config.train.train_policy.variant != "dapo"
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
                 else None,
             )
             current_fetch_count = len(payloads_list)
@@ -375,12 +384,28 @@ maxmemory-policy allkeys-lfu
                 validation_step,
                 rank_in_mesh,
                 weight_version=weight_version_for_current_batch
-                if self.config.train.train_policy.variant != "dapo"
+                if not is_sft and self.config.train.train_policy.variant != "dapo"
                 else None,
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
-                payloads_list[i].weight_version = 0
+                if is_sft:
+                    # For SFT with multiple replicas, we need to set the weight version, epoch and remain_samples_num for the replica side control
+                    payloads_list[
+                        i
+                    ].weight_version = self.policy_status_manager.current_step
+                    payloads_list[i].extra_info = (
+                        {}
+                        if payloads_list[i].extra_info is None
+                        else payloads_list[i].extra_info
+                    )
+                    # The epoch in data_fetcher starts from 1 and need to minus 1 to be consistent with the worker side.
+                    payloads_list[i].extra_info["epoch"] = self.data_fetcher.epoch - 1
+                    payloads_list[i].extra_info["remain_samples_num"] = (
+                        self.policy_status_manager.remain_samples_num
+                    )
+                else:
+                    payloads_list[i].weight_version = 0
         if not is_validation:
             self.policy_status_manager.samples_on_the_fly += (
                 current_fetch_count * self.config.rollout.n_generation

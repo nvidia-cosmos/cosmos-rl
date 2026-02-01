@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import inspect
 import os
 import torch
 from typing import Optional, Union, Callable, Dict, Any
@@ -151,38 +152,10 @@ def construct_dataset(
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
         else:
-            logger.warning(
-                "No validation dataset provided, using split of training dataset for validation."
+            # Split train/val from training dataset if no val dataset and no val dataset name provided
+            train_dataset, test_dataset = util.split_train_n_val_dataset(
+                train_dataset, cosmos_config
             )
-            if isinstance(train_dataset, torch.utils.data.Dataset):
-                # Define the split ratio (e.g., 80% train, 20% test)
-                if config.dataset.test_size is None:
-                    logger.warning(
-                        "No test size specified, using 10% of the training dataset for testing."
-                    )
-                    config.dataset.test_size = 0.1
-                if isinstance(config.dataset.test_size, float):
-                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
-                else:
-                    n_test_samples = config.dataset.test_size
-                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
-
-                # Generate deterministic indices
-                indices = list(range(len(train_dataset)))
-                test_indices = indices[:n_test_samples]
-                train_indices = indices[n_test_samples:]
-
-                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-            else:
-                assert hasattr(
-                    train_dataset, "train_test_split"
-                ), "train_dataset must have train_test_split method"
-                split = train_dataset.train_test_split(
-                    test_size=config.dataset.test_size, shuffle=False
-                )
-                train_dataset = split["train"]
-                test_dataset = split["test"]
     else:
 
         class EmptyDataset(Dataset):
@@ -273,8 +246,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
     def setup(
         self,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
+        val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -428,11 +401,20 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.train_sampler = train_sampler
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
-            batch_sampler = batch_sampler(
-                self.train_sampler,
-                batch_size=self.config.train.train_batch_per_replica,
-                drop_last=False,
-            )
+            sig = inspect.signature(batch_sampler)
+            kwargs = {
+                "dataset": train_dataset.dataset,
+                "num_replicas": self.dp_world_size,
+                "rank": self.dp_rank,
+                "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                "config": self.config,
+                "sampler": self.train_sampler,
+                "batch_size": self.config.train.train_batch_per_replica,
+                "drop_last": False,
+            }
+            # Filter kwargs to only those the function accepts
+            filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+            batch_sampler = batch_sampler(**filtered)
 
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
@@ -564,12 +546,21 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )
             if isinstance(val_batch_sampler, Callable):
-                val_batch_sampler = val_batch_sampler(
-                    val_sampler,
-                    batch_size=self.config.validation.batch_size
+                sig = inspect.signature(val_batch_sampler)
+                kwargs = {
+                    "dataset": val_dataset.dataset,
+                    "num_replicas": self.dp_world_size,
+                    "rank": self.dp_rank,
+                    "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                    "config": self.config,
+                    "sampler": val_sampler,
+                    "batch_size": self.config.validation.batch_size
                     or self.config.train.train_batch_per_replica,
-                    drop_last=False,
-                )
+                    "drop_last": False,
+                }
+                # Filter kwargs to only those the function accepts
+                filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                val_batch_sampler = val_batch_sampler(**filtered)
             self.val_data_loader = DataLoader(
                 val_dataset,
                 num_workers=self.config.train.train_policy.dataloader_num_workers,
@@ -624,8 +615,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def validate(self, current_epoch: int, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
+
         if (
             (self.train_step == 0 and self.config.validation.val_before_train)
             or (

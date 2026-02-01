@@ -138,7 +138,7 @@ class TeacherWorker(PolicyWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
+        data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         # setup data packer first
         self.init_data_packer(

@@ -95,6 +95,7 @@ from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
 import multiprocessing as mp
 from cosmos_rl.dispatcher.replica import Rollout
+from cosmos_rl.collective.collective import P2RCollectiveManager
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -281,6 +282,7 @@ class TestPolicyWorker:
     def __init__(
         self, name, policy_world_size, rollouts_comm, freeze_params: bool = False
     ):
+        self.replica_name = name
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -293,18 +295,28 @@ class TestPolicyWorker:
             policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type=cosmos_device_type)
-        self.replica_name = name
-        self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
 
-        self.p2r_nccl_uuids = rollouts_comm
-        self.train_stream = torch.cuda.Stream()
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         self.config.train.train_policy.dataset.name = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+        self.rl_mode = self.config.mode
+
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=None,
+            role=Role.POLICY,
+        )
+        self.p2r_collective_manager.unique_ids_cache = rollouts_comm
+        self.p2r_collective_manager.nccl_comm_cache = rollouts_comm
+
+        self.train_stream = torch.cuda.Stream()
+
         self.trainer = TestPolicyTrainer(
             config=self.config,
             parallel_dims=self.parallel_dims,
@@ -353,16 +365,15 @@ class TestRollout:
     def __init__(
         self, name, rollout_world_size, policies_comm, freeze_params: bool = False
     ):
+        self.replica_name = name
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
         self.role = Role.ROLLOUT
         self.world_size = rollout_world_size
-        self.policy_to_rollout_nccl_communicators = policies_comm
         rollout_parallelism_config = ParallelismConfig(
             dp_shard_size=1, cp_size=1, tp_size=4, pp_size=1
         )
-        self.replica_name = name
         self.parallel_dims = ParallelDims.from_config(
             rollout_parallelism_config,
         )
@@ -386,11 +397,22 @@ class TestRollout:
         self.quantization_type = None
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"  # keep the same as policy above.
+        self.rl_mode = self.config.mode
 
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         self.config.train.train_policy.dataset.name = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+
+        self.p2r_collective_manager = P2RCollectiveManager(
+            replica_name=self.replica_name,
+            parallel_dims=self.parallel_dims,
+            config=self.config,
+            api_client=None,
+            role=Role.ROLLOUT,
+        )
+        self.p2r_collective_manager.unique_ids_cache = policies_comm
+        self.p2r_collective_manager.nccl_comm_cache = policies_comm
 
         self.weight_inplace_view_map = compatibale_map
         self.recv_param_key_n_rank_list = compatibale_list
@@ -2020,6 +2042,107 @@ def run_sft_custom_sampler():
     assert cnt == 8
 
 
+def run_sft_data_packer_factory():
+    """Test that data_packer and val_data_packer can be passed as factory functions."""
+    config_dict = load_simple_sft_config()
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.validation.enable = True
+    config.validation.freq = 1
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type=cosmos_device_type)
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        pass
+
+    CommMixin.init_comm = dummy
+
+    class TestDatasetSFT(TestDataset):
+        def setup(
+            self,
+            config: CosmosConfig,
+        ):
+            dataset = util.load_data_from_disk_or_hf(
+                config.validation.dataset.name,
+                config.validation.dataset.subset,
+                config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in config.validation.dataset.split:
+                dataset_list.append(dataset[split_name])
+            self.dataset = concatenate_datasets(dataset_list)
+
+        def __getitem__(self, idx):
+            return super().__getitem__(idx)["conversation"]
+
+        def __len__(self):
+            return 16
+
+    # Track factory function calls
+    factory_call_count = {"data_packer": 0, "val_data_packer": 0}
+
+    # Define factory functions for data_packer and val_data_packer
+    def data_packer_factory(cfg: CosmosConfig) -> DecoderOnlyLLMDataPacker:
+        factory_call_count["data_packer"] += 1
+        packer = DecoderOnlyLLMDataPacker()
+        return packer
+
+    def val_data_packer_factory(cfg: CosmosConfig) -> DecoderOnlyLLMDataPacker:
+        factory_call_count["val_data_packer"] += 1
+        packer = DecoderOnlyLLMDataPacker()
+        return packer
+
+    dataset = TestDatasetSFT(config)
+    dataset.setup(config)
+
+    # Test 1: Pass factory functions directly
+    sft_worker = SFTPolicyWorker(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        data_packer=data_packer_factory,
+        val_data_packer=val_data_packer_factory,
+    )
+
+    # Verify factory functions were called
+    assert (
+        factory_call_count["data_packer"] == 1
+    ), f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
+    assert (
+        factory_call_count["val_data_packer"] == 1
+    ), f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
+
+    # Verify data packers are properly set
+    assert isinstance(
+        sft_worker.data_packer, DecoderOnlyLLMDataPacker
+    ), f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
+    assert isinstance(
+        sft_worker.val_data_packer, DecoderOnlyLLMDataPacker
+    ), f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
+
+    # Verify data loaders work
+    cnt = 0
+    for it in sft_worker.train_data_loader:
+        assert len(it) > 0
+        cnt += 1
+    assert cnt > 0, "train_data_loader should have at least one batch"
+
+    cnt = 0
+    for it in sft_worker.val_data_loader:
+        assert len(it) > 0
+        cnt += 1
+    assert cnt > 0, "val_data_loader should have at least one batch"
+
+    logger.info("All data_packer factory tests passed!")
+
+
 def run_gspo_test():
     config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
@@ -2517,6 +2640,9 @@ async def main():
         exit(0)
     elif mode == "sft_for_custom_sampler":
         run_sft_custom_sampler()
+        exit(0)
+    elif mode == "sft_for_data_packer_factory":
+        run_sft_data_packer_factory()
         exit(0)
     elif mode == "reward_execution_check":
         run_reward_check()

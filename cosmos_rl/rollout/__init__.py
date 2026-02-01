@@ -29,7 +29,7 @@ from cosmos_rl.utils.logging import logger
 try:
     import cosmos_rl.rollout.vllm_rollout.vllm_rollout as vllm_rollout_dummy  # noqa: F401
 except ImportError as e:
-    logger.debug(
+    logger.error(
         f"Failed to import VLLM Rollout. Please make sure vllm is installed. Error: {e}"
     )
     pass
@@ -37,7 +37,7 @@ except ImportError as e:
 try:
     import cosmos_rl.rollout.example_custom_rollout.example_custom_rollout as example_custom_rollout_dummy  # noqa: F401
 except ImportError as e:
-    logger.debug(
+    logger.error(
         f"Failed to import example HF Rollout. Please make sure transformers is installed. Error: {e}"
     )
     pass
@@ -45,13 +45,13 @@ except ImportError as e:
 try:
     import cosmos_rl.rollout.vla_rollout.vla_rollout as vla_rollout_dummy  # noqa: F401
 except ImportError as e:
-    logger.debug(f"Failed to import OpenVLA Rollout. Error: {e}")
+    logger.error(f"Failed to import OpenVLA Rollout. Error: {e}")
     pass
 
 try:
     import cosmos_rl.rollout.diffuers_rollout.nft_rollout as diffusion_nft_rollout_dummy  # noqa: F401
 except ImportError as e:
-    logger.debug(f"Failed to import Diffusion NFT Rollout. Error: {e}")
+    logger.error(f"Failed to import Diffusion NFT Rollout. Error: {e}")
     pass
 
 
@@ -112,6 +112,8 @@ class RolloutWorkerBase(CommMixin):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()
+
+        self.rl_mode = self.config.mode
 
     def set_rollout(self, rollout: RolloutBase):
         self.rollout = rollout

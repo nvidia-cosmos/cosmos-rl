@@ -156,6 +156,7 @@ class SFTTrainer(LLMTrainer):
         total_steps: int,
         train_step: int,
         save_freq: int,
+        inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
@@ -380,6 +381,17 @@ class SFTTrainer(LLMTrainer):
         Compute the global grad norm on all parameters and then apply
         gradient clipping using the global grad norm.
         """
+        if inter_policy_nccl is not None:
+            # Reduce gradients across all replicas for multiple replicas case
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], inter_policy_nccl
+                    )
+
         all_params = [
             p
             for m in [model for model in self.model_parts if model is not None]
@@ -448,8 +460,6 @@ class SFTTrainer(LLMTrainer):
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
         if not self.config.validation.enable:
-            return
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
 
         self.model.eval()
@@ -532,7 +542,17 @@ class SFTTrainer(LLMTrainer):
                 val_logits = self.model(**val_batch)
 
                 val_loss = self.loss_fn(val_logits, val_labels)
-        return val_loss.item() * val_inputs.size(0)
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+        ):
+            val_loss = (  # noqa: F841
+                dist_util.dist_mean(val_loss, self.parallel_dims.mesh["dp"])
+            ) * self.parallel_dims.mesh["dp"].size()
+        else:
+            val_loss = val_loss.item()  # noqa: F841
+
+        return val_loss * val_inputs.size(0)
 
     def checkpointing(
         self,
@@ -542,9 +562,11 @@ class SFTTrainer(LLMTrainer):
         is_last_step: bool = False,
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
+        do_save: bool = False,
+        **kwargs,
     ):
         if (
-            is_last_step or (train_step % save_freq == 0 and train_step > 0)
+            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             # save safetensors
             # TODO(dinghaoy): support export safetensors asynchronously.
@@ -573,6 +595,7 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    **kwargs,
                 )
                 self.ckpt_manager.save_check(
                     step=train_step,

@@ -15,26 +15,18 @@
 
 import msgpack
 import torch
-from cosmos_rl.utils.parallelism import ParallelDims
+import asyncio
+import multiprocessing
+
 from typing import Dict, List, Tuple, Callable, Any, Optional
+from concurrent.futures import ProcessPoolExecutor
+from torch.nn.parameter import Parameter
+
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.logging import logger
-from vllm.model_executor.layers.linear import (
-    RowParallelLinear,
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    MergedColumnParallelLinear,
-)
-from vllm.model_executor import models as vllm_model_classes
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-
-from torch.nn.parameter import Parameter
-import asyncio
 from cosmos_rl.utils import util
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_dtensor
 from cosmos_rl.utils.dim_slice_info import tensor_overlap_info_at_dim, merge_rank
@@ -554,6 +546,18 @@ class ParallelTopoMapper:
         is_bias: bool,
         leaf_name: str,
     ) -> Tuple[int, Dict[str, Any], Dict[str, List[str]]]:
+        from vllm.model_executor.layers.linear import (
+            RowParallelLinear,
+            ColumnParallelLinear,
+            QKVParallelLinear,
+            MergedColumnParallelLinear,
+        )
+        from vllm.model_executor import models as vllm_model_classes
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            VocabParallelEmbedding,
+        )
+
         packed_modules_mapping = self.weight_mapper.packed_modules_mapping
         dims_rank_info = None
         tp_dim = None
