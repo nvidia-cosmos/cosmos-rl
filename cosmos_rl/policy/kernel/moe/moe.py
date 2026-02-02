@@ -386,7 +386,7 @@ class GroupedExpertsDeepEP(nn.Module):
         # permuted_local_hidden_states: [total_dispatched_num_tokens, hidden_size]: tokens that dispatched to current EP rank, grouped by the selected experts, split by `tokens_per_expert`.
         # tokens_per_expert: [num_local_experts]: number of tokens dispatched to each expert.
         #   The sum of tokens_per_expert is equal to the total number of tokens dispatched to the current EP rank, i.e., total_dispatched_num_tokens.
-        # permuted_probs: [total_dispatched_num_tokens, topk]: probabilities of the selected expert for each dispatched token.
+        # permuted_probs: [total_dispatched_num_tokens,]: probabilities of the selected expert for each dispatched token.
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(
                 hidden_states=x,
@@ -403,11 +403,12 @@ class GroupedExpertsDeepEP(nn.Module):
                 tokens_per_expert,
                 trans_b=True,
             )
+            # output1: # [total_dispatched_num_tokens, moe_inter_dim * 2]
             if self.enable_glu:
                 output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             else:
                 output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
-            # output1_: # [total_dispatched_num_tokens, moe_inter_dim * 2]
+            # output1_: # [total_dispatched_num_tokens, moe_inter_dim]
             output2 = ops.gmm(
                 output1_,
                 self.down_projs.to_local(),
@@ -415,14 +416,7 @@ class GroupedExpertsDeepEP(nn.Module):
                 trans_b=True,
             )  # [total_dispatched_num_tokens, hidden_size]
         else:
-            # No tokens dispatched to the current EP rank
-            # [hidden_size] @ [hidden_size, moe_inter_dim * 2] = [moe_inter_dim * 2]
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
-            if self.enable_glu:
-                output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            else:
-                output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
+            output2 = permuted_local_hidden_states.new_zeros(x.shape[-1])
 
         y = self.token_dispatcher.token_unpermutation(output2)
 
@@ -441,7 +435,7 @@ def padding_wrapper_for_torch(
     Args:
         tokens_per_expert: Number of tokens of each expert. [num_local_experts,]
         padded_max_len: length of tokens that needs to pad to.
-        permuted_probs: [total_dispatched_num_tokens]: probabilities of the selected expert for each dispatched token.
+        permuted_probs: [total_dispatched_num_tokens, 1]: probabilities of the selected expert for each dispatched token.
         alignment: length of tokens of input should be multiple of `alignment`.
         num_local_experts: Experts number of current ep rank.
     """
@@ -465,7 +459,7 @@ def padding_wrapper_for_torch(
             device=input.device,
         )
         padded_permuted_probs = permuted_probs.new_zeros(
-            (padded_total_tokens_num_cur_group,)
+            (padded_total_tokens_num_cur_group, permuted_probs.size(-1))
         )
         # fill the origin input row indices to padded_indices
         for expert_id in range(num_local_experts):
@@ -557,7 +551,6 @@ def grouped_gemm_wrapper(
             input, tokens_per_expert, permuted_probs, alignment, num_local_experts
         )
     )
-    permuted_probs = permuted_probs.unsqueeze(-1)
     output = run_grouped_gemm(input, w13, w2, permuted_probs, tokens_per_expert)
     output = unpadding_wrapper_for_torch(output, input_shape, padded_indices)
     return output
@@ -594,6 +587,7 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
                 token_indices=indices,
             )
         )
+        permuted_probs = permuted_probs.unsqueeze(-1)
         if torch.count_nonzero(tokens_per_expert) > 0:
             output = grouped_gemm_wrapper(
                 permuted_local_hidden_states,
@@ -604,12 +598,14 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
                 self.args.n_routed_experts // self.ep_size,
             )
         else:
-            # No tokens dispatched to the current EP rank
-            output1 = torch.matmul(
-                x[0] * 0, self.gate_and_up_projs.to_local()[0].t()
-            )  # [hidden_size] @ [hidden_size, moe_inter_dim * 2] = [moe_inter_dim * 2]
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output = torch.matmul(output1_, self.down_projs.to_local()[0].t())
+            output1 = torch.matmul(x[:1] * 0, self.gate_and_up_projs.to_local()[0].t())
+            if self.enable_glu:
+                output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            else:
+                output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
+            output = torch.matmul(output1_, self.down_projs.to_local()[0].t())[:0]
+
+            # output = permuted_local_hidden_states.new_zeros(x.shape[-1])
 
         y = self.token_dispatcher.token_unpermutation(output)
 
