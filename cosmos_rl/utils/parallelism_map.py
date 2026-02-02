@@ -17,7 +17,6 @@ import msgpack
 import torch
 import asyncio
 import multiprocessing
-import importlib
 
 from typing import Dict, List, Tuple, Callable, Any, Optional
 from concurrent.futures import ProcessPoolExecutor
@@ -31,31 +30,6 @@ from cosmos_rl.utils import util
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_dtensor
 from cosmos_rl.utils.dim_slice_info import tensor_overlap_info_at_dim, merge_rank
-
-
-def _import_vllm_layers():
-    """
-    Import vLLM layers lazily.
-
-    IMPORTANT: importing vLLM may load compiled extensions (vllm._C). If CUDA isn't
-    available or vLLM/torch ABI is mismatched, importing at module import time will
-    crash even when rollout is disabled.
-    """
-    linear = importlib.import_module("vllm.model_executor.layers.linear")
-    vllm_models = importlib.import_module("vllm.model_executor.models")
-    fused_moe = importlib.import_module("vllm.model_executor.layers.fused_moe")
-    vocab_embed = importlib.import_module(
-        "vllm.model_executor.layers.vocab_parallel_embedding"
-    )
-    return (
-        linear.RowParallelLinear,
-        linear.ColumnParallelLinear,
-        linear.QKVParallelLinear,
-        linear.MergedColumnParallelLinear,
-        vllm_models,
-        fused_moe.FusedMoE,
-        vocab_embed.VocabParallelEmbedding,
-    )
 
 
 class WeightSyncInstruction:
@@ -588,15 +562,6 @@ class ParallelTopoMapper:
         dims_rank_info = None
         tp_dim = None
         if "vllm" in self.backend:
-            (
-                RowParallelLinear,
-                ColumnParallelLinear,
-                QKVParallelLinear,
-                MergedColumnParallelLinear,
-                vllm_model_classes,
-                FusedMoE,
-                VocabParallelEmbedding,
-            ) = _import_vllm_layers()
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any(
@@ -697,15 +662,6 @@ class ParallelTopoMapper:
         assert (
             not self.is_policy
         ), "parallelism_info_for_vllm_params should only be called for rollout model."
-        (
-            RowParallelLinear,
-            ColumnParallelLinear,
-            QKVParallelLinear,
-            MergedColumnParallelLinear,
-            vllm_model_classes,
-            FusedMoE,
-            VocabParallelEmbedding,
-        ) = _import_vllm_layers()
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}

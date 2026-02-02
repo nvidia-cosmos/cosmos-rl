@@ -103,7 +103,6 @@ jobs:
           ${DOCKER_RUN} python tests/test_custom_args.py
           ${DOCKER_RUN} python tests/test_colocated_separated.py
 
-
       - name: Cleanup
         if: always()
         run: |
