@@ -16,7 +16,7 @@
 # PickScore model from https://github.com/yuvalkirstain/PickScore
 
 import os
-from typing import List
+from typing import Any, List
 
 import torch
 from PIL import Image
@@ -48,6 +48,21 @@ class PickScoreScorer(torch.nn.Module):
 
     @torch.no_grad()
     def forward(self, prompts: List[str], images: List[Image.Image]) -> torch.Tensor:
+        def _extract_features(features: Any) -> torch.Tensor:
+            # HF models may return tensors or ModelOutput objects (e.g., BaseModelOutputWithPooling).
+            if isinstance(features, torch.Tensor):
+                return features
+            for attr in ("image_embeds", "text_embeds", "embeds", "pooler_output"):
+                if hasattr(features, attr):
+                    value = getattr(features, attr)
+                    if isinstance(value, torch.Tensor):
+                        return value
+            if isinstance(features, (tuple, list)) and len(features) > 0 and isinstance(features[0], torch.Tensor):
+                return features[0]
+            raise TypeError(
+                f"[pickscore] expected tensor-like features; got {type(features)} with attrs={dir(features)}"
+            )
+
         if len(prompts) != len(images):
             raise ValueError(f"[pickscore] prompts length ({len(prompts)}) must match images length ({len(images)}).")
         image_inputs = self.processor(
@@ -67,10 +82,13 @@ class PickScoreScorer(torch.nn.Module):
         )
         text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
-        image_embs = self.model.get_image_features(**image_inputs)
-        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
-        text_embs = self.model.get_text_features(**text_inputs)
-        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
+        image_features = self.model.get_image_features(**image_inputs)
+        image_embs = _extract_features(image_features)
+        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+
+        text_features = self.model.get_text_features(**text_inputs)
+        text_embs = _extract_features(text_features)
+        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
 
         logit_scale = self.model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
