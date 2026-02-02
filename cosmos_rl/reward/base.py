@@ -51,18 +51,22 @@ class RolloutGroup:
         assert (
             self.payload.completions is not None and len(self.payload.completions) > 0
         ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
-        rewards = [
-            # completion can be any objects such as tensors and videos in tensor native or video modes,
-            # so that reward functions can compute reward directly from tensors or videos
-            algo.compute_reward(
-                completion,
-                self.reference_answer,
-                prompt=self.payload.prompt,
-            )
-            for completion in self.payload.completions
-        ]
+
+        # completion can be any objects such as tensors and videos in tensor native or video modes,
+        # so that reward functions can compute reward directly from tensors or videos
+        rewards = algo.compute_reward(
+            self.payload.completions,
+            self.reference_answer,
+            prompt=self.payload.prompt,
+        )
+        assert (
+            len(rewards[0])
+            == len(rewards[1])
+            == len(rewards[2])
+            == len(self.payload.completions)
+        ), "[RolloutGroup] The length of rewards, filter_rewards, reward_metrics should be the same as the length of completions"
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        advantages = algo.compute_advantage([r[0] for r in rewards])
+        advantages = algo.compute_advantage([r for r in rewards[0]])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
 
         if self.payload.cumulative_logprob is not None:
@@ -70,23 +74,23 @@ class RolloutGroup:
             # We need calculate the most likely mode reward which is the reward of the completion
             # with the highest cumulative logprob and highest probability
             assert (
-                len(self.payload.cumulative_logprob) == len(rewards)
+                len(self.payload.cumulative_logprob) == len(rewards[0])
             ), "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"
             best_reward = None
             best_cumulative_logprob = None
-            for i, reward in enumerate(rewards):
+            for i, reward in enumerate(rewards[0]):
                 if self.payload.cumulative_logprob[i] is None:
                     continue
                 if (
                     best_cumulative_logprob is None
                     or self.payload.cumulative_logprob[i] > best_cumulative_logprob
                 ):
-                    best_reward = reward[0]
+                    best_reward = reward
                     best_cumulative_logprob = self.payload.cumulative_logprob[i]
             if best_reward is not None:
                 # Only assign the best reward to the first rollout in the group
-                rewards[0][2]["most_likely_mode_reward_mean"] = best_reward
-                rewards[0][2]["most_likely_mode_reward_count"] = 1
+                rewards[2][0]["most_likely_mode_reward_mean"] = best_reward
+                rewards[2][0]["most_likely_mode_reward_count"] = 1
 
         # If the completed_conversations is not provided, we use None for all the rollouts
         if self.payload.completed_conversations is not None:
@@ -111,18 +115,20 @@ class RolloutGroup:
                 completion=completion,
                 completed_conversation=completed_conversation,
                 is_end=self.is_end,
-                reward=reward[0],
+                reward=reward,
                 advantage=advantage,
                 prompt_idx=self.payload.prompt_idx,
-                filter_reward=reward[1],
+                filter_reward=filter_reward,
                 completion_logprobs=logprobs,
                 completion_token_ids=token_ids,
-                report_metrics=reward[2],
+                report_metrics=reward_metrics,
             )
-            for completion, completed_conversation, reward, advantage, logprobs, token_ids in zip(
+            for completion, completed_conversation, reward, filter_reward, reward_metrics, advantage, logprobs, token_ids in zip(
                 self.payload.completions,
                 completed_conversations,
-                rewards,
+                rewards[0],
+                rewards[1],
+                rewards[2],
                 advantages,
                 self.payload.completion_logprobs,
                 self.payload.completion_token_ids,

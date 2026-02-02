@@ -377,61 +377,119 @@ class Reward:
         logger.info(f"[Reward] is_filter: {self.is_filter}")
         self.data_packer = data_packer
 
+    def compute_per_reward_func(
+        self,
+        func: Callable,
+        weight: float,
+        filter: float,
+        to_be_evaluated_list: List[str],
+        reference: Union[str, None],
+        prompt: Union[str, List],
+        total_rewards: List[float],
+        filter_rewards: List[float],
+        all_rewards_dicts: List[Dict[str, Any]],
+        **kwargs,
+    ):
+        """
+        Compute reward for a single reward function and update the total rewards and filter rewards and all_rewards_dicts.
+        """
+        if self.config.train.train_policy.group_reward_calculation:
+            """
+            Compute reward in a batched manner for efficiency.
+            The reward function is expected to support batched input and return a list of rewards.
+            """
+            val = func(
+                to_be_evaluated_list,
+                reference,
+                prompt=prompt,
+                data_packer=self.data_packer,
+                config=self.config,
+                tokenizer=self.tokenizer,
+                **kwargs,
+            )
+            if isinstance(val, tuple) and len(val) == 2:
+                # If the reward function returns a tuple of (value, rewards_dict)
+                # The second element is expected to be a dictionary of reward components
+                # It will be used for metric logging and reporting
+                val, rewards_dict = val
+                assert (
+                    isinstance(rewards_dict, list)
+                    and len(rewards_dict) == len(to_be_evaluated_list)
+                ), "The second element returned by reward function must be a list of dictionaries containing reward components for each evaluated item."
+                for i in range(len(to_be_evaluated_list)):
+                    all_rewards_dicts[i].update(rewards_dict[i])
+            assert (
+                isinstance(val, list) and len(val) == len(to_be_evaluated_list)
+            ), "The reward function must return a list of rewards with the same length as to_be_evaluated_list."
+            for i in range(len(to_be_evaluated_list)):
+                total_rewards[i] += weight * val[i]
+                filter_rewards[i] += filter * val[i]
+        else:
+            for i, to_be_evaluated in enumerate(to_be_evaluated_list):
+                val = func(
+                    to_be_evaluated,
+                    reference,
+                    prompt=prompt,
+                    data_packer=self.data_packer,
+                    config=self.config,
+                    tokenizer=self.tokenizer,
+                    **kwargs,
+                )
+                if isinstance(val, tuple) and len(val) == 2:
+                    # If the reward function returns a tuple of (value, rewards_dict)
+                    # The second element is expected to be a dictionary of reward components
+                    # It will be used for metric logging and reporting
+                    val, rewards_dict = val
+                    assert isinstance(
+                        rewards_dict, dict
+                    ), "The second element returned by reward function must be a dictionary containing reward components."
+                    all_rewards_dicts[i].update(rewards_dict)
+                total_rewards[i] += weight * val
+                filter_rewards[i] += filter * val
+
     def compute_reward(
         self,
-        to_be_evaluated: str,
+        to_be_evaluated_list: List[str],
         reference: Union[str, None],
         prompt: Union[str, List] = "",
         **kwargs,
-    ) -> Tuple[float, float, Dict[str, Any]]:
-        total_reward = 0.0
-        filter_reward = 0.0
-        all_rewards_dict = {}
+    ) -> Tuple[List[float], List[float], List[Dict[str, Any]]]:
+        total_rewards = [0.0 for _ in range(len(to_be_evaluated_list))]
+        filter_rewards = [0.0 for _ in range(len(to_be_evaluated_list))]
+        all_rewards_dicts = [{} for _ in range(len(to_be_evaluated_list))]
         for x, filter in zip(self.reward_funcs, self.is_filter):
             if isinstance(x, tuple):
                 func, weight = x
             else:
                 func = x
                 weight = 1.0
-            val = func(
-                to_be_evaluated,
+            self.compute_per_reward_func(
+                func,
+                weight,
+                filter,
+                to_be_evaluated_list,
                 reference,
-                prompt=prompt,
-                data_packer=self.data_packer,
-                config=self.config,
-                tokenizer=self.tokenizer,
+                prompt,
+                total_rewards,
+                filter_rewards,
+                all_rewards_dicts,
                 **kwargs,
             )
-            if isinstance(val, tuple) and len(val) == 2:
-                # If the reward function returns a tuple of (value, rewards_dict)
-                # The second element is expected to be a dictionary of reward components
-                # It will be used for metric logging and reporting
-                val, rewards_dict = val
-                all_rewards_dict.update(rewards_dict)
-            total_reward += weight * val
-            filter_reward += filter * val
 
         for func, weight in self.filter_reward_fns:
-            val = func(
-                to_be_evaluated,
+            self.compute_per_reward_func(
+                func,
+                0.0,
+                weight,
+                to_be_evaluated_list,
                 reference,
-                prompt=prompt,
-                data_packer=self.data_packer,
-                config=self.config,
-                tokenizer=self.tokenizer,
+                prompt,
+                total_rewards,
+                filter_rewards,
+                all_rewards_dicts,
                 **kwargs,
             )
-            if isinstance(val, tuple) and len(val) == 2:
-                # If the reward function returns a tuple of (value, rewards_dict)
-                # The second element is expected to be a dictionary of reward components
-                # It will be used for metric logging and reporting
-                val, rewards_dict = val
-                assert isinstance(
-                    rewards_dict, dict
-                ), "The second element returned by reward function must be a dictionary containing reward components."
-                all_rewards_dict.update(rewards_dict)
-            filter_reward += val * weight
 
         if all([f == 0.0 for f in self.is_filter]) and len(self.filter_reward_fns) == 0:
-            filter_reward = total_reward
-        return total_reward, filter_reward, all_rewards_dict
+            filter_rewards = total_rewards
+        return total_rewards, filter_rewards, all_rewards_dicts

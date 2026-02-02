@@ -351,6 +351,12 @@ class GrpoConfig(BaseModel):
         default=False,
         description="Bypass reward computation and use fixed reward of 0.0 for all samples. Useful for distillation or debugging.",
     )
+
+    group_reward_calculation: bool = Field(
+        default=False,
+        description="Whether to group the rollouts with the same prompt for reward calculation. If set to True, the rollouts with the same prompt will be grouped together and the reward will be calculated once for each group. This can save computation time when there are many rollouts with the same prompt. Notice that the specified reward fn must support reward calculation in batched group manner.",
+    )
+
     temperature: float = Field(
         default=1.0,
         description="Temperature for sampling. The higher the temperature, the more random the completions.",
