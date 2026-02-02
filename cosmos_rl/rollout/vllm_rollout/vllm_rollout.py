@@ -17,14 +17,6 @@ import threading
 import types
 import copy
 
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    monkey_patch_for_fp8,
-    simplify_process_weights_after_loading_for_fp8,
-)
-
-
 import vllm
 import torch
 
@@ -51,8 +43,8 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
+    monkey_patch_for_fp8,
+    simplify_process_weights_after_loading_for_fp8,
 )
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
