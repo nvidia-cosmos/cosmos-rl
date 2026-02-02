@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import argparse
 import toml
-import torch
 import json
 from types import SimpleNamespace
 from torch.utils.data import Dataset
@@ -21,7 +20,9 @@ from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 from PIL import Image
 
 
-def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> np.ndarray:
+def _resize_with_pad_pil(
+    image: Image.Image, height: int, width: int, method: int
+) -> np.ndarray:
     """Resize a single PIL image with padding to target size."""
     cur_width, cur_height = image.size
     if cur_width == width and cur_height == height:
@@ -39,7 +40,9 @@ def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: in
     return np.array(zero_image)
 
 
-def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+def resize_with_pad(
+    images: np.ndarray, height: int, width: int, method=Image.BILINEAR
+) -> np.ndarray:
     """Replicates tf.image.resize_with_pad for multiple images using PIL.
 
     Args:
@@ -56,7 +59,12 @@ def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BI
 
     original_shape = images.shape
     images = images.reshape(-1, *original_shape[-3:])
-    resized = np.stack([_resize_with_pad_pil(Image.fromarray(im), height, width, method) for im in images])
+    resized = np.stack(
+        [
+            _resize_with_pad_pil(Image.fromarray(im), height, width, method)
+            for im in images
+        ]
+    )
     return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
 
 
@@ -69,13 +77,17 @@ class InjectDefaultPrompt:
             data["prompt"] = np.asarray(self.prompt)
         return data
 
+
 class ResizeImages:
     def __init__(self, height, width):
         self.height = height
         self.width = width
 
     def __call__(self, data):
-        data["image"] = {k: resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        data["image"] = {
+            k: resize_with_pad(v, self.height, self.width)
+            for k, v in data["image"].items()
+        }
         return data
 
 
@@ -98,10 +110,16 @@ class TokenizePrompt:
             prompt = prompt.item()
 
         tokens, token_masks = self.tokenizer.tokenize_openpi(prompt, state)
-        return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
+        return {
+            **data,
+            "tokenized_prompt": tokens,
+            "tokenized_prompt_mask": token_masks,
+        }
 
 
-def pad_to_dim(x: np.ndarray, target_dim: int, axis: int = -1, value: float = 0.0) -> np.ndarray:
+def pad_to_dim(
+    x: np.ndarray, target_dim: int, axis: int = -1, value: float = 0.0
+) -> np.ndarray:
     """Pad an array to the target dimension with zeros along the specified axis."""
     current_dim = x.shape[axis]
     if current_dim < target_dim:
@@ -110,6 +128,7 @@ def pad_to_dim(x: np.ndarray, target_dim: int, axis: int = -1, value: float = 0.
         return np.pad(x, pad_width, constant_values=value)
     return x
 
+
 class PadStatesAndActions:
     def __init__(self, model_action_dim):
         self.model_action_dim = model_action_dim
@@ -117,7 +136,9 @@ class PadStatesAndActions:
     def __call__(self, data):
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
         if "actions" in data:
-            data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
+            data["actions"] = pad_to_dim(
+                data["actions"], self.model_action_dim, axis=-1
+            )
         return data
 
 
@@ -173,19 +194,19 @@ class RepackTransform:
     def __init__(self, structure: dict[str, str] | None = None):
         if structure is None:
             structure = {
-            "observation/egocentric_camera": "observation.images.rgb.head",
-            "observation/wrist_image_left": "observation.images.rgb.left_wrist",
-            "observation/wrist_image_right": "observation.images.rgb.right_wrist",
-            "observation/state": "observation.state",
-            "actions": "action",
-            "prompt": "prompt",
-        }
+                "observation/egocentric_camera": "observation.images.rgb.head",
+                "observation/wrist_image_left": "observation.images.rgb.left_wrist",
+                "observation/wrist_image_right": "observation.images.rgb.right_wrist",
+                "observation/state": "observation.state",
+                "actions": "action",
+                "prompt": "prompt",
+            }
         self.structure = structure
-    
+
     def __call__(self, data):
         flat = self._flatten_dict(data)
         return {new_key: flat[old_key] for new_key, old_key in self.structure.items()}
-    
+
     def _flatten_dict(self, d, parent_key="", sep="/"):
         items = {}
         for k, v in d.items():
@@ -221,11 +242,15 @@ def unflatten_dict(flat: dict[str, Any], sep: str = "/") -> dict[str, Any]:
                 nxt = {}
                 cur[p] = nxt
             elif not isinstance(nxt, dict):
-                raise ValueError(f"Cannot unflatten: leaf {p!r} aliases a node for key={key!r}")
+                raise ValueError(
+                    f"Cannot unflatten: leaf {p!r} aliases a node for key={key!r}"
+                )
             cur = nxt
         last = parts[-1]
         if last in cur and isinstance(cur[last], dict):
-            raise ValueError(f"Cannot unflatten: node {last!r} aliases a leaf for key={key!r}")
+            raise ValueError(
+                f"Cannot unflatten: node {last!r} aliases a leaf for key={key!r}"
+            )
         cur[last] = value
     return root
 
@@ -258,6 +283,7 @@ def _assert_quantile_stats(norm_stats) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantiles is True. Key {k} is missing q01 or q99."
             )
+
 
 class NormalizeTransform:
     def __init__(self, norm_stats=None, use_quantiles=False, strict=False):
@@ -296,18 +322,29 @@ def extract_state_from_proprio(proprio_data):
     # extract joint position
     base_qvel = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["base_qvel"]]  # 3
     trunk_qpos = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["trunk_qpos"]]  # 4
-    arm_left_qpos = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_left_qpos"]]  #  7
-    arm_right_qpos = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_right_qpos"]]  #  7
-    left_gripper_width = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_left_qpos"]].sum(axis=-1, keepdims=True)  # 1
-    right_gripper_width = proprio_data[..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_right_qpos"]].sum(axis=-1, keepdims=True)  # 1
-    return np.concatenate([
-        base_qvel,
-        trunk_qpos,
-        arm_left_qpos,
-        arm_right_qpos,
-        left_gripper_width,
-        right_gripper_width,
-    ], axis=-1)
+    arm_left_qpos = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_left_qpos"]
+    ]  #  7
+    arm_right_qpos = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["arm_right_qpos"]
+    ]  #  7
+    left_gripper_width = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_left_qpos"]
+    ].sum(axis=-1, keepdims=True)  # 1
+    right_gripper_width = proprio_data[
+        ..., PROPRIOCEPTION_INDICES["R1Pro"]["gripper_right_qpos"]
+    ].sum(axis=-1, keepdims=True)  # 1
+    return np.concatenate(
+        [
+            base_qvel,
+            trunk_qpos,
+            arm_left_qpos,
+            arm_right_qpos,
+            left_gripper_width,
+            right_gripper_width,
+        ],
+        axis=-1,
+    )
 
 
 def _parse_image(image) -> np.ndarray:
@@ -381,10 +418,10 @@ class BehaviorSFTDataset(Dataset):
             modalities=config.train.train_policy.dataset.modalities,
             local_only=True,
             delta_timestamps={
-                key: [t / 30.0 for t in range(config.custom['action_horizon'])]
-                for key in config.custom['action_sequence_keys']
+                key: [t / 30.0 for t in range(config.custom["action_horizon"])]
+                for key in config.custom["action_sequence_keys"]
             },
-            episodes=config.custom['episodes_index'],
+            episodes=config.custom["episodes_index"],
             chunk_streaming_using_keyframe=True,
             shuffle=True,
         )
@@ -392,28 +429,43 @@ class BehaviorSFTDataset(Dataset):
         # Load norm stats
         self.init_norm_stats()
 
-
         # build tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path, max_len=config.custom['max_token_len'], trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.policy.model_name_or_path,
+            max_len=config.custom["max_token_len"],
+            trust_remote_code=True,
+        )
 
         # Load transforms
         self._transforms = []
-        
+
         # Add prompt transform if enabled
         if getattr(config.train.train_policy.dataset, "prompt_from_task", False):
             self._transforms.append(PromptFromLeRobotTask(self.dataset.meta.tasks))
-        
+
         # Add repack transform
         self._transforms.append(RepackTransform())
         # Convert into B1K-style model inputs (ported from openpi)
-        self._transforms.append(B1kInputsTransform(config.custom['action_dim'], config.train.train_policy.dataset.model_type))
+        self._transforms.append(
+            B1kInputsTransform(
+                config.custom["action_dim"],
+                config.train.train_policy.dataset.model_type,
+            )
+        )
         # openpi/src/openpi/transforms.py
         self._transforms.append(NormalizeTransform(self.norm_stats, use_quantiles=True))
         # openpi/src/openpi/training/config.py ModelTransformFactory.inputs
         self._transforms.append(InjectDefaultPrompt())
-        self._transforms.append(ResizeImages(config.custom['image_size'][0], config.custom['image_size'][1]))
-        self._transforms.append(TokenizePrompt(self.tokenizer, discrete_state_input=config.custom['discrete_state_input']))
-        self._transforms.append(PadStatesAndActions(config.custom['action_dim']))
+        self._transforms.append(
+            ResizeImages(config.custom["image_size"][0], config.custom["image_size"][1])
+        )
+        self._transforms.append(
+            TokenizePrompt(
+                self.tokenizer,
+                discrete_state_input=config.custom["discrete_state_input"],
+            )
+        )
+        self._transforms.append(PadStatesAndActions(config.custom["action_dim"]))
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -424,7 +476,7 @@ class BehaviorSFTDataset(Dataset):
         for transform in self._transforms:
             item = transform(item)
         return item
-    
+
     def init_norm_stats(self):
         self.skip_norm_stats = self.config.train.train_policy.dataset.skip_norm_stats
 
@@ -434,7 +486,12 @@ class BehaviorSFTDataset(Dataset):
         else:
             norm_stats_path = self.config.train.train_policy.dataset.norm_stats
             if norm_stats_path is None:
-                norm_stats_path = os.path.join(self.config.policy.model_name_or_path, "assets", self.config.train.train_policy.dataset.repo_id, "norm_stats.json")
+                norm_stats_path = os.path.join(
+                    self.config.policy.model_name_or_path,
+                    "assets",
+                    self.config.train.train_policy.dataset.repo_id,
+                    "norm_stats.json",
+                )
             if os.path.exists(norm_stats_path):
                 logger.info(f"Loading norm stats from {norm_stats_path}")
                 self.norm_stats = load_norm_stats(norm_stats_path)
@@ -447,10 +504,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args, _ = parser.parse_known_args()
-    
+
     with open(args.config, "r") as f:
         config_dict = toml.load(f)
     config = CosmosConfig.from_dict(config_dict)
-    
+
     dataset = BehaviorSFTDataset(config)
     launch_dispatcher(dataset=dataset)

@@ -17,6 +17,7 @@ import msgpack
 import torch
 import asyncio
 import multiprocessing
+import importlib
 
 from typing import Dict, List, Tuple, Callable, Any, Optional
 from concurrent.futures import ProcessPoolExecutor
@@ -55,6 +56,7 @@ def _import_vllm_layers():
         fused_moe.FusedMoE,
         vocab_embed.VocabParallelEmbedding,
     )
+
 
 class WeightSyncInstruction:
     """

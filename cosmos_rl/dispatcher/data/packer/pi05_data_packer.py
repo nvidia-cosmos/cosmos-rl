@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import torch
 import numpy as np
@@ -25,6 +25,7 @@ from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.replay_buffer import load_trajectory_from_buffer
+
 
 class RLPolicyInput:
     def __init__(
@@ -60,10 +61,20 @@ class RLPolicyInput:
         self.tokenized_prompt_mask = tokenized_prompt_mask
         self.old_log_probs = old_log_probs
 
+
 class Observation:
     """Observation class matching OpenPI's Observation structure."""
-    
-    def __init__(self, images, image_masks, state, tokenized_prompt, tokenized_prompt_mask, token_ar_mask=None, token_loss_mask=None):
+
+    def __init__(
+        self,
+        images,
+        image_masks,
+        state,
+        tokenized_prompt,
+        tokenized_prompt_mask,
+        token_ar_mask=None,
+        token_loss_mask=None,
+    ):
         self.images = images
         self.image_masks = image_masks
         self.state = state
@@ -77,12 +88,20 @@ class Observation:
         """Create Observation from dict, matching OpenPI's Observation.from_dict()."""
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = (
-                    data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+                    data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
                 )
-        
+            elif (
+                hasattr(data["image"][key], "dtype")
+                and data["image"][key].dtype == torch.uint8
+            ):
+                data["image"][key] = (
+                    data["image"][key].to(torch.float32).permute(0, 3, 1, 2)
+                    / 255.0
+                    * 2.0
+                    - 1.0
+                )
+
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -92,6 +111,7 @@ class Observation:
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
         )
+
 
 class PI05DataPacker(BaseDataPacker):
     """Data packer for PI0/PI05 models."""
@@ -103,11 +123,13 @@ class PI05DataPacker(BaseDataPacker):
         return sample
 
     def get_rollout_input(self, item: Any) -> RLPayload:
-        if isinstance(item, RLPayload): # TODO: check if this is needed
+        if isinstance(item, RLPayload):  # TODO: check if this is needed
             return item
 
         if not isinstance(item, dict):
-            raise ValueError(f"PI05 data packer expects dict or RLPayload, got {type(item)}")
+            raise ValueError(
+                f"PI05 data packer expects dict or RLPayload, got {type(item)}"
+            )
 
         metadata = {}
         metadata["task_suite_name"] = item.get("task_suite_name", "libero_10")
@@ -179,6 +201,7 @@ class PI05DataPacker(BaseDataPacker):
             tokenized_prompt_mask=trajectory["attention_mask"].to(device),
             old_log_probs=trajectory["old_log_probs"].to(device),
         )
+
     def policy_compute_max_len(self, *args, **kwargs):
         return 512
 
@@ -325,7 +348,7 @@ class PI05DataPacker(BaseDataPacker):
         """
         # Stack each field across the batch
         image_keys = list(batch[0]["image"].keys())
-        
+
         images = {
             key: torch.from_numpy(np.stack([s["image"][key] for s in batch]))
             for key in image_keys
@@ -336,12 +359,15 @@ class PI05DataPacker(BaseDataPacker):
             )
             for key in image_keys
         }
-        
-        state = torch.from_numpy(np.stack([s["state"] for s in batch]))
-        tokenized_prompt = torch.from_numpy(np.stack([s["tokenized_prompt"] for s in batch]))
-        tokenized_prompt_mask = torch.from_numpy(np.stack([s["tokenized_prompt_mask"] for s in batch]))
-        actions = torch.from_numpy(np.stack([s["actions"] for s in batch]))
 
+        state = torch.from_numpy(np.stack([s["state"] for s in batch]))
+        tokenized_prompt = torch.from_numpy(
+            np.stack([s["tokenized_prompt"] for s in batch])
+        )
+        tokenized_prompt_mask = torch.from_numpy(
+            np.stack([s["tokenized_prompt_mask"] for s in batch])
+        )
+        actions = torch.from_numpy(np.stack([s["actions"] for s in batch]))
 
         observation = Observation.from_dict(
             {
@@ -354,5 +380,3 @@ class PI05DataPacker(BaseDataPacker):
         )
 
         return {"observation": observation, "actions": actions}
-
-

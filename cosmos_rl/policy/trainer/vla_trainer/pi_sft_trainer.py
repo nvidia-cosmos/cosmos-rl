@@ -44,10 +44,12 @@ from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.policy.model import ModelRegistry
 
 
-def openpi_lr_factor(step: int, warmup_steps: int, decay_steps: int, min_lr_factor: float = 0.0) -> float:
+def openpi_lr_factor(
+    step: int, warmup_steps: int, decay_steps: int, min_lr_factor: float = 0.0
+) -> float:
     """
     OpenPI-comet-aligned LR schedule (returns multiplicative factor for LambdaLR).
-    
+
     Warmup: 1/(warmup_steps+1) -> 1 (matches OpenPI JAX init_lr = peak_lr/(warmup_steps+1))
     Decay: cosine from 1 -> min_lr_factor
     """
@@ -117,8 +119,8 @@ class PISFTTrainer(Trainer):
         self.model.post_to_empty_hook(config)
 
         self.model.set_gradient_checkpointing_enabled(
-                config.policy.model_gradient_checkpointing
-            )
+            config.policy.model_gradient_checkpointing
+        )
 
         self.build_optimizers()
         self.lr_schedulers = None
@@ -212,7 +214,6 @@ class PISFTTrainer(Trainer):
             self.ckpt_manager.set_rng_state(rng_state)
         return len_params
 
-
     def step_training(self, global_batch, total_steps, train_step, save_freq):
         # timing started
         start_event = torch.cuda.Event(enable_timing=True)
@@ -228,7 +229,7 @@ class PISFTTrainer(Trainer):
 
         self.lr_schedulers.step()
         self.optimizers.zero_grad()
-        
+
         # split global_batch into mini_batches
         global_batch_size = len(global_batch)
         mini_batch_begin_idxs = list(
@@ -248,7 +249,7 @@ class PISFTTrainer(Trainer):
             observation = self._move_observation_to_device(observation)
             actions = actions.to(dtype=torch.float32, device=self.device)
             loss = self.model(observation, actions)
-            (loss.mean()/len(mini_batch_begin_idxs)).backward()
+            (loss.mean() / len(mini_batch_begin_idxs)).backward()
             acc_loss += loss.mean().detach()
         # Average loss over all mini-batches for logging
         acc_loss = acc_loss / len(mini_batch_begin_idxs)
@@ -326,17 +327,22 @@ class PISFTTrainer(Trainer):
             if should_log_interval:
                 self._loss_interval_sum = 0.0
                 self._loss_interval_count = 0
-        
-        return report_data
 
+        return report_data
 
     def _move_observation_to_device(self, observation):
         """Move all tensors in observation to self.device (matching OpenPI's jax.tree.map pattern)."""
-        observation.images = {k: v.to(self.device) for k, v in observation.images.items()}
-        observation.image_masks = {k: v.to(self.device) for k, v in observation.image_masks.items()}
+        observation.images = {
+            k: v.to(self.device) for k, v in observation.images.items()
+        }
+        observation.image_masks = {
+            k: v.to(self.device) for k, v in observation.image_masks.items()
+        }
         observation.state = observation.state.to(self.device)
         observation.tokenized_prompt = observation.tokenized_prompt.to(self.device)
-        observation.tokenized_prompt_mask = observation.tokenized_prompt_mask.to(self.device)
+        observation.tokenized_prompt_mask = observation.tokenized_prompt_mask.to(
+            self.device
+        )
         return observation
 
     def build_optimizers(self):
@@ -367,7 +373,12 @@ class PISFTTrainer(Trainer):
                 if util.is_master_rank(self.parallel_dims, self.global_rank):
                     norm_stats = getattr(self.data_packer, "norm_stats", None)
                     if norm_stats is not None:
-                        step_dir = os.path.join(self.config.train.output_dir, "checkpoints", f"step_{train_step}", "policy")
+                        step_dir = os.path.join(
+                            self.config.train.output_dir,
+                            "checkpoints",
+                            f"step_{train_step}",
+                            "policy",
+                        )
                         os.makedirs(step_dir, exist_ok=True)
                         norm_stats_path = os.path.join(step_dir, "norm_stats.json")
                         if not os.path.exists(norm_stats_path):
@@ -377,7 +388,8 @@ class PISFTTrainer(Trainer):
     def load_model(self):
         ckpt_total_steps = 0
         train_step = 0
-        if (not self.parallel_dims.dp_replicate_enabled
+        if (
+            not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
             resumed = False
             if self.config.train.resume:
@@ -392,7 +404,7 @@ class PISFTTrainer(Trainer):
                     )
             if not resumed:
                 self.model_load_from_hf()
-        
+
         if self.parallel_dims.dp_replicate_enabled:
             if self.config.train.resume:
                 ckpt_total_steps = dist_util.broadcast_object_cpu(
@@ -426,7 +438,6 @@ class PISFTTrainer(Trainer):
         self.model.train()
         return ckpt_total_steps, train_step
 
-
     def model_load_from_hf(self):
         start_time = time.time()
         self.model.load_hf_weights(
@@ -449,7 +460,6 @@ class PISFTTrainer(Trainer):
             revision=self.config.policy.model_revision,
         )
         return ckpt_extra_vars
-
 
     def step_validation(self, *args, **kwargs):
         pass

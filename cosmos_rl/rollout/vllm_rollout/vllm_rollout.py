@@ -27,7 +27,6 @@ from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
-from vllm.outputs import RequestOutput
 
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.policy.config import Config
@@ -728,8 +727,6 @@ class vLLMRollout(RolloutBase):
         results: List[RequestOutput],
         sampling_params: SamplingParams,
     ) -> List[RequestOutput]:
-        from vllm.inputs import TokensPrompt
-
         topk_sampling_params = copy.deepcopy(sampling_params)
         topk_sampling_params.prompt_logprobs = self.config.distillation.top_k
         topk_sampling_params.logprobs = None

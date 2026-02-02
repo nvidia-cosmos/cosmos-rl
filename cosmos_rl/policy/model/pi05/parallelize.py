@@ -36,7 +36,9 @@ def apply_ddp(
     if enable_compile:
         torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100, find_unused_parameters=True)
+    replicate(
+        model, device_mesh=dp_mesh, bucket_cap_mb=100, find_unused_parameters=True
+    )
     logger.info("Applied DDP to PI05 model")
 
 

@@ -293,7 +293,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=val_data_packer,
         )
         trainer_type = getattr(
-            self.config.train.train_policy, "trainer_type", self.config.train.train_policy.type
+            self.config.train.train_policy,
+            "trainer_type",
+            self.config.train.train_policy.type,
         )
         if self.config.policy.is_diffusers:
             trainer_type = "diffusers_" + trainer_type

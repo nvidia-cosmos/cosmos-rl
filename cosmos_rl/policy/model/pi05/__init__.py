@@ -137,6 +137,7 @@ def resize_with_pad_torch(
 
     return padded_images
 
+
 def preprocess_observation_pytorch(
     observation,
     *,
@@ -172,7 +173,9 @@ def preprocess_observation_pytorch(
             image = image.permute(0, 2, 3, 1)
 
         if image.shape[1:3] != image_resolution:
-            logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
+            logger.info(
+                f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}"
+            )
             image = resize_with_pad_torch(image, *image_resolution)
 
         if train:
@@ -196,7 +199,10 @@ def preprocess_observation_pytorch(
                     start_h = torch.randint(0, max_h + 1, (1,), device=image.device)
                     start_w = torch.randint(0, max_w + 1, (1,), device=image.device)
                     image = image[
-                        :, start_h : start_h + crop_height, start_w : start_w + crop_width, :
+                        :,
+                        start_h : start_h + crop_height,
+                        start_w : start_w + crop_width,
+                        :,
                     ]
 
                 # Resize back to original size
@@ -247,7 +253,9 @@ def preprocess_observation_pytorch(
                     ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
                 # split back into base_image and meta_images
-                split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
+                split_images = torch.split(
+                    image, batch // (1 + len(meta_image_keys)), dim=0
+                )
                 image = split_images[0]
                 for i, meta_key in enumerate(meta_image_keys):
                     meta_image = split_images[i + 1]
@@ -290,7 +298,9 @@ def preprocess_observation_pytorch(
             batch, height, width = image.shape[:3]
 
             # split back into base_image and meta_images
-            split_images = torch.split(image, batch // (1 + len(meta_image_keys)), dim=0)
+            split_images = torch.split(
+                image, batch // (1 + len(meta_image_keys)), dim=0
+            )
             image = split_images[0]
             for i, meta_key in enumerate(meta_image_keys):
                 if is_channels_first:
@@ -478,7 +488,9 @@ class PI05(BaseModel):
 
         torch.set_float32_matmul_precision("high")
         if getattr(hf_config, "cosmos_compile", False):
-            self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+            self.sample_actions = torch.compile(
+                self.sample_actions, mode="max-autotune"
+            )
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -501,7 +513,6 @@ class PI05(BaseModel):
         ]
         self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
-
 
     def get_trained_model_state_dict(self):
         return {n: p for n, p in self.named_parameters() if p.requires_grad}
@@ -743,8 +754,8 @@ class PI05(BaseModel):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
-            observation, train=True
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=True)
         )
 
         if noise is None:
@@ -757,10 +768,16 @@ class PI05(BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
+            self.embed_suffix(state, x_t, time)
+        )
         if (
-            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            self.paligemma_with_expert.paligemma.language_model.layers[
+                0
+            ].self_attn.q_proj.weight.dtype
             == torch.bfloat16
         ):
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
@@ -1067,7 +1084,9 @@ class PI05(BaseModel):
         return suffix_out
 
     def _set_fsdp_reshard_after_forward(self, policy_str):
-        logging.info("FSDP reshard_after_forward setting is not applicable for PI05 model.")
+        logging.info(
+            "FSDP reshard_after_forward setting is not applicable for PI05 model."
+        )
         pass
 
     def denoise_step(
@@ -1277,12 +1296,18 @@ class PI05(BaseModel):
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
-        with safe_open(weight_path, framework="pt", device=("cuda" if device.type == "cuda" else "cpu")) as f:
+        with safe_open(
+            weight_path,
+            framework="pt",
+            device=("cuda" if device.type == "cuda" else "cpu"),
+        ) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
         # logger.info(f'{state_dict.keys()}')
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
-        embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        embed_key = (
+            "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        )
         lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"
         if embed_key not in state_dict and lm_head_key in state_dict:
             state_dict[embed_key] = state_dict[lm_head_key]
@@ -1291,8 +1316,9 @@ class PI05(BaseModel):
         if missing:
             logger.warning(f"PI05 relaxed load: {len(missing)} missing keys: {missing}")
         if unexpected:
-            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys: {unexpected}")
-
+            logger.info(
+                f"PI05 relaxed load: {len(unexpected)} unexpected keys: {unexpected}"
+            )
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         raise ValueError("PI05 does not support context parallelism")
