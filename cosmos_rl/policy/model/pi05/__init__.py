@@ -38,15 +38,16 @@ import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
-from typing import Callable, List, Optional, Tuple, Dict
+from typing import Callable, List, Optional, Tuple, Dict, Any
 
 from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from safetensors import safe_open
 
+from cosmos_rl.tools.dataset.behavior_sft import resize_with_pad_torch, np_to_pi05_img
 
 IMAGE_KEYS = (
     "base_0_rgb",
@@ -55,87 +56,6 @@ IMAGE_KEYS = (
 )
 
 IMAGE_RESOLUTION = (224, 224)
-
-
-def resize_with_pad_torch(
-    images: torch.Tensor,
-    height: int,
-    width: int,
-    mode: str = "bilinear",
-) -> torch.Tensor:
-    """PyTorch version of resize_with_pad. Resizes an image to a target height and width without distortion
-    by padding with black. If the image is float32, it must be in the range [-1, 1].
-
-    Args:
-        images: Tensor of shape [*b, h, w, c] or [*b, c, h, w]
-        height: Target height
-        width: Target width
-        mode: Interpolation mode ('bilinear', 'nearest', etc.)
-
-    Returns:
-        Resized and padded tensor with same shape format as input
-    """
-    # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
-    if images.shape[-1] <= 4:  # Assume channels-last format
-        channels_last = True
-        # Convert to channels-first for torch operations
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-        images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
-    else:
-        channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-
-    batch_size, channels, cur_height, cur_width = images.shape
-
-    # Calculate resize ratio
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-
-    # Resize
-    resized_images = F.interpolate(
-        images,
-        size=(resized_height, resized_width),
-        mode=mode,
-        align_corners=False if mode == "bilinear" else None,
-    )
-
-    # Handle dtype-specific clipping
-    if images.dtype == torch.uint8:
-        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
-    elif images.dtype == torch.float32:
-        resized_images = resized_images.clamp(-1.0, 1.0)
-    else:
-        raise ValueError(f"Unsupported image dtype: {images.dtype}")
-
-    # Calculate padding
-    pad_h0, remainder_h = divmod(height - resized_height, 2)
-    pad_h1 = pad_h0 + remainder_h
-    pad_w0, remainder_w = divmod(width - resized_width, 2)
-    pad_w1 = pad_w0 + remainder_w
-
-    # Pad
-    constant_value = 0 if images.dtype == torch.uint8 else -1.0
-    padded_images = F.pad(
-        resized_images,
-        (pad_w0, pad_w1, pad_h0, pad_h1),  # left, right, top, bottom
-        mode="constant",
-        value=constant_value,
-    )
-
-    # Convert back to original format if needed
-    if channels_last:
-        padded_images = padded_images.permute(
-            0, 2, 3, 1
-        )  # [b, c, h, w] -> [b, h, w, c]
-        if batch_size == 1 and images.shape[0] == 1:
-            padded_images = padded_images.squeeze(
-                0
-            )  # Remove batch dimension if it was added
-
-    return padded_images
 
 
 def preprocess_observation_pytorch(
@@ -504,6 +424,13 @@ class PI05(BaseModel):
                 noise_logvar_range=self.noise_logvar_range,
                 noise_scheduler_type="learn",
             )
+
+        self.processor = None
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name_or_path, trust_remote_code=True
+        )
+        self.norm_stats = self._load_pi05_norm_stats(self.model_name_or_path)
+
         self.model_input_keys = [
             "input_ids",
             "attention_mask",
@@ -1325,6 +1252,102 @@ class PI05(BaseModel):
 
     def check_tp_compatible(self, tp_size: int):
         raise ValueError("PI05 does not support tensor parallelism")
+
+    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
+        """Load PI05 norm_stats from canonical OpenPI path."""
+        import json
+
+        resolved = resolve_model_path(model_path)
+        if self.hf_config.dataset_name == "libero":
+            p = os.path.join(
+                resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
+            )
+        else:
+            p = os.path.join(
+                resolved,
+                "assets",
+                "behavior-1k",
+                "2025-challenge-demos",
+                "norm_stats.json",
+            )
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r") as f:
+            raw = json.load(f)
+        return raw["norm_stats"]
+
+    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        batch_size = inputs["full_images"].shape[0]  # [H, W, C], values in [0, 255]
+
+        base_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]
+        wrist_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["wrist_images"]]
+
+        base_imgs_t = torch.stack(base_imgs, 0)
+        wrist_imgs_t = torch.stack(wrist_imgs, 0)
+        if len(wrist_imgs_t.shape) > 4:  # [N, N_IMG, H, W, C]
+            base_imgs_t = base_imgs_t.unsqueeze(1)
+            images = torch.cat([base_imgs_t, wrist_imgs_t], dim=1)
+            image_masks = torch.tensor(
+                [[1, 1, 1] for _ in range(batch_size)], dtype=torch.bool
+            )
+        else:
+            images = torch.stack(
+                [base_imgs_t, wrist_imgs_t, torch.zeros_like(wrist_imgs_t)], dim=1
+            )
+            image_masks = torch.tensor(
+                [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
+            )
+
+        state = torch.stack(
+            [
+                torch.as_tensor(
+                    self._normalize_pi05_state(inputs["states"][i]),
+                    dtype=torch.float32,
+                )
+                for i in range(batch_size)
+            ],
+            dim=0,
+        )
+
+        tokenized_prompt = []
+        tokenized_prompt_mask = []
+        for i in range(batch_size):
+            prompt = inputs["task_descriptions"][i]
+            # If discrete_state_input=False, pass None to tokenizer (state is used as continuous input)
+            # If discrete_state_input=True, pass state to tokenizer (state is discretized into tokens)
+            if self.hf_config.discrete_state_input:
+                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
+            else:
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=None)
+
+            tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
+            tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
+        tokenized_prompt = torch.stack(tokenized_prompt, dim=0)
+        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0)
+        return {
+            "images": images.cuda(),
+            "image_masks": image_masks.cuda(),
+            "states": state.cuda(),
+            "input_ids": tokenized_prompt.cuda(),
+            "attention_mask": tokenized_prompt_mask.cuda(),
+        }
+
+    def _normalize_pi05_state(self, state: np.ndarray) -> np.ndarray:
+        """official_openpi Normalize(use_quantiles=True): map state into [-1, 1] using q01/q99."""
+        s_stats = self.norm_stats.get("state") or self.norm_stats.get("proprio")
+        if (
+            not isinstance(s_stats, dict)
+            or ("q01" not in s_stats)
+            or ("q99" not in s_stats)
+        ):
+            raise ValueError(
+                "PI05 norm_stats must contain state.q01 and state.q99 (quantiles)."
+            )
+        x = np.asarray(state, dtype=np.float32).reshape(-1)
+        q01 = np.asarray(s_stats["q01"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        q99 = np.asarray(s_stats["q99"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
 
     def _unnormalize_pi05_actions(self, actions: np.ndarray) -> np.ndarray:
         """official_openpi Unnormalize(use_quantiles=True): map actions from [-1, 1] back using q01/q99."""

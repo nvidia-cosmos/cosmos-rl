@@ -15,7 +15,6 @@
 """PyTorch Siglip model."""
 
 import math
-from pickle import load
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
