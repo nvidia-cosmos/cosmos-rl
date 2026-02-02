@@ -139,6 +139,7 @@ class PI05DataPacker(BaseDataPacker):
             metadata=metadata,
             weight_version=0,
         )
+        logger.debug(f"PI05 data packer created payload with metadata: {metadata}")
         return payload
 
     def get_policy_input(self, sample: Rollout, device: torch.device) -> Any:
