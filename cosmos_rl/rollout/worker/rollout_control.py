@@ -195,6 +195,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 config.rollout.backend in self.SUPPORT_ASYNC_BACKEND
             ), f"DisaggregatedRolloutControlWorker async mode only supports {self.SUPPORT_ASYNC_BACKEND} backends, but got {config.rollout.backend}"
             self._is_async_rollout = True
+        else:
+            assert (
+                config.rollout.backend not in self.SUPPORT_ASYNC_BACKEND
+            ), f"DisaggregatedRolloutControlWorker sync mode does not support {config.rollout.backend} backend"
 
         self.setup(
             dataset=kwargs.get("dataset"),
