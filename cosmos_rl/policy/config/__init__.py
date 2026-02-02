@@ -91,27 +91,6 @@ class DatasetConfig(BaseModel):
         default=None,
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
-
-    # Added fields for BehaviorSFT
-    repo_id: str = Field(default="", description="Repo ID for Behavior Dataset")
-    root: str = Field(default="", description="Root path for Behavior Dataset")
-    tasks: List[str] = Field(default_factory=list, description="List of tasks")
-    modalities: List[str] = Field(
-        default_factory=list, description="List of modalities"
-    )
-    model_type: str = Field(
-        default="", description="Model type for input transformation"
-    )
-    prompt_from_task: bool = Field(
-        default=False, description="Whether to generate prompt from task"
-    )
-    skip_norm_stats: bool = Field(
-        default=False, description="Whether to skip loading norm stats"
-    )
-    norm_stats: Optional[str] = Field(default=None, description="Path to norm stats")
-    discrete_state_input: bool = Field(
-        default=False, description="Whether to use discrete state input"
-    )
     local_dir: str = Field(
         default="",
         description="Local path to load dataset",

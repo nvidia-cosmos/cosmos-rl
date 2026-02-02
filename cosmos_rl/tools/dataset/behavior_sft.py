@@ -514,10 +514,10 @@ class BehaviorSFTDataset(Dataset):
 
         # Load dataset
         self.dataset = BehaviorLeRobotDataset(
-            repo_id=config.train.train_policy.dataset.repo_id,
-            root=config.train.train_policy.dataset.root,
-            tasks=config.train.train_policy.dataset.tasks,
-            modalities=config.train.train_policy.dataset.modalities,
+            repo_id=config.train.train_policy.dataset.name,
+            root=config.train.train_policy.dataset.local_dir,
+            tasks=config.custom.get("tasks"),
+            modalities=config.custom.get("modalities"),
             local_only=True,
             delta_timestamps={
                 key: [t / 30.0 for t in range(config.custom["action_horizon"])]
@@ -542,7 +542,7 @@ class BehaviorSFTDataset(Dataset):
         self._transforms = []
 
         # Add prompt transform if enabled
-        if getattr(config.train.train_policy.dataset, "prompt_from_task", False):
+        if config.custom.get("prompt_from_task", False):
             self._transforms.append(PromptFromLeRobotTask(self.dataset.meta.tasks))
 
         # Add repack transform
@@ -551,7 +551,7 @@ class BehaviorSFTDataset(Dataset):
         self._transforms.append(
             B1kInputsTransform(
                 config.custom["action_dim"],
-                config.train.train_policy.dataset.model_type,
+                config.custom.get("model_type"),
             )
         )
         # openpi/src/openpi/transforms.py
@@ -580,18 +580,18 @@ class BehaviorSFTDataset(Dataset):
         return item
 
     def init_norm_stats(self):
-        self.skip_norm_stats = self.config.train.train_policy.dataset.skip_norm_stats
+        self.skip_norm_stats = bool(self.config.custom.get("skip_norm_stats", False))
 
         if self.skip_norm_stats:
             logger.info("Skipping norm stats")
             self.norm_stats = None
         else:
-            norm_stats_path = self.config.train.train_policy.dataset.norm_stats
+            norm_stats_path = self.config.custom.get("norm_stats")
             if norm_stats_path is None:
                 norm_stats_path = os.path.join(
                     self.config.policy.model_name_or_path,
                     "assets",
-                    self.config.train.train_policy.dataset.repo_id,
+                    self.config.train.train_policy.dataset.name,
                     "norm_stats.json",
                 )
             if os.path.exists(norm_stats_path):
