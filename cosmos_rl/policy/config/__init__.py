@@ -1555,8 +1555,8 @@ class Config(BaseModel):
     )
     mode: str = Field(
         default="disaggregated",
-        description="Running mode, could be 'disaggregated' or 'colocated'",
-        choices=["disaggregated", "colocated"],
+        description="Running mode, could be 'disaggregated' or 'colocated' or 'colocated_separated'",
+        choices=["disaggregated", "colocated", "colocated_separated"],
     )
 
     @classmethod

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from typing import Optional, Callable, List, Dict, Iterator, Tuple, Any
 from itertools import islice
 import math
@@ -221,11 +222,20 @@ class ControllerDataFetcher(DataFetcherBase):
             if self.batch_sampler is not None and isinstance(
                 self.batch_sampler, Callable
             ):
-                self.batch_sampler = self.batch_sampler(
-                    self.train_sampler,
-                    batch_size=self.rollout_batch_size,
-                    drop_last=False,
-                )
+                sig = inspect.signature(self.batch_sampler)
+                kwargs = {
+                    "dataset": self.dataset.train_set.dataset,
+                    "num_replicas": 1,
+                    "rank": 0,
+                    "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                    "config": self.config,
+                    "sampler": self.train_sampler,
+                    "batch_size": self.rollout_batch_size,
+                    "drop_last": False,
+                }
+                # Filter kwargs to only those the function accepts
+                filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                self.batch_sampler = self.batch_sampler(**filtered)
             if self.config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
@@ -374,8 +384,14 @@ class ControllerDataFetcher(DataFetcherBase):
                         "[DataFetcher] Using custom batch Sampler that yields list of indices for validation dataset."
                     )
                     if isinstance(self.val_batch_sampler, Callable):
-                        self.val_batch_sampler = self.val_batch_sampler(
-                            self.val_sampler
+                        sig = inspect.signature(self.val_batch_sampler)
+                        kwargs = {
+                            "dataset": self.val_dataset.val_set.dataset,
+                            "num_replicas": 1,
+                            "rank": 0,
+                            "num_workers": self.config.train.train_policy.dataloader_num_workers,
+                            "config": self.config,
+                            "sampler": self.val_sampler
                             if self.val_sampler is not None
                             else DistributedSampler(
                                 self.val_dataset.val_set,
@@ -384,9 +400,14 @@ class ControllerDataFetcher(DataFetcherBase):
                                 shuffle=False,
                                 drop_last=False,
                             ),
-                            batch_size=self.val_batch_size,
-                            drop_last=False,
-                        )
+                            "batch_size": self.val_batch_size,
+                            "drop_last": False,
+                        }
+                        # Filter kwargs to only those the function accepts
+                        filtered = {
+                            k: v for k, v in kwargs.items() if k in sig.parameters
+                        }
+                        self.val_batch_sampler = self.val_batch_sampler(**filtered)
                         self.val_dataloader = DataLoader(
                             self.val_dataset.val_set,
                             num_workers=self.config.train.train_policy.dataloader_num_workers,

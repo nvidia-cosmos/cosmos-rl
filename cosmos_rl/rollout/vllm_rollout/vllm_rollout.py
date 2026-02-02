@@ -13,24 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
-)
+import threading
+import types
+import copy
 
 import vllm
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 import torch
-import copy
+
 from typing import List, Optional, Dict, Tuple
 from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
+from vllm.outputs import RequestOutput
+
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
@@ -44,6 +42,12 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     add_tool_response_messages,
     add_assistant_message,
 )
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    apply_fp8_linear_patch,
+    simplify_process_weights_after_loading,
+)
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
@@ -52,8 +56,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
     Command,
 )
-import threading
-import types
+
 from functools import partial
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
@@ -725,6 +728,8 @@ class vLLMRollout(RolloutBase):
         results: List[RequestOutput],
         sampling_params: SamplingParams,
     ) -> List[RequestOutput]:
+        from vllm.inputs import TokensPrompt
+
         topk_sampling_params = copy.deepcopy(sampling_params)
         topk_sampling_params.prompt_logprobs = self.config.distillation.top_k
         topk_sampling_params.logprobs = None

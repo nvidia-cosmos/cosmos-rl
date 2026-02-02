@@ -23,7 +23,7 @@ import unittest
 
 import toml
 
-from cosmos_rl.utils import util
+from cosmos_rl.utils import network_util
 
 
 class TestPolicyOverfit(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestPolicyOverfit(unittest.TestCase):
         """Tests if policy trains on fixed samples, overfits, and decreases training loss."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 8
-        port = util.find_available_port(8123)
+        port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
             "configs",

@@ -18,6 +18,12 @@ import numpy as np
 import io
 import json
 import time
+import os
+
+
+def log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 """
 HPSv2, ImageReward, OCR, and GenEval reward functions are supported currently.
@@ -40,6 +46,16 @@ api_ping = "/api/reward/ping"  # For check the server availability.
 api_enqueue = "/api/reward/enqueue"  # For enqueueing reward calculation tasks.
 api_reward = "/api/reward/pull"  # For pulling reward calculation results.
 token = None  # If authentication is needed, set the token here.
+
+def make_headers(replica_id: str | None = None, extra: dict | None = None) -> dict:
+    headers: dict = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if replica_id:
+        headers["X-Lepton-Replica-Target"] = replica_id
+    if extra:
+        headers.update(extra)
+    return headers
 
 # The folllowing code is an example of how to generate encoded latents from video using the Wan2pt1TokenizerHelper.
 # The generated latents can be sent to the "/api/reward/enqueue" endpoint for calculating rewards.
@@ -80,15 +96,15 @@ data = {
 
 # The following code is an example of how to check the server availability using the "/api/reward/ping" endpoint.
 # This endpoint is used to check if the server is running and can be accessed.
-print("Checking server availability...")
+log("Checking server availability...")
 url = host + api_ping
 response = requests.post(
     url,
     data={"info_data": json.dumps(data)},
-    headers={"Authorization": f"Bearer {token}"},
+    headers=make_headers(),
 )
-print("Status Code:", response.status_code)
-print("Response:", response.json())
+log(f"Status Code: {response.status_code}")
+log(f"Response: {response.json()}")
 
 
 # How to make the reward calculation request to the "/api/reward/enqueue" endpoint.
@@ -106,21 +122,25 @@ for i in range(1):
     response = requests.post(
         url,
         data=payload,
-        headers={
-            "Content-Type": "application/octet-stream",
-            "Authorization": f"Bearer {token}",
-        },
+        headers=make_headers(extra={"Content-Type": "application/octet-stream"}),
         timeout=30,
     )
-    print("Status Code:", response.status_code)
-    print("Response:", response.json())
-    pending_requests.append((response.json()["uuid"], list(data["reward_fn"].keys())))
+    log(f"Status Code: {response.status_code}")
+    log(f"Response: {response.json()}")
+    response_json = response.json()
+    pending_requests.append(
+        (
+            response_json["uuid"],
+            response_json.get("replica_id"),
+            list(data["reward_fn"].keys()),
+        )
+    )
 
-for uuid, reward_types in pending_requests:
+for uuid, replica_id, reward_types in pending_requests:
     url = host + api_reward
     # Send the recorded uuid with reward type as a POST request to the "/api/reward/pull" endpoint to get the reward calculation results.
     for reward_type in reward_types:
-        print(f"Pulling reward results for UUID: {uuid}, reward type: {reward_type}...")
+        log(f"Pulling reward results for UUID: {uuid}, reward type: {reward_type}...")
         while True:
             response = requests.post(
                 url,
@@ -128,11 +148,11 @@ for uuid, reward_types in pending_requests:
                     "uuid": uuid,
                     "type": reward_type,
                 },
-                headers={"Authorization": f"Bearer {token}"},
+                headers=make_headers(replica_id=replica_id),
                 timeout=10,
             )
-            print("Status Code:", response.status_code)
-            print("Response:", response.json())
+            log(f"Status Code: {response.status_code}")
+            log(f"Response: {response.json()}")
             if response.status_code == 200:
                 # Successfully got the reward results, exit the loop.
                 # The response contains the reward scores for the requested reward type.

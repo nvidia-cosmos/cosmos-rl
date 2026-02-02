@@ -239,7 +239,7 @@ class RolloutRegistry:
 
     @classmethod
     def register(
-        x,
+        cls,
         rollout_type: str,
         *,
         allow_override: bool = False,

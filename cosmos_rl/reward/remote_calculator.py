@@ -87,6 +87,7 @@ class RemoteRewardCalculator:
         self.fetch_url = os.environ.get("REMOTE_REWARD_FETCH_URL", "")
         self.token = os.environ.get("REMOTE_REWARD_TOKEN", "")
         self.uuid2payload = dict()
+        self.uuid2replica = dict()
 
     @classmethod
     def get_instance(cls) -> "RemoteRewardCalculator":
@@ -138,7 +139,7 @@ class RemoteRewardCalculator:
                     "Content-Type": "application/octet-stream",
                     "Authorization": f"Bearer {self.token}",
                 },
-                timeout=10.0,
+                timeout=30.0,
             ),
             [self.enqueue_url],
         )
@@ -148,8 +149,9 @@ class RemoteRewardCalculator:
             )
 
         uuid = response.json()["uuid"]
+        replica_id = response.json().get("replica_id", None)
         logger.info(f"[RemoteReward] Enqueued request with UUID: {uuid}")
-        return uuid
+        return (uuid, replica_id)
 
     def compute_rewards(
         self,
@@ -191,7 +193,8 @@ class RemoteRewardCalculator:
             video_fps = payload.extra_info.get("video_fps", 16.0)
             # Encode video data
             latents = self.tokenizer.encode(mm_datas)
-            mm_tensor = latents.to(dtype=torch.float32).cpu().numpy()
+            # Use float16 to reduce payload size over the network.
+            mm_tensor = latents.to(dtype=torch.float16).cpu().numpy()
             # Create video info for entire batch (assuming 16 FPS as default)
             video_infos = []
             for _ in range(latents.shape[0]):
@@ -201,12 +204,18 @@ class RemoteRewardCalculator:
         else:  # image
             data["media_type"] = "image"
             mm_tensor = (
-                mm_datas.to(dtype=torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+                mm_datas.to(dtype=torch.float16).cpu().numpy().transpose(0, 2, 3, 1)
             )  # B,C,H,W -> B,H,W,C
 
+        logger.debug(
+            "[RemoteRewardCalculator] Prepared mm_tensor for enqueue. "
+            f"shape={getattr(mm_tensor, 'shape', None)}, dtype={getattr(mm_tensor, 'dtype', None)}, bytes={getattr(mm_tensor, 'nbytes', None)}"
+        )
+
         # Enqueue request (single call for entire batch)
-        uuid = self.enqueue_request(mm_tensor, data)
+        uuid, replica_id = self.enqueue_request(mm_tensor, data)
         self.uuid2payload[uuid] = payload
+        self.uuid2replica[uuid] = replica_id
 
         return uuid
 
@@ -215,12 +224,23 @@ class RemoteRewardCalculator:
         logger.debug(
             f"[RemoteRewardCalculator] Trying to fetch reward for UUID {uuid}..."
         )
+        replica_id = self.uuid2replica.get(uuid, None)
+        # Specify replica_id header if available for lepton endpoint
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+        }
+        if (
+            replica_id is not None
+            and not os.environ.get("COSMOS_DISABLE_REMOTE_REWARD_USE_REPLICA", "0")
+            == "1"
+        ):
+            headers["X-Lepton-Replica-Target"] = replica_id
         # TODO(dinghaoy): support multiple reward functions and return_all option
         response = make_request_with_retry(
             partial(
                 requests.post,
                 data={"uuid": uuid, "type": list(self.config.reward_fn.keys())[0]},
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers=headers,
                 timeout=10.0,
             ),
             [self.fetch_url],
@@ -295,6 +315,7 @@ class RemoteRewardCalculator:
                 valid_payloads.append(self.uuid2payload[uuid])
                 # Remove the payload from the dict to save memory
                 del self.uuid2payload[uuid]
+                del self.uuid2replica[uuid]
             except Exception as e:
                 logger.info(
                     f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
