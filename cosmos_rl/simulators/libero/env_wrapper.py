@@ -30,6 +30,22 @@ from cosmos_rl.simulators.libero.utils import (
 from cosmos_rl.simulators.utils import save_rollout_video
 
 
+def normalize_gripper_action(action, binarize=True):
+    """Normalize gripper action from [0,1] to [-1,+1] range."""
+    action = action.copy()
+    action[..., -1] = 2 * action[..., -1] - 1
+    if binarize:
+        action[..., -1] = np.sign(action[..., -1])
+    return action
+
+
+def invert_gripper_action(action):
+    """Flip the sign of the gripper action (last dim)."""
+    action = action.copy()
+    action[..., -1] *= -1.0
+    return action
+
+
 @dataclass
 class EnvStates:
     env_idx: int
@@ -286,6 +302,10 @@ class LiberoEnvWrapper(gym.Env):
     def chunk_step(self, env_ids: List[int], actions: torch.Tensor):
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
+
+        # Libero-specific gripper post-processing
+        actions = normalize_gripper_action(actions)
+        actions = invert_gripper_action(actions)
 
         steps = actions.shape[1]
         for step in range(steps):

@@ -16,7 +16,11 @@
 import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
-from typing import Dict
+from typing import Dict, Any
+from cosmos_rl.policy.model.vla.openvla_oft.constants import (
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+    NormalizationType,
+)
 
 
 def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
@@ -56,6 +60,45 @@ def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
     result_image = result_image.convert("RGB")
 
     return result_image
+
+
+def normalize_proprio(proprio: np.ndarray, norm_stats: dict[str, Any]) -> np.ndarray:
+    """
+    Normalize proprioception data to match training distribution.
+
+    Args:
+        proprio: Raw proprioception data
+        norm_stats: Normalization statistics
+
+    Returns:
+        np.ndarray: Normalized proprioception data
+    """
+    if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+        mask = norm_stats.get("mask", np.ones_like(norm_stats["min"], dtype=bool))
+        proprio_high, proprio_low = (
+            np.array(norm_stats["max"]),
+            np.array(norm_stats["min"]),
+        )
+    elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+        mask = norm_stats.get("mask", np.ones_like(norm_stats["q01"], dtype=bool))
+        proprio_high, proprio_low = (
+            np.array(norm_stats["q99"]),
+            np.array(norm_stats["q01"]),
+        )
+    else:
+        raise ValueError("Unsupported action/proprio normalization type detected!")
+
+    normalized_proprio = np.clip(
+        np.where(
+            mask,
+            2 * (proprio - proprio_low) / (proprio_high - proprio_low + 1e-8) - 1,
+            proprio,
+        ),
+        a_min=-1.0,
+        a_max=1.0,
+    )
+
+    return normalized_proprio
 
 
 def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:

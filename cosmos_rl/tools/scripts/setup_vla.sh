@@ -9,13 +9,13 @@ apt-get install -y cmake
 apt-get install -y \
     libglvnd0 \
     libgl1 \
-    libegl1 \
-    libgles2 \
-    libglib2.0-dev \
-    libglew2.2 \
-    libnvidia-egl-gbm1 \
-    libnvidia-egl-wayland1 \
-    libnvidia-egl-wayland-dev
+    libegl1 
+    # libgles2 \
+    # libglib2.0-dev \
+    # libglew2.2 \
+    # libnvidia-egl-gbm1 \
+    # libnvidia-egl-wayland1 \
+    # libnvidia-egl-wayland-dev
 
 mkdir -p /usr/share/glvnd/egl_vendor.d/
 

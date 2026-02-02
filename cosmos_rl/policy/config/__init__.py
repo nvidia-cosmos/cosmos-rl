@@ -1452,6 +1452,11 @@ class VLAConfig(BaseModel):
         description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all.",
     )
 
+    unnorm_key: str = Field(
+        default="libero_10_no_noops",
+        description="The unnormalized key for the dataset.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         return self
