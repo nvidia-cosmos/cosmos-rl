@@ -27,6 +27,26 @@ def decide_fa_version():
     return 2
 
 
+def check_if_fa_installed():
+    fa2_installed = False
+    fa3_installed = False
+    try:
+        import flash_attn_3  # noqa: F401
+
+        fa3_installed = True
+    except ImportError:
+        fa3_installed = False
+
+    try:
+        import flash_attn  # noqa: F401
+
+        fa2_installed = True
+    except ImportError:
+        fa2_installed = False
+
+    return fa2_installed or fa3_installed
+
+
 def lastdim_contig(x: torch.Tensor) -> torch.Tensor:
     return x if x is None or x.stride(-1) == 1 else x.contiguous()
 
@@ -48,6 +68,7 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
         torch_compile: bool = True,
         user_specified_fa_version: Optional[int] = None,
         enable_fp4: bool = False,
+        deterministic: bool = False,
     ):
         # FA3 is not compatible with torch.compile
         # The support is in WIP: https://github.com/Dao-AILab/flash-attention/pull/1769
@@ -55,31 +76,53 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
         if user_specified_fa_version is not None:
             # Respect the user's specified version
             self.fa_version = user_specified_fa_version
+        self.is_fa_installed = check_if_fa_installed()
+        self.enable_fp4 = enable_fp4
+        self.torch_compile = torch_compile
+        self.deterministic = deterministic
 
-        if self.fa_version == 3 and torch_compile:
-            logger.warning(
-                "FlashAttention3 is not compatible with torch.compile. Using FlashAttention2 instead."
-            )
-            self.fa_version = 2
-
-        if self.fa_version == 3:
-            try:
-                # Just as a check to see if flash_attn_3 is installed
-                import flash_attn_3  # noqa: F401
-
-                # According to: https://github.com/Dao-AILab/flash-attention/blob/add175637c5d54b74bc25372e49ce282d6f236fc/README.md?plain=1#L62
-                from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-
-                self.fa_version = 3
-            except ImportError:
+        if self.is_fa_installed:
+            if self.fa_version == 3 and torch_compile:
                 logger.warning(
-                    "FlashAttention3 is not installed. Using FlashAttention2 instead."
+                    "FlashAttention3 is not compatible with torch.compile. Using FlashAttention2 instead."
                 )
                 self.fa_version = 2
+
+            if self.fa_version == 3:
+                try:
+                    # Just as a check to see if flash_attn_3 is installed
+                    import flash_attn_3  # noqa: F401
+
+                    # According to: https://github.com/Dao-AILab/flash-attention/blob/add175637c5d54b74bc25372e49ce282d6f236fc/README.md?plain=1#L62
+                    from flash_attn_interface import (
+                        flash_attn_func,
+                        flash_attn_varlen_func,
+                    )
+
+                    self.fa_version = 3
+                except ImportError:
+                    logger.warning(
+                        "FlashAttention3 is not installed. Using FlashAttention2 instead."
+                    )
+                    self.fa_version = 2
+                    from flash_attn import flash_attn_func, flash_attn_varlen_func
+            else:
                 from flash_attn import flash_attn_func, flash_attn_varlen_func
+            from flash_attn.layers.rotary import (
+                apply_rotary_emb as ori_apply_rotary_emb,
+            )
+
+            apply_rotary_emb = ori_apply_rotary_emb
+            logger.info(f"[Cosmos-RL] Using FlashAttention-{self.fa_version}.")
+
         else:
-            from flash_attn import flash_attn_func, flash_attn_varlen_func
-        logger.info(f"[Cosmos-RL] Using FlashAttention-{self.fa_version}.")
+
+            def dummy_func(*args, **kwargs):
+                raise NotImplementedError("FlashAttention is not installed.")
+
+            flash_attn_func = dummy_func
+            flash_attn_varlen_func = dummy_func
+            apply_rotary_emb = dummy_func
 
         def _flash_attn_func(q, k, v, *args, **kwargs):
             if enable_fp4:
@@ -117,19 +160,13 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
                 **kwargs,
             )
 
-        self.flash_attn_func = _flash_attn_func
-        self.flash_attn_varlen_func = _flash_attn_varlen_func
-        from flash_attn.layers.rotary import apply_rotary_emb as ori_apply_rotary_emb
-
-        self.apply_rotary_emb = ori_apply_rotary_emb
-
-    def set_deterministic(self, deterministic: bool):
         self.flash_attn_func = partial(
-            self.flash_attn_func, deterministic=deterministic
+            _flash_attn_func, deterministic=self.deterministic
         )
         self.flash_attn_varlen_func = partial(
-            self.flash_attn_varlen_func, deterministic=deterministic
+            _flash_attn_varlen_func, deterministic=self.deterministic
         )
+        self.apply_rotary_emb = apply_rotary_emb
 
 
 def init_flash_attn_meta(
@@ -142,4 +179,5 @@ def init_flash_attn_meta(
         torch_compile=compile,
         user_specified_fa_version=fa_version,
         enable_fp4=enable_fp4,
-    ).set_deterministic(deterministic)
+        deterministic=deterministic,
+    )
