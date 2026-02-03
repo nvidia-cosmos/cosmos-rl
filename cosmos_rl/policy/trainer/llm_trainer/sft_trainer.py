@@ -166,7 +166,7 @@ class SFTTrainer(LLMTrainer):
 
         acc_loss = torch.zeros(1, device=self.device)
         self.optimizers.zero_grad()
-        global_batch_size = len(global_batch)
+        global_batch_size = self.data_packer.batch_size(global_batch)
         # split global_batch into mini_batches
         mini_batch_begin_idxs = list(
             range(
@@ -187,7 +187,9 @@ class SFTTrainer(LLMTrainer):
                 and not self.parallel_dims.pp_dynamic_shape
                 else None
             )
-            raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]
+            raw_batch = self.data_packer.slice_batch(
+                global_batch, i, i + self.config.train.train_policy.mini_batch
+            )
             if fixed_length is None:
                 max_len = min(
                     self.config.policy.model_max_length,
