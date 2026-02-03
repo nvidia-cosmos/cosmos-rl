@@ -121,6 +121,22 @@ class CheckpointMananger:
                 state_dict_cpu[key] = value
         return state_dict
 
+    def finalize(self) -> None:
+        """Wait for any pending async checkpoint saves/uploads to finish.
+        This should be called before process exit to avoid losing uploads when
+        `save_mode == "async"`.
+        """
+        if self.save_mode != "async" or not hasattr(self, "executor"):
+            return
+        if self.pre_save_futures:
+            for future in futures.as_completed(self.pre_save_futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Async checkpoint save/upload failed: {e}")
+            self.pre_save_futures = []
+        self.executor.shutdown(wait=True)
+
     def save_checkpoint(
         self,
         model: Union[torch.nn.Module, Dict],

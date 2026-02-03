@@ -578,6 +578,7 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    is_final=is_last_step,
                     **kwargs,
                 )
                 self.ckpt_manager.save_check(
