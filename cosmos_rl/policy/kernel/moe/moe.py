@@ -452,11 +452,12 @@ def padding_wrapper_for_torch(
         # start_index_values: starting index in the ORIGINAL (non-padded) input for each expert
         # e.g., if tokens_per_expert = [3, 5, 2], then start_index_values = [0, 3, 8]
         start_index_values = torch.cumsum(tokens_per_expert, 0) - tokens_per_expert
-        
+
         # padded_start_values: starting index in the PADDED output for each expert
         # e.g., if padded_tokens_per_expert = [16, 16, 16], then padded_start_values = [0, 16, 32]
-        # BUG FIX: Previously used cumsum directly which gave END offsets, not START offsets
-        padded_start_values = torch.cumsum(padded_tokens_per_expert, 0) - padded_tokens_per_expert
+        padded_start_values = (
+            torch.cumsum(padded_tokens_per_expert, 0) - padded_tokens_per_expert
+        )
 
         padded_indices = torch.full(
             (padded_total_tokens_num_cur_group,),
