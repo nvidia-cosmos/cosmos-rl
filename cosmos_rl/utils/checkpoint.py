@@ -75,7 +75,7 @@ class CheckpointMananger:
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
             for timestamp in reversed(timestamps):
-                if timestamp < cur_timestamp:
+                if timestamp <= cur_timestamp:
                     break
             steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
             steps = sorted(steps, key=digit_ascending_key)
