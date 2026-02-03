@@ -211,6 +211,18 @@ class BaseDataPacker(ABC):
     def save_state(self, dest_path: str) -> None:
         pass
 
+    def batch_size(self, batch: Any) -> int:
+        """
+        Get the batch size from the batch data
+        """
+        return len(batch)
+
+    def slice_batch(self, batch: Any, start: int, end: int) -> Any:
+        """
+        Slice the batch data from start to end
+        """
+        return batch[start:end]
+
 
 class DataPacker(BaseDataPacker, ABC):
     """
