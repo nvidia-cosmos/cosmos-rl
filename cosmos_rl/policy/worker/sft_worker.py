@@ -292,14 +292,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
-        trainer_type = getattr(
-            self.config.train.train_policy,
-            "trainer_type",
-            self.config.train.train_policy.type,
-        )
+        trainer_type = self.config.train.train_policy.trainer_type
         if self.config.policy.is_diffusers:
             trainer_type = "diffusers_" + trainer_type
-
         self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
             config=self.config,
             parallel_dims=self.parallel_dims,
