@@ -29,8 +29,8 @@ class GRPO(RuleBasedAlgo):
         self.eps = eps
 
     def compute_reward(
-        self, to_be_evaluated: str, reference: str, prompt: str = None, **kwargs
-    ) -> Tuple[float, float, Dict[str, Any]]:
+        self, to_be_evaluated: List[str], reference: str, prompt: str = None, **kwargs
+    ) -> Tuple[List[float], List[float], List[Dict[str, Any]]]:
         return self.reward_fn.compute_reward(
             to_be_evaluated, reference, prompt=prompt, **kwargs
         )
