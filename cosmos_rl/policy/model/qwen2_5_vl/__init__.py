@@ -41,7 +41,7 @@ from cosmos_rl.policy.model.qwen2_5_vl.weight_mapper import QwenVL25WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
@@ -485,9 +485,9 @@ class Qwen2_5_VLModel(nn.Module):
                 # for run torch.mm on input's dtype
                 with torch.autocast(device_type="cuda", dtype=h.dtype):
                     output = h @ embed_tokens_weight.t()
-            return output
+            return CosmosModelOutput(logits=output)
         else:
-            return h
+            return CosmosModelOutput(logits=h)
 
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:

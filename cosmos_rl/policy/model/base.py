@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -37,6 +38,20 @@ from cosmos_rl.utils.dim_slice_info import (
     extract_infomation_from_dtensor,
     tensor_overlap_info_at_dim,
 )
+
+
+@dataclass
+class CosmosModelOutput:
+    """
+    Base class for model's outputs, with logits and potential auxiliary loss.
+
+    Args:
+        logits: The logits of the model.
+        aux_loss: The auxiliary loss of the model.
+    """
+
+    logits: torch.Tensor = None
+    aux_loss: torch.Tensor = None
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -531,8 +546,13 @@ class ModelRegistry:
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config_args = hf_config_args if hf_config_args is not None else {}
+        aux_loss_coeff = config.policy.aux_loss_coeff
+        if aux_loss_coeff > 0.0 and "aux_loss_coeff" not in hf_config_args:
+            hf_config_args["aux_loss_coeff"] = aux_loss_coeff
+
         for k, v in hf_config_args.items():
             logger.info(f"Set hf config args {k} to {v}")
+
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )

@@ -1071,6 +1071,10 @@ class PolicyConfig(BaseModel):
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
+    aux_loss_coeff: float = Field(
+        default=0.0,
+        description="Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.",
+    )
 
     @model_validator(mode="after")
     def check_params_value(self):

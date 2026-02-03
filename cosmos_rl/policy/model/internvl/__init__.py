@@ -37,7 +37,7 @@ from cosmos_rl.policy.model.internvl.weight_mapper import InternVLWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
 from functools import cached_property
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.policy.model.gpt import GPTArgs
@@ -190,7 +190,7 @@ class Qwen3MoE(nn.Module):
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
-        return h
+        return CosmosModelOutput(logits=h)
 
     def current_device(self):
         return next(self.parameters()).device
