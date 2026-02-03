@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SFT adapter for llava-format datasets with support for separate training and validation datasets.
+"""TAO-compatible SFT example with custom logger and hooks.
 
 This script demonstrates how to use custom_logger_fns and hook_fns for TAO-compatible
 status logging. The TAOStatusLogger writes to status.json in the format expected by TAO/NVAIE.
 
+For a general-purpose llava-format SFT script without TAO logging, see:
+    scripts/llava_sft.py
+
 Usage:
-    cosmos-rl --config spec.toml scripts/custom_sft.py
+    cosmos-rl --config spec.toml cosmos_rl/tools/custom_example/tao_sft_example.py
 
 Environment Variables for TAO logging:
     TAO_API_JOB_ID: Job ID for status file path
@@ -42,13 +45,13 @@ import torch.utils.data
 from cosmos_rl.utils.logging import logger
 
 # Import TAO status logger utilities
-from cosmos_rl.tools.custom_example import TAOStatusLogger
+from cosmos_rl.tools.custom_hooks import TAOStatusLogger
 
 # Import TAO core logging for STARTED/SUCCESS/FAILURE status
 try:
     from nvidia_tao_core.loggers.logging import (
-        StatusLogger,
         Status,
+        StatusLogger,
         Verbosity,
         set_status_logger,
     )
@@ -159,11 +162,29 @@ class CustomDataset(torch.utils.data.Dataset):
                 vision_kwargs=self.vision_kwargs,
             )
         else:
-            # Fallback conversation format
+            # Fallback conversation format with image/video support
             conversations = []
             if self.system_prompt:
                 conversations.append({"role": "system", "content": self.system_prompt})
-            conversations.append({"role": "user", "content": user_prompt})
+
+            # Build user content with media (images/videos) and vision_kwargs
+            if images or videos:
+                user_content = []
+                if images:
+                    for img in images:
+                        user_content.append(
+                            {"type": "image", "image": img, **self.vision_kwargs}
+                        )
+                if videos:
+                    for vid in videos:
+                        user_content.append(
+                            {"type": "video", "video": vid, **self.vision_kwargs}
+                        )
+                user_content.append({"type": "text", "text": user_prompt})
+                conversations.append({"role": "user", "content": user_content})
+            else:
+                conversations.append({"role": "user", "content": user_prompt})
+
             conversations.append({"role": "assistant", "content": response})
 
         return conversations
