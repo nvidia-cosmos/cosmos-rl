@@ -30,6 +30,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed import get_process_group_ranks
 from torch.nn.modules.module import _IncompatibleKeys
 
+from cosmos_rl.utils.constant import CACHE_DIR
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config.wfm import (
     ModelConfig,
@@ -85,6 +86,9 @@ from cosmos_rl.policy.model.wfm.networks.minimal_v1_lvg_dit import MinimalV1LVGD
 # text encoder
 from cosmos_rl.policy.model.wfm.networks.vlm_qwen.processor import build_tokenizer
 from cosmos_rl.policy.model.wfm.networks.vlm_qwen.qwen_omni import QwenVLBaseModel
+from cosmos_rl.utils.wfm.checkpointer import (
+    load_checkpoint,
+)
 
 
 class InferenceInfos:
@@ -292,9 +296,22 @@ class WorldFoundationalModel(nn.Module):
             self.config.text_encoder_config.encoder_model_config,
             qwen_vl_processor,
         )
-        self.text_encoder.load_hf_weights(
-            self.config.text_encoder_config.ckpt_path, device="cuda"
-        )
+        if self.config.text_encoder_config.ckpt_path.startswith("s3://"):
+            if os.path.exists("credentials/s3_training.secret"):
+                s3_credential_path = "credentials/s3_training.secret"
+            else:
+                s3_credential_path = os.path.join(
+                    CACHE_DIR, "credentials", "s3_training.secret"
+                )
+            load_checkpoint(
+                self.text_encoder,
+                self.config.text_encoder_config.ckpt_path,
+                s3_credential_path,
+            )
+        else:  # From HF
+            self.text_encoder.load_hf_weights(
+                self.config.text_encoder_config.ckpt_path, device="cuda"
+            )
         self.text_encoder.eval()
         torch.cuda.empty_cache()
 
