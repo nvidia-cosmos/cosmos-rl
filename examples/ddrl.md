@@ -96,7 +96,7 @@ class RLConfig:
 Considering the computation overhead, it's necessary to use a seperated async service for reward computing.
 
 - You can launch a reward service by following this [document](https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service/README.md).
-- Configure the trainer to make it communicate with the reward service. Set environment variable ``WFM_REWARD_TOKEN``, ``WFM_REWARD_ENQUEUE_URL``, and ``WFM_REWARD_FETCH_URL`` 
+- Configure the trainer to make it communicate with the reward service. Set environment variable ``REMOTE_REWARD_TOKEN``, ``REMOTE_REWARD_ENQUEUE_URL``, and ``REMOTE_REWARD_FETCH_URL``
 
 ### Dataset
 
