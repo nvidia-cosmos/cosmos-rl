@@ -487,8 +487,6 @@ class NodesManager:
         self.output_files: List[str] = []
         self.envs: List[Dict[str, str]] = []
 
-        self.role_to_nodes: Dict[str, List[Node]] = {}  # Role to nodes mapping.
-
     def replica_placement(
         self,
         args: argparse.Namespace,
