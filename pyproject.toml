@@ -36,7 +36,6 @@ dependencies = [
     "kernels",
     "diffusers @ git+https://github.com/huggingface/diffusers.git@ec37629", # For cosmos-predict2.5
     "peft",
-    "flash-attn>=2.8.3",
 ]
 
 [build-system]
@@ -110,6 +109,7 @@ vla = [
 
 rl = [
     "vllm>=0.8.5",
+    "flash-attn>=2.8.3",
 ]
 
 all = [
