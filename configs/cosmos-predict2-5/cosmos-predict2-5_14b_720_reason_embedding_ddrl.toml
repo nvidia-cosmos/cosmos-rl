@@ -24,13 +24,18 @@ input_key = "fps"
 
 [model]
 text_encoder_class = "reason1_7B"
-fsdp_shard_size = 8
+fsdp_shard_size = 32
+dp_replicate_size = 4
+use_rf_ckpts = true
 resolution = "720"
 
 [model_parallel]
 context_parallel_size = 2
 
 [model.net]
+model_channels = 5120
+num_blocks = 36
+num_heads = 40
 use_crossattn_projection = true
 crossattn_proj_in_channels = 100352
 crossattn_emb_channels = 1024
@@ -67,12 +72,16 @@ window_size = 112
 
 [model.rl]
 sample_steps = 20
+num_rollout = 8
+train_on = [0,2,4,6,8,10,12,14,16,18]
 update_ref_every_iter = 0
 data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
-train_on = [0,2,4,6,8,10,12,14,16,18]
+
+[model.tokenizer]
+temporal_window = 4
 
 [trainer]
 max_iter = 2001
@@ -245,11 +254,11 @@ offline_text_embedding = false
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos-predict2-5_2b_720_reason_embedding_ddrl"
+name = "cosmos-predict2-5_14b_720_reason_embedding_ddrl"
 wandb_mode = "online"
 
 [checkpoint]
 type = "distributed"
-load_path = "nvidia/Cosmos-Predict2.5-2B"
-model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"
+load_path = "nvidia/Cosmos-Predict2.5-14B"
+model_id = "base/pre-trained/54937b8c-29de-4f04-862c-e67b04ec41e8_ema_bf16.pt"
 save_iter = 32

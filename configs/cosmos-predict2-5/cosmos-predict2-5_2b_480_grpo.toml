@@ -25,9 +25,6 @@ input_key = "fps"
 fsdp_shard_size = 8
 
 [model_parallel]
-tensor_model_parallel_size = 1
-pipeline_model_parallel_size = 1
-pipeline_parallel_size = 1
 context_parallel_size = 1
 
 [trainer]
