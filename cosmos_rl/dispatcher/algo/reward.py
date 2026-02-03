@@ -391,7 +391,7 @@ class Reward:
         **kwargs,
     ):
         """
-        Compute reward for a single reward function and update the total rewards and filter rewards and all_rewards_dicts.
+        Compute reward for one single reward function type, then update the total_rewards, filter_rewards and all_rewards_dicts at the corresponding indices.
         """
         if self.config.train.train_policy.group_reward_calculation:
             """
