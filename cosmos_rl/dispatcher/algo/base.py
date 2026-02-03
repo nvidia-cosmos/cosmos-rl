@@ -24,8 +24,8 @@ class RuleBasedAlgo(ABC):
     @abstractmethod
     def compute_reward(
         self, to_be_evaluated: Any, reference: Any, prompt: Any = None, **kwargs
-    ) -> Tuple[float, float, Dict[str, Any]]:
-        return 0.0, 0.0, {}
+    ) -> Tuple[List[float], List[float], List[Dict[str, Any]]]:
+        return [0.0], [0.0], [{}]
 
     @abstractmethod
     def compute_advantage(self, rewards: List[float]) -> List[float]:
