@@ -41,8 +41,7 @@ logging.getLogger("cosmos").propagate = False
 import importlib
 import numpy as np
 import torch
-from imaginaire.lazy_config import instantiate
-from imaginaire.utils.config_helper import get_config_module, override
+from projects.cosmos3.vlm.datasets.utils import DataSource
 from typing import Any, Dict, List, Optional
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.launcher.worker_entry import main as launch_worker
@@ -51,26 +50,77 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-
-MAX_PIXELS = 81920
 IGNORE_LABEL_ID = -100
 
 
-# # Instantiate i4 model
-# config_file = "projects/cosmos3/vlm/configs/base/config.py"
-# config_module = get_config_module(config_file)
-# config = importlib.import_module(config_module).make_config()
-# experiment = "pre_exp020_000_qwen3_vl_30b_a3b_thinking"
-# config = override(
-#     config,
-#     [
-#         "--",
-#         f"experiment={experiment}",
-#         # "data_train=09_eagle_sft_full_mul_repeat_debug_s3",
-#         # "data_train=debug_image_data_qwen",
-#     ],
-# )
-# self.dataloader = instantiate(config.dataloader_train)
+S3_BUCKET_NAME = "nv-cosmos-zu-videos"
+S3_CREDENTIALS_PATH = "credentials/s3_training.secret"
+
+
+"""
+Example data config for i4 web dataset sources.
+Allow to combine multiple data sources with different weights.
+The following code defines a dataset configuration for using i4 web dataset format:
+DATAINFO contains DataSource instances for two datasets: 'robospatial_llava_qa' and 'pixmo_pointing_fix'.
+Each with their respective total key counts, paths to their wdinfo files, text and media keys, and a flag indicating they are not text-only datasets.
+The data_weight_default dictionary assigns weights to these datasets for training purposes.
+The url_to_category function maps dataset URLs to their corresponding categories based on specific substrings in the URL.
+These three components are required for instantiating the dataset and must be attributes of an importable module file such as this .py file.
+User can specify which datasets to include using DATAINFO and assign weights using data_weight_default to compose the training dataset.
+"""
+DATAINFO = {
+    # robospatial_llava_qa: using v1_1 from webdataset_interleaved
+    "robospatial_llava_qa": DataSource(
+        total_key_count=3075590,
+        wdinfo_path={
+            "train": "cosmos_reason2/grounding_2d/v1_1/wdinfo/robospatial_llava_qa/wdinfo.json",
+        },
+        text_keys=["texts"],
+        media_keys=["media"],
+        text_only=False,
+    ),
+    # pixmo_pointing_fix: using v1_1 from webdataset_interleaved
+    "pixmo_pointing_fix": DataSource(
+        total_key_count=1834800,
+        wdinfo_path={
+            "train": "cosmos_reason2/grounding_2d/v1_1/wdinfo/pixmo_pointing_fix/wdinfo.json",
+        },
+        text_keys=["texts"],
+        media_keys=["media"],
+        text_only=False,
+    ),
+}
+
+data_weight_default = {
+    "robospatial_llava_qa": 3075590,
+    "pixmo_pointing_fix": 1834800,
+}
+
+
+def url_to_category(url: str) -> str | None:
+    # Map the tar url to the category in the data_weight_dict
+    if "eagle_sft/" in url:
+        # cosmos_reason2/eagle_sft/GroundUI/v0/
+        return url.split("eagle_sft/", 1)[1].split("/")[0]
+    elif "grounding_2d/" in url:
+        # cosmos_reason2/grounding_2d/v1_1/gqa_s_ext/
+        return url.split("grounding_2d/", 1)[1].split("/")[1]
+    else:
+        return None
+
+
+def patch_imaginaire_s3_object_store():
+    def object_store_to_bucket_and_credentials(object_store: str):
+        if object_store == "s3":
+            return S3_BUCKET_NAME, S3_CREDENTIALS_PATH
+        else:
+            raise ValueError(f"Object store {object_store} not supported")
+
+    import projects.cosmos3.vlm.datasets.dataset_provider_sft as dataset_provider_sft
+
+    dataset_provider_sft.object_store_to_bucket_and_credentials = (
+        object_store_to_bucket_and_credentials
+    )
 
 
 class I4WebDatasetDataPacker(DataPacker):
@@ -164,6 +214,53 @@ class I4WebDatasetDataPacker(DataPacker):
         return sliced_batch
 
 
+def register_data_set(data_modules: Dict[str, str]):
+    from hydra.core.config_store import ConfigStore
+    from imaginaire.lazy_config import LazyCall as L
+    from projects.cosmos3.vlm.datasets.collate_fn import custom_collate
+    from projects.cosmos3.vlm.datasets.joint_dataset_dynamic_batch_webloader import (
+        JointDatasetDynamicBatchingWebLoader,
+    )
+    from projects.cosmos3.vlm.configs.base.defaults.dataloader_weighted_url import (
+        create_dataloader_config,
+    )
+
+    cs = ConfigStore.instance()
+    object_store = "s3"
+    for dataset_name, data_module in data_modules.items():
+        cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name=dataset_name,
+            node=L(JointDatasetDynamicBatchingWebLoader)(
+                datasets_cfg={
+                    "default": {
+                        "dataset": create_dataloader_config(
+                            data_module, "train", object_store
+                        ),
+                        "ratio": 1,
+                    }
+                },
+                # Arguments for the joint dataset
+                pool_size=16,
+                max_batch_size="${data_setting.max_batch_size}",
+                max_tokens="${data_setting.max_tokens}",
+                model_name_or_path="${policy.model_name_or_path}",  # "Qwen/Qwen3-VL-2B-Init"
+                long_threshold=6400,
+                length_key="input_ids",
+                batching_strategy="prefer_closest",
+                # Arguments for the webloader
+                batch_size=1,  # This is not the real batch size, it wont be used
+                num_workers=8,
+                sampler=None,
+                prefetch_factor=1,
+                persistent_workers=False,
+                pin_memory=True,
+                collate_fn=custom_collate,
+            ),
+        )
+
+
 class CustomSFTDataPacker(I4WebDatasetDataPacker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -175,6 +272,9 @@ class CosmosSFTDataset(Dataset):
         """
         Called by launcher after being mounted
         """
+        from imaginaire.lazy_config import instantiate
+        from imaginaire.utils.config_helper import get_config_module, override
+
         self.config = config
         self.tokenizer = tokenizer
 
@@ -182,26 +282,33 @@ class CosmosSFTDataset(Dataset):
         config_file = "projects/cosmos3/vlm/configs/base/config.py"
         config_module = get_config_module(config_file)
         config = importlib.import_module(config_module).make_config()
-        experiment = "pre_exp020_000_qwen3_vl_30b_a3b_thinking"
+
+        # Register custom dataset
+        data_sets = {
+            # name : <module_path>.<`data_weight_default` attribute of the module> (example as module of this .py file)
+            "sample_dataset": "cosmos_rl.tools.dataset.i4_vlm_sft.data_weight_default",
+        }
+        register_data_set(data_sets)
         config = override(
             config,
             [
                 "--",
-                f"experiment={experiment}",
-                # "data_train=09_eagle_sft_full_mul_repeat_debug_s3",
-                # "data_train=debug_image_data_qwen",
+                "data_train=sample_dataset",
+                # For processor from raw data to model input
+                "model=qwen3_vl_8b_instruct_cosmos_rl",
+                "checkpoint=s3",
             ],
         )
-        self.dataloader = instantiate(config.dataloader_train)
-        self.iterator = iter(self.dataloader)
-        self.data_loader = self.dataloader
+        # Setting up S3 object store patching with bucket and credentials
+        patch_imaginaire_s3_object_store()
+        self.data_loader = instantiate(config.dataloader_train)
 
     def __len__(self):
-        return len(self.dataloader)
+        return len(self.data_loader)
 
 
 if __name__ == "__main__":
-    # mp.set_start_method('spawn', force=True)
+
     def get_dataset(config: CosmosConfig) -> Dataset:
         return CosmosSFTDataset()
 
