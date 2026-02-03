@@ -65,7 +65,11 @@ We construct the WFM RL training pipeline based on diffusers library. Thus it is
 
 - You can launch a reward service by following the instructions here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
 
-- Configure the environment variable ``REMOTE_REWARD_TOKEN``, ``REMOTE_REWARD_ENQUEUE_URL``, and ``REMOTE_REWARD_FETCH_URL`` to make the trainer communicate with the reward service.
+- Configure the environment variable ``REMOTE_REWARD_TOKEN``, ``REMOTE_REWARD_ENQUEUE_URL``, and ``REMOTE_REWARD_FETCH_URL`` to make the trainer communicate with the reward service::
+
+    export REMOTE_REWARD_TOKEN="your_token"
+    export REMOTE_REWARD_ENQUEUE_URL="https://reward_service_host:PORT/api/reward/enqueue"
+    export REMOTE_REWARD_FETCH_URL="https://reward_service_host:PORT/api/reward/fetch"
 
 **Parallelism**: Support FSDP for world foundational model training. You can edit the related configurations in the toml file to enable these parallelism techniques.::
 
@@ -111,13 +115,15 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
 
 - You can launch a reward service by following the instructions here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
 
-- Configure the environment variable ``WFM_REWARD_TOKEN``, ``WFM_REWARD_ENQUEUE_URL``, and ``WFM_REWARD_FETCH_URL`` to make the trainer communicate with the reward service.
+- Configure the environment variable ``REMOTE_REWARD_TOKEN``, ``REMOTE_REWARD_ENQUEUE_URL``, and ``REMOTE_REWARD_FETCH_URL`` to make the trainer communicate with the reward service::
+
+    export REMOTE_REWARD_TOKEN="your_token"
+    export REMOTE_REWARD_ENQUEUE_URL="https://reward_service_host:PORT/api/reward/enqueue"
+    export REMOTE_REWARD_FETCH_URL="https://reward_service_host:PORT/api/reward/fetch"
 
 **Models**:
 
 - Cosmos-Predict2.5-2B/14B
-
-- Wan2.1 (coming soon)
 
 **Parallelism**: Support HSDP/FSDP, and context parallel (CP) for world foundational model training. You can edit the related configurations in the toml file to enable these parallelism techniques.::
 
