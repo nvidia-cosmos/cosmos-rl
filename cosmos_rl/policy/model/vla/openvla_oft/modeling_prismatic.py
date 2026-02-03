@@ -6,7 +6,6 @@ Inherits from the default `transformers.PretrainedModel`. Meant to be standalone
 but exactly replicate the logic in `prismatic.models.vlms.prismatic.py`.
 """
 
-import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
@@ -38,7 +37,7 @@ from .constants import (
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
 # Set up logger
-logger = logging.getLogger(__name__)
+from cosmos_rl.utils.util import logger
 
 
 # === Utility Functions for Monkey-Patching ===
@@ -2155,6 +2154,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         language_embeddings = input_embeddings[~all_actions_mask].reshape(
             input_embeddings.shape[0], -1, input_embeddings.shape[2]
         )
+
+        logger.info(f"pixel_values shape: {pixel_values.shape}")
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(

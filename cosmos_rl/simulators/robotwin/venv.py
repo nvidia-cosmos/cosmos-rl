@@ -52,7 +52,7 @@ def _disable_oidn_denoiser():
 
         def patched_set_denoiser(denoiser_type: str):
             if denoiser_type.lower() == "oidn":
-                logger.info(
+                logger.debug(
                     "OIDN denoiser disabled for GPU compatibility (H200/Hopper)"
                 )
                 return
@@ -113,7 +113,7 @@ def _update_obs(observation: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def get_robotwin_task_suite() -> List[str]:
+def get_robotwin_task_suite(subtasks: Optional[str] = None) -> List[str]:
     """Automatically discover all available RoboTwin tasks.
 
     Scans the RoboTwin/envs directory for task files and returns a sorted list
@@ -141,6 +141,9 @@ def get_robotwin_task_suite() -> List[str]:
 
     # Exclude special files
     exclude = {"__init__", "_base_task", "_GLOBAL_CONFIGS", "reward"}
+    # Exclude known buggy tasks
+    # place_fan.py has a bug: calls Reward() instead of Reward.build_top()
+    exclude.add("place_fan")
 
     task_names = []
     for task_file in task_files:
@@ -148,7 +151,16 @@ def get_robotwin_task_suite() -> List[str]:
         if task_name not in exclude and not task_name.startswith("_"):
             task_names.append(task_name)
 
-    return sorted(task_names)
+    task_names = sorted(task_names)
+
+    if subtasks is not None:
+        selected_tasks = subtasks.split(",")
+        new_task_names = {
+            i: task for i, task in enumerate(task_names) if task in selected_tasks
+        }
+        return new_task_names
+    else:
+        return task_names
 
 
 class SubEnv:
@@ -203,7 +215,6 @@ class SubEnv:
         # Check cache first to avoid redundant setup
         if task_name in self.task_metadata_cache:
             self.episode_info_list = self.task_metadata_cache[task_name]
-            logger.info(f"Using cached metadata for task: {task_name}")
             return
 
         # Double-check cache after acquiring lock
@@ -217,7 +228,7 @@ class SubEnv:
         retry_count = 0
         last_error = None
 
-        logger.info(f"Setting up task metadata for: {task_name}")
+        logger.debug(f"Setting up task metadata for: {task_name}")
 
         while not is_valid and retry_count < max_retries:
             try:
@@ -264,7 +275,6 @@ class SubEnv:
         self.episode_info_list = [episode_info]
         # Cache the result
         self.task_metadata_cache[task_name] = self.episode_info_list
-        logger.info(f"Cached metadata for task: {task_name}")
 
     def create_instruction(self, task_name: str) -> str:
         """Generate task instruction/description.
@@ -362,7 +372,7 @@ class SubEnv:
                 self.setup_task(task_name)
                 self.instruction = self.create_instruction(task_name)
                 self.current_task_name = task_name
-                logger.info(f"SubEnv {self.env_id} task changed to: {task_name}")
+                logger.debug(f"SubEnv {self.env_id} task changed to: {task_name}")
             except Exception as e:
                 logger.error(
                     f"SubEnv {self.env_id} failed to setup task {task_name}: {e}"
@@ -383,7 +393,7 @@ class SubEnv:
         while not is_valid and retry_count < max_retries:
             try:
                 self.task = _class_decorator(task_name)
-                logger.info(
+                logger.debug(
                     f"SubEnv {self.env_id} setup_demo with task {task_name}, seed {trial_seed}, retry {retry_count}"
                 )
                 self.task.setup_demo(
@@ -652,7 +662,7 @@ class VectorEnv(gym.Env):
         Raises:
             RuntimeError: If any environment fails to setup
         """
-        logger.info(
+        logger.debug(
             f"Setting up tasks for {self.num_envs} environments (this may take several minutes)..."
         )
 
@@ -672,12 +682,9 @@ class VectorEnv(gym.Env):
         for i in range(self.num_envs):
             try:
                 futures[i].result(timeout=timeout)
-                logger.info(f"SubEnv {i} setup completed")
             except Exception as e:
                 logger.error(f"SubEnv {i} setup_task error: {e}")
                 raise RuntimeError(f"SubEnv {i} setup_task error: {e}")
-        
-        logger.info("All environments setup completed")
 
     def reset(
         self,
@@ -727,20 +734,10 @@ class VectorEnv(gym.Env):
                 # Use trial_id as env_seed
                 env_seed = trial_ids[idx]
 
-                logger.info(
-                    f"Resetting SubEnv {env_id}: task={task_name}, seed={env_seed}"
-                )
                 try:
-                    # Note: global_lock in SubEnv.reset() ensures sequential execution
-                    # First reset takes: setup_task (~60-90s) + setup_demo (~60-90s)
-                    # Subsequent resets: only setup_demo (~60-90s) due to caching
-                    logger.info(
-                        f"SubEnv {env_id} reset starting (this may take 2-4 minutes)..."
-                    )
                     obs = self.envs[env_id].reset(
                         task_name=task_name, env_seed=env_seed
                     )
-                    logger.info(f"SubEnv {env_id} reset completed successfully")
                     observations.append(obs)
                 except Exception as e:
                     error_details = traceback.format_exc()

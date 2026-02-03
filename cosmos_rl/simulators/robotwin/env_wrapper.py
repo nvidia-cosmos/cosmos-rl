@@ -99,14 +99,12 @@ class RoboTwinEnvWrapper(gym.Env):
 
         Returns:
             Dictionary with keys:
-                - full_images: Array of full camera images
-                - left_wrist_images: Array of left wrist camera images (if available)
-                - right_wrist_images: Array of right wrist camera images (if available)
+                - full_images: Array of full camera images (B, H, W, C)
+                - wrist_images: Array of left wrist camera images (B, N_IMG, H, W, C)
                 - states: Array of robot states
         """
         full_images = []
-        left_wrist_images = []
-        right_wrist_images = []
+        wrist_images = []
         states = []
 
         for obs in obs_list:
@@ -114,30 +112,17 @@ class RoboTwinEnvWrapper(gym.Env):
                 continue
 
             # Extract full image (head camera)
-            if "full_image" in obs:
-                full_images.append(obs["full_image"])
-
-            # Extract wrist images
-            if "left_wrist_image" in obs and obs["left_wrist_image"] is not None:
-                left_wrist_images.append(obs["left_wrist_image"])
-
-            if "right_wrist_image" in obs and obs["right_wrist_image"] is not None:
-                right_wrist_images.append(obs["right_wrist_image"])
-
-            # Extract state
-            if "state" in obs:
-                states.append(obs["state"])
+            full_images.append(obs["full_image"])
+            wrist_images.append(
+                np.stack([obs["left_wrist_image"], obs["right_wrist_image"]], axis=0)
+            )
+            states.append(obs["state"])
 
         result = {
             "full_images": np.stack(full_images) if full_images else None,
+            "wrist_images": np.stack(wrist_images) if wrist_images else None,
             "states": np.stack(states) if states else None,
         }
-
-        if left_wrist_images:
-            result["left_wrist_images"] = np.stack(left_wrist_images)
-
-        if right_wrist_images:
-            result["right_wrist_images"] = np.stack(right_wrist_images)
 
         return result
 
@@ -218,8 +203,7 @@ class RoboTwinEnvWrapper(gym.Env):
             if do_validation[i]:
                 self.env_states[env_id].valid_pixels = {
                     "full_images": [],
-                    "left_wrist_images": [],
-                    "right_wrist_images": [],
+                    "wrist_images": [],
                 }
 
                 # Record initial frame
@@ -268,8 +252,7 @@ class RoboTwinEnvWrapper(gym.Env):
             if do_validation[i]:
                 self.env_states[env_id].valid_pixels = {
                     "full_images": [],
-                    "left_wrist_images": [],
-                    "right_wrist_images": [],
+                    "wrist_images": [],
                 }
 
         # Setup tasks and get descriptions
@@ -317,7 +300,7 @@ class RoboTwinEnvWrapper(gym.Env):
 
         Returns:
             Dictionary with keys:
-                - full_images, left_wrist_images, right_wrist_images, states
+                - full_images, wrist_images, states
                 - complete: Boolean array indicating episode completion
                 - active: Boolean array indicating if environment is still active
                 - finish_step: Array of step counts
@@ -371,7 +354,7 @@ class RoboTwinEnvWrapper(gym.Env):
 
         # Build full observation dict
         full_images_and_states = {}
-        for key in ["full_images", "left_wrist_images", "right_wrist_images", "states"]:
+        for key in ["full_images", "wrist_images", "states"]:
             obs_list = []
             for env_id in env_ids:
                 if (

@@ -72,15 +72,17 @@ def get_simulator_type(config: Config) -> str:
     Returns:
         "b1k" or "libero"
     """
-    subset = config.validation.dataset.subset.lower()
-    if "b1k" in subset:
+    dataset = config.validation.dataset.name.lower()
+    if "b1k" in dataset:
         return "b1k"
-    elif "libero" in subset:
+    elif "libero" in dataset:
         return "libero"
+    elif "robotwin" in dataset:
+        return "robotwin"
     else:
         # Default to libero for backward compatibility
         logger.warning(
-            f"Unknown dataset subset '{subset}', defaulting to libero simulator"
+            f"Unknown dataset subset '{dataset}', defaulting to libero simulator"
         )
         return "libero"
 
@@ -111,6 +113,10 @@ def extract_simulator_config(config: Config):
 
         cfg.task_suite_name = config.validation.dataset.subset
         cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+    elif sim_type == "robotwin":
+        # Robotwin-specific config
+        cfg.task_suite_name = config.validation.dataset.subset
+        cfg.max_steps = 512
 
     return cfg
 
@@ -153,7 +159,6 @@ class OpenVLARollout(RolloutBase):
             # - "fork": causes segmentation fault (GPU contexts copied in bad state)
             # Solution: Run in-process
             use_subprocess = False
-            logger.info("Initializing B1K simulator in-process (no subprocess)")
         elif sim_type == "libero":
             from cosmos_rl.simulators.libero.env_wrapper import (
                 LiberoEnvWrapper as EnvWrapperCls,
@@ -161,7 +166,13 @@ class OpenVLARollout(RolloutBase):
 
             # Libero works fine in subprocess with spawn method
             use_subprocess = True
-            logger.info("Initializing LIBERO simulator in subprocess (spawn)")
+        elif sim_type == "robotwin":
+            from cosmos_rl.simulators.robotwin.env_wrapper import (
+                RoboTwinEnvWrapper as EnvWrapperCls,
+            )
+
+            # Robotwin works fine in subprocess with spawn method
+            use_subprocess = True
         else:
             raise ValueError(f"Invalid simulator type: {sim_type}")
 
@@ -450,7 +461,20 @@ class OpenVLARollout(RolloutBase):
                     is_valid=is_validation,
                     temperature=self.config.rollout.sampling_config.temperature,
                     unnorm_key="libero_10_no_noops",
+                    # unnorm_key="beat_block_hammer_1k",
                 )
+                # for k, v in active_sim_results.items():
+                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
+                #         logger.info(f"active_sim_results[{k}]: {v.shape}")
+                # for k, v in vla_input.items():
+                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
+                #         logger.info(f"vla_input[{k}]: {v.shape}")
+                # for k, v in vla_output.items():
+                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
+                #         logger.info(f"vla_output[{k}]: {v.shape}")
+                # logger.info(f"active_sim_results: {active_sim_results.keys()}")
+                # logger.info(f"vla_input: {vla_input.keys()}")
+                # logger.info(f"vla_output: {vla_output.keys()}")
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
                 for key in self.vla_input_keys:
