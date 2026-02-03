@@ -618,7 +618,7 @@ class ModelRegistry:
                 util.replace_with_liger_equivalents(model)
 
             # Apply pattern-based trainable configuration
-            trainable_pattern = getattr(config.policy, "trainable_pattern", None)
+            trainable_pattern = config.policy.trainable_pattern
             if trainable_pattern is not None:
                 model.apply_trainable_pattern(trainable_pattern)
 
@@ -638,7 +638,7 @@ class ModelRegistry:
                 model.apply_trainable(config.policy.trainable_map)
 
             # Apply pattern-based freeze configuration
-            freeze_pattern = getattr(config.policy, "freeze_pattern", None)
+            freeze_pattern = config.policy.freeze_pattern
             if freeze_pattern is not None:
                 model.apply_freeze_pattern(freeze_pattern)
 
