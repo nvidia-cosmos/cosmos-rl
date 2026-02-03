@@ -449,8 +449,14 @@ def padding_wrapper_for_torch(
 
         padded_total_tokens_num_cur_group = padded_tokens_per_expert.sum().item()
 
+        # start_index_values: starting index in the ORIGINAL (non-padded) input for each expert
+        # e.g., if tokens_per_expert = [3, 5, 2], then start_index_values = [0, 3, 8]
         start_index_values = torch.cumsum(tokens_per_expert, 0) - tokens_per_expert
-        padded_offsets = torch.cumsum(padded_tokens_per_expert, 0)
+        
+        # padded_start_values: starting index in the PADDED output for each expert
+        # e.g., if padded_tokens_per_expert = [16, 16, 16], then padded_start_values = [0, 16, 32]
+        # BUG FIX: Previously used cumsum directly which gave END offsets, not START offsets
+        padded_start_values = torch.cumsum(padded_tokens_per_expert, 0) - padded_tokens_per_expert
 
         padded_indices = torch.full(
             (padded_total_tokens_num_cur_group,),
@@ -463,7 +469,8 @@ def padding_wrapper_for_torch(
         )
         # fill the origin input row indices to padded_indices
         for expert_id in range(num_local_experts):
-            padded_start = padded_offsets[expert_id].item()
+            # FIX: Use padded_start_values instead of padded_offsets (which was END offset)
+            padded_start = padded_start_values[expert_id].item()
             start_index = start_index_values[expert_id].item()
             length = tokens_per_expert[expert_id].item()
             if length > 0:
@@ -498,7 +505,9 @@ def unpadding_wrapper_for_torch(output: torch.Tensor, input_shape, padded_indice
     """
     Recover actual output from padded output of torch._grouped_mm.
     """
-    out_unpadded = output.new_empty(input_shape)
+    # Use new_zeros instead of new_empty as a safety measure to avoid uninitialized memory
+    # in case some indices are not covered (e.g., padding positions with -1 indices)
+    out_unpadded = output.new_zeros(input_shape)
     out_unpadded[padded_indices, :] = output
     out = out_unpadded[:-1]
     return out
