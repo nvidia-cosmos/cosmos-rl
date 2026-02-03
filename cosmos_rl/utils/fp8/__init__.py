@@ -13,3 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import cosmos_rl.utils.fp8.fp8_util  # noqa: F401

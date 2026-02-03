@@ -448,6 +448,16 @@ class MoEFlexTokenDispatcher:
     ):
         """
         Preprocesses the hidden states and routing information before dispatching tokens to experts.
+        Args:
+            hidden_states (torch.Tensor): Input hidden states to be processed, shape: [num_tokens, hidden_size].
+            num_local_tokens (int): Number of tokens to be processed.
+            token_probs (torch.Tensor): Routing probabilities for each token-expert pair, shape: [num_tokens, topk].
+            token_indices (torch.Tensor): Indices of the selected experts for each token, shape: [num_tokens, topk].
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]:
+                - hidden_states: Reshaped hidden states, shape: [num_tokens, hidden_size].
+                - token_probs: Token probabilities from the communication manager, shape: [num_tokens, topk].
         """
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
@@ -551,6 +561,18 @@ class MoEFlexTokenDispatcher:
         1. Preprocess the hidden states
         2. Perform all-to-all communication to dispatch tokens
         3. Post-process the dispatched tokens for expert processing
+
+        Args:
+            hidden_states (torch.Tensor): Input hidden states to be processed, shape: [num_tokens, hidden_size].
+            num_local_tokens (int): Number of tokens to be processed.
+            token_probs (torch.Tensor): Routing probabilities for each token-expert pair, shape: [num_tokens, topk].
+            token_indices (torch.Tensor): Indices of the selected experts for each token, shape: [num_tokens, topk].
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                - global_input_tokens: Permuted hidden states, shape: [num_tokens, hidden_size].
+                - tokens_per_expert: Number of tokens per expert, shape: [num_experts].
+                - permuted_probs: Permuted probabilities, shape: [num_tokens, topk].
         """
         hidden_states, _ = self.dispatch_preprocess2(
             hidden_states=hidden_states,

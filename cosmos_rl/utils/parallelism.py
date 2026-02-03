@@ -27,6 +27,7 @@ from typing import Generator, Optional, List
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import ParallelismConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 
 
 def train_context(enable_compiled_autograd: bool):
@@ -522,3 +523,11 @@ def pre_parallelize_sanity_check(func):
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def is_tensorwise_tp_enabled(config: CosmosConfig) -> bool:
+    return (
+        config.train.quantization.quantization_type != "none"
+        and config.train.quantization.linear_quantization_config.fp_linear_config.quant_recipe
+        == "tensorwise"
+    )

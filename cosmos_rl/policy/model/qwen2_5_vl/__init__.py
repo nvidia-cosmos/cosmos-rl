@@ -1014,6 +1014,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     @classmethod
     def from_pretrained(
         cls,
+        cosmos_config: CosmosConfig,
         hf_config: AutoConfig,
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,

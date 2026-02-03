@@ -27,7 +27,10 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.model_converter import ModelConverter
+from cosmos_rl.utils.model_converter import (
+    QuantizationConverter,
+    register_quantization_converter_class,
+)
 
 MIN_TORCH_VERSION_FOR_FP8 = "2.7.0"
 IS_TORCH_COMPATIBLE_WITH_FP8 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP8)
@@ -87,7 +90,8 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-class FP8ModelConverter(ModelConverter):
+@register_quantization_converter_class("linear", "fp8")
+class FP8LinearQuantizationConverter(QuantizationConverter):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__(config, parallel_dims)
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
@@ -97,28 +101,28 @@ class FP8ModelConverter(ModelConverter):
             raise RuntimeError(
                 "FP8 is only supported for device that has compute capability 8.9 or higher"
             )
-        self.fp8_config = config.train.fp8
+        self.fp8_config = config.train.quantization.linear_quantization_config
 
-        assert is_valid_fp8_quant_recipe(self.fp8_config.quant_recipe)
-        assert is_valid_fp8_recipe(self.fp8_config.fp8_recipe)
+        assert is_valid_fp8_quant_recipe(self.fp8_config.fp_linear_config.quant_recipe)
+        assert is_valid_fp8_recipe(self.fp8_config.fp_linear_config.scaling_recipe)
 
-        if self.fp8_config.fp8_recipe == FP8Recipe.DELAYED_SCALING:
+        if self.fp8_config.fp_linear_config.scaling_recipe == FP8Recipe.DELAYED_SCALING:
             raise NotImplementedError("[FP8] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
 
-        if self.fp8_config.quant_recipe == "rowwise":
+        if self.fp8_config.fp_linear_config.quant_recipe == "rowwise":
             # From torchtitan, it reports an issue that RMSNorm will cause NaN when rowwise quantization and torch.compile is enabled,
             # From that issue, it is recommended to set torch._inductor.config.emulate_precision_casts to True to avoid this.
             # Issue: https://github.com/pytorch/pytorch/issues/150859
             torch._inductor.config.emulate_precision_casts = True
             self.ao_float8_config = Float8LinearConfig.from_recipe_name(
-                self.fp8_config.quant_recipe
+                self.fp8_config.fp_linear_config.quant_recipe
             )
             logger.debug(
                 "[FP8] Set torch._inductor.config.emulate_precision_casts to True"
             )
-        elif self.fp8_config.quant_recipe == "tensorwise":
+        elif self.fp8_config.fp_linear_config.quant_recipe == "tensorwise":
             # For tensorwise, torchao supports that precompute scale and perform FSDP2 weight all-gather in FP8.
             # this could save the bandwidth.
             # self.precompute_scale = True
@@ -140,7 +144,7 @@ class FP8ModelConverter(ModelConverter):
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
             return
 
-        if not self.fp8_config.enable_fp8:
+        if not self.fp8_config.enable:
             return
 
         convert_to_float8_training(
@@ -154,8 +158,7 @@ class FP8ModelConverter(ModelConverter):
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
             return
-
-        if not self.fp8_config.enable_fp8:
+        if not self.fp8_config.enable:
             return
 
         if not self.precompute_scale:
@@ -164,3 +167,65 @@ class FP8ModelConverter(ModelConverter):
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             precompute_float8_dynamic_scale_for_fsdp(m)
+
+
+@register_quantization_converter_class("moe", "fp8")
+class FP8MoEQuantizationConverter(QuantizationConverter):
+    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+        super().__init__(config, parallel_dims)
+        if not IS_TORCH_COMPATIBLE_WITH_FP8:
+            return
+
+        if not is_cuda_compatible(8, 9):
+            raise RuntimeError(
+                "FP8 is only supported for device that has compute capability 8.9 or higher"
+            )
+        self.fp8_config = config.train.quantization.moe_quantization_config
+        self.moe_fqns = [
+            "experts"
+        ]  # only convert MoE layers that has `experts` in the FQN.
+
+        if not config.train.compile:
+            logger.warning(
+                "Compile is required for high performance float8 MoE training."
+            )
+
+        assert (
+            parallel_dims.pp_coord[1] == 1
+        ), "Float8 MoE training does not support pipeline parallelism."
+        assert (
+            parallel_dims.cp_coord[1] == 1
+        ), "Float8 MoE training does not support context parallelism."
+
+    def convert_model(self, model: nn.Module):
+        """
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        """
+        from torchao.quantization.quant_api import quantize_
+
+        try:
+            from torchao.prototype.moe_training.conversion_utils import (
+                MoETrainingConfig,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "torchao installation does not have MoE training support. Please install torchao nightly build."
+            ) from e
+
+        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+            for target_fqn in self.moe_fqns:
+                if target_fqn in cur_fqn:
+                    return True
+            return False
+
+        # FP8 rowwise quantization for MoE layers.
+        config = MoETrainingConfig()
+        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        logger.info(
+            f"Converted MoE layers matching FQNS {self.moe_fqns} "
+            "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
+        )
+
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        pass

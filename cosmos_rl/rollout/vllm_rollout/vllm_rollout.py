@@ -43,8 +43,8 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
+    monkey_patch_for_fp8,
+    simplify_process_weights_after_loading_for_fp8,
 )
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
@@ -162,7 +162,6 @@ class vLLMRollout(RolloutBase):
     def post_init_hook(self, **kwargs):
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
-        self._model_param_map = None  # key: compatible name, value: param
 
         policy_config = self.config.policy
 
@@ -265,7 +264,7 @@ class vLLMRollout(RolloutBase):
             pp_size = rollout_parallelism.pp_size
 
             enable_ep_parallelism = False
-            disable_mm_preprocessor_cache = False
+            llm_additional_kwargs = {}
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
@@ -277,15 +276,26 @@ class vLLMRollout(RolloutBase):
                 enable_ep_parallelism = True
             if model_type in multimodal_type:
                 # for vllm nightly, this is only True for multimodal models, check here
-                disable_mm_preprocessor_cache = True
+                llm_additional_kwargs["mm_processor_cache_gb"] = 0
             assert tp_size * pp_size == rollout_parallelism.world_size, (
                 "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            self.quantization = quantization
+            self.quantization = (
+                quantization if quantization != "none" else None
+            )  # ["none", "fp8", "fp4"]
 
             policy_config = self.config.policy
+
+            # patch the vllm model to use rowwise fp8
+            if self.quantization == "fp8":
+                # patch for weight quantization. [weight loading]
+                # patch must happen before `rollout_engine` is initialized.
+                simplify_process_weights_after_loading_for_fp8()
+                logger.info(
+                    f"[Rollout] Initializing vLLM engine with quantization: {self.quantization}"
+                )
 
             self.rollout_engine = LLM(
                 model=model_path,
@@ -298,7 +308,6 @@ class vLLMRollout(RolloutBase):
                 enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
                 gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
                 disable_custom_all_reduce=True,
-                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
                 skip_tokenizer_init=False,
                 max_model_len=policy_config.model_max_length,
                 disable_log_stats=True,
@@ -316,19 +325,17 @@ class vLLMRollout(RolloutBase):
                 load_format=load_format,
                 # Set max_logprobs for distillation, default is 20
                 max_logprobs=max(self.config.distillation.top_k, 20),
+                **llm_additional_kwargs,
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
-            # initialization done.
-
-            # patch the vllm model to use rowwise fp8
             if self.quantization == "fp8":
-                from vllm.config import set_current_vllm_config
-
-                vllm_config = self.rollout_engine.llm_engine.vllm_config
-                with set_current_vllm_config(vllm_config):
-                    apply_fp8_linear_patch(self.get_underlying_model())
-                simplify_process_weights_after_loading()
+                # Patch for computing kernel in rowwise fp8 manner. [computation]
+                monkey_patch_for_fp8(
+                    self.rollout_engine.llm_engine.vllm_config,
+                    self.get_underlying_model(),
+                )
+            # initialization done.
 
     def post_init_engine_hook(
         self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
@@ -979,16 +986,44 @@ class vLLMRollout(RolloutBase):
         return self.rollout_engine
 
     def fp8_quantization(self, weight: torch.Tensor):
-        # convert to fp8
+        """
+        Quantize the weight to fp8.
+        Args:
+            weight: The weight to quantize, in high-precision dtype. If with shape [out_dim, in_dim], it's Linear case, if with shape [num_experts, out_dim, in_dim], it's MoE case.
+        Returns:
+            qweight: The quantized weight.
+            weight_scale: The scale of the quantized weight.
+        """
         from vllm import _custom_ops as ops
 
         # quantization of rowwise torch scaled_mm.
         # weight has shape [out_dim, in_dim]
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            weight, scale=None, use_per_token_if_dynamic=True
-        )
 
-        return qweight.t(), weight_scale
+        ndim = weight.dim()
+        if ndim == 2:
+            # Fp8LinearMethod
+            # quantization of rowwise torch scaled_mm.
+            # weight has shape [out_dim, in_dim]
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                weight, scale=None, use_per_token_if_dynamic=True
+            )
+
+            return qweight.t(), weight_scale
+        elif ndim == 3:
+            # Fp8OnlineMoEMethod
+            # per-tensor quantization for each expert.
+            # weight has shape [num_experts, out_dim, in_dim]
+            n_experts = weight.shape[0]
+            qweight = torch.empty_like(weight, dtype=torch.float8_e4m3fn)
+            weight_scale = torch.ones(
+                n_experts, dtype=torch.float32, device=weight.device
+            )
+            for expert in range(n_experts):
+                qweight[expert, :, :], weight_scale[expert] = ops.scaled_fp8_quant(
+                    weight[expert, :, :]
+                )
+
+            return qweight, weight_scale
 
     def mxfp4_quantization(self, weight: torch.Tensor):
         """

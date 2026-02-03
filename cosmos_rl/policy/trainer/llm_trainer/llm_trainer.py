@@ -34,7 +34,6 @@ from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from cosmos_rl.policy.trainer.base import Trainer
@@ -89,14 +88,11 @@ class LLMTrainer(Trainer):
 
         # FP8 settings
         with torch.device("meta"):
-            if config.train.fp8.enable_fp8:
-                self.model_converter = FP8ModelConverter(config, parallel_dims)
-                self.model_converter.convert_model(model)
-            elif config.train.fp4.enable_fp4:
-                from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
+            if config.train.quantization.quantization_type != "none":
+                from cosmos_rl.utils.quantization import ModelConverters
 
-                self.model_converter = FP4ModelConverter(config, parallel_dims)
-                self.model_converter.convert_model(model)
+                self.model_converters = ModelConverters(config, parallel_dims)
+                self.model_converters.convert_model(model)
 
         if config.train.fsdp_offload:
             model._apply(
@@ -153,7 +149,7 @@ class LLMTrainer(Trainer):
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
-        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+        if self.config.train.quantization.quantization_type != "none":
             # Constraint of FP8/FP4 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.
             # See: https://github.com/pytorch/pytorch/blob/851a6fa82df251fbc368f0284d941ce78f68e7b1/aten/src/ATen/native/cuda/Blas.cpp#L1252
@@ -168,9 +164,9 @@ class LLMTrainer(Trainer):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
-        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+        if self.config.train.quantization.quantization_type != "none":
             self.optimizers.register_step_post_hook(
-                lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
+                lambda *args, **kwargs: self.model_converters.post_optimizer_hook(
                     self.model_parts
                 )
             )

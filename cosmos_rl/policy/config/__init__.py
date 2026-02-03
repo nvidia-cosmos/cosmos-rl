@@ -620,9 +620,8 @@ class ProfilerConfig(BaseModel):
     )
 
 
-class FP8Config(BaseModel):
-    enable_fp8: bool = Field(default=False, description="Whether to enable fp8.")
-    fp8_recipe: str = Field(
+class FPLinearConfig(BaseModel):
+    scaling_recipe: str = Field(
         default="dynamic_scaling",
         description="Recipe for weight scale calculation.",
         choices=["dynamic_scaling", "delayed_scaling"],
@@ -634,17 +633,38 @@ class FP8Config(BaseModel):
     )
 
 
-class FP4Config(BaseModel):
-    enable_fp4: bool = Field(default=False, description="Whether to enable fp4.")
-    fp4_recipe: str = Field(
-        default="dynamic_scaling",
-        description="Recipe for weight scale calculation.",
-        choices=["dynamic_scaling", "delayed_scaling"],
+class FPMoEConfig(BaseModel):
+    # FP moe is now default in rowwise manner.
+    pass
+
+
+class LinearQuantizationConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable linear quantization."
     )
-    quant_recipe: str = Field(
-        default="rowwise",
-        description="Quantization strategy for weight.",
-        choices=["rowwise", "tensorwise"],
+    fp_linear_config: FPLinearConfig = Field(default_factory=FPLinearConfig)
+
+
+class MoEQuantizationConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable MoE quantization."
+    )
+    # moe does not support fp4 quantization yet.
+    fp_moe_config: FPMoEConfig = Field(default_factory=FPMoEConfig)
+
+
+class TrainQuantizationConfig(BaseModel):
+    # quantization type used for creating model converters.
+    quantization_type: str = Field(
+        default="none",
+        description="Quantization type.",
+        choices=["fp8", "fp4", "none"],
+    )
+    linear_quantization_config: LinearQuantizationConfig = Field(
+        default_factory=LinearQuantizationConfig
+    )
+    moe_quantization_config: MoEQuantizationConfig = Field(
+        default_factory=MoEQuantizationConfig
     )
 
 
@@ -751,9 +771,10 @@ class TrainingConfig(BaseModel):
     )
 
     # --------- Engineering ---------
+    quantization: TrainQuantizationConfig = Field(
+        default_factory=TrainQuantizationConfig
+    )
 
-    fp8: FP8Config = Field(default_factory=FP8Config)
-    fp4: FP4Config = Field(default_factory=FP4Config)
     ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
     resume: Union[bool, str] = Field(
         default=False,
@@ -786,6 +807,11 @@ class TrainingConfig(BaseModel):
         default=None,
         description="FlashAttention version to use. If None, will use the default version.",
         choices=[2, 3],
+    )
+    moe_backend: str = Field(
+        default="grouped_gemm",
+        description="MoE backend to use. Currently support `native`(for-lopp style Expert computation), `grouped_gemm`(Using grouped_gemm from third party) and `torch`(Using torch._grouped_gemm)",
+        choices=["native", "grouped_gemm", "torch"],
     )
 
     seed: Optional[int] = Field(
@@ -846,6 +872,21 @@ class TrainingConfig(BaseModel):
             # Seed must be positive
             logger.warning("Seed is negative, setting to 42")
             self.seed = 42
+
+        # For FP8 MoE
+        if (
+            self.quantization.quantization_type != "none"
+            and self.quantization.moe_quantization_config.enable
+        ):
+            # if MoE quantization is enabled, we need to use the `torch` backend.
+            original_moe_backend = self.moe_backend
+            if original_moe_backend != "torch":
+                logger.warning(
+                    f"For FP8 MoE, moe_backend must be set to `torch`. Got {original_moe_backend}, will change to `torch`."
+                )
+                self.moe_backend = "torch"
+
+        logger.info(f"If MoE existed, using {self.moe_backend} as the MoE backend.")
 
         return self
 
@@ -1240,7 +1281,8 @@ class RolloutConfig(BaseModel):
         choices=["none", "fp8"],
     )
 
-    seed: Optional[int] = Field(default=None, description="random seed for rollout.")
+    # This default seed is aligned with vLLM
+    seed: int = Field(default=0, description="random seed for rollout.")
 
     sampling_config: SamplingConfig = Field(default_factory=SamplingConfig)
 
