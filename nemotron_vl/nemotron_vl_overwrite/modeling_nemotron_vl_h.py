@@ -2077,6 +2077,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        output_hidden_states: Optional[bool] = None,
         use_cache: Optional[bool] = None,
         **kwargs,
     ) -> Union[tuple, NemotronHOutput]:
@@ -2217,6 +2218,7 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
             cache_position=cache_position,
             visual_pos_masks=visual_pos_masks,
             deepstack_visual_embeds=deepstack_visual_embeds,
+            output_hidden_states=output_hidden_states,
             use_cache=use_cache,
             **kwargs,
         )
@@ -2399,6 +2401,7 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
             cache_position=cache_position,
+            output_hidden_states=output_hidden_states,
             use_cache=use_cache,
         )
         hidden_states = nemotron_h_outputs[0]
