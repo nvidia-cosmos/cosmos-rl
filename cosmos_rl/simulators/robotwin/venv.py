@@ -24,7 +24,6 @@ Supports partial reset/step operations and Libero-style uniform interfaces.
 import importlib
 import os
 import gc
-import logging
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +34,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 import yaml
+
+from cosmos_rl.utils.logging import logger
 
 # Monkey-patch to disable OIDN denoiser on incompatible GPUs (H200/Hopper)
 _original_set_denoiser = None
@@ -51,7 +52,7 @@ def _disable_oidn_denoiser():
 
         def patched_set_denoiser(denoiser_type: str):
             if denoiser_type.lower() == "oidn":
-                logging.info(
+                logger.info(
                     "OIDN denoiser disabled for GPU compatibility (H200/Hopper)"
                 )
                 return
@@ -202,7 +203,7 @@ class SubEnv:
         # Check cache first to avoid redundant setup
         if task_name in self.task_metadata_cache:
             self.episode_info_list = self.task_metadata_cache[task_name]
-            logging.info(f"Using cached metadata for task: {task_name}")
+            logger.info(f"Using cached metadata for task: {task_name}")
             return
 
         # Double-check cache after acquiring lock
@@ -216,7 +217,7 @@ class SubEnv:
         retry_count = 0
         last_error = None
 
-        logging.info(f"Setting up task metadata for: {task_name}")
+        logger.info(f"Setting up task metadata for: {task_name}")
 
         while not is_valid and retry_count < max_retries:
             try:
@@ -231,7 +232,7 @@ class SubEnv:
                 is_valid = True
             except KeyError as e:
                 # KeyError likely means config issue, not seed issue - fail immediately
-                logging.error(f"SubEnv setup_task KeyError (config issue): {e}")
+                logger.error(f"SubEnv setup_task KeyError (config issue): {e}")
                 if hasattr(task, "close_env"):
                     task.close_env()
                 raise RuntimeError(
@@ -242,7 +243,7 @@ class SubEnv:
                 # Other errors might be seed-related, retry with different seed
                 last_error = e
                 error_str = str(e)
-                logging.warning(
+                logger.warning(
                     f"SubEnv setup_task failed with seed {trial_seed}: {error_str[:100]}"
                 )
                 if hasattr(task, "close_env"):
@@ -263,7 +264,7 @@ class SubEnv:
         self.episode_info_list = [episode_info]
         # Cache the result
         self.task_metadata_cache[task_name] = self.episode_info_list
-        logging.info(f"Cached metadata for task: {task_name}")
+        logger.info(f"Cached metadata for task: {task_name}")
 
     def create_instruction(self, task_name: str) -> str:
         """Generate task instruction/description.
@@ -283,7 +284,7 @@ class SubEnv:
             instruction = np.random.choice(task_descriptions[0][self.instruction_type])
             return instruction
         except ImportError:
-            logging.warning(
+            logger.warning(
                 "Could not import generate_episode_descriptions, using default instruction"
             )
             return "Complete the {} task".format(task_name)
@@ -302,7 +303,7 @@ class SubEnv:
                 f"SubEnv {self.env_id} task not initialized. "
                 f"Call reset() with task_name first."
             )
-            logging.error(error_msg)
+            logger.error(error_msg)
             raise RuntimeError(error_msg)
 
         with self.local_lock:
@@ -330,7 +331,7 @@ class SubEnv:
                     "info": info,
                 }
             except Exception as e:
-                logging.error(f"SubEnv {self.env_id} step error: {e}")
+                logger.error(f"SubEnv {self.env_id} step error: {e}")
                 raise
 
     def reset(self, task_name: str, env_seed: Optional[int] = None):
@@ -349,7 +350,7 @@ class SubEnv:
             try:
                 self.task.close_env()
             except Exception as e:
-                logging.warning(f"Error closing task: {e}")
+                logger.warning(f"Error closing task: {e}")
 
         # Update seed if provided
         if env_seed is not None:
@@ -361,15 +362,15 @@ class SubEnv:
                 self.setup_task(task_name)
                 self.instruction = self.create_instruction(task_name)
                 self.current_task_name = task_name
-                logging.info(f"SubEnv {self.env_id} task changed to: {task_name}")
+                logger.info(f"SubEnv {self.env_id} task changed to: {task_name}")
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"SubEnv {self.env_id} failed to setup task {task_name}: {e}"
                 )
                 raise
 
         self.task_args["instruction"] = self.instruction
-        logging.debug(
+        logger.debug(
             f"SubEnv {self.env_id} resetting with task {task_name}, seed {self.env_seed}"
         )
 
@@ -382,7 +383,7 @@ class SubEnv:
         while not is_valid and retry_count < max_retries:
             try:
                 self.task = _class_decorator(task_name)
-                logging.info(
+                logger.info(
                     f"SubEnv {self.env_id} setup_demo with task {task_name}, seed {trial_seed}, retry {retry_count}"
                 )
                 self.task.setup_demo(
@@ -393,7 +394,7 @@ class SubEnv:
                 self.task.reward_step = 0
                 is_valid = True
             except Exception as e:
-                logging.warning(
+                logger.warning(
                     f"SubEnv {self.env_id} reset failed with seed {trial_seed}: {e}, retrying..."
                 )
                 if self.task is not None and hasattr(self.task, "close_env"):
@@ -448,7 +449,7 @@ class SubEnv:
                 try:
                     self.task.close_env(clear_cache=clear_cache)
                 except Exception as e:
-                    logging.warning(f"Error closing SubEnv {self.env_id}: {e}")
+                    logger.warning(f"Error closing SubEnv {self.env_id}: {e}")
 
 
 class VectorEnv(gym.Env):
@@ -651,7 +652,7 @@ class VectorEnv(gym.Env):
         Raises:
             RuntimeError: If any environment fails to setup
         """
-        logging.info(
+        logger.info(
             f"Setting up tasks for {self.num_envs} environments (this may take several minutes)..."
         )
 
@@ -660,7 +661,7 @@ class VectorEnv(gym.Env):
         default_task = self.task_suite[0] if self.task_suite else None
 
         if not default_task:
-            logging.warning("No tasks in task_suite, skipping setup_tasks")
+            logger.warning("No tasks in task_suite, skipping setup_tasks")
             return
 
         futures = {}
@@ -671,12 +672,12 @@ class VectorEnv(gym.Env):
         for i in range(self.num_envs):
             try:
                 futures[i].result(timeout=timeout)
-                logging.info(f"SubEnv {i} setup completed")
+                logger.info(f"SubEnv {i} setup completed")
             except Exception as e:
-                logging.error(f"SubEnv {i} setup_task error: {e}")
+                logger.error(f"SubEnv {i} setup_task error: {e}")
                 raise RuntimeError(f"SubEnv {i} setup_task error: {e}")
-
-        logging.info("All environments setup completed")
+        
+        logger.info("All environments setup completed")
 
     def reset(
         self,
@@ -726,24 +727,24 @@ class VectorEnv(gym.Env):
                 # Use trial_id as env_seed
                 env_seed = trial_ids[idx]
 
-                logging.info(
+                logger.info(
                     f"Resetting SubEnv {env_id}: task={task_name}, seed={env_seed}"
                 )
                 try:
                     # Note: global_lock in SubEnv.reset() ensures sequential execution
                     # First reset takes: setup_task (~60-90s) + setup_demo (~60-90s)
                     # Subsequent resets: only setup_demo (~60-90s) due to caching
-                    logging.info(
+                    logger.info(
                         f"SubEnv {env_id} reset starting (this may take 2-4 minutes)..."
                     )
                     obs = self.envs[env_id].reset(
                         task_name=task_name, env_seed=env_seed
                     )
-                    logging.info(f"SubEnv {env_id} reset completed successfully")
+                    logger.info(f"SubEnv {env_id} reset completed successfully")
                     observations.append(obs)
                 except Exception as e:
                     error_details = traceback.format_exc()
-                    logging.error(f"SubEnv {env_id} reset error:\n{error_details}")
+                    logger.error(f"SubEnv {env_id} reset error:\n{error_details}")
                     raise RuntimeError(
                         f"SubEnv {env_id} reset error: {type(e).__name__}: {e}\n"
                         f"Full traceback:\n{error_details}"
@@ -816,7 +817,7 @@ class VectorEnv(gym.Env):
                     truncated.append(result["truncated"])
                     infos.append(result["info"])
                 except Exception as e:
-                    logging.error(f"SubEnv {env_id} step error: {e}")
+                    logger.error(f"SubEnv {env_id} step error: {e}")
                     raise RuntimeError(f"SubEnv {env_id} step error: {e}")
 
         return observations, rewards, terminated, truncated, infos
