@@ -75,7 +75,7 @@ class CheckpointMananger:
         """
         saved_step_to_timestamp_map = {}
         if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
+            root_output_dir = self._get_root_output_dir()
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
 

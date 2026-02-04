@@ -190,7 +190,9 @@ class TestCheckpointManager(unittest.TestCase):
         parallel_dims = create_test_parallel_dims()
 
         output_dir = os.path.join(self.test_dir, self.timestamp1)
-        config = create_test_config(output_dir=output_dir, resume=False, max_keep=3, export_safetensors=True)
+        config = create_test_config(
+            output_dir=output_dir, resume=False, max_keep=3, export_safetensors=True
+        )
         manager = CheckpointMananger(
             config, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
         )
@@ -278,9 +280,7 @@ class TestCheckpointManager(unittest.TestCase):
         optimizer.step()
         scheduler.step()
         # Assert new model weights are different from original
-        self.assertFalse(
-            self._state_dicts_equal(original_state, model.state_dict())
-        )
+        self.assertFalse(self._state_dicts_equal(original_state, model.state_dict()))
         self.assertFalse(
             self._state_dicts_equal(original_optimizer_state, optimizer.state_dict())
         )
@@ -290,8 +290,9 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Assert new model weights are now the same as original
         self.assertTrue(self._state_dicts_equal(original_state, model.state_dict()))
-        self.assertTrue(self._state_dicts_equal(original_optimizer_state, optimizer.state_dict()))
-
+        self.assertTrue(
+            self._state_dicts_equal(original_optimizer_state, optimizer.state_dict())
+        )
 
     def test_save_check_does_not_update_on_worse_score(self):
         """Test that save_check does not update best checkpoint on worse score."""
@@ -357,7 +358,9 @@ class TestCheckpointManager(unittest.TestCase):
         scheduler = SimpleScheduler()
 
         # Run forward pass and compute gradients (input: batch=4, dim=10 -> output: batch=4, dim=5)
-        loss = torch.nn.functional.mse_loss(model(torch.randn(4, 10)), torch.randn(4, 5))
+        loss = torch.nn.functional.mse_loss(
+            model(torch.randn(4, 10)), torch.randn(4, 5)
+        )
         loss.backward()
         optimizer.step()
 
@@ -381,15 +384,27 @@ class TestCheckpointManager(unittest.TestCase):
         new_scheduler = SimpleScheduler()
 
         # Assert new model weights are different from original
-        self.assertFalse(self._state_dicts_equal(original_state, new_model.state_dict()))
-        self.assertFalse(self._state_dicts_equal(original_optimizer_state, new_optimizer.state_dict()))
+        self.assertFalse(
+            self._state_dicts_equal(original_state, new_model.state_dict())
+        )
+        self.assertFalse(
+            self._state_dicts_equal(
+                original_optimizer_state, new_optimizer.state_dict()
+            )
+        )
 
         # Load the checkpoint from the previous session
-        manager2.load_checkpoint(new_model, new_optimizer, new_scheduler, model_name_or_path="dummy")
+        manager2.load_checkpoint(
+            new_model, new_optimizer, new_scheduler, model_name_or_path="dummy"
+        )
 
         # Assert new model weights are now the same as original
         self.assertTrue(self._state_dicts_equal(original_state, new_model.state_dict()))
-        self.assertTrue(self._state_dicts_equal(original_optimizer_state, new_optimizer.state_dict()))
+        self.assertTrue(
+            self._state_dicts_equal(
+                original_optimizer_state, new_optimizer.state_dict()
+            )
+        )
 
     def test_best_score_default_for_loss_metric(self):
         """Test default best_score is inf for loss metrics."""
