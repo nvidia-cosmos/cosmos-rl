@@ -487,6 +487,9 @@ class NodesManager:
         self.output_files: List[str] = []
         self.envs: List[Dict[str, str]] = []
 
+        # Backup states for rollback
+        self.backuped_states = None
+
     def replica_placement(
         self,
         args: argparse.Namespace,
@@ -526,17 +529,6 @@ class NodesManager:
             script_args=script_args,
         )
 
-        # launch reference replicas if needed
-        self.replica_placement_for_role(
-            args=args,
-            role="reference",
-            n_replicas=n_reference,
-            min_n_gpus_replica=min_n_gpus_reference,
-            replica_sh=replica_sh,
-            script=script,
-            script_args=script_args,
-        )
-
         # launch rollout rollout replicas, put it at last, fixed order.
         self.replica_placement_for_role(
             args=args,
@@ -548,13 +540,23 @@ class NodesManager:
             script_args=script_args,
         )
 
+        # launch reference replicas if needed
+        self.replica_placement_for_role(
+            args=args,
+            role="reference",
+            n_replicas=n_reference,
+            min_n_gpus_replica=min_n_gpus_reference,
+            replica_sh=replica_sh,
+            script=script,
+            script_args=script_args,
+        )
+
         # If commands list is not empty, we need to append the commands to the last node.
         if self.commands:
-            if self.global_worker_idx + 1 <= len(self.nodes):
-                node = self.nodes[self.global_worker_idx]
-            else:
-                node = Node(self.global_worker_idx, self.available_gpus)
-                self.nodes.append(node)
+            node = self.creating_or_using_node()
+            logger.info(
+                f"Appending commands to node {self.global_worker_idx} with {len(self.commands)} commands"
+            )
             node.launch_commands.extend_commands(
                 self.commands,
                 self.gpu_devices,
@@ -564,6 +566,14 @@ class NodesManager:
             )
             self.global_worker_idx += 1
             self.clear_list()
+
+    def creating_or_using_node(self):
+        if self.global_worker_idx + 1 <= len(self.nodes):
+            node = self.nodes[self.global_worker_idx]
+        else:
+            node = Node(self.global_worker_idx, self.available_gpus)
+            self.nodes.append(node)
+        return node
 
     def replica_placement_for_role(
         self,
@@ -578,23 +588,19 @@ class NodesManager:
         if n_replicas == 0:
             return
 
-        if self.nodes and (
-            min_n_gpus_replica > len(self.available_gpus)
-            or (self.rl_mode in ["colocated_separated"] and role == "rollout")
+        if (self.nodes and (min_n_gpus_replica > len(self.available_gpus))) or (
+            self.rl_mode in ["colocated_separated"] and role == "rollout"
         ):
             # If:
             # 1. not in the first replica placement
             # 2. the number of GPUs available for the current node is not enough for the minimum number of GPUs per replica
             # 3. some cards has already been assigned to other replicas
-            # 4. in colocated-separated mode and this is a rollout role placement, we have to interrupt the current node's placement
+            # 4. or in colocated-separated mode and this is a rollout role placement, we have to interrupt the current node's placement
             # then we need to increase the global worker index and allocate a new node.
-            if self.gpu_idx > 0:
-                if self.global_worker_idx + 1 <= len(self.nodes):
-                    node = self.nodes[self.global_worker_idx]
-                else:
-                    node = Node(self.global_worker_idx, self.available_gpus)
-                    self.nodes.append(Node(self.global_worker_idx, self.available_gpus))
-
+            if self.gpu_idx > 0 or (
+                self.rl_mode in ["colocated_separated"] and role == "rollout"
+            ):
+                node = self.creating_or_using_node()
                 node.launch_commands.extend_commands(
                     self.commands,
                     self.gpu_devices,
@@ -611,12 +617,20 @@ class NodesManager:
 
         # If in colocated-separated mode, we reset the global worker index and gpu index to 0.
         # To let rollout replicas use the same devices as policy replicas.
+        self.backuped_states = (
+            self.commands,
+            self.gpu_devices,
+            self.control_urls,
+            self.output_files,
+            self.envs,
+            self.global_worker_idx,
+            self.gpu_idx,
+        )
         if self.rl_mode in ["colocated_separated"] and role == "rollout":
             logger.info(
                 "Reset global worker index and gpu index to 0 for rollout replicas in colocated-separated mode"
             )
-            self.global_worker_idx = 0
-            self.gpu_idx = 0
+            self.clear_all(including_nodes=False)
 
         for i in range(n_replicas):
             if min_n_gpus_replica > len(self.available_gpus):
@@ -664,11 +678,7 @@ class NodesManager:
                     self.envs.append(env_for_node)
 
                     # Add a node or use existing node
-                    if self.global_worker_idx + 1 <= len(self.nodes):
-                        node = self.nodes[self.global_worker_idx]
-                    else:
-                        node = Node(self.global_worker_idx, self.available_gpus)
-                        self.nodes.append(node)
+                    node = self.creating_or_using_node()
                     node.launch_commands.extend_commands(
                         [self.commands],
                         [self.gpu_devices],
@@ -683,11 +693,7 @@ class NodesManager:
                 # if the current node has enough GPUs for the minimum number of GPUs per replica, we can continue to place the next replica.
                 if self.gpu_idx + min_n_gpus_replica > len(self.available_gpus):
                     # if the remaining GPUs are not enough for the minimum number of GPUs per replica, we need to move to a new node.
-                    if self.global_worker_idx + 1 <= len(self.nodes):
-                        node = self.nodes[self.global_worker_idx]
-                    else:
-                        node = Node(self.global_worker_idx, self.available_gpus)
-                        self.nodes.append(node)
+                    node = self.creating_or_using_node()
                     node.launch_commands.extend_commands(
                         [self.commands],
                         [self.gpu_devices],
@@ -730,6 +736,40 @@ class NodesManager:
 
                 self.gpu_idx += min_n_gpus_replica
 
+        if self.rl_mode in ["colocated_separated"] and role == "rollout":
+            (
+                original_commands,
+                original_gpu_devices,
+                original_control_urls,
+                original_output_files,
+                original_envs,
+                original_global_worker_idx,
+                original_gpu_idx,
+            ) = self.backuped_states
+            if original_global_worker_idx < self.global_worker_idx:
+                # We added new nodes to the previous nodes list, keep current worker index
+                pass
+            else:
+                # We have not used all the previous nodes of policy.
+                # First finalize existing commands
+                if len(self.commands) > 0:
+                    node = self.nodes[self.global_worker_idx]
+                    node.launch_commands.extend_commands(
+                        self.commands,
+                        self.gpu_devices,
+                        self.control_urls,
+                        self.output_files,
+                        self.envs,
+                    )
+                # recover the backuped states
+                self.commands = original_commands
+                self.gpu_devices = original_gpu_devices
+                self.control_urls = original_control_urls
+                self.output_files = original_output_files
+                self.envs = original_envs
+                self.global_worker_idx = original_global_worker_idx
+                self.gpu_idx = original_gpu_idx
+
     def clear_list(self):
         # clear the commands, gpu devices, control URLs, output files, and environment variables for the current node.
         # Note: gpu_idx may not be 0 after clearing the list
@@ -739,11 +779,12 @@ class NodesManager:
         self.output_files = []
         self.envs = []
 
-    def clear_all(self):
+    def clear_all(self, including_nodes: bool = False):
         self.clear_list()
-        self.nodes = []
         self.global_worker_idx = 0
         self.gpu_idx = 0
+        if including_nodes:
+            self.nodes = []
 
     def finalize(self) -> List[SingleWorkerCommands]:
         return [node.launch_commands for node in self.nodes]

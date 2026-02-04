@@ -271,6 +271,10 @@ class P2RCollectiveManager:
                 )
             r_rank = self.global_rank
             p_rank = self.global_rank
+            if p_rank + 1 > command.src_replica_size:
+                # For rollout rank exceeds the policy world size, we don't need to setup IPC.
+                return
+
             mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
                 logger.info(

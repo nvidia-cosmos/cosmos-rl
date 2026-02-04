@@ -69,7 +69,7 @@ save_mode = "async"
 
 [rollout.parallelism]
 n_init_replicas = 1
-tp_size = 1
+tp_size = 4
 pp_size = 1
 
 [policy.parallelism]
