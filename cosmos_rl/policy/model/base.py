@@ -14,8 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any
+from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any, NamedTuple
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
@@ -40,8 +39,7 @@ from cosmos_rl.utils.dim_slice_info import (
 )
 
 
-@dataclass
-class CosmosModelOutput:
+class CosmosModelOutput(NamedTuple):
     """
     Base class for model's outputs, with logits and potential auxiliary loss.
 
@@ -51,7 +49,7 @@ class CosmosModelOutput:
     """
 
     logits: torch.Tensor = None
-    aux_loss: torch.Tensor = None
+    aux_loss: Optional[torch.Tensor] = None
 
 
 class BaseModel(torch.nn.Module, ABC):

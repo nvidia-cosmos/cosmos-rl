@@ -26,6 +26,7 @@ import torch.nn as nn
 
 from cosmos_rl.utils.attn_util import repeat_kv
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.model.base import CosmosModelOutput
 
 
 def all_to_all_tensor(
@@ -487,6 +488,8 @@ def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
     else:
         # non-pp case, just use hook is perfect.
         def gather_output_hook(model, args, output):
-            return gather_outputs_for_ulysses(output, gather_dim=1, cp_mesh=cp_mesh)
+            logits = output.logits
+            logits = gather_outputs_for_ulysses(logits, gather_dim=1, cp_mesh=cp_mesh)
+            return CosmosModelOutput(logits=logits, aux_loss=output.aux_loss)
 
         model.register_forward_hook(gather_output_hook)
