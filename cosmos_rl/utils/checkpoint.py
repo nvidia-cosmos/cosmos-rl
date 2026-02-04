@@ -104,7 +104,7 @@ class CheckpointMananger:
                     root_output_dir,
                     saved_step_to_timestamp[step],
                     "checkpoints",
-                    step,
+                    f"step_{step}",
                     "policy",
                 )
                 for step in reversed(steps)
@@ -184,17 +184,29 @@ class CheckpointMananger:
 
     def _delete_step_checkpoint(self, step: int):
         """Delete checkpoint and safetensors for a given step."""
-        step_to_timestamp = self._get_saved_step_to_timestamp_map()
-        if step not in step_to_timestamp:
-            return
-        timestamp = step_to_timestamp[step]
-        root_output_dir = self._get_root_output_dir()
-        ckpt_dir = os.path.join(
-            root_output_dir, timestamp, "checkpoints", f"step_{step}"
-        )
-        safetensors_dir = os.path.join(
-            root_output_dir, timestamp, "safetensors", f"step_{step}"
-        )
+        if self.config.train.resume == True:  # noqa: E712
+            # Resume case: checkpoint may be in a different timestamp directory
+            step_to_timestamp = self._get_saved_step_to_timestamp_map()
+            timestamp = step_to_timestamp.get(step)
+            if timestamp is None:
+                # Checkpoint directory not found, skip deletion
+                logger.warning(
+                    f"Checkpoint step_{step} not found in any timestamp directory"
+                )
+                return
+            root_output_dir = self._get_root_output_dir()
+            ckpt_dir = os.path.join(
+                root_output_dir, timestamp, "checkpoints", f"step_{step}"
+            )
+            safetensors_dir = os.path.join(
+                root_output_dir, timestamp, "safetensors", f"step_{step}"
+            )
+        else:
+            # Non-resume case: checkpoint is in current output_dir
+            ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{step}")
+            safetensors_dir = os.path.join(
+                self.config.train.output_dir, "safetensors", f"step_{step}"
+            )
         if os.path.exists(ckpt_dir):
             shutil.rmtree(ckpt_dir)
             logger.info(f"Removed old checkpoint: {ckpt_dir}")
