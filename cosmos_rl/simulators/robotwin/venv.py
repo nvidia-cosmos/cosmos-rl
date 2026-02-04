@@ -217,18 +217,11 @@ class SubEnv:
             self.episode_info_list = self.task_metadata_cache[task_name]
             return
 
-        # Double-check cache after acquiring lock
-        if task_name in self.task_metadata_cache:
-            self.episode_info_list = self.task_metadata_cache[task_name]
-            return
-
         trial_seed = self.env_seed
         is_valid = False
         max_retries = 10
         retry_count = 0
         last_error = None
-
-        logger.debug(f"Setting up task metadata for: {task_name}")
 
         while not is_valid and retry_count < max_retries:
             try:
@@ -303,7 +296,10 @@ class SubEnv:
         """Execute one step in the environment.
 
         Args:
-            action: Action to take in the environment (1D array of action_dim)
+            action: Action to take in the environment
+                   - Single step: 1D array of shape (action_dim,)
+                   - Chunk actions: 2D array of shape (horizon, action_dim)
+                   RoboTwin's gen_sparse_reward_data naturally supports chunk actions
 
         Returns:
             Dictionary containing obs, reward, terminated, truncated, and info
@@ -318,14 +314,20 @@ class SubEnv:
 
         with self.local_lock:
             try:
-                # RoboTwin's gen_sparse_reward_data expects chunk_actions with shape (num_steps, action_dim)
-                # For single-step execution, wrap action in an extra dimension
+                # RoboTwin's gen_sparse_reward_data expects chunk_actions with shape (horizon, action_dim)
+                # It naturally supports both single-step (horizon=1) and chunk actions
+                # Convert to 2D if needed: (action_dim,) -> (1, action_dim)
                 if action.ndim == 1:
                     chunk_action = action[
                         np.newaxis, :
                     ]  # (action_dim,) -> (1, action_dim)
+                elif action.ndim == 2:
+                    chunk_action = action  # Already (horizon, action_dim)
                 else:
-                    chunk_action = action
+                    raise ValueError(
+                        f"Action must be 1D (action_dim,) or 2D (horizon, action_dim), "
+                        f"got shape {action.shape}"
+                    )
 
                 reward, terminated, truncated, info = self.task.gen_sparse_reward_data(
                     chunk_action
@@ -372,7 +374,13 @@ class SubEnv:
                 self.setup_task(task_name)
                 self.instruction = self.create_instruction(task_name)
                 self.current_task_name = task_name
-                logger.debug(f"SubEnv {self.env_id} task changed to: {task_name}")
+                # Close existing task if task name changed
+                if self.task is not None and hasattr(self.task, "close_env"):
+                    try:
+                        self.task.close_env()
+                    except Exception:
+                        pass  # Ignore errors when closing
+                    self.task = None
             except Exception as e:
                 logger.error(
                     f"SubEnv {self.env_id} failed to setup task {task_name}: {e}"
@@ -380,11 +388,9 @@ class SubEnv:
                 raise
 
         self.task_args["instruction"] = self.instruction
-        logger.debug(
-            f"SubEnv {self.env_id} resetting with task {task_name}, seed {self.env_seed}"
-        )
 
         # Try to create and setup task with retries
+        # Reuse existing task instance if available and same task_name, otherwise create new one
         trial_seed = self.env_seed
         is_valid = False
         max_retries = 10
@@ -392,10 +398,10 @@ class SubEnv:
 
         while not is_valid and retry_count < max_retries:
             try:
-                self.task = _class_decorator(task_name)
-                logger.debug(
-                    f"SubEnv {self.env_id} setup_demo with task {task_name}, seed {trial_seed}, retry {retry_count}"
-                )
+                # Only create new task if we don't have one
+                if self.task is None:
+                    self.task = _class_decorator(task_name)
+
                 self.task.setup_demo(
                     now_ep_num=trial_seed, seed=trial_seed, **self.task_args
                 )
@@ -403,12 +409,14 @@ class SubEnv:
                 self.task.run_steps = 0
                 self.task.reward_step = 0
                 is_valid = True
-            except Exception as e:
-                logger.warning(
-                    f"SubEnv {self.env_id} reset failed with seed {trial_seed}: {e}, retrying..."
-                )
+            except Exception:
+                # Close and recreate task on error
                 if self.task is not None and hasattr(self.task, "close_env"):
-                    self.task.close_env()
+                    try:
+                        self.task.close_env()
+                    except Exception:
+                        pass
+                self.task = _class_decorator(task_name)
                 trial_seed += 1
                 retry_count += 1
                 continue

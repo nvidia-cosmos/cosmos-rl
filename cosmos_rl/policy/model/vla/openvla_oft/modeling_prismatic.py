@@ -37,7 +37,6 @@ from .constants import (
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
 # Set up logger
-from cosmos_rl.utils.util import logger
 
 
 # === Utility Functions for Monkey-Patching ===
@@ -1878,7 +1877,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
             predicted_action_token_ids = reponse_ids.cpu().numpy()
 
-            logprobs = None
+            logprobs = torch.zeros_like(response_last256, dtype=torch.float16)
         else:
             # assert temperature > 0
             # org
@@ -2155,7 +2154,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             input_embeddings.shape[0], -1, input_embeddings.shape[2]
         )
 
-        logger.info(f"pixel_values shape: {pixel_values.shape}")
+        # logger.info(f"pixel_values shape: {pixel_values.shape}")
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(
