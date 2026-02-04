@@ -479,9 +479,10 @@ def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
                         if key in kwargs:
                             kwargs.pop(key)
                 outputs = origin_forward(*args, **kwargs)
-                return gather_outputs_for_ulysses(
-                    outputs, gather_dim=1, cp_mesh=cp_mesh
+                logits = gather_outputs_for_ulysses(
+                    outputs.logits, gather_dim=1, cp_mesh=cp_mesh
                 )
+                return outputs._replace(logits=logits)
 
             model.forward = types.MethodType(gather_output_forward, model)
     else:
