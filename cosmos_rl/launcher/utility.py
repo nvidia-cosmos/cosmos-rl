@@ -15,7 +15,7 @@
 
 import os
 import subprocess
-from typing import List, Optional, Dict, Any, NamedTuple, Iterator
+from typing import List, Optional, Dict, Any, NamedTuple, Iterator, Callable
 import time
 import argparse
 import sys
@@ -435,6 +435,359 @@ class SingleWorkerCommands:
 
     def __repr__(self) -> str:
         return "\n".join([repr(command_item) for command_item in self.command_items])
+
+
+class Node:
+    def __init__(self, worker_idx: int, available_gpus: List[int]):
+        self.worker_idx = worker_idx
+        self.available_gpus = available_gpus
+
+        self.gpu_idx = 0
+        self.launch_commands = SingleWorkerCommands(worker_idx)
+
+
+class NodesManager:
+    def __init__(
+        self,
+        replica_sh: str,
+        available_gpus: List[int],
+        controller_url: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        config_path: Optional[str] = None,
+        rdzv_port: Optional[int] = None,
+        rl_mode: str = "disaggregated",
+        backend: str = "vllm",
+        get_worker_ip: Optional[Callable] = None,
+    ):
+        self.nodes: List[Node] = []  # Global nodes list.
+        self.global_worker_idx = 0  # Current node index for replica assignment.
+        self.gpu_idx = 0  # unused gpu start index for current node index.
+
+        self.controller_url = controller_url
+        self.output_dir = output_dir
+        self.config_path = config_path
+        self.rdzv_port = rdzv_port
+        self.available_gpus = available_gpus
+        self.rl_mode = rl_mode
+        self.rollout_backend = backend
+        self.get_worker_ip = get_worker_ip
+
+        # Checks
+        assert len(available_gpus) in [
+            1,
+            2,
+            4,
+            8,
+        ], "Number of GPUs per node must be 1, 2, 4, or 8"
+
+        # Commands, command-associated GPU devices, control URLs, output files, and environment variables.
+        self.commands: List[str] = []
+        self.gpu_devices: List[str] = []
+        self.control_urls: List[str] = []
+        self.output_files: List[str] = []
+        self.envs: List[Dict[str, str]] = []
+
+        # Backup states for rollback
+        self.backuped_states = None
+
+    def replica_placement(
+        self,
+        args: argparse.Namespace,
+        n_policy: int,  # Number of policy replicas.
+        n_rollouts: int,  # Number of rollout replicas.
+        n_reference: int,  # Number of reference replicas.
+        min_n_gpus_policy: int,  # Minimum number of GPUs per policy replica.
+        min_n_gpus_rollout: int,  # Minimum number of GPUs per rollout replica.
+        min_n_gpus_reference: int,  # Minimum number of GPUs per reference replica.
+        replica_sh: str,
+        script: Optional[str] = None,  # Entrypoint script for cosmos-rl.
+        script_args: Optional[List[Any]] = None,
+    ):
+        if self.rl_mode in ["colocated"]:
+            if n_rollouts > 0:
+                n_rollouts = 0
+                logger.warning(
+                    f"Launching Cosmos-RL in colocated mode, rollout replicas will share the same devices as policy replicas, reset n_rollouts from {n_rollouts} to 0"
+                )
+
+        if self.rl_mode in ["colocated_separated"]:
+            if n_rollouts <= 0:
+                # If n_rollouts is not specified, set it equal to n_policy.
+                n_rollouts = n_policy
+                logger.warning(
+                    f"Launching Cosmos-RL in colocated-separated mode, rollout replicas will share the same devices as policy replicas, reset n_rollouts from {n_rollouts} to {n_policy}"
+                )
+
+        # launch policy replicas, put it at first, fixed order.
+        self.replica_placement_for_role(
+            args=args,
+            role="policy",
+            n_replicas=n_policy,
+            min_n_gpus_replica=min_n_gpus_policy,
+            replica_sh=replica_sh,
+            script=script,
+            script_args=script_args,
+        )
+
+        # launch rollout rollout replicas, put it at last, fixed order.
+        self.replica_placement_for_role(
+            args=args,
+            role="rollout",
+            n_replicas=n_rollouts,
+            min_n_gpus_replica=min_n_gpus_rollout,
+            replica_sh=replica_sh,
+            script=script,
+            script_args=script_args,
+        )
+
+        # launch reference replicas if needed
+        self.replica_placement_for_role(
+            args=args,
+            role="reference",
+            n_replicas=n_reference,
+            min_n_gpus_replica=min_n_gpus_reference,
+            replica_sh=replica_sh,
+            script=script,
+            script_args=script_args,
+        )
+
+        # If commands list is not empty, we need to append the commands to the last node.
+        if self.commands:
+            node = self.creating_or_using_node()
+            logger.info(
+                f"Appending commands to node {self.global_worker_idx} with {len(self.commands)} commands"
+            )
+            node.launch_commands.extend_commands(
+                self.commands,
+                self.gpu_devices,
+                self.control_urls,
+                self.output_files,
+                self.envs,
+            )
+            self.global_worker_idx += 1
+            self.clear_list()
+
+    def creating_or_using_node(self):
+        if self.global_worker_idx + 1 <= len(self.nodes):
+            node = self.nodes[self.global_worker_idx]
+        else:
+            node = Node(self.global_worker_idx, self.available_gpus)
+            self.nodes.append(node)
+        return node
+
+    def replica_placement_for_role(
+        self,
+        args: argparse.Namespace,
+        role: str,
+        n_replicas: int,
+        min_n_gpus_replica: int,
+        replica_sh: str,
+        script: Optional[str] = None,
+        script_args: Optional[List[Any]] = None,
+    ):
+        if n_replicas == 0:
+            return
+
+        if (self.nodes and (min_n_gpus_replica > len(self.available_gpus))) or (
+            self.rl_mode in ["colocated_separated"] and role == "rollout"
+        ):
+            # If:
+            # 1. not in the first replica placement
+            # 2. the number of GPUs available for the current node is not enough for the minimum number of GPUs per replica
+            # 3. some cards has already been assigned to other replicas
+            # 4. or in colocated-separated mode and this is a rollout role placement, we have to interrupt the current node's placement
+            # then we need to increase the global worker index and allocate a new node.
+            if self.gpu_idx > 0 or (
+                self.rl_mode in ["colocated_separated"] and role == "rollout"
+            ):
+                node = self.creating_or_using_node()
+                node.launch_commands.extend_commands(
+                    self.commands,
+                    self.gpu_devices,
+                    self.control_urls,
+                    self.output_files,
+                    self.envs,
+                )
+
+                self.gpu_idx = 0
+                self.global_worker_idx += 1
+
+                # clear the commands, gpu devices, control URLs, output files, and environment variables for the current node.
+                self.clear_list()
+
+        # If in colocated-separated mode, we reset the global worker index and gpu index to 0.
+        # To let rollout replicas use the same devices as policy replicas.
+        self.backuped_states = (
+            self.commands,
+            self.gpu_devices,
+            self.control_urls,
+            self.output_files,
+            self.envs,
+            self.global_worker_idx,
+            self.gpu_idx,
+        )
+        if self.rl_mode in ["colocated_separated"] and role == "rollout":
+            logger.info(
+                "Reset global worker index and gpu index to 0 for rollout replicas in colocated-separated mode"
+            )
+            self.clear_all(including_nodes=False)
+
+        for i in range(n_replicas):
+            if min_n_gpus_replica > len(self.available_gpus):
+                # A single node is not enough for one replica
+                nodes_needed = min_n_gpus_replica // len(self.available_gpus)
+                rdzv_ip = "localhost"
+                for node_in_replica in range(nodes_needed):
+                    gpu_devices_for_node = ",".join(
+                        [str(d) for d in self.available_gpus]
+                    )
+                    self.gpu_devices.append(gpu_devices_for_node)
+
+                    command_for_node = f"{replica_sh} --type {role} --ngpus {len(self.available_gpus)} --nnodes {nodes_needed} --backend {self.rollout_backend} --config {self.config_path}"
+                    if node_in_replica == 0:
+                        command_for_node += (
+                            f" --rdzv-endpoint {rdzv_ip}:{self.rdzv_port}"
+                        )
+                        if self.get_worker_ip is not None:
+                            rdzv_ip = self.get_worker_ip(self.global_worker_idx, args)
+                    else:
+                        command_for_node += (
+                            f" --rdzv-endpoint {rdzv_ip}:{self.rdzv_port}"
+                        )
+
+                    if script is not None:
+                        command_for_node += f" --script {script}"
+                    if script_args is not None:
+                        command_for_node += f" {' '.join(script_args)}"
+
+                    self.commands.append(command_for_node)
+
+                    control_url_for_node = self.controller_url
+                    output_file_for_node = (
+                        os.path.join(self.output_dir, f"{role}_{i}.log")
+                        if self.output_dir is not None
+                        else None
+                    )
+                    self.control_urls.append(control_url_for_node)
+                    self.output_files.append(output_file_for_node)
+                    env_for_node = None
+                    if self.rl_mode != "colocated_separated":
+                        env_for_node = {
+                            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+                        }
+                    self.envs.append(env_for_node)
+
+                    # Add a node or use existing node
+                    node = self.creating_or_using_node()
+                    node.launch_commands.extend_commands(
+                        [self.commands],
+                        [self.gpu_devices],
+                        [self.control_urls],
+                        [self.output_files],
+                        [self.envs],
+                    )
+
+                    self.global_worker_idx += 1
+                    self.clear_list()
+            else:
+                # if the current node has enough GPUs for the minimum number of GPUs per replica, we can continue to place the next replica.
+                if self.gpu_idx + min_n_gpus_replica > len(self.available_gpus):
+                    # if the remaining GPUs are not enough for the minimum number of GPUs per replica, we need to move to a new node.
+                    node = self.creating_or_using_node()
+                    node.launch_commands.extend_commands(
+                        [self.commands],
+                        [self.gpu_devices],
+                        [self.control_urls],
+                        [self.output_files],
+                        [self.envs],
+                    )
+                    self.global_worker_idx += 1
+
+                    self.clear_list()
+                    self.gpu_idx = 0
+
+                gpu_devices_for_replica = ",".join(
+                    [
+                        str(d)
+                        for d in self.available_gpus[
+                            self.gpu_idx : self.gpu_idx + min_n_gpus_replica
+                        ]
+                    ]
+                )
+                commands_for_replica = f"{replica_sh} --type {role} --ngpus {min_n_gpus_replica} --backend {self.rollout_backend} --config {self.config_path}"
+                if script is not None:
+                    commands_for_replica += f" --script {script}"
+                if script_args is not None:
+                    commands_for_replica += f" {' '.join(script_args)}"
+                self.commands.append(commands_for_replica)
+                self.gpu_devices.append(gpu_devices_for_replica)
+                self.control_urls.append(self.controller_url)
+                self.output_files.append(
+                    os.path.join(self.output_dir, f"{role}_{i}.log")
+                    if self.output_dir is not None
+                    else None
+                )
+                env_for_replica = None
+                if self.rl_mode != "colocated_separated":
+                    env_for_replica = {
+                        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+                    }
+                self.envs.append(env_for_replica)
+
+                self.gpu_idx += min_n_gpus_replica
+
+        if self.rl_mode in ["colocated_separated"] and role == "rollout":
+            (
+                original_commands,
+                original_gpu_devices,
+                original_control_urls,
+                original_output_files,
+                original_envs,
+                original_global_worker_idx,
+                original_gpu_idx,
+            ) = self.backuped_states
+            if original_global_worker_idx < self.global_worker_idx:
+                # We added new nodes to the previous nodes list, keep current worker index
+                pass
+            else:
+                # We have not used all the previous nodes of policy.
+                # First finalize existing commands
+                if len(self.commands) > 0:
+                    node = self.nodes[self.global_worker_idx]
+                    node.launch_commands.extend_commands(
+                        self.commands,
+                        self.gpu_devices,
+                        self.control_urls,
+                        self.output_files,
+                        self.envs,
+                    )
+                # recover the backuped states
+                self.commands = original_commands
+                self.gpu_devices = original_gpu_devices
+                self.control_urls = original_control_urls
+                self.output_files = original_output_files
+                self.envs = original_envs
+                self.global_worker_idx = original_global_worker_idx
+                self.gpu_idx = original_gpu_idx
+
+    def clear_list(self):
+        # clear the commands, gpu devices, control URLs, output files, and environment variables for the current node.
+        # Note: gpu_idx may not be 0 after clearing the list
+        self.commands = []
+        self.gpu_devices = []
+        self.control_urls = []
+        self.output_files = []
+        self.envs = []
+
+    def clear_all(self, including_nodes: bool = False):
+        self.clear_list()
+        self.global_worker_idx = 0
+        self.gpu_idx = 0
+        if including_nodes:
+            self.nodes = []
+
+    def finalize(self) -> List[SingleWorkerCommands]:
+        return [node.launch_commands for node in self.nodes]
 
 
 def launch_processes(
