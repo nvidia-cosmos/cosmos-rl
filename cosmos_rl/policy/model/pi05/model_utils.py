@@ -39,6 +39,7 @@ from cosmos_rl.policy.model.pi05.transformers_replace import (
 )
 from cosmos_rl.policy.model.pi05.transformers_replace import modeling_gemma
 
+
 def convert_to_uint8(img: np.ndarray) -> np.ndarray:
     """Converts an image to uint8 if it is a float image.
 

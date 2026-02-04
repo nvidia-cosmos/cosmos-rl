@@ -47,7 +47,10 @@ from cosmos_rl.utils.util import resolve_model_path
 from transformers import AutoConfig, AutoTokenizer
 from safetensors import safe_open
 
-from cosmos_rl.policy.model.pi05.model_utils import resize_with_pad_torch, np_to_pi05_img
+from cosmos_rl.policy.model.pi05.model_utils import (
+    resize_with_pad_torch,
+    np_to_pi05_img,
+)
 
 IMAGE_KEYS = (
     "base_0_rgb",
