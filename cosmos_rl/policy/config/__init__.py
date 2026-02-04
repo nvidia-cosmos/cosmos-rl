@@ -19,6 +19,7 @@ from pydantic_core import core_schema
 from datetime import datetime
 from typing import Any, Dict, Union, Optional, List, Literal
 import os
+import re
 import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
@@ -1547,6 +1548,18 @@ class Config(BaseModel):
                 config_data["train"]["timestamp"] = datetime.now().strftime(
                     "%Y%m%d%H%M%S"
                 )
+                config_data["train"]["output_dir"] = os.path.join(
+                    config_data["train"]["output_dir"],
+                    config_data["train"]["timestamp"],
+                )
+            else:
+                timestamp = str(config_data["train"]["timestamp"])
+                if not re.match(r"^\d{14}$", timestamp):
+                    raise ValueError(
+                        f"Invalid timestamp format: '{timestamp}'. "
+                        f"Expected format: YYYYMMDDHHMMSS (14 digits), e.g., '20250203120000'."
+                    )
+                # append the timestamp to the output_dir
                 config_data["train"]["output_dir"] = os.path.join(
                     config_data["train"]["output_dir"],
                     config_data["train"]["timestamp"],
