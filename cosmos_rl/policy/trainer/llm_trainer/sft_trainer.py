@@ -525,6 +525,9 @@ class SFTTrainer(LLMTrainer):
                     val_loss = torch.tensor([-1.0], device=self.device)
             else:
                 val_logits = self.model(**val_batch)
+                # Extract logits if model returns a ModelOutput object
+                if hasattr(val_logits, "logits"):
+                    val_logits = val_logits.logits
 
                 val_loss = self.loss_fn(val_logits, val_labels)
         if (
