@@ -1553,7 +1553,7 @@ class Config(BaseModel):
                     config_data["train"]["timestamp"],
                 )
             else:
-                timestamp = config_data["train"]["timestamp"]
+                timestamp = str(config_data["train"]["timestamp"])
                 if not re.match(r"^\d{14}$", timestamp):
                     raise ValueError(
                         f"Invalid timestamp format: '{timestamp}'. "
