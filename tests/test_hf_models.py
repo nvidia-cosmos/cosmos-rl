@@ -56,11 +56,7 @@ def test_hf_model_forward(model, inputs):
 
 def test_cosmos_hf_model(model, inputs):
     with torch.no_grad():
-        output = model(**inputs)
-        if isinstance(output, torch.Tensor):
-            logits = output
-        else:
-            logits = output.logits
+        logits = model(**inputs).logits
         return logits[:, -1, :]
 
 

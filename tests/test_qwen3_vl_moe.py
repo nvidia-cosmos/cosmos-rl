@@ -334,7 +334,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 attention_mask=data_batch["attention_mask"],
                 image_grid_thw=data_batch["image_grid_thw"],
                 position_ids=data_batch.get("position_ids", None),
-            )
+            ).logits
         del cosmos_model
         torch.cuda.empty_cache()
 

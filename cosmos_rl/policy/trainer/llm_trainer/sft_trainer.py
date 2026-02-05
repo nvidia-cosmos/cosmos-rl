@@ -47,6 +47,7 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.model.base import CosmosModelOutput
 
 
 def async_safe_ce(
@@ -335,10 +336,11 @@ class SFTTrainer(LLMTrainer):
                 aux_loss = None
                 with self.act_offloading_ctx_manager:
                     output = self.model(**batch)
-                    if isinstance(output, torch.Tensor):
-                        logits = output
+                    logits = output.logits
+                    if isinstance(output, CosmosModelOutput):
+                        aux_loss = output.aux_loss
                     else:
-                        logits = output.logits
+                        # For hf_models
                         # Enumerate the output to involve any `loss` like output
                         for k, v in output.items():
                             if "loss" in k.lower() and isinstance(v, torch.Tensor):
@@ -517,14 +519,14 @@ class SFTTrainer(LLMTrainer):
                         position_ids=val_position_ids,
                         pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                         seq_len_multiple=self.seq_len_multiple,
-                    )
+                    ).logits
 
                 if pp_last_stage:
                     val_loss = self.loss_fn(pp_out, val_labels)
                 else:
                     val_loss = torch.tensor([-1.0], device=self.device)
             else:
-                val_logits = self.model(**val_batch)
+                val_logits = self.model(**val_batch).logits
 
                 val_loss = self.loss_fn(val_logits, val_labels)
         if (
