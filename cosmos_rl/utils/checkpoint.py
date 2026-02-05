@@ -62,9 +62,60 @@ class CheckpointMananger:
         self.best_score = self._load_best_score()
         self.best_step = self._get_best_step_from_link()
 
-    @staticmethod
-    def ckpt_path_check(ckpt_path: str):
-        return os.path.exists(os.path.join(ckpt_path, "cosmos_config"))
+    def _get_num_saving_ranks(self) -> int:
+        """
+        Calculate the number of ranks that save checkpoints based on parallel_dims.
+
+        The checkpoint saving condition is: dp_replicate_coord[0] == 0
+        So the number of saving ranks = world_size / dp_replicate
+
+        Different parallelism configurations examples:
+        - Pure DP (dp_replicate=8, dp_shard=1): 1 rank saves (rank 0)
+        - Pure FSDP (dp_replicate=1, dp_shard=8): 8 ranks save (rank 0-7)
+        - DP + FSDP (dp_replicate=2, dp_shard=4): 4 ranks save (rank 0-3)
+        - TP/PP/CP: These are within the saving group, so they add to the count
+
+        Returns:
+            int: Number of ranks that save checkpoints.
+        """
+        if self.parallel_dims is None:
+            return 1  # Default to 1 rank (pure DP or single GPU)
+
+        # Ranks with dp_replicate_coord[0] == 0 will save
+        # This equals: world_size / dp_replicate
+        # Note: dp_replicate is guaranteed to be >= 1 by ParallelDims._validate()
+        return self.parallel_dims.world_size // self.parallel_dims.dp_replicate
+
+    def ckpt_path_check(self, ckpt_path: str) -> bool:
+        """
+        Check if a checkpoint path is valid and complete.
+
+        A checkpoint is considered complete if:
+        1. The cosmos_config file exists
+        2. All expected rank complete markers (.rank_<rank_id>_complete) exist
+
+        The expected ranks are determined by self.parallel_dims:
+        - Ranks with dp_replicate_coord[0] == 0 save checkpoints
+        - Number of saving ranks = world_size / dp_replicate
+
+        Args:
+            ckpt_path: Path to the checkpoint directory (e.g., step_100/policy)
+
+        Returns:
+            bool: True if checkpoint is complete, False otherwise.
+        """
+        # Check cosmos_config exists
+        if not os.path.exists(os.path.join(ckpt_path, "cosmos_config")):
+            return False
+
+        # Calculate expected number of saving ranks based on parallel_dims
+        num_saving_ranks = self._get_num_saving_ranks()
+
+        # Check complete markers for all expected ranks (0 to num_saving_ranks-1)
+        for rank in range(num_saving_ranks):
+            if not os.path.exists(os.path.join(ckpt_path, f".rank_{rank}_complete")):
+                return False
+        return True
 
     def _get_saved_step_to_timestamp_map(self) -> Dict[int, str]:
         """
@@ -216,19 +267,22 @@ class CheckpointMananger:
 
     @staticmethod
     def get_rng_state():
-        return {
+        rng_state = {
             "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state(),
             "numpy": np.random.get_state(),
             "python": random.getstate(),
         }
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            rng_state["cuda"] = torch.cuda.get_rng_state()
+        return rng_state
 
     @staticmethod
     def set_rng_state(rng_state):
         torch.set_rng_state(rng_state["torch"])
-        torch.cuda.set_rng_state(rng_state["cuda"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["python"])
+        if "cuda" in rng_state and torch.cuda.is_available():
+            torch.cuda.set_rng_state(rng_state["cuda"])
 
     @staticmethod
     def load_extra_info(extra_info_path: str):
@@ -344,7 +398,23 @@ class CheckpointMananger:
                 "Unsupport model type, should either be a torch.nn.Module or dict"
             )
 
+        # Path for the complete marker file
+        complete_marker_path = os.path.join(
+            self.ckpt_output_dir,
+            cur_step_ckpt_dir,
+            f".rank_{self.global_rank}_complete",
+        )
+
         if self.save_mode == "async":
+
+            def _write_complete_marker_after_saves(futures_to_wait, marker_path):
+                """Wait for all save futures to complete, then write the complete marker."""
+                for f in futures_to_wait:
+                    f.result()  # Block until each future completes
+                # All saves completed, write the complete marker
+                with open(marker_path, "w") as f:
+                    f.write("")
+
             # wait for the previous save to finish
             if len(self.pre_save_futures) > 0:
                 for future in futures.as_completed(self.pre_save_futures):
@@ -362,12 +432,13 @@ class CheckpointMananger:
             extra_info_state_dict_cpu = self.offload_state_dict_cpu(extra_info)
 
             # save the state dicts to disk
-            self.pre_save_futures.append(
+            save_futures = []
+            save_futures.append(
                 self.executor.submit(
                     _save_upload, model_state_dict_cpu, model_ckpt_path, is_final
                 )
             )
-            self.pre_save_futures.append(
+            save_futures.append(
                 self.executor.submit(
                     _save_upload,
                     optimizer_state_dict_cpu,
@@ -375,7 +446,7 @@ class CheckpointMananger:
                     is_final,
                 )
             )
-            self.pre_save_futures.append(
+            save_futures.append(
                 self.executor.submit(
                     _save_upload,
                     scheduler_state_dict_cpu,
@@ -383,7 +454,7 @@ class CheckpointMananger:
                     is_final,
                 )
             )
-            self.pre_save_futures.append(
+            save_futures.append(
                 self.executor.submit(
                     _save_upload,
                     extra_info_state_dict_cpu,
@@ -391,6 +462,15 @@ class CheckpointMananger:
                     is_final,
                 )
             )
+
+            # Submit a task that waits for all saves and then writes the complete marker
+            complete_marker_future = self.executor.submit(
+                _write_complete_marker_after_saves, save_futures, complete_marker_path
+            )
+
+            # Track all futures (saves + complete marker)
+            self.pre_save_futures = save_futures + [complete_marker_future]
+
             if is_final:
                 # wait for all futures to complete before returning for final save
                 futures.wait(self.pre_save_futures)
@@ -400,6 +480,9 @@ class CheckpointMananger:
             _save_upload(optimizer.state_dict(), optimizer_ckpt_path, is_final)
             _save_upload(scheduler.state_dict(), scheduler_ckpt_path, is_final)
             _save_upload(extra_info, extra_info_ckpt_path, is_final)
+            # Write complete marker after all saves are done
+            with open(complete_marker_path, "w") as f:
+                f.write("")
 
         logger.info(
             f"[Policy] Step: {step}, checkpoint saved successfully at {os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir)}."
@@ -413,7 +496,7 @@ class CheckpointMananger:
         model_name_or_path: str,
         revision: Optional[str] = None,
         strict: bool = True,
-    ):
+    ) -> tuple[Dict, Optional[Union[torch.optim.lr_scheduler._LRScheduler, Callable]]]:
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
         # check whether checkpoint existing
@@ -443,11 +526,19 @@ class CheckpointMananger:
                         else:
                             extra_vars[key] = extra_info[key]
 
-                    outputs = [extra_vars]
-                    # Create a new scheduler upon ``training_steps``
                     if isinstance(scheduler, Callable):
-                        scheduler = scheduler(training_steps=extra_vars["total_steps"])
-                        outputs.append(scheduler)
+                        # Create a new scheduler upon ``training_steps``
+                        new_scheduler = scheduler(
+                            training_steps=extra_vars["total_steps"]
+                        )
+                        new_scheduler.load_state_dict(
+                            torch.load(scheduler_path, weights_only=False)
+                        )
+                    else:
+                        scheduler.load_state_dict(
+                            torch.load(scheduler_path, weights_only=False)
+                        )
+                        new_scheduler = scheduler
 
                     model.load_state_dict(
                         torch.load(model_path, weights_only=False), strict=strict
@@ -455,13 +546,10 @@ class CheckpointMananger:
                     optimizer.load_state_dict(
                         torch.load(optimizer_path, weights_only=False)
                     )
-                    scheduler.load_state_dict(
-                        torch.load(scheduler_path, weights_only=False)
-                    )
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
-                    return outputs[0] if len(outputs) == 1 else outputs
+                    return extra_vars, new_scheduler
             except Exception as e:
                 logger.error(
                     f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
