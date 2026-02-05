@@ -175,7 +175,7 @@ def parallelize(
             )
             fsdp_mesh_moe_name = "fsdp_moe"
         else:
-            fsdp_mesh_no_moe = fsdp_mesh_moe = world_mesh[tuple(("dp_shard_cp"))]
+            fsdp_mesh_no_moe = fsdp_mesh_moe = world_mesh[tuple(("dp_shard_cp",))]
             fsdp_mesh_no_moe_name = fsdp_mesh_moe_name = "dp_shard_cp"
 
         if parallel_dims.dp_replicate_enabled:

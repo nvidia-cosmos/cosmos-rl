@@ -43,17 +43,28 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
     return image_inputs, video_inputs
 
 
-def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
+def decode_base64_to_image(
+    image_inputs: List[Union[str, Image.Image]],
+) -> List[Union[str, Image.Image]]:
     new_image_inputs = []
     for image_input in image_inputs:
         # TODO: hardcode
-        if os.path.isfile(image_input):
+        if isinstance(image_input, Image.Image):
+            new_image_inputs.append(image_input)
             continue
-        img_bytes = base64.b64decode(image_input)
-        img_buffer = io.BytesIO(img_bytes)
-        image = Image.open(img_buffer)
-        new_image_inputs.append(image)
+        else:
+            assert isinstance(
+                image_input, str
+            ), f"image_input should be a string, but got {type(image_input)}"
+            if os.path.isfile(image_input):
+                continue
+            else:
+                img_bytes = base64.b64decode(image_input)
+                img_buffer = io.BytesIO(img_bytes)
+                image = Image.open(img_buffer)
+                new_image_inputs.append(image)
     return new_image_inputs
+
 
 def retrieve_not_none_values(input_list):
     input_list = [x for x in input_list if x is not None]
@@ -350,30 +361,26 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            # For dataset with image or video urls
-            if len(image_inputs) == 0 and len(video_inputs) == 0:
-                if self.use_qwen_vl_process:
-                    image_inputs, video_inputs, video_kwargs = (
-                        qwen_vl_process_vision_info(
-                            conversation,
-                            image_patch_size=16,
-                            return_video_kwargs=True,
-                            return_video_metadata=True,
-                        )
+            if self.use_qwen_vl_process:
+                image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
+                    conversation,
+                    image_patch_size=16,
+                    return_video_kwargs=True,
+                    return_video_metadata=True,
+                )
+                if video_inputs is not None:
+                    video_inputs, video_metadatas = zip(*video_inputs)
+                    video_inputs, video_metadatas = (
+                        list(video_inputs),
+                        list(video_metadatas),
                     )
-                    if video_inputs is not None:
-                        video_inputs, video_metadatas = zip(*video_inputs)
-                        video_inputs, video_metadatas = (
-                            list(video_inputs),
-                            list(video_metadatas),
-                        )
-                    else:
-                        video_metadatas = None
+                else:
+                    video_metadatas = None
 
-                    kwarg["images"] = image_inputs
-                    kwarg["videos"] = video_inputs
-                    kwarg["video_metadata"] = video_metadatas
-                    kwarg["do_resize"] = False
+                kwarg["images"] = image_inputs
+                kwarg["videos"] = video_inputs
+                kwarg["video_metadata"] = video_metadatas
+                kwarg["do_resize"] = False
 
             inputs = self.hf_processor(
                 text=[text],
@@ -490,8 +497,14 @@ class HFVLMDataPacker(DataPacker):
 
         pixel_values_videos = retrieve_not_none_values(pixel_values_videos)
 
-        pixel_values_videos_lengths_per_sample = [x for x in pixel_values_videos_lengths_per_sample if x is not None]
-        pixel_values_videos_lengths_per_sample = pixel_values_videos_lengths_per_sample if len(pixel_values_videos_lengths_per_sample) > 0 else None
+        pixel_values_videos_lengths_per_sample = [
+            x for x in pixel_values_videos_lengths_per_sample if x is not None
+        ]
+        pixel_values_videos_lengths_per_sample = (
+            pixel_values_videos_lengths_per_sample
+            if len(pixel_values_videos_lengths_per_sample) > 0
+            else None
+        )
 
         video_grid_thw = retrieve_not_none_values(video_grid_thw)
 
@@ -499,8 +512,14 @@ class HFVLMDataPacker(DataPacker):
 
         pixel_values = retrieve_not_none_values(pixel_values)
 
-        pixel_values_lengths_per_sample = [x for x in pixel_values_lengths_per_sample if x is not None]
-        pixel_values_lengths_per_sample = pixel_values_lengths_per_sample if len(pixel_values_lengths_per_sample) > 0 else None
+        pixel_values_lengths_per_sample = [
+            x for x in pixel_values_lengths_per_sample if x is not None
+        ]
+        pixel_values_lengths_per_sample = (
+            pixel_values_lengths_per_sample
+            if len(pixel_values_lengths_per_sample) > 0
+            else None
+        )
 
         image_grid_thw = retrieve_not_none_values(image_grid_thw)
 
