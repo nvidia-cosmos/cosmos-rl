@@ -157,7 +157,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Verify best score and step are set
         self.assertEqual(manager1.best_score, 0.5)
-        self.assertEqual(manager1.best_step, 200)
+        self.assertEqual(os.path.basename(manager1.best_ckpt_abs_dir), "step_200")
 
         # Verify best symlink exists
         best_ckpt_link = os.path.join(self.test_dir, "best", "checkpoints")
@@ -175,7 +175,7 @@ class TestCheckpointManager(unittest.TestCase):
         with open(best_score_path, "r") as f:
             data = json.load(f)
         self.assertEqual(data["best_score"], 0.5)
-        self.assertEqual(data["best_step"], 200)
+        self.assertEqual(os.path.basename(data["best_ckpt_abs_dir"]), "step_200")
         self.assertEqual(data["metric"], "val_loss")
 
         # === Second training session (resume) ===
@@ -187,7 +187,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Should have loaded best_score and best_step from first session
         self.assertEqual(manager2.best_score, 0.5)
-        self.assertEqual(manager2.best_step, 200)
+        self.assertEqual(os.path.basename(manager2.best_ckpt_abs_dir), "step_200")
 
     def test_export_safetensors(self):
         """Test that export_safetensors behavior is correct."""
@@ -255,7 +255,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save_check(300, val_score=0.6)
 
         # Now we have 3 checkpoints, best is step 100
-        self.assertEqual(manager.best_step, 100)
+        self.assertEqual(os.path.basename(manager.best_ckpt_abs_dir), "step_100")
 
         # Save step 400, should trigger deletion
         manager.save_checkpoint(model, optimizer, scheduler, step=400, total_steps=1000)
@@ -322,7 +322,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Best should still be step 100
         self.assertEqual(manager.best_score, 0.5)
-        self.assertEqual(manager.best_step, 100)
+        self.assertEqual(os.path.basename(manager.best_ckpt_abs_dir), "step_100")
 
         # Check the actual symlink points to step 100
         best_ckpt_link = os.path.join(self.test_dir, "best", "checkpoints")
@@ -414,17 +414,20 @@ class TestCheckpointManager(unittest.TestCase):
         """Test default best_score is inf for loss metrics."""
         output_dir = os.path.join(self.test_dir, self.timestamp1)
         config = create_test_config(output_dir=output_dir, resume=False)
-        print(output_dir)
-
-        manager = CheckpointMananger(config, global_rank=0, metric="val_loss")
+        parallel_dims = create_test_parallel_dims()
+        manager = CheckpointMananger(
+            config, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
         self.assertEqual(manager.best_score, float("inf"))
 
     def test_best_score_default_for_non_loss_metric(self):
         """Test default best_score is -inf for non-loss metrics (like accuracy)."""
         output_dir = os.path.join(self.test_dir, self.timestamp1)
         config = create_test_config(output_dir=output_dir, resume=False)
-
-        manager = CheckpointMananger(config, global_rank=0, metric="accuracy")
+        parallel_dims = create_test_parallel_dims()
+        manager = CheckpointMananger(
+            config, parallel_dims=parallel_dims, global_rank=0, metric="accuracy"
+        )
         self.assertEqual(manager.best_score, -float("inf"))
 
     def test_load_checkpoint_restores_extra_info(self):
@@ -909,6 +912,142 @@ class TestCheckpointManager(unittest.TestCase):
         # Verify rank 0 marker exists but rank 1 doesn't
         self.assertTrue(os.path.exists(os.path.join(ckpt_path, ".rank_0_complete")))
         self.assertFalse(os.path.exists(os.path.join(ckpt_path, ".rank_1_complete")))
+
+    def test_prune_corrupted_checkpoints(self):
+        """Test that _prune_corrupted_checkpoints removes incomplete checkpoints.
+
+        Scenario:
+        - Save checkpoints at step 100, 200, 300
+        - Corrupt checkpoint at step 200 by removing the complete marker
+        - Resume with new manager
+        - Verify step 200 was pruned from saved_step_dirs
+        """
+        parallel_dims = create_test_parallel_dims()
+
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(output_dir=output_dir, resume=False, max_keep=5)
+        manager = CheckpointMananger(
+            config, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+
+        # Save checkpoints at step 100, 200, 300
+        for step in [100, 200, 300]:
+            manager.save_checkpoint(
+                model, optimizer, scheduler, step=step, total_steps=1000
+            )
+            manager.save_check(step)
+
+        # Verify all three checkpoints exist
+        step_100_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "step_100"
+        )
+        step_200_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "step_200"
+        )
+        step_300_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "step_300"
+        )
+
+        self.assertTrue(os.path.exists(step_100_path))
+        self.assertTrue(os.path.exists(step_200_path))
+        self.assertTrue(os.path.exists(step_300_path))
+
+        # Corrupt step 200 by removing the complete marker
+        complete_marker = os.path.join(step_200_path, "policy", ".rank_0_complete")
+        os.remove(complete_marker)
+
+        # Resume with a new manager - this should prune corrupted checkpoints during init
+        output_dir2 = os.path.join(self.test_dir, self.timestamp2)
+        config2 = create_test_config(output_dir=output_dir2, resume=True, max_keep=5)
+        manager2 = CheckpointMananger(
+            config2, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        # Verify step 200 was pruned (directory deleted)
+        self.assertFalse(os.path.exists(step_200_path))
+
+        # Verify step 100 and 300 still exist
+        self.assertTrue(os.path.exists(step_100_path))
+        self.assertTrue(os.path.exists(step_300_path))
+
+        # Verify saved_step_dirs only contains step 100 and 300
+        saved_steps = [os.path.basename(d) for d in manager2.saved_ckpt_step_dirs]
+        self.assertEqual(len(manager2.saved_ckpt_step_dirs), 2)
+        self.assertIn("step_100", saved_steps)
+        self.assertIn("step_300", saved_steps)
+        self.assertNotIn("step_200", saved_steps)
+
+    def test_best_ckpt_corrupted_resets_to_default(self):
+        """Test that if best checkpoint is corrupted, init resets best_score to default and best_ckpt_abs_dir to None.
+
+        Scenario:
+        - Save checkpoints at step 100 and 200, with step 200 being the best
+        - Corrupt step 200 (the best checkpoint) by removing the complete marker
+        - Resume with new manager
+        - Verify best_score is default (inf for loss metric) and best_ckpt_abs_dir is None
+        """
+        parallel_dims = create_test_parallel_dims()
+
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(output_dir=output_dir, resume=False, max_keep=5)
+        manager = CheckpointMananger(
+            config, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+
+        # Save checkpoint at step 100 with val_score
+        manager.save_checkpoint(model, optimizer, scheduler, step=100, total_steps=1000)
+        manager.save_check(100, val_score=1.0)
+
+        # Save checkpoint at step 200 with better val_score (lower is better for loss)
+        manager.save_checkpoint(model, optimizer, scheduler, step=200, total_steps=1000)
+        manager.save_check(200, val_score=0.5)
+
+        # Verify step 200 is the best checkpoint
+        self.assertEqual(manager.best_score, 0.5)
+        self.assertEqual(os.path.basename(manager.best_ckpt_abs_dir), "step_200")
+
+        # Verify best symlink exists and points to step 200
+        best_ckpt_link = os.path.join(self.test_dir, "best", "checkpoints")
+        self.assertTrue(os.path.islink(best_ckpt_link))
+        target = os.readlink(best_ckpt_link)
+        self.assertTrue(target.endswith("step_200"))
+
+        # Corrupt step 200 (the best checkpoint) by removing the complete marker
+        step_200_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "step_200"
+        )
+        complete_marker = os.path.join(step_200_path, "policy", ".rank_0_complete")
+        os.remove(complete_marker)
+
+        # Resume with a new manager
+        output_dir2 = os.path.join(self.test_dir, self.timestamp2)
+        config2 = create_test_config(output_dir=output_dir2, resume=True, max_keep=5)
+        manager2 = CheckpointMananger(
+            config2, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        # Verify best_score is reset to default (inf for loss metric)
+        self.assertEqual(manager2.best_score, float("inf"))
+
+        # Verify best_ckpt_abs_dir is None
+        self.assertIsNone(manager2.best_ckpt_abs_dir)
+
+        # Verify the corrupted checkpoint was pruned
+        self.assertFalse(os.path.exists(step_200_path))
+
+        # Verify step 100 still exists
+        step_100_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "step_100"
+        )
+        self.assertTrue(os.path.exists(step_100_path))
 
     def test_save_and_load_with_dp_replicate_greater_than_one(self):
         """Test save and load when dp_replicate > 1 (pure DP mode).

@@ -16,7 +16,6 @@
 import os
 import re
 import json
-import heapq
 import torch
 import random
 import shutil
@@ -27,7 +26,25 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.s3_utils import upload_file_to_s3
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import List, Callable, Union, Optional, Dict
+from typing import List, Callable, Tuple, Union, Optional, Dict
+
+
+def _step_dir_sort_key(dir_path: str) -> int:
+    """
+    Key function for sorting directories by step number.
+
+    Args:
+        dir_path: Directory path (e.g., '/path/to/step_100' or 'step_100')
+
+    Returns:
+        step_id if matches 'step_xxx' pattern
+        -9999 if doesn't match - these will sort first
+    """
+    basename = os.path.basename(dir_path)
+    match = re.match(r"^step_(\d+)$", basename)
+    if match:
+        return int(match.group(1))
+    return -9999
 
 
 class CheckpointMananger:
@@ -55,12 +72,29 @@ class CheckpointMananger:
             if self.save_mode == "async":
                 self.executor = futures.ThreadPoolExecutor(max_workers=4)
         self.pre_save_futures = []
-        self.saved_steps = []
-        for step, _ in self._get_saved_step_to_timestamp_map().items():
-            heapq.heappush(self.saved_steps, step)
-        # Load best score from file if exists (persists across resumes)
-        self.best_score = self._load_best_score()
-        self.best_step = self._get_best_step_from_link()
+        if is_master_rank(self.parallel_dims, self.global_rank):
+            self.saved_ckpt_step_dirs = sorted(
+                self._get_all_saved_ckpt_step_dirs(),
+                key=_step_dir_sort_key,
+            )
+            self._prune_corrupted_ckpts()
+            # Load best score from file if exists (persists across resumes)
+            self.best_score, self.best_ckpt_abs_dir = self._load_best_score()
+
+    def _prune_corrupted_ckpts(self):
+        """Prune corrupted checkpoints."""
+        # Create a list of directories to remove (avoid modifying list while iterating)
+        dirs_to_remove = []
+        for ckpt_dir in self.saved_ckpt_step_dirs:
+            policy_path = os.path.join(ckpt_dir, "policy")
+            if not self.ckpt_path_check(policy_path):
+                dirs_to_remove.append(ckpt_dir)
+
+        # Remove corrupted checkpoints
+        for ckpt_dir in dirs_to_remove:
+            self._delete_checkpoint(ckpt_dir)
+            self.saved_ckpt_step_dirs.remove(ckpt_dir)
+            logger.info(f"Pruned corrupted checkpoint: {ckpt_dir}")
 
     def _get_num_saving_ranks(self) -> int:
         """
@@ -117,16 +151,16 @@ class CheckpointMananger:
                 return False
         return True
 
-    def _get_saved_step_to_timestamp_map(self) -> Dict[int, str]:
+    def _get_all_saved_ckpt_step_dirs(self) -> List[str]:
         """
-        Get the map of saved step to timestamp.
+        Get the list of all saved checkpoint step directories.
 
         Returns:
-            Dict[int, str]: A dictionary mapping saved steps to their corresponding timestamps.
+            List[str]: A list of paths to the all saved checkpoint step directories.
         """
-        saved_step_to_timestamp_map = {}
+        saved_ckpt_step_dirs = []
         if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = self._get_root_output_dir()
+            root_output_dir = self._root_output_dir
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
 
@@ -141,29 +175,28 @@ class CheckpointMananger:
                     # validate step_dir format: step_<number>
                     match = re.match(r"^step_(\d+)$", step_dir)
                     if match:
-                        saved_step_to_timestamp_map[int(match.group(1))] = timestamp
-        return saved_step_to_timestamp_map
+                        saved_ckpt_step_dirs.append(os.path.join(ckpt_base, step_dir))
+        return saved_ckpt_step_dirs
 
-    def get_ckpt_path(self) -> List[str]:
-        # find the latest checkpoint under output_dir
-        if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = self._get_root_output_dir()
-            saved_step_to_timestamp = self._get_saved_step_to_timestamp_map()
-            steps = sorted(saved_step_to_timestamp.keys())
-            return [
-                os.path.join(
-                    root_output_dir,
-                    saved_step_to_timestamp[step],
-                    "checkpoints",
-                    f"step_{step}",
-                    "policy",
-                )
-                for step in reversed(steps)
-            ]
-        else:
+    def get_latest_ckpt_paths(self) -> List[str]:
+        """
+        Get the paths to the all saved checkpoint directories ordered by step number in descending order.
+
+        Returns:
+            List[str]: A list of paths to the all saved checkpoint directories ordered by step number in descending order.
+        """
+        if isinstance(self.config.train.resume, str):
             return [self.config.train.resume]
+        else:
+            saved_step_dirs = sorted(
+                self._get_all_saved_ckpt_step_dirs(),
+                key=_step_dir_sort_key,
+                reverse=True,
+            )
+            return [os.path.join(step_dir, "policy") for step_dir in saved_step_dirs]
 
-    def _get_root_output_dir(self) -> str:
+    @property
+    def _root_output_dir(self) -> str:
         """
         Get the root output directory.
 
@@ -173,40 +206,54 @@ class CheckpointMananger:
         """
         return os.path.dirname(self.config.train.output_dir)
 
-    def _get_best_dir(self) -> str:
+    @property
+    def _best_dir(self) -> str:
         """Get the path to the best model directory at root level."""
-        return os.path.join(self._get_root_output_dir(), "best")
+        return os.path.join(self._root_output_dir, "best")
 
-    def _get_best_score_path(self) -> str:
+    @property
+    def _best_score_path(self) -> str:
         """Get the path to the best score file."""
-        return os.path.join(self._get_best_dir(), "best_score.json")
+        return os.path.join(self._best_dir, "best_score.json")
 
-    def _load_best_score(self) -> float:
+    def _load_best_score(self) -> Tuple[float, Optional[str]]:
         """
         Load the best score from file if exists.
         Returns the default value if file doesn't exist.
         """
         default_score = float("inf") if "loss" in self.metric else -float("inf")
-        best_score_path = self._get_best_score_path()
+        best_score_path = self._best_score_path
         if os.path.exists(best_score_path):
             try:
                 with open(best_score_path, "r") as f:
                     data = json.load(f)
                     score = data.get("best_score", default_score)
+                    best_ckpt_abs_dir = data.get("best_ckpt_abs_dir", None)
+                    if (
+                        best_ckpt_abs_dir is None
+                        or best_ckpt_abs_dir != self._get_best_ckpt_abs_dir()
+                    ):
+                        raise ValueError(
+                            f"Best checkpoint directory mismatch: {best_ckpt_abs_dir} != {self._get_best_ckpt_abs_dir()}"
+                        )
                     logger.info(f"Loaded best score from {best_score_path}: {score}")
-                    return score
+                    return score, best_ckpt_abs_dir
             except Exception as e:
                 logger.warning(f"Failed to load best score from {best_score_path}: {e}")
-        return default_score
+        return default_score, None
 
-    def _save_best_score(self, score: float, step: int):
+    def _save_best_score(self, score: float, best_ckpt_dir: str):
         """Save the best score to file."""
-        best_dir = self._get_best_dir()
-        os.makedirs(best_dir, exist_ok=True)
-        best_score_path = self._get_best_score_path()
+        best_score_path = self._best_score_path
+        os.makedirs(os.path.dirname(best_score_path), exist_ok=True)
         with open(best_score_path, "w") as f:
             json.dump(
-                {"best_score": score, "best_step": step, "metric": self.metric}, f
+                {
+                    "best_score": score,
+                    "best_ckpt_abs_dir": os.path.abspath(best_ckpt_dir),
+                    "metric": self.metric,
+                },
+                f,
             )
         logger.info(f"Saved best score to {best_score_path}: {score}")
 
@@ -215,7 +262,7 @@ class CheckpointMananger:
         Get the best step number from the existing best checkpoint link.
         Returns None if no best link exists.
         """
-        best_ckpt_link = os.path.join(self._get_best_dir(), "checkpoints")
+        best_ckpt_link = os.path.join(self._best_dir, "checkpoints")
         if os.path.islink(best_ckpt_link):
             try:
                 target = os.readlink(best_ckpt_link)
@@ -229,38 +276,74 @@ class CheckpointMananger:
                 logger.warning(f"Failed to read best checkpoint link: {e}")
         return None
 
-    def _is_step_linked_as_best(self, step: int) -> bool:
-        """Check if the given step is currently linked as the best checkpoint."""
-        return self.best_step is not None and self.best_step == step
+    def _get_best_ckpt_abs_dir(self) -> Optional[str]:
+        """
+        Get the path to the best checkpoint directory.
 
-    def _delete_step_checkpoint(self, step: int):
-        """Delete checkpoint and safetensors for a given step."""
-        if self.config.train.resume == True:  # noqa: E712
-            # Resume case: checkpoint may be in a different timestamp directory
-            step_to_timestamp = self._get_saved_step_to_timestamp_map()
-            timestamp = step_to_timestamp.get(step)
-            if timestamp is None:
-                # Checkpoint directory not found, skip deletion
-                logger.warning(
-                    f"Checkpoint step_{step} not found in any timestamp directory"
-                )
-                return
-            root_output_dir = self._get_root_output_dir()
-            ckpt_dir = os.path.join(
-                root_output_dir, timestamp, "checkpoints", f"step_{step}"
+        Returns the final resolved path (not a symlink) only if:
+        1. The symlink can be resolved to a final target (not a link)
+        2. The target directory exists
+        3. The checkpoint is valid (self.ckpt_path_check(dir/policy) returns True)
+
+        Returns:
+            str | None: The resolved checkpoint directory path, or None if invalid.
+        """
+        best_ckpt_link = os.path.join(self._best_dir, "checkpoints")
+        if not os.path.islink(best_ckpt_link):
+            return None
+
+        # Resolve to the final target (not a link)
+        resolved_path = os.path.realpath(best_ckpt_link)
+
+        # Ensure it's not still a symlink (broken chain)
+        if os.path.islink(resolved_path):
+            logger.warning(
+                f"Best checkpoint link could not be fully resolved: {best_ckpt_link}"
             )
-            safetensors_dir = os.path.join(
-                root_output_dir, timestamp, "safetensors", f"step_{step}"
-            )
-        else:
-            # Non-resume case: checkpoint is in current output_dir
-            ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{step}")
-            safetensors_dir = os.path.join(
-                self.config.train.output_dir, "safetensors", f"step_{step}"
-            )
+            return None
+
+        # Check that the directory exists
+        if not os.path.isdir(resolved_path):
+            logger.warning(f"Best checkpoint directory does not exist: {resolved_path}")
+            return None
+
+        # Validate the step directory format
+        basename = os.path.basename(resolved_path)
+        match = re.match(r"^step_(\d+)$", basename)
+        if not match:
+            logger.warning(f"Best checkpoint directory has invalid format: {basename}")
+            return None
+
+        # Validate the checkpoint is complete
+        policy_path = os.path.join(resolved_path, "policy")
+        if not self.ckpt_path_check(policy_path):
+            logger.warning(f"Best checkpoint is incomplete or invalid: {policy_path}")
+            return None
+
+        return os.path.abspath(resolved_path)
+
+    def _is_ckpt_dir_linked_as_best(self, ckpt_dir: str) -> bool:
+        """Check if the given ckpt_dir is currently linked as the best checkpoint."""
+        return (
+            self.best_ckpt_abs_dir is not None
+            and self.best_ckpt_abs_dir == os.path.abspath(ckpt_dir)
+        )
+
+    def _delete_checkpoint(self, ckpt_dir: str):
+        """Delete checkpoint and safetensors for a given step.
+
+        Args:
+            ckpt_dir: The directory of the checkpoint to delete, which is expected to be like:
+                /path/to/output_dir/<timestamp>/checkpoints/step_<step_number>
+        """
         if os.path.exists(ckpt_dir):
             shutil.rmtree(ckpt_dir)
             logger.info(f"Removed old checkpoint: {ckpt_dir}")
+        safetensors_dir = os.path.join(
+            os.path.dirname(os.path.dirname(ckpt_dir)),
+            "safetensors",
+            os.path.basename(ckpt_dir),
+        )
         if os.path.exists(safetensors_dir):
             shutil.rmtree(safetensors_dir)
             logger.info(f"Removed old safetensors: {safetensors_dir}")
@@ -498,7 +581,7 @@ class CheckpointMananger:
         strict: bool = True,
     ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
         extra_vars = {}
-        base_paths: List[str] = self.get_ckpt_path()
+        base_paths: List[str] = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
         for base_path in base_paths:
             try:
@@ -559,7 +642,7 @@ class CheckpointMananger:
 
     def load_extra_info_from_checkpoint(self):
         extra_vars = {}
-        base_paths = self.get_ckpt_path()
+        base_paths = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
 
         for base_path in base_paths:
@@ -593,31 +676,35 @@ class CheckpointMananger:
 
     def save_check(self, step: int, **kwargs):
         if is_master_rank(self.parallel_dims, self.global_rank):
-            heapq.heappush(self.saved_steps, step)
+            step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
+            self.saved_ckpt_step_dirs.append(step_ckpt_path)
             # remove the old checkpoints
             # expected behavior:
             # Keep the best checkpoint, and delete the oldest checkpoint if the number of
             # checkpoints exceeds the max_keep.
             # If the best checkpoint is the oldest checkpoint, delete the second oldest checkpoint.
-            if len(self.saved_steps) > self.max_keep and self.max_keep != -1:
-                oldest = self.saved_steps[0]  # peek
+            if len(self.saved_ckpt_step_dirs) > self.max_keep and self.max_keep != -1:
+                oldest_dir = self.saved_ckpt_step_dirs[0]  # peek
                 step_to_delete = None
 
-                if self._is_step_linked_as_best(oldest) and len(self.saved_steps) > 1:
+                if (
+                    self._is_ckpt_dir_linked_as_best(oldest_dir)
+                    and len(self.saved_ckpt_step_dirs) > 1
+                ):
                     # Best is oldest, delete second oldest instead
-                    heapq.heappop(self.saved_steps)  # remove best temporarily
-                    step_to_delete = heapq.heappop(self.saved_steps)
-                    heapq.heappush(self.saved_steps, oldest)  # put best back
+                    self.saved_ckpt_step_dirs.pop(0)  # remove best temporarily
+                    step_to_delete = self.saved_ckpt_step_dirs.pop(0)
+                    self.saved_ckpt_step_dirs.insert(0, oldest_dir)  # put best back
                     logger.info(
-                        f"Best checkpoint is at step_{oldest}, "
-                        f"deleting step_{step_to_delete} instead"
+                        f"Best checkpoint is at {oldest_dir}, "
+                        f"deleting {step_to_delete} instead"
                     )
                 else:
-                    step_to_delete = heapq.heappop(self.saved_steps)
-                    logger.info(f"Deleting step_{step_to_delete}")
+                    step_to_delete = self.saved_ckpt_step_dirs.pop(0)
+                    logger.info(f"Deleting {step_to_delete}")
 
                 if step_to_delete is not None:
-                    self._delete_step_checkpoint(step_to_delete)
+                    self._delete_checkpoint(step_to_delete)
 
             val_score = kwargs.get("val_score", None)
             if val_score is not None:
@@ -625,15 +712,14 @@ class CheckpointMananger:
                     "loss" not in self.metric and val_score > self.best_score
                 ):
                     self.best_score = val_score
-                    self.best_step = step
+                    self.best_ckpt_abs_dir = os.path.abspath(step_ckpt_path)
 
-                    best_dir = self._get_best_dir()
+                    best_dir = self._best_dir
                     os.makedirs(best_dir, exist_ok=True)
 
                     # Create symlink for checkpoint at root/best/checkpoints
                     best_ckpt_link = os.path.join(best_dir, "checkpoints")
                     # assume the best checkpoint is at self.ckpt_output_dir/step_<step>
-                    step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
                     if os.path.islink(best_ckpt_link):
                         os.unlink(best_ckpt_link)
                     os.symlink(step_ckpt_path, best_ckpt_link)
@@ -653,4 +739,4 @@ class CheckpointMananger:
                         logger.info(f"Best safetensors updated to step_{step}")
 
                     # Save best score to file for persistence across resumes
-                    self._save_best_score(val_score, step)
+                    self._save_best_score(val_score, step_ckpt_path)
