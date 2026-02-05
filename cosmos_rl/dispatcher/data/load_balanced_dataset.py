@@ -21,10 +21,10 @@ the number of tokens across different data parallel ranks, reducing padding
 waste and improving training efficiency.
 """
 
-from collections import deque
-from typing import Dict, List, Optional, Any, Deque, Union
 import torch
 from torch.utils.data import Dataset, IterableDataset
+from collections import deque
+from typing import Dict, List, Optional, Any, Deque, Union
 from cosmos_rl.utils.logging import logger
 
 
@@ -183,6 +183,7 @@ class LoadBalancedDataset(IterableDataset):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         accumulate_steps: int = 1,  # Number of batches to accumulate per iteration
+        infinite_loop: bool = True,  # Whether to automatically restart when data is exhausted
     ):
         """
         Initialize the load-balanced dataset.
@@ -199,6 +200,8 @@ class LoadBalancedDataset(IterableDataset):
             seed: Random seed for sampling (used if base_dataset is Dataset)
             dp_rank: Data parallel rank for sharding (default: 0)
             dp_world_size: Data parallel world size for sharding (default: 1)
+            infinite_loop: If True, automatically restart iteration when data is exhausted (default: True)
+                           This is useful for step-based training where data should loop until total_steps is reached.
         """
         super().__init__()
         self.pool_size = pool_size
@@ -211,6 +214,7 @@ class LoadBalancedDataset(IterableDataset):
         self.seed = seed
         self.dp_rank = dp_rank
         self.dp_world_size = dp_world_size
+        self.infinite_loop = infinite_loop
 
         if accumulate_steps < 1:
             raise ValueError(f"accumulate_steps must be >= 1, got {accumulate_steps}")
@@ -235,11 +239,13 @@ class LoadBalancedDataset(IterableDataset):
         # For resume support: track how many batches to skip
         self._skip_batches = 0
         self._current_epoch = 0
+        self._epochs_completed = 0  # Track number of completed epochs for logging
 
         logger.info(
             f"[LoadBalancedDataset] pool_size={pool_size}, max_tokens_for_batch={max_tokens_for_batch}, "
             f"batching_strategy={batching_strategy}, seq_packing_enabled={seq_packing_enabled}, "
-            f"dp_rank={dp_rank}, dp_world_size={dp_world_size}, accumulate_steps={accumulate_steps}"
+            f"dp_rank={dp_rank}, dp_world_size={dp_world_size}, accumulate_steps={accumulate_steps}, "
+            f"infinite_loop={infinite_loop}"
         )
 
     def __len__(self) -> int:
@@ -275,12 +281,48 @@ class LoadBalancedDataset(IterableDataset):
             logger.warning(f"Error getting sample: {e}")
             return None
 
+    def _recreate_iterator(self):
+        """
+        Recreate the dataset iterator with incremented epoch for new data ordering.
+        This is called when data is exhausted and infinite_loop is enabled.
+        """
+        self._epochs_completed += 1
+        self._current_epoch += 1
+
+        # Update epoch for deterministic ordering (different epoch = different shuffle)
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(self._current_epoch)
+
+        # Create new iterator with updated epoch
+        self._dataset_iterator = iter(self.base_dataset)
+
+        logger.debug(
+            f"[LoadBalancedDataset] Rank {self.dp_rank}: Data exhausted, "
+            f"restarting with epoch {self._current_epoch} (completed {self._epochs_completed} epochs)"
+        )
+
     def _fill_pool(self):
-        """Fill the pool with samples up to pool_size."""
+        """
+        Fill the pool with samples up to pool_size.
+
+        If infinite_loop is enabled and data is exhausted, automatically recreate
+        the iterator with incremented epoch to continue iteration.
+        """
         while len(self._pool) < self.pool_size:
             sample = self._get_next_sample()
             if sample is None:
-                break
+                # Data exhausted
+                if self.infinite_loop:
+                    # Automatically restart with new epoch
+                    self._recreate_iterator()
+                    # Try to get a sample from the new iterator
+                    sample = self._get_next_sample()
+                    if sample is None:
+                        # Even after recreating, no data available (empty dataset)
+                        break
+                else:
+                    # Not in infinite loop mode, stop filling
+                    break
             self._pool.append(sample)
 
     def _find_best_candidate_prefer_first(
@@ -503,6 +545,33 @@ class LoadBalancedDataset(IterableDataset):
             f"(dp_rank={self.dp_rank})"
         )
 
+    def _build_accumulated_batches(self) -> List[List[Dict[str, Any]]]:
+        """
+        Build accumulated batches for gradient accumulation.
+
+        Returns:
+            List of batches (each batch is a list of samples), empty list if no batches can be built
+        """
+        accumulated_batches = []
+        for _ in range(self.accumulate_steps):
+            try:
+                batch = self._best_fit_batch()
+                accumulated_batches.append(batch)
+            except StopIteration:
+                # Pool might be empty, try to refill
+                self._fill_pool()
+                if not self._pool:
+                    # Dataset exhausted (and not restarting)
+                    break
+                # Try again with refilled pool
+                try:
+                    batch = self._best_fit_batch()
+                    accumulated_batches.append(batch)
+                except StopIteration:
+                    # Still can't build a batch
+                    break
+        return accumulated_batches
+
     def __iter__(self):
         """
         Iterate over accumulated batches.
@@ -510,6 +579,9 @@ class LoadBalancedDataset(IterableDataset):
 
         The base_dataset is already sharded according to dp_rank in __init__,
         so we can directly iterate over it.
+
+        If infinite_loop is enabled, automatically restarts iteration when data
+        is exhausted by recreating the iterator with incremented epoch.
         """
         # Create iterator from the already-sharded base_dataset
         # If epoch is set, update it for deterministic ordering
@@ -523,10 +595,9 @@ class LoadBalancedDataset(IterableDataset):
         # This is intentional - each epoch should start fresh. However, if you need to preserve
         # remaining samples across iterator recreations, consider yielding them before clearing.
         if self._pool:
-            logger.warning(
+            logger.debug(
                 f"[LoadBalancedDataset] Clearing pool with {len(self._pool)} remaining samples. "
-                "These samples will be discarded. This is normal if starting a new epoch, "
-                "but may indicate premature iterator recreation."
+                "This is normal if starting a new iteration."
             )
         self._pool.clear()
 
@@ -538,32 +609,30 @@ class LoadBalancedDataset(IterableDataset):
                 f"(dp_rank={self.dp_rank})"
             )
             while batches_skipped < self._skip_batches:
-                accumulated_batches = []
-                for _ in range(self.accumulate_steps):
-                    try:
-                        batch = self._best_fit_batch()
-                        accumulated_batches.append(batch)
-                    except StopIteration:
-                        # Check if we can refill pool
-                        self._fill_pool()
-                        if not self._pool:
-                            # Dataset exhausted before reaching skip target
+                accumulated_batches = self._build_accumulated_batches()
+
+                if not accumulated_batches:
+                    # No more batches available
+                    if self.infinite_loop:
+                        # Try to continue after recreating iterator
+                        self._recreate_iterator()
+                        accumulated_batches = self._build_accumulated_batches()
+                        if not accumulated_batches:
+                            # Even after recreating, no data available (empty dataset)
                             logger.warning(
                                 f"[LoadBalancedDataset] Dataset exhausted while skipping batches. "
                                 f"Skipped {batches_skipped}/{self._skip_batches} batches "
                                 f"(dp_rank={self.dp_rank})"
                             )
                             break
-                        # Try again with refilled pool
-                        try:
-                            batch = self._best_fit_batch()
-                            accumulated_batches.append(batch)
-                        except StopIteration:
-                            break
-
-                if not accumulated_batches:
-                    # No more batches to skip
-                    break
+                    else:
+                        # Not in infinite loop mode, stop skipping
+                        logger.warning(
+                            f"[LoadBalancedDataset] Dataset exhausted while skipping batches. "
+                            f"Skipped {batches_skipped}/{self._skip_batches} batches "
+                            f"(dp_rank={self.dp_rank})"
+                        )
+                        break
 
                 batches_skipped += 1
 
@@ -571,32 +640,33 @@ class LoadBalancedDataset(IterableDataset):
                 f"[LoadBalancedDataset] Skipped {batches_skipped} batches, "
                 f"resuming from batch {batches_skipped} (dp_rank={self.dp_rank})"
             )
-            # Reset skip_batches after skipping (for next epoch)
+            # Reset skip_batches after skipping (for next iteration)
             self._skip_batches = 0
 
         # Iterate and yield accumulated batches
         while True:
-            accumulated_batches = []
-            for _ in range(self.accumulate_steps):
-                try:
-                    batch = self._best_fit_batch()
-                    accumulated_batches.append(batch)
-                except StopIteration:
-                    # Check if we can refill pool
-                    self._fill_pool()
-                    if not self._pool:
-                        # Dataset exhausted
-                        break
-                    # Try again with refilled pool
-                    try:
-                        batch = self._best_fit_batch()
-                        accumulated_batches.append(batch)
-                    except StopIteration:
-                        break
+            accumulated_batches = self._build_accumulated_batches()
 
             # Yield accumulated batches if we have any
             if accumulated_batches:
                 yield accumulated_batches
             else:
-                # No more batches
-                break
+                # No more batches available
+                if self.infinite_loop:
+                    # Try to continue after recreating iterator
+                    self._recreate_iterator()
+                    accumulated_batches = self._build_accumulated_batches()
+                    if accumulated_batches:
+                        # Successfully restarted, continue iteration
+                        yield accumulated_batches
+                        continue
+                    else:
+                        # Even after recreating, no data available (empty dataset)
+                        logger.warning(
+                            f"[LoadBalancedDataset] Rank {self.dp_rank}: "
+                            "Dataset is empty, stopping iteration"
+                        )
+                        break
+                else:
+                    # Not in infinite loop mode, stop iteration
+                    break
