@@ -628,6 +628,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             if hasattr(self.train_sampler, "set_epoch"):
                 self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+            # global_batch is a list of items from `datapacker.sft_process_sample()`
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
