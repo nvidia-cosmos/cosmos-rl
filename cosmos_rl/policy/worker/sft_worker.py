@@ -545,7 +545,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        if hasattr(train_dataset.dataset, "data_loader"):
+        if hasattr(train_dataset, "dataset") and hasattr(
+            train_dataset.dataset, "data_loader"
+        ):
             # Use custom data loader if provided by dataset
             self.train_data_loader = train_dataset.dataset.data_loader
         else:
