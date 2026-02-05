@@ -111,3 +111,4 @@ training_chunk_size = 16
 num_envs = 8
 save_video = false
 continuous = false
+unnorm_key = "libero_10_no_noops"

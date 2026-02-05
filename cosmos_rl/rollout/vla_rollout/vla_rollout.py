@@ -172,8 +172,7 @@ class OpenVLARollout(RolloutBase):
             )
 
             # Robotwin works fine in subprocess with spawn method
-            # Temporarily testing in-process mode to debug graphics context initialization
-            use_subprocess = False
+            use_subprocess = True
         else:
             raise ValueError(f"Invalid simulator type: {sim_type}")
 
@@ -462,20 +461,8 @@ class OpenVLARollout(RolloutBase):
                     is_valid=is_validation,
                     temperature=self.config.rollout.sampling_config.temperature,
                     # unnorm_key="libero_10_no_noops",
-                    unnorm_key="beat_block_hammer_1k",
+                    unnorm_key=self.config.vla.unnorm_key,
                 )
-                # for k, v in active_sim_results.items():
-                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
-                #         logger.info(f"active_sim_results[{k}]: {v.shape}")
-                # for k, v in vla_input.items():
-                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
-                #         logger.info(f"vla_input[{k}]: {v.shape}")
-                # for k, v in vla_output.items():
-                #     if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
-                #         logger.info(f"vla_output[{k}]: {v.shape}")
-                # logger.info(f"active_sim_results: {active_sim_results.keys()}")
-                # logger.info(f"vla_input: {vla_input.keys()}")
-                # logger.info(f"vla_output: {vla_output.keys()}")
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
                 for key in self.vla_input_keys:

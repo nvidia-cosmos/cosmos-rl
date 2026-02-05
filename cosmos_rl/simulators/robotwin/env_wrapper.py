@@ -61,7 +61,7 @@ class RoboTwinEnvWrapper(gym.Env):
         self.num_envs = getattr(cfg, "num_envs", 1)
         self.seed = getattr(cfg, "seed", 0)
         self.task_config = getattr(cfg, "task_config", {})
-        self.max_steps = getattr(cfg, "max_steps", 512)
+        self.max_steps = getattr(cfg, "max_steps", 200)
         self.skip_instruction_setup = skip_instruction_setup
         self.task_suite = get_robotwin_task_suite()
 
@@ -292,11 +292,15 @@ class RoboTwinEnvWrapper(gym.Env):
         return images_and_states, task_descriptions
 
     def step(self, env_ids: List[int], action):
-        """Execute one step in specified environments.
+        """Execute step(s) in specified environments with chunk action support.
 
         Args:
             env_ids: List of environment indices to step
             action: Actions for each environment
+                   - Single step: 2D array of shape (num_envs, action_dim)
+                   - Chunk actions: 3D array of shape (num_envs, horizon, action_dim)
+                   If single step, SubEnv.step will expand to (1, action_dim) internally.
+                   Observations are chunk-interval (from final step of chunk).
 
         Returns:
             Dictionary with keys:
@@ -317,10 +321,12 @@ class RoboTwinEnvWrapper(gym.Env):
             active_env_ids = [env_ids[i] for i in active_indices]
             active_action = action[active_indices]
 
-            # Execute step
-            # Check if actions are chunked (3D: num_envs, num_steps, action_dim) or single-step (2D: num_envs, action_dim)
-            is_chunked = active_action.ndim == 3
-            num_steps_in_chunk = active_action.shape[1] if is_chunked else 1
+            # Execute step - VectorEnv.step handles both single-step and chunk actions
+            # Determine number of steps in chunk for step counting
+            if active_action.ndim == 3:  # (num_envs, horizon, action_dim)
+                num_steps_in_chunk = active_action.shape[1]
+            else:
+                num_steps_in_chunk = 1  # (num_envs, action_dim) -> single step
 
             obs_list, rewards, terminated, truncated, infos = self.env.step(
                 active_action, env_ids=active_env_ids
@@ -329,7 +335,7 @@ class RoboTwinEnvWrapper(gym.Env):
 
             # Update environment states
             for i, env_id in enumerate(active_env_ids):
-                # Increment step count by number of steps in chunk (or 1 for single step)
+                # Increment step count by number of steps in chunk
                 self.env_states[env_id].step += num_steps_in_chunk
 
                 # Check if episode is done
@@ -341,12 +347,12 @@ class RoboTwinEnvWrapper(gym.Env):
                     )
                     self.env_states[env_id].active = False
 
-                # Update current observation
+                # Update current observation (chunk-interval observation from final step)
                 for k, v in images_and_states.items():
                     if v is not None:
                         self.env_states[env_id].current_obs[k] = v[i]
 
-                # Record validation frames
+                # Record validation frames (chunk-interval, not intra-chunk)
                 if self.env_states[env_id].do_validation:
                     if images_and_states.get("full_images") is not None:
                         self.env_states[env_id].valid_pixels["full_images"].append(
@@ -387,36 +393,22 @@ class RoboTwinEnvWrapper(gym.Env):
             actions: Tensor of shape (num_envs, num_steps, action_dim)
 
         Returns:
-            Results from the final step
+            Results from the final step (chunk-interval observation).
+            Note: Uses chunk-interval observations only (no intra-chunk frames).
+            Validation frames are captured at chunk boundaries automatically.
         """
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
 
-        # Check if any environment needs validation video recording
-        # If validation is enabled, we need intermediate frames from each step
-        # Note: gen_sparse_reward_data processes chunks natively but only returns final observation
-        # For validation videos, we need to step sequentially to capture intermediate frames
-        needs_validation = any(
-            self.env_states[env_id].do_validation for env_id in env_ids
-        )
-
-        if needs_validation:
-            # For validation videos, step sequentially to capture frames at each step
-            # This is slower but necessary to record intermediate observations for video
-            # If ANY env needs validation, use sequential for all to keep them synchronized
-            num_steps = actions.shape[1]
-            for step in range(num_steps):
-                results = self.step(env_ids, actions[:, step])
-            return results
-        else:
-            # No validation needed: use native chunk support for maximum performance
-            # RoboTwin's gen_sparse_reward_data naturally supports chunk actions
-            # Pass the entire chunk (num_envs, num_steps, action_dim) directly
-            # VectorEnv.step() will pass actions[i] (num_steps, action_dim) to each SubEnv
-            # SubEnv.step() will pass it to gen_sparse_reward_data which processes all steps at once
-            # This is much faster than looping sequentially!
-            results = self.step(env_ids, actions)
-            return results
+        # Use native chunk support for maximum performance
+        # RoboTwin's gen_sparse_reward_data naturally supports chunk actions
+        # Pass the entire chunk (num_envs, num_steps, action_dim) directly
+        # VectorEnv.step() will pass actions[i] (num_steps, action_dim) to each SubEnv
+        # SubEnv.step() will pass it to gen_sparse_reward_data which processes all steps at once
+        # Returns chunk-interval observation (from final step of chunk)
+        # Validation frames are captured automatically at chunk boundaries in step()
+        results = self.step(env_ids, actions)
+        return results
 
     def get_env_states(self, env_ids: List[int]):
         """Get environment states for specified environments.

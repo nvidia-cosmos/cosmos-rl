@@ -293,16 +293,18 @@ class SubEnv:
             return "Complete the {} task".format(task_name)
 
     def step(self, action):
-        """Execute one step in the environment.
+        """Execute step(s) in the environment with chunk action support.
 
         Args:
             action: Action to take in the environment
                    - Single step: 1D array of shape (action_dim,)
                    - Chunk actions: 2D array of shape (horizon, action_dim)
-                   RoboTwin's gen_sparse_reward_data naturally supports chunk actions
+                   If single step, expands to (1, action_dim) internally.
+                   RoboTwin's gen_sparse_reward_data processes chunk actions natively.
 
         Returns:
-            Dictionary containing obs, reward, terminated, truncated, and info
+            Dictionary containing obs, reward, terminated, truncated, and info.
+            Observation is from the final step of the chunk (chunk-interval observation).
         """
         if self.task is None:
             error_msg = (
@@ -314,9 +316,8 @@ class SubEnv:
 
         with self.local_lock:
             try:
+                # Always convert to chunk format: (horizon, action_dim)
                 # RoboTwin's gen_sparse_reward_data expects chunk_actions with shape (horizon, action_dim)
-                # It naturally supports both single-step (horizon=1) and chunk actions
-                # Convert to 2D if needed: (action_dim,) -> (1, action_dim)
                 if action.ndim == 1:
                     chunk_action = action[
                         np.newaxis, :
@@ -329,6 +330,8 @@ class SubEnv:
                         f"got shape {action.shape}"
                     )
 
+                # Process chunk actions - gen_sparse_reward_data handles the entire chunk internally
+                # Returns final observation (chunk-interval, not intra-chunk)
                 reward, terminated, truncated, info = self.task.gen_sparse_reward_data(
                     chunk_action
                 )
@@ -390,7 +393,6 @@ class SubEnv:
         self.task_args["instruction"] = self.instruction
 
         # Try to create and setup task with retries
-        # Reuse existing task instance if available and same task_name, otherwise create new one
         trial_seed = self.env_seed
         is_valid = False
         max_retries = 10
@@ -398,25 +400,20 @@ class SubEnv:
 
         while not is_valid and retry_count < max_retries:
             try:
-                # Only create new task if we don't have one
-                if self.task is None:
-                    self.task = _class_decorator(task_name)
-
+                self.task = _class_decorator(task_name)
                 self.task.setup_demo(
                     now_ep_num=trial_seed, seed=trial_seed, **self.task_args
                 )
-                self.task.step_lim = self.task_args.get("step_lim", 512)
+                self.task.step_lim = self.task_args.get("step_lim", 200)
                 self.task.run_steps = 0
                 self.task.reward_step = 0
                 is_valid = True
-            except Exception:
-                # Close and recreate task on error
+            except Exception as e:
+                logger.warning(
+                    f"SubEnv {self.env_id} reset failed with seed {trial_seed}: {e}, retrying..."
+                )
                 if self.task is not None and hasattr(self.task, "close_env"):
-                    try:
-                        self.task.close_env()
-                    except Exception:
-                        pass
-                self.task = _class_decorator(task_name)
+                    self.task.close_env()
                 trial_seed += 1
                 retry_count += 1
                 continue
@@ -780,14 +777,18 @@ class VectorEnv(gym.Env):
         return observations
 
     def step(self, actions, env_ids: Optional[Union[int, List[int]]] = None):
-        """Execute one step in specified environments.
+        """Execute step(s) in specified environments with chunk action support.
 
         Args:
             actions: Actions for each environment
+                    - Single step: 2D array of shape (num_envs, action_dim)
+                    - Chunk actions: 3D array of shape (num_envs, horizon, action_dim)
+                    If single step, SubEnv.step will expand to (1, action_dim) internally.
             env_ids: Environment indices to step (None = all environments)
 
         Returns:
-            Tuple of (observations, rewards, terminated, truncated, infos)
+            Tuple of (observations, rewards, terminated, truncated, infos).
+            Observations are from the final step of each chunk (chunk-interval observations).
         """
         if env_ids is None:
             env_ids = list(range(self.num_envs))
@@ -799,10 +800,16 @@ class VectorEnv(gym.Env):
             actions = actions.detach().cpu().numpy()
 
         # Submit step tasks
+        # actions[i] will be either (action_dim,) or (horizon, action_dim)
+        # SubEnv.step handles expansion of single-step actions internally
         step_futures = {}
         for i, env_id in enumerate(env_ids):
             if 0 <= env_id < self.num_envs:
-                future = self.thread_pool.submit(self.envs[env_id].step, actions[i])
+                # Extract action for this environment
+                # If actions is 3D (num_envs, horizon, action_dim), actions[i] is (horizon, action_dim)
+                # If actions is 2D (num_envs, action_dim), actions[i] is (action_dim,)
+                env_action = actions[i]
+                future = self.thread_pool.submit(self.envs[env_id].step, env_action)
                 step_futures[env_id] = future
 
         # Collect results

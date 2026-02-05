@@ -84,7 +84,7 @@ if __name__ == "__main__":
         return Robotwin2Dataset(num_trials_per_task=50, train_val="train")
 
     def get_val_dataset(config: CosmosConfig) -> Dataset:
-        return Robotwin2Dataset(num_trials_per_task=1, train_val="val")
+        return Robotwin2Dataset(num_trials_per_task=1024, train_val="val")
 
     launch_worker(
         dataset=get_dataset,
