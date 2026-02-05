@@ -1390,6 +1390,7 @@ def split_train_n_val_dataset(
     )
     return train_dataset, test_dataset
 
+
 def extract_padding_mask(input_ids, pad_token_id):
     """
     Extract the padding mask from the input_ids.
