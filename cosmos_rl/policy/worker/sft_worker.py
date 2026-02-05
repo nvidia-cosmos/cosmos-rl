@@ -296,10 +296,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
-        trainer_type = self.config.train.train_policy.type
+        trainer_type = self.config.train.train_policy.trainer_type
         if self.config.policy.is_diffusers:
             trainer_type = "diffusers_" + trainer_type
-
         self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
             config=self.config,
             parallel_dims=self.parallel_dims,
@@ -546,10 +545,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        self.train_data_loader = get_train_data_loader(
-            self.train_sampler, batch_sampler
-        )
-        if val_batch_sampler is not None:
+        if hasattr(train_dataset.dataset, "data_loader"):
+            # Use custom data loader if provided by dataset
+            self.train_data_loader = train_dataset.dataset.data_loader
+        else:
+            self.train_data_loader = get_train_data_loader(
+                self.train_sampler, batch_sampler
+            )
+
+        if hasattr(val_dataset.dataset, "data_loader"):
+            # Use custom data loader if provided by dataset
+            self.val_data_loader = val_dataset.dataset.data_loader
+        elif val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )

@@ -168,12 +168,10 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
 
     def __init__(self, config: PaliGemmaConfig):
         super().__init__(config)
-        # Use local SiglipVisionModel implementation
         self.vision_tower = SiglipVisionModel(config=config.vision_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(config)
         self.vocab_size = config.text_config.vocab_size
 
-        # Use local GemmaModel implementation
         language_model = GemmaModel(config=config.text_config)
         self.language_model = language_model
 

@@ -135,13 +135,13 @@ class RemoteReward(BaseRewardModel):
         }
 
         # Enqueue request (single call for entire batch)
-        uuid = self.enqueue_request(tensor, data)
+        uuid, replica_id = self.enqueue_request(tensor, data)
         if is_async:
             logger.info(f"Reward compute is async, returning uuid: {uuid}")
             return torch.zeros((latents.shape[0],), device=latents.device), uuid
 
         # Poll for reward
-        reward = self.fetch_reward(uuid)
+        reward = self.fetch_reward(uuid, replica_id)
 
         return reward.to(latents.device), None
 
@@ -173,17 +173,29 @@ class RemoteReward(BaseRewardModel):
             )
 
         uuid = response.json()["uuid"]
-        # logger.info(f"[RemoteReward] Enqueued request with UUID: {uuid}, latents.max(): {tensor.max()}")
-        return uuid
+        replica_id = response.json().get("replica_id", None)
+        # logger.info(f"[RemoteReward] Enqueued request with UUID: {uuid}, replica_Id: {replica_id}, latents.max(): {tensor.max()}")
+        return uuid, replica_id
 
-    def fetch_reward(self, uuid, return_all: bool = False):
+    def fetch_reward(self, uuid, replica_id, return_all: bool = False):
         """Poll for reward until ready."""
+
+        # Specify replica_id header if available for lepton endpoint
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+        }
+        if (
+            replica_id is not None
+            and not os.environ.get("COSMOS_DISABLE_REMOTE_REWARD_USE_REPLICA", "0")
+            == "1"
+        ):
+            headers["X-Lepton-Replica-Target"] = replica_id
 
         response = make_request_with_retry(
             partial(
                 requests.post,
                 data={"uuid": uuid, "type": self.reward_fn},
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers=headers,
                 timeout=5.0,
             ),
             [self.fetch_url],

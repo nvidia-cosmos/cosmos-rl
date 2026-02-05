@@ -177,11 +177,12 @@ class SFTTrainer(LLMTrainer):
             if not self.enable_dp_load_balancing
             else 1
         )
+        global_batch_size = self.data_packer.batch_size(global_batch)
         # split global_batch into mini_batches
         mini_batch_begin_idxs = list(
             range(
                 0,
-                len(global_batch),
+                global_batch_size,
                 mini_batch,
             )
         )
@@ -198,7 +199,9 @@ class SFTTrainer(LLMTrainer):
                 else None
             )
             raw_batch = (
-                global_batch[i : i + mini_batch]
+                self.data_packer.slice_batch(
+                    global_batch, i, i + self.config.train.train_policy.mini_batch
+                )
                 if not self.enable_dp_load_balancing
                 else global_batch[i]
             )
@@ -595,6 +598,7 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    is_final=is_last_step,
                     **kwargs,
                 )
                 self.ckpt_manager.save_check(

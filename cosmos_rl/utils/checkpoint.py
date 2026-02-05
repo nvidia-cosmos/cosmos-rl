@@ -56,35 +56,163 @@ class CheckpointMananger:
                 self.executor = futures.ThreadPoolExecutor(max_workers=4)
         self.pre_save_futures = []
         self.saved_steps = []
-        self.best_score = float("inf") if "loss" in metric else -float("inf")
+        for step, _ in self._get_saved_step_to_timestamp_map().items():
+            heapq.heappush(self.saved_steps, step)
+        # Load best score from file if exists (persists across resumes)
+        self.best_score = self._load_best_score()
+        self.best_step = self._get_best_step_from_link()
 
     @staticmethod
     def ckpt_path_check(ckpt_path: str):
         return os.path.exists(os.path.join(ckpt_path, "cosmos_config"))
 
-    def get_ckpt_path(self) -> List[str]:
-        def digit_ascending_key(name: str):
-            # grab the last integer found in the folder name; put non-numeric names at the end (sorted by name)
-            nums = re.findall(r"\d+", name)
-            return (1, name) if not nums else (0, int(nums[-1]))
+    def _get_saved_step_to_timestamp_map(self) -> Dict[int, str]:
+        """
+        Get the map of saved step to timestamp.
 
-        # find the latest checkpoint under output_dir
+        Returns:
+            Dict[int, str]: A dictionary mapping saved steps to their corresponding timestamps.
+        """
+        saved_step_to_timestamp_map = {}
         if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
-            cur_timestamp = os.path.basename(os.path.dirname(self.ckpt_output_dir))
+            root_output_dir = self._get_root_output_dir()
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
-            for timestamp in reversed(timestamps):
-                if timestamp < cur_timestamp:
-                    break
-            steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
-            steps = sorted(steps, key=digit_ascending_key)
+
+            for timestamp in timestamps:
+                # Skip the 'best' directory which contains symlinks
+                if timestamp == "best":
+                    continue
+                ckpt_base = os.path.join(root_output_dir, timestamp, "checkpoints")
+                if not os.path.isdir(ckpt_base):
+                    continue
+                for step_dir in os.listdir(ckpt_base):
+                    # validate step_dir format: step_<number>
+                    match = re.match(r"^step_(\d+)$", step_dir)
+                    if match:
+                        saved_step_to_timestamp_map[int(match.group(1))] = timestamp
+        return saved_step_to_timestamp_map
+
+    def get_ckpt_path(self) -> List[str]:
+        # find the latest checkpoint under output_dir
+        if self.config.train.resume == True:  # noqa: E712
+            root_output_dir = self._get_root_output_dir()
+            saved_step_to_timestamp = self._get_saved_step_to_timestamp_map()
+            steps = sorted(saved_step_to_timestamp.keys())
             return [
-                os.path.join(root_output_dir, timestamp, "checkpoints", step, "policy")
+                os.path.join(
+                    root_output_dir,
+                    saved_step_to_timestamp[step],
+                    "checkpoints",
+                    f"step_{step}",
+                    "policy",
+                )
                 for step in reversed(steps)
             ]
         else:
             return [self.config.train.resume]
+
+    def _get_root_output_dir(self) -> str:
+        """
+        Get the root output directory.
+
+        We assume self.config.train.output_dir directory is structured like:
+            /path/to/output_dir/<cur_timestamp>
+        This method returns the /path/to/output_dir
+        """
+        return os.path.dirname(self.config.train.output_dir)
+
+    def _get_best_dir(self) -> str:
+        """Get the path to the best model directory at root level."""
+        return os.path.join(self._get_root_output_dir(), "best")
+
+    def _get_best_score_path(self) -> str:
+        """Get the path to the best score file."""
+        return os.path.join(self._get_best_dir(), "best_score.json")
+
+    def _load_best_score(self) -> float:
+        """
+        Load the best score from file if exists.
+        Returns the default value if file doesn't exist.
+        """
+        default_score = float("inf") if "loss" in self.metric else -float("inf")
+        best_score_path = self._get_best_score_path()
+        if os.path.exists(best_score_path):
+            try:
+                with open(best_score_path, "r") as f:
+                    data = json.load(f)
+                    score = data.get("best_score", default_score)
+                    logger.info(f"Loaded best score from {best_score_path}: {score}")
+                    return score
+            except Exception as e:
+                logger.warning(f"Failed to load best score from {best_score_path}: {e}")
+        return default_score
+
+    def _save_best_score(self, score: float, step: int):
+        """Save the best score to file."""
+        best_dir = self._get_best_dir()
+        os.makedirs(best_dir, exist_ok=True)
+        best_score_path = self._get_best_score_path()
+        with open(best_score_path, "w") as f:
+            json.dump(
+                {"best_score": score, "best_step": step, "metric": self.metric}, f
+            )
+        logger.info(f"Saved best score to {best_score_path}: {score}")
+
+    def _get_best_step_from_link(self) -> Optional[int]:
+        """
+        Get the best step number from the existing best checkpoint link.
+        Returns None if no best link exists.
+        """
+        best_ckpt_link = os.path.join(self._get_best_dir(), "checkpoints")
+        if os.path.islink(best_ckpt_link):
+            try:
+                target = os.readlink(best_ckpt_link)
+                basename = os.path.basename(target)
+                match = re.match(r"^step_(\d+)$", basename)
+                if match:
+                    step = int(match.group(1))
+                    logger.info(f"Found existing best checkpoint at step {step}")
+                    return step
+            except Exception as e:
+                logger.warning(f"Failed to read best checkpoint link: {e}")
+        return None
+
+    def _is_step_linked_as_best(self, step: int) -> bool:
+        """Check if the given step is currently linked as the best checkpoint."""
+        return self.best_step is not None and self.best_step == step
+
+    def _delete_step_checkpoint(self, step: int):
+        """Delete checkpoint and safetensors for a given step."""
+        if self.config.train.resume == True:  # noqa: E712
+            # Resume case: checkpoint may be in a different timestamp directory
+            step_to_timestamp = self._get_saved_step_to_timestamp_map()
+            timestamp = step_to_timestamp.get(step)
+            if timestamp is None:
+                # Checkpoint directory not found, skip deletion
+                logger.warning(
+                    f"Checkpoint step_{step} not found in any timestamp directory"
+                )
+                return
+            root_output_dir = self._get_root_output_dir()
+            ckpt_dir = os.path.join(
+                root_output_dir, timestamp, "checkpoints", f"step_{step}"
+            )
+            safetensors_dir = os.path.join(
+                root_output_dir, timestamp, "safetensors", f"step_{step}"
+            )
+        else:
+            # Non-resume case: checkpoint is in current output_dir
+            ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{step}")
+            safetensors_dir = os.path.join(
+                self.config.train.output_dir, "safetensors", f"step_{step}"
+            )
+        if os.path.exists(ckpt_dir):
+            shutil.rmtree(ckpt_dir)
+            logger.info(f"Removed old checkpoint: {ckpt_dir}")
+        if os.path.exists(safetensors_dir):
+            shutil.rmtree(safetensors_dir)
+            logger.info(f"Removed old safetensors: {safetensors_dir}")
 
     @staticmethod
     def get_rng_state():
@@ -120,6 +248,22 @@ class CheckpointMananger:
             else:
                 state_dict_cpu[key] = value
         return state_dict
+
+    def finalize(self) -> None:
+        """Wait for any pending async checkpoint saves/uploads to finish.
+        This should be called before process exit to avoid losing uploads when
+        `save_mode == "async"`.
+        """
+        if self.save_mode != "async" or not hasattr(self, "executor"):
+            return
+        if self.pre_save_futures:
+            for future in futures.as_completed(self.pre_save_futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Async checkpoint save/upload failed: {e}")
+            self.pre_save_futures = []
+        self.executor.shutdown(wait=True)
 
     def save_checkpoint(
         self,
@@ -363,18 +507,29 @@ class CheckpointMananger:
         if is_master_rank(self.parallel_dims, self.global_rank):
             heapq.heappush(self.saved_steps, step)
             # remove the old checkpoints
+            # expected behavior:
+            # Keep the best checkpoint, and delete the oldest checkpoint if the number of
+            # checkpoints exceeds the max_keep.
+            # If the best checkpoint is the oldest checkpoint, delete the second oldest checkpoint.
             if len(self.saved_steps) > self.max_keep and self.max_keep != -1:
-                oldest = heapq.heappop(self.saved_steps)
-                ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{oldest}")
-                safetensors_dir = os.path.join(
-                    self.config.train.output_dir, "safetensors", f"step_{oldest}"
-                )
-                if os.path.exists(ckpt_dir):
-                    shutil.rmtree(ckpt_dir)
-                    logger.info(f"Removed old checkpoint: {ckpt_dir}")
-                if os.path.exists(safetensors_dir):
-                    shutil.rmtree(safetensors_dir)
-                    logger.info(f"Removed old safetensors: {safetensors_dir}")
+                oldest = self.saved_steps[0]  # peek
+                step_to_delete = None
+
+                if self._is_step_linked_as_best(oldest) and len(self.saved_steps) > 1:
+                    # Best is oldest, delete second oldest instead
+                    heapq.heappop(self.saved_steps)  # remove best temporarily
+                    step_to_delete = heapq.heappop(self.saved_steps)
+                    heapq.heappush(self.saved_steps, oldest)  # put best back
+                    logger.info(
+                        f"Best checkpoint is at step_{oldest}, "
+                        f"deleting step_{step_to_delete} instead"
+                    )
+                else:
+                    step_to_delete = heapq.heappop(self.saved_steps)
+                    logger.info(f"Deleting step_{step_to_delete}")
+
+                if step_to_delete is not None:
+                    self._delete_step_checkpoint(step_to_delete)
 
             val_score = kwargs.get("val_score", None)
             if val_score is not None:
@@ -382,20 +537,32 @@ class CheckpointMananger:
                     "loss" not in self.metric and val_score > self.best_score
                 ):
                     self.best_score = val_score
-                    best_ckpt_dir = os.path.join(
-                        self.config.train.output_dir, "checkpoints", "best"
-                    )
-                    if os.path.islink(best_ckpt_dir):
-                        os.unlink(best_ckpt_dir)
-                    os.symlink(f"step_{step}", best_ckpt_dir)
+                    self.best_step = step
+
+                    best_dir = self._get_best_dir()
+                    os.makedirs(best_dir, exist_ok=True)
+
+                    # Create symlink for checkpoint at root/best/checkpoints
+                    best_ckpt_link = os.path.join(best_dir, "checkpoints")
+                    # assume the best checkpoint is at self.ckpt_output_dir/step_<step>
+                    step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
+                    if os.path.islink(best_ckpt_link):
+                        os.unlink(best_ckpt_link)
+                    os.symlink(step_ckpt_path, best_ckpt_link)
                     logger.info(
                         f"Best checkpoint updated to step_{step} with score: {val_score}"
                     )
+
+                    # Create symlink for safetensors at root/best/safetensors
                     if self.config.train.ckpt.export_safetensors:
-                        best_safetensors_dir = os.path.join(
-                            self.config.train.output_dir, "safetensors", "best"
+                        best_safetensors_link = os.path.join(best_dir, "safetensors")
+                        step_safetensors_path = os.path.join(
+                            self.config.train.output_dir, "safetensors", f"step_{step}"
                         )
-                        if os.path.islink(best_safetensors_dir):
-                            os.unlink(best_safetensors_dir)
-                        os.symlink(f"step_{step}", best_safetensors_dir)
+                        if os.path.islink(best_safetensors_link):
+                            os.unlink(best_safetensors_link)
+                        os.symlink(step_safetensors_path, best_safetensors_link)
                         logger.info(f"Best safetensors updated to step_{step}")
+
+                    # Save best score to file for persistence across resumes
+                    self._save_best_score(val_score, step)

@@ -25,6 +25,7 @@ input_key = "fps"
 [model]
 text_encoder_class = "reason1_7B"
 fsdp_shard_size = 8
+dp_replicate_size = 16
 resolution = "720"
 
 [model_parallel]
@@ -67,12 +68,13 @@ window_size = 112
 
 [model.rl]
 sample_steps = 20
+num_rollout = 8
+train_on = [0,2,4,6,8,10,12,14,16,18]
 update_ref_every_iter = 0
 data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
-train_on = [0,2,4,6,8,10,12,14,16,18]
 
 [trainer]
 max_iter = 2001

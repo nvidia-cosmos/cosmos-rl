@@ -91,7 +91,6 @@ class DatasetConfig(BaseModel):
         default=None,
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
-
     local_dir: str = Field(
         default="",
         description="Local path to load dataset",
@@ -408,6 +407,12 @@ class GrpoConfig(BaseModel):
         default=False,
         description="Bypass reward computation and use fixed reward of 0.0 for all samples. Useful for distillation or debugging.",
     )
+
+    group_reward_calculation: bool = Field(
+        default=False,
+        description="Whether to group the rollouts with the same prompt for reward calculation. If set to True, the rollouts with the same prompt will be grouped together and the reward will be calculated once for each group. This can save computation time when there are many rollouts with the same prompt. Notice that the specified reward fn must support reward calculation in batched group manner.",
+    )
+
     temperature: float = Field(
         default=1.0,
         description="Temperature for sampling. The higher the temperature, the more random the completions.",
@@ -1125,6 +1130,15 @@ class PolicyConfig(BaseModel):
         "Example: freeze_pattern = ['^visual\\..*'] freezes all visual components; "
         "freeze_pattern = ['^model\\.layers\\.[0-9]+\\.'] freezes layers 0-9.",
     )
+    trainable_pattern: Optional[List[str]] = Field(
+        default=None,
+        description="Pattern-based configuration to train parts of the model. "
+        "A list of regex patterns that match against parameter names; "
+        "matched parameters will be set to require_grad=True otherwise require_grad=False. "
+        "Example: trainable_pattern = ['^visual\\..*'] trains all visual components; "
+        "trainable_pattern = ['^model\\.layers\\.[0-9]+\\.'] trains layers 0-9.",
+    )
+
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
@@ -1141,6 +1155,9 @@ class PolicyConfig(BaseModel):
         assert (
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        assert (
+            self.trainable_pattern is None or self.freeze_pattern is None
+        ), "trainable_pattern and freeze_pattern cannot be set at the same time"
         return self
 
 
@@ -1344,6 +1361,10 @@ class LoggingConfig(BaseModel):
     logger: List[str] = Field(
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
+    )
+    log_interval: int = Field(
+        default=100,
+        description="Log interval (in steps) for loss averaging.",
     )
     project_name: str = Field(
         default="cosmos_rl",

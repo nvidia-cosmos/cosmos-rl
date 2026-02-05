@@ -89,19 +89,19 @@ class WFMPolicyWorker(WorkerBase):
     def __init__(self, config: CosmosVisionGenConfig, **kwargs):
         super().__init__(config)
         # Override remote reward config with environment variables if provided
-        if os.environ.get("WFM_REWARD_TOKEN", ""):
+        if os.environ.get("REMOTE_REWARD_TOKEN", ""):
             self.config.model.rl.reward_config.remote_reward.token = os.environ.get(
-                "WFM_REWARD_TOKEN", ""
+                "REMOTE_REWARD_TOKEN", ""
             )
             logger.info("Using token from environment variable")
-        if os.environ.get("WFM_REWARD_ENQUEUE_URL", ""):
+        if os.environ.get("REMOTE_REWARD_ENQUEUE_URL", ""):
             self.config.model.rl.reward_config.remote_reward.enqueue_url = (
-                os.environ.get("WFM_REWARD_ENQUEUE_URL", "")
+                os.environ.get("REMOTE_REWARD_ENQUEUE_URL", "")
             )
             logger.info("Using enqueue_url from environment variable")
-        if os.environ.get("WFM_REWARD_FETCH_URL", ""):
+        if os.environ.get("REMOTE_REWARD_FETCH_URL", ""):
             self.config.model.rl.reward_config.remote_reward.fetch_url = os.environ.get(
-                "WFM_REWARD_FETCH_URL", ""
+                "REMOTE_REWARD_FETCH_URL", ""
             )
             logger.info("Using fetch_url from environment variable")
 
