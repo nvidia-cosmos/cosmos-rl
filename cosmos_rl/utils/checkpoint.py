@@ -496,7 +496,7 @@ class CheckpointMananger:
         model_name_or_path: str,
         revision: Optional[str] = None,
         strict: bool = True,
-    ) -> tuple[Dict, Optional[Union[torch.optim.lr_scheduler._LRScheduler, Callable]]]:
+    ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
         # check whether checkpoint existing
