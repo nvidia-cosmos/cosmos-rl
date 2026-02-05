@@ -265,7 +265,7 @@ def get_worker_ip(worker_idx: int, args: argparse.Namespace) -> str:
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         return get_lepton_ip(worker_idx)
     elif args.node_ip_list is not None:
-        return get_ip_from_list(worker_idx)
+        return get_ip_from_list(worker_idx, args)
     else:
         raise RuntimeError(
             "Replica with GPUs larger than 8 occurs but not on Lepton job, please specify --node-ip-list to provide the IPs of all nodes to enable conenctions to each Rendezvous head node."
@@ -401,7 +401,7 @@ class SingleWorkerCommands:
         env: Optional[Dict[str, str]] = None,
     ):
         logger.info(
-            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}"
+            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}, env: {env}"
         )
         self.command_items.append(
             CommandItem(command, gpu_devices, control_url, output_file, env)
@@ -680,11 +680,11 @@ class NodesManager:
                     # Add a node or use existing node
                     node = self.creating_or_using_node()
                     node.launch_commands.extend_commands(
-                        [self.commands],
-                        [self.gpu_devices],
-                        [self.control_urls],
-                        [self.output_files],
-                        [self.envs],
+                        self.commands,
+                        self.gpu_devices,
+                        self.control_urls,
+                        self.output_files,
+                        self.envs,
                     )
 
                     self.global_worker_idx += 1
@@ -695,11 +695,11 @@ class NodesManager:
                     # if the remaining GPUs are not enough for the minimum number of GPUs per replica, we need to move to a new node.
                     node = self.creating_or_using_node()
                     node.launch_commands.extend_commands(
-                        [self.commands],
-                        [self.gpu_devices],
-                        [self.control_urls],
-                        [self.output_files],
-                        [self.envs],
+                        self.commands,
+                        self.gpu_devices,
+                        self.control_urls,
+                        self.output_files,
+                        self.envs,
                     )
                     self.global_worker_idx += 1
 
@@ -831,6 +831,9 @@ def launch_processes(
             if ofile is not None:
                 f.close()
         except Exception as e:
+            import traceback
+
+            logger.error(traceback.format_exc())
             logger.error(f"Error launching process for command '{cmd}': {e}")
 
     return processes
