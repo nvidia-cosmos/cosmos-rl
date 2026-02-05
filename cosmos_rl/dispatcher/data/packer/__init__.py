@@ -32,4 +32,5 @@ __all__ = [
     "VLADataPacker",
     "PI05DataPacker",
     "worker_entry_parser",
+    "PI05DataPacker",
 ]

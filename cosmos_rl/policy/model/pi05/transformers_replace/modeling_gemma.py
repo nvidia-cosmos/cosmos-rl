@@ -607,9 +607,7 @@ class GemmaModel(GemmaPreTrainedModel):
         # normalized
         # Gemma downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
         # See https://github.com/huggingface/transformers/pull/29402
-        # normalizer = torch.tensor(
-        #     self.config.hidden_size**0.5, dtype=hidden_states.dtype
-        # )
+        # normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
         # hidden_states = hidden_states * normalizer
 
         # decoder layers

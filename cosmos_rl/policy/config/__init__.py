@@ -91,7 +91,6 @@ class DatasetConfig(BaseModel):
         default=None,
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
-
     local_dir: str = Field(
         default="",
         description="Local path to load dataset",
@@ -1305,6 +1304,10 @@ class LoggingConfig(BaseModel):
     logger: List[str] = Field(
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
+    )
+    log_interval: int = Field(
+        default=100,
+        description="Log interval (in steps) for loss averaging.",
     )
     project_name: str = Field(
         default="cosmos_rl",

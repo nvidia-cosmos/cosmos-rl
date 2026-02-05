@@ -45,4 +45,5 @@ __all__ = [
     "BaseModel",
     "WeightMapper",
     "ModelRegistry",
+    "PI05",
 ]

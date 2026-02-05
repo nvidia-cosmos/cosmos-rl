@@ -16,6 +16,7 @@
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer.vla_trainer.vla_trainer import OpenVLAGRPOTrainer
+from cosmos_rl.policy.trainer.vla_trainer.pi_sft_trainer import PISFTTrainer
 from cosmos_rl.policy.trainer.vla_trainer.pi05_trainer import PI05GRPOTrainer
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.base import Trainer
@@ -38,5 +39,6 @@ __all__ = [
     "Trainer",
     "DiffusersTrainer",
     "Diffusers_SFTTrainer",
+    "PISFTTrainer",
     "NFTTrainer",
 ]
