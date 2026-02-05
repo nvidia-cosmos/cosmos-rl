@@ -562,7 +562,7 @@ class TorchEngine(LLMTrainer):
                                 )
                     else:
                         with self.act_offloading_ctx_manager:
-                            raw_logits = self.model(**user_mini_batch)
+                            raw_logits = self.model(**user_mini_batch).logits
 
                         if self.parallel_dims.cp_enabled:
                             # reset the position ids and input ids
