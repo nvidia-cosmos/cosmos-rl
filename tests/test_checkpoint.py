@@ -330,6 +330,37 @@ class TestCheckpointManager(unittest.TestCase):
         target = os.readlink(best_ckpt_link)
         self.assertTrue(target.endswith("step_100"))
 
+    def test_async_delete_checkpoint(self):
+        """Test that checkpoint deletion works correctly in async mode."""
+        parallel_dims = create_test_parallel_dims()
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(
+            output_dir=output_dir, resume=False, max_keep=2, save_mode="async"
+        )
+        manager = CheckpointMananger(
+            config, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+
+        # Save 3 checkpoints, max_keep=2 should delete the oldest
+        for step in [100, 200, 300]:
+            manager.save_checkpoint(
+                model, optimizer, scheduler, step=step, total_steps=1000
+            )
+            manager.save_check(step)
+
+        # Wait for async operations to complete
+        manager.finalize()
+
+        # Verify step_100 was deleted, step_200 and step_300 exist
+        ckpt_dir = os.path.join(output_dir, "checkpoints")
+        self.assertFalse(os.path.exists(os.path.join(ckpt_dir, "step_100")))
+        self.assertTrue(os.path.exists(os.path.join(ckpt_dir, "step_200")))
+        self.assertTrue(os.path.exists(os.path.join(ckpt_dir, "step_300")))
+
     def _state_dicts_equal(self, sd1, sd2):
         """Helper to compare two state dicts."""
         if sd1.keys() != sd2.keys():
