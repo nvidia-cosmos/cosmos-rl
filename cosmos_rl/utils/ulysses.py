@@ -482,7 +482,8 @@ def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
                 logits = gather_outputs_for_ulysses(
                     outputs.logits, gather_dim=1, cp_mesh=cp_mesh
                 )
-                return outputs._replace(logits=logits)
+                outputs.logits = logits
+                return outputs
 
             model.forward = types.MethodType(gather_output_forward, model)
     else:
@@ -491,6 +492,7 @@ def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
             logits = gather_outputs_for_ulysses(
                 output.logits, gather_dim=1, cp_mesh=cp_mesh
             )
-            return output._replace(logits=logits)
+            output.logits = logits
+            return output
 
         model.register_forward_hook(gather_output_hook)
