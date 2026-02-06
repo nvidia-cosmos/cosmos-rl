@@ -51,7 +51,7 @@ class CheckpointMananger:
     def __init__(
         self,
         config: CosmosConfig,
-        parallel_dims: ParallelDims = None,
+        parallel_dims: Optional[ParallelDims] = None,
         global_rank: int = 0,
         metric: str = "val_loss",
     ):
@@ -72,7 +72,7 @@ class CheckpointMananger:
             if self.save_mode == "async":
                 self.executor = futures.ThreadPoolExecutor(max_workers=4)
         self.pre_save_futures = []
-        if is_master_rank(self.parallel_dims, self.global_rank):
+        if self._is_master_rank():
             self.saved_ckpt_step_dirs = sorted(
                 self._get_all_saved_ckpt_step_dirs(),
                 key=_step_dir_sort_key,
@@ -80,6 +80,12 @@ class CheckpointMananger:
             self._prune_corrupted_ckpts()
             # Load best score from file if exists (persists across resumes)
             self.best_score, self.best_ckpt_abs_dir = self._load_best_score()
+
+    def _is_master_rank(self) -> bool:
+        return (self.parallel_dims is None and self.global_rank == 0) or (
+            self.parallel_dims is not None
+            and is_master_rank(self.parallel_dims, self.global_rank)
+        )
 
     def _prune_corrupted_ckpts(self):
         """Prune corrupted checkpoints."""
@@ -675,7 +681,7 @@ class CheckpointMananger:
         raise FileNotFoundError(f"No checkpoint found at {base_paths}")
 
     def save_check(self, step: int, **kwargs):
-        if is_master_rank(self.parallel_dims, self.global_rank):
+        if self._is_master_rank():
             step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
             self.saved_ckpt_step_dirs.append(step_ckpt_path)
             # remove the old checkpoints
