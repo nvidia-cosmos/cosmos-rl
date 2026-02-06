@@ -342,17 +342,20 @@ class CheckpointMananger:
             ckpt_dir: The directory of the checkpoint to delete, which is expected to be like:
                 /path/to/output_dir/<timestamp>/checkpoints/step_<step_number>
         """
-        if os.path.exists(ckpt_dir):
-            shutil.rmtree(ckpt_dir)
-            logger.info(f"Removed old checkpoint: {ckpt_dir}")
-        safetensors_dir = os.path.join(
-            os.path.dirname(os.path.dirname(ckpt_dir)),
-            "safetensors",
-            os.path.basename(ckpt_dir),
-        )
-        if os.path.exists(safetensors_dir):
-            shutil.rmtree(safetensors_dir)
-            logger.info(f"Removed old safetensors: {safetensors_dir}")
+        try:
+            if os.path.exists(ckpt_dir):
+                shutil.rmtree(ckpt_dir)
+                logger.info(f"Removed old checkpoint: {ckpt_dir}")
+            safetensors_dir = os.path.join(
+                os.path.dirname(os.path.dirname(ckpt_dir)),
+                "safetensors",
+                os.path.basename(ckpt_dir),
+            )
+            if os.path.exists(safetensors_dir):
+                shutil.rmtree(safetensors_dir)
+                logger.info(f"Removed old safetensors: {safetensors_dir}")
+        except Exception as e:
+            logger.error(f"Error deleting checkpoint {ckpt_dir}: {e}")
 
     @staticmethod
     def get_rng_state():
@@ -710,7 +713,14 @@ class CheckpointMananger:
                     logger.info(f"Deleting {step_to_delete}")
 
                 if step_to_delete is not None:
-                    self._delete_checkpoint(step_to_delete)
+                    if self.save_mode == "async" and hasattr(self, "executor"):
+                        self.pre_save_futures.append(
+                            self.executor.submit(
+                                self._delete_checkpoint, step_to_delete
+                            )
+                        )
+                    else:
+                        self._delete_checkpoint(step_to_delete)
 
             val_score = kwargs.get("val_score", None)
             if val_score is not None:
