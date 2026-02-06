@@ -403,6 +403,8 @@ class PISFTTrainer(Trainer):
                         f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                     )
             if not resumed:
+                self.lr_schedulers = None
+                self.build_optimizers()
                 self.model_load_from_hf()
 
         if self.parallel_dims.dp_replicate_enabled:
@@ -414,12 +416,12 @@ class PISFTTrainer(Trainer):
                 )
                 if (
                     self.parallel_dims.dp_replicate_coord[0] != 0
-                    and ckpt_total_steps is not None
+                    and ckpt_total_steps > 0
                 ):
                     # Initialize lr_schedulers on non-zero dp_replicate ranks when resuming training
                     # only when ckpt_total_steps > 0, means a checkpoint is loaded
                     self.lr_schedulers = self.build_lr_schedulers(ckpt_total_steps)
-                if ckpt_total_steps is not None:
+                if ckpt_total_steps > 0:
                     assert (
                         self.lr_schedulers is not None
                     ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."

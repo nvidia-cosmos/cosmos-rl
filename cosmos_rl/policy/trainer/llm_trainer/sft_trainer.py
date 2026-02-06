@@ -637,14 +637,14 @@ class SFTTrainer(LLMTrainer):
 
                 if (
                     self.parallel_dims.dp_replicate_coord[0] != 0
-                    and ckpt_total_steps is not None
+                    and ckpt_total_steps > 0
                 ):
                     # Initialize lr_schedulers on non-zero dp_replicate ranks when resuming training
                     # only when ckpt_total_steps > 0, means a checkpoint is loaded
                     self.lr_schedulers = build_lr_schedulers(
                         self.optimizers, self.config, ckpt_total_steps
                     )
-                if ckpt_total_steps is not None:
+                if ckpt_total_steps > 0:
                     assert (
                         self.lr_schedulers is not None
                     ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
