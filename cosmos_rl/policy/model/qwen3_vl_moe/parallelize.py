@@ -14,34 +14,20 @@
 # limitations under the License.
 
 import os
-from typing import Callable, Optional
-
-import cosmos_rl.utils.util as util
 import torch
 import torch.nn as nn
-<<<<<<< HEAD:cosmos_rl/policy/model/qwen3_vl_moe/parallelize.py
 from typing import Callable, Optional
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-=======
-from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.parallelism import ParallelDims
-from torch.distributed._composable.replicate import replicate
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
->>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
+    parallelize_module,
     PrepareModuleInput,
     PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
-<<<<<<< HEAD:cosmos_rl/policy/model/qwen3_vl_moe/parallelize.py
     ParallelStyle,
 )
 from cosmos_rl.utils.distributed import ReplicateParallel
@@ -57,10 +43,6 @@ from cosmos_rl.utils.ulysses import (
 )
 from cosmos_rl.policy.kernel.moe.moe import MoE, GroupedExpertsDeepEP
 from torch.distributed.tensor import distribute_module, distribute_tensor
-=======
-    parallelize_module,
-)
->>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
 
 
 @pre_parallelize_sanity_check
@@ -206,11 +188,13 @@ def parallelize(
             == 0
         ), "train_batch must be divisible by pp_micro_batch_size"
         assert (
-            config.train.train_batch_per_replica
-            // config.policy.parallelism.pp_micro_batch_size
-        ) % pp_size == 0, (
-            "train_batch / pp_micro_batch_size must be divisible by pp_size"
-        )
+            (
+                config.train.train_batch_per_replica
+                // config.policy.parallelism.pp_micro_batch_size
+            )
+            % pp_size
+            == 0
+        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
@@ -223,7 +207,6 @@ def parallelize(
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
-<<<<<<< HEAD:cosmos_rl/policy/model/qwen3_vl_moe/parallelize.py
                 (
                     config.validation.batch_size
                     // config.policy.parallelism.pp_micro_batch_size
@@ -231,13 +214,6 @@ def parallelize(
                 % pp_size
                 == 0
             ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
-=======
-                config.train.validation_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            ) % pp_size == 0, (
-                "validation_batch / pp_micro_batch_size must be divisible by pp_size"
-            )
->>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
             n_val_microbatches = (
                 config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size
