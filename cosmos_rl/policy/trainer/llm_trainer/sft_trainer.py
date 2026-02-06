@@ -633,7 +633,8 @@ class SFTTrainer(LLMTrainer):
                     self.lr_schedulers = None
                     self.build_optimizers()
                     self.model.load_hf_weights(
-                        self.config.policy.model_safetensor_path,
+                        self.config.policy.model_safetensor_path
+                        or self.config.policy.model_name_or_path,
                         self.parallel_dims,
                         self.device,
                         revision=self.config.policy.model_revision,

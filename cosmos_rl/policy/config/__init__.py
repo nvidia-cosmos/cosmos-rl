@@ -1043,6 +1043,7 @@ class PolicyConfig(BaseModel):
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
     )
+
     model_safetensor_path: Optional[str] = Field(
         default=None,
         description="The safetensor path",
@@ -1109,8 +1110,6 @@ class PolicyConfig(BaseModel):
         assert (
             self.trainable_pattern is None or self.freeze_pattern is None
         ), "trainable_pattern and freeze_pattern cannot be set at the same time"
-        if self.model_safetensor_path is None:
-            self.model_safetensor_path = self.model_name_or_path
         return self
 
 
