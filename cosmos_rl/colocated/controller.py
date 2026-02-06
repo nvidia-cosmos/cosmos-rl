@@ -415,17 +415,19 @@ class ColocatedController(Controller):
             }
             self.train_report_data.setdefault(self.current_step, {}).update(report_data)
 
-    def put_rollouts(self, rollout: RolloutRequest):
+    def put_rollouts(self, rollout_request: RolloutRequest):
         """
         Put rollouts into the policy's data queue.
         This method extracts rollouts from the rollout request and enqueues them for training.
         """
-        for k, v in rollout.metrics.items():
+        for k, v in rollout_request.metrics.items():
             # Handle dynamic sampling statistics update in colocated mode
             self.train_report_data.setdefault(self.current_step, {})[k] = (
                 self.train_report_data.get(self.current_step, {}).get(k, 0) + v
             )
-        rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
+        rollouts_list = extract_rollouts(
+            rollout_request.payloads, rollout_request.is_end
+        )
         # Flatten the rollouts into a single list
         rollouts = [
             rollout
@@ -433,23 +435,28 @@ class ColocatedController(Controller):
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
 
-        gathered_rollouts = dist_util.all_gather_object_cpu(
-            rollouts,
-            device=torch.device("cpu"),
-            group=self.rollout.parallel_dims.mesh["dp"].get_group(),
-        )
-        rollouts = [rollout for sublist in gathered_rollouts for rollout in sublist]
-        if len(rollouts) > 0:
-            logger.debug(
-                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
-                f"example: rollouts[0]\n{rollouts[0]}"
-            )
-        assert (
-            self.rollout.parallel_dims.cp_coord[1] == 1
-        ), "Colocated rollout worker only supports cp size 1."
-        if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
+        if self.config.train.train_policy.uncentralized_training:
+            # In uncentralized training, directly put the rollouts into the policy's data queue without going through the controller.
             for rollout in rollouts:
                 self.policy.data_queue.put_nowait(rollout)
+        else:
+            gathered_rollouts = dist_util.all_gather_object_cpu(
+                rollouts,
+                device=torch.device("cpu"),
+                group=self.rollout.parallel_dims.mesh["dp"].get_group(),
+            )
+            rollouts = [rollout for sublist in gathered_rollouts for rollout in sublist]
+            if len(rollouts) > 0:
+                logger.debug(
+                    f"[RolloutGroup] from replica: {rollout_request.src_replica_name} with {len(rollout_request.payloads)} samples:"
+                    f"example: rollouts[0]\n{rollouts[0]}"
+                )
+            assert (
+                self.rollout.parallel_dims.cp_coord[1] == 1
+            ), "Colocated rollout worker only supports cp size 1."
+            if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
+                for rollout in rollouts:
+                    self.policy.data_queue.put_nowait(rollout)
 
     def pending_policy_samples(self) -> int:
         """

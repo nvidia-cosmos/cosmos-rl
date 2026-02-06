@@ -688,9 +688,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             self.replica_batch_for_this_step // self.dp_world_size * self.dp_world_size
         )
         assert batch_for_this_step % self.dp_world_size == 0
-        if self.global_rank == 0:
-            dp_id = 0
-            prefetch_dp_id = 0
+
+        if self.config.train.train_policy.uncetralized_training:
             for _ in range(batch_for_this_step):
                 try:
                     rollout = self.data_queue.get(block=True, timeout=None)
@@ -698,34 +697,47 @@ class RLPolicyWorker(PolicyWorkerBase):
                     raise Empty(
                         "[Policy] Rollouts queue is empty, please check the dispatcher."
                     )
-                prefetch_dp_id = self.prepare_teacher_uuids_for_prefetch(
-                    prefetch_dp_id, batch_for_this_step
-                )
-                if rollout.teacher_result_uuid:
-                    assert (
-                        self.teacher_uuid_to_dp_shard.pop(
-                            rollout.teacher_result_uuid, None
-                        )
-                        == dp_id
-                    )
-                for i in range(self.world_size):
-                    if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
-                        scattered_rollouts[i].append(rollout)
-                        # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
-                dp_id += 1
-                if dp_id >= self.dp_world_size:
-                    dp_id = 0
+                rollouts[0].append(rollout)
+            # TODO(dinghaoy): Support distillation in decentralized training
         else:
-            self.prepare_teacher_uuids_for_prefetch(0, batch_for_this_step)
+            if self.global_rank == 0:
+                dp_id = 0
+                prefetch_dp_id = 0
+                for _ in range(batch_for_this_step):
+                    try:
+                        rollout = self.data_queue.get(block=True, timeout=None)
+                    except Empty:
+                        raise Empty(
+                            "[Policy] Rollouts queue is empty, please check the dispatcher."
+                        )
+                    prefetch_dp_id = self.prepare_teacher_uuids_for_prefetch(
+                        prefetch_dp_id, batch_for_this_step
+                    )
+                    if rollout.teacher_result_uuid:
+                        assert (
+                            self.teacher_uuid_to_dp_shard.pop(
+                                rollout.teacher_result_uuid, None
+                            )
+                            == dp_id
+                        )
+                    for i in range(self.world_size):
+                        if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
+                            scattered_rollouts[i].append(rollout)
+                            # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
+                    dp_id += 1
+                    if dp_id >= self.dp_world_size:
+                        dp_id = 0
+            else:
+                self.prepare_teacher_uuids_for_prefetch(0, batch_for_this_step)
 
-        if self.world_size == 1:
-            return preprocess_rollouts(scattered_rollouts[0])
+            if self.world_size == 1:
+                return preprocess_rollouts(scattered_rollouts[0])
 
-        dist.scatter_object_list(
-            rollouts,
-            scattered_rollouts,
-            src=0,
-        )
+            dist.scatter_object_list(
+                rollouts,
+                scattered_rollouts,
+                src=0,
+            )
         return preprocess_rollouts(rollouts[0])
 
     def teacher_interact_loop(self):
