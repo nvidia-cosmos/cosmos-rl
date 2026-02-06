@@ -13,56 +13,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
-import time
-from functools import partial
-from typing import Callable, List, NamedTuple, Optional
-
-import cosmos_rl.utils.distributed as dist_util
-import cosmos_rl.utils.util as util
-import msgpack
-import requests
-import tensorrt_llm
 import torch
+import time
+import threading
+from functools import partial
+from typing import List, Optional, Callable, NamedTuple
 import torch.distributed as dist
-from cosmos_rl.dispatcher.command import (
-    BuildMeshCommand,
-    Command,
-    PolicyToRolloutUnicastCommand,
-    RolloutToRolloutBroadcastCommand,
-)
-from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
-from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
-    ShutdownInstruction,
-    ValidationInstruction,
-)
-from cosmos_rl.utils import constant
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
-)
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.distributed import cosmos_device_type
-from cosmos_rl.utils.network_util import make_request_with_retry
+
+import tensorrt_llm
+from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor
+from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.rollout import TRTLLMRolloutWorkerBase
+from cosmos_rl.rollout import State
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
-from cosmos_rl.utils.pynccl import (
-    create_nccl_comm,
-    create_nccl_uid,
-    nccl_broadcast,
-    nccl_group_end,
-    nccl_group_start,
-    nccl_recv,
+from cosmos_rl.dispatcher.command import (
+    BuildMeshCommand,
+    PolicyToRolloutUnicastCommand,
+    RolloutToRolloutBroadcastCommand,
+    Command,
 )
-from cosmos_rl.utils.util import b64_to_list, list_to_b64
-from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor
-from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
+from cosmos_rl.utils.pynccl import (
+    create_nccl_uid,
+    create_nccl_comm,
+    nccl_broadcast,
+    nccl_recv,
+    nccl_group_start,
+    nccl_group_end,
+)
+
+from cosmos_rl.policy.model import ModelRegistry, WeightMapper
+from cosmos_rl.utils import constant
+from cosmos_rl.utils.logging import logger
+import cosmos_rl.utils.distributed as dist_util
+import cosmos_rl.utils.util as util
+from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
+    ValidationInstruction,
+    ShutdownInstruction,
+    RolloutWrapperInstruction,
+)
+from cosmos_rl.utils.distributed import cosmos_device_type
 
 trtllm_version = tensorrt_llm.__version__
 logger.info(f"[Rollout] Using trtllm version: {trtllm_version}")
@@ -73,9 +66,9 @@ if trtllm_version == "1.0.0rc6":
 else:
     raise NotImplementedError(f"Unsupported trtllm version: {trtllm_version}")
 
-from queue import Queue
-
 from transformers import AutoConfig
+
+from queue import Queue
 
 """
 1. Extend PyExecutor to support Cosmos-specific features.
@@ -114,7 +107,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
         if TrtLLMRolloutWorker.init_count > 0:
             self.ready = True
             parallel_dims = ParallelDims.from_config(
-                parallelism_config=cosmos_config.rollout.parallelism
+                parallesim_config=cosmos_config.rollout.parallelism
             )
             self.parallel_dims = parallel_dims
 
@@ -526,8 +519,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 assert (
                     self.rank_in_rollout_repicas >= 0
                 ), "[Rollout] rank in rollout replicas should be set before broadcast."
-                assert len(dst_replica_names) == len(
-                    self.replica_name_to_rank
+                assert (
+                    len(dst_replica_names) == len(self.replica_name_to_rank)
                 ), "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
