@@ -45,10 +45,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from cosmos_rl.utils.logging import logger
-<<<<<<< HEAD
 from cosmos_rl.utils.distributed import cosmos_device_type
-=======
->>>>>>> 79c95ac (PP WIP)
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.parallelism_map import (

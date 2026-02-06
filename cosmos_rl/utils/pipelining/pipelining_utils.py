@@ -17,40 +17,18 @@ import math
 from typing import Callable
 
 import torch
-<<<<<<< HEAD
-# from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
-#     PipelineScheduleSingle,
-#     ScheduleZBVZeroBubble,
-#     _PipelineSchedule,
-#     get_schedule_class,
-# )
-# from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
-#     PipelineStage,
-# )
-from cosmos_rl.utils.logging import logger
-from torch import nn
-from torch.distributed.device_mesh import DeviceMesh
-
-from torch.distributed.pipelining.schedules import (
-=======
 from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
->>>>>>> 79c95ac (PP WIP)
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
     _PipelineSchedule,
     get_schedule_class,
 )
-<<<<<<< HEAD
-
-from torch.distributed.pipelining.stage import PipelineStage
-=======
 from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
     PipelineStage,
 )
 from cosmos_rl.utils.logging import logger
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
->>>>>>> 79c95ac (PP WIP)
 
 __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_rank"]
 
