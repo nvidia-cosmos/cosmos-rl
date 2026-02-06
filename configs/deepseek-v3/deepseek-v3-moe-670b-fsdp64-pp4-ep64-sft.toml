@@ -22,7 +22,7 @@ train_batch_per_replica = 16
 sync_weight_interval = 1
 
 [policy]
-model_name_or_path = "deepseek-ai/DeepSeek-V3"
+model_name_or_path = "/lustre/fsw/portfolios/sw/users/yufhuang/cache/deepseek-v3/dcp_hf"
 model_max_length = 1024
 model_gradient_checkpointing = true
 
@@ -33,7 +33,7 @@ experiment_name = "deepseek-v3-sft"
 
 [train.train_policy]
 type = "sft"
-dataset.name = "LNTANOooo/sharegpt52k"
+dataset.name = "/lustre/fsw/portfolios/sw/users/ssrinivasa/datasets/LNTANOooo___sharegpt52k/"
 dataset.subset = ""
 dataset.split = "train"
 conversation_column_name = "conversation"
@@ -53,7 +53,8 @@ ep_size = 64
 dp_shard_size = 64
 pp_size = 4
 pp_micro_batch_size = 4
-pp_schedule = "GPipe"
+pp_schedule = "Interleaved1F1B"
+pp_layers_per_stage = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
 
