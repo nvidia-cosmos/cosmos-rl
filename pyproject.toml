@@ -34,7 +34,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffusers @ git+https://github.com/huggingface/diffusers.git@ec37629", # For cosmos-predict2.5
+    "diffusers", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
     "peft",
 ]
 
