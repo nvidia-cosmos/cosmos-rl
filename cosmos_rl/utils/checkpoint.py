@@ -647,6 +647,14 @@ class CheckpointMananger:
                             optimizer_path, weights_only=False, map_location="cpu"
                         )
                     )
+
+                    # Release CUDA cached memory to avoid fragmentation-induced
+                    # OOM during the first training step after resume.
+                    import gc
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
