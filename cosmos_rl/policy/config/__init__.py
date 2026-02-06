@@ -13,13 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
-import json
-import os
-from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Union
-
-from cosmos_rl.utils.modelscope import update_config_if_modelscope
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
@@ -1621,11 +1614,13 @@ class Config(BaseModel):
             #   - 1F1B
             # But not correct for those `InterleavedXXX` style schedule
             assert (
-                self.train.train_batch_per_replica
-                // self.policy.parallelism.pp_micro_batch_size
-            ) % self.policy.parallelism.pp_size == 0, (
-                "train_batch / pp_micro_batch_size must be divisible by pp_size"
-            )
+                (
+                    self.train.train_batch_per_replica
+                    // self.policy.parallelism.pp_micro_batch_size
+                )
+                % self.policy.parallelism.pp_size
+                == 0
+            ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
 
         # Validate constraints for GRPO with LoRA
         if (
