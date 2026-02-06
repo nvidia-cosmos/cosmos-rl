@@ -330,22 +330,24 @@ class SFTTrainer(Trainer):
                 logger.error(
                     f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
-                self.model.load_hf_weights(
-                    config.policy.model_name_or_path,
-                    parallel_dims,
-                    self.device,
-                    revision=config.policy.model_revision,
-                )
+                for model_part in self.model_parts:
+                    model_part.load_hf_weights(
+                        config.policy.model_name_or_path,
+                        parallel_dims,
+                        self.device,
+                        revision=config.policy.model_revision,
+                    )
         else:
-            for m in self.model:
-                m.load_hf_weights(
-                    config.policy.model_name_or_path,
-                    parallel_dims,
-                    self.device,
-                    revision=config.policy.model_revision,
-                )
-        for m in self.model:
-            m.train()
+            pass
+            # for model_part in self.model_parts:
+            #     model_part.load_hf_weights(
+            #         config.policy.model_name_or_path,
+            #         parallel_dims,
+            #         self.device,
+            #         revision=config.policy.model_revision,
+            #     )
+        for model_part in self.model_parts:
+            model_part.train()
 
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
@@ -376,29 +378,32 @@ class SFTTrainer(Trainer):
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
             if isinstance(sampler, Callable):
+                # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
                 train_sampler = sampler(
                     train_dataset,
                     num_replicas=self.dp_world_size,
                     rank=self.dp_rank,
                     shuffle=config.train.train_policy.dataloader_shuffle,
-                    drop_last=False,
+                    drop_last=self.pp_scheduler is not None,
                 )
             else:
                 train_sampler = sampler
         else:
+            # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
             train_sampler = DistributedSampler(
                 train_dataset,
                 num_replicas=self.dp_world_size,
                 rank=self.dp_rank,
                 shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
+                drop_last=self.pp_scheduler is not None,
             )
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
+            # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
             batch_sampler = batch_sampler(
                 train_sampler,
                 batch_size=config.train.train_batch_per_replica,
-                drop_last=False,
+                drop_last=self.pp_scheduler is not None,
             )
 
         def get_train_data_loader(
@@ -417,6 +422,7 @@ class SFTTrainer(Trainer):
                     collate_fn=collate_fn,
                 )
             else:
+                # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
                 data_loader = DataLoader(
                     train_dataset,
                     batch_size=config.train.train_batch_per_replica,
@@ -425,7 +431,7 @@ class SFTTrainer(Trainer):
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
-                    drop_last=False,
+                    drop_last=self.pp_scheduler is not None,
                 )
             return data_loader
 
@@ -571,8 +577,8 @@ class SFTTrainer(Trainer):
             return
 
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
-        for m in self.model:
-            m.eval()
+        for model_part in self.model_parts:
+            model_part.eval()
         with torch.no_grad():
             val_total_loss = 0.0
             for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
@@ -608,7 +614,7 @@ class SFTTrainer(Trainer):
                     )
                 val_inputs = val_batch["input_ids"]
                 val_labels = val_batch.pop("label_ids")
-                val_position_ids, _, val_pos_seq_dim = self.model[0].get_position_ids(
+                val_position_ids, _, val_pos_seq_dim = self.model_parts[0].get_position_ids(
                     **val_batch
                 )
 
@@ -616,7 +622,7 @@ class SFTTrainer(Trainer):
                 val_padding_mask = val_batch.get("padding_mask", None)
 
                 delay_cp_slice_inputs = getattr(
-                    self.model[0], "delay_cp_slice_inputs", False
+                    self.model_parts[0], "delay_cp_slice_inputs", False
                 )
                 if self.parallel_dims.cp_enabled and not delay_cp_slice_inputs:
                     [val_inputs, val_position_ids, val_padding_mask] = (
@@ -657,7 +663,7 @@ class SFTTrainer(Trainer):
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model[0](**val_batch)
+                    val_logits = self.model_parts[0](**val_batch)
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
@@ -747,8 +753,8 @@ class SFTTrainer(Trainer):
                         ):
                             torch.cuda.cudart().cudaProfilerStop()
 
-                    for m in self.model:
-                        m.train()
+                    for model_part in self.model_parts:
+                        model_part.train()
                     for k, v in batch.items():
                         batch[k] = (
                             v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -756,7 +762,7 @@ class SFTTrainer(Trainer):
 
                     labels = batch.pop("label_ids")
 
-                    position_ids, input_ids, pos_seq_dim = self.model[
+                    position_ids, input_ids, pos_seq_dim = self.model_parts[
                         0
                     ].get_position_ids(**batch)
 
@@ -782,7 +788,7 @@ class SFTTrainer(Trainer):
                         batch.update(packed_args)
                     # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
                     delay_cp_slice_inputs = getattr(
-                        self.model, "delay_cp_slice_inputs", False
+                        self.model_parts[0], "delay_cp_slice_inputs", False
                     )
                     if (
                         self.parallel_dims.cp_enabled
@@ -813,62 +819,37 @@ class SFTTrainer(Trainer):
                         )
                         pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                        # Pipeline Parallel forward / backward inside step() call
+                        # PP case: pp_scheduler.step() handles forward/backward across all pipeline stages.
+                        # It internally manages all model_parts and coordinates communication between stages.
+                        # - First stage receives input_ids and starts the pipeline
+                        # - Last stage computes loss and initiates backward pass
+                        # - Intermediate stages only receive activations from previous stage
                         targets, losses = (
                             (labels, []) if pp_last_stage else (None, None)
                         )
+
+                        pp_data_batch_args = []
                         if pp_first_stage:
-                            self.pp_scheduler.step(
-                                **batch,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-                        else:
-                            # FWD + BWD if it is 1F1B-like scheduler
-                            self.pp_scheduler.step(
-                                position_ids=batch["position_ids"],
-                                target=targets,
-                                losses=losses,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
+                            pp_data_batch_args.append(input_ids)
+                        self.pp_scheduler.step(
+                            *pp_data_batch_args,
+                            position_ids=batch["position_ids"],
+                            target=targets,
+                            losses=losses,
+                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                            seq_len_multiple=self.seq_len_multiple,
+                        )
+
                         loss = (
                             torch.mean(torch.stack(losses)).to(self.device)
                             if pp_last_stage
                             else torch.tensor([-1.0], device=self.device)
                         )
                     else:
-                        # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
-                        # last_token_ids = []
-                        # with torch.no_grad():
-                        #     N_NEW_TOKENS = 100
-                        #     for _ in range(N_NEW_TOKENS):
-                        #         if len(last_token_ids) > 0:
-                        #             batch["input_ids"] = torch.cat(
-                        #                 [batch["input_ids"], last_token_ids[-1]],
-                        #                 dim=-1,
-                        #             )
-                        #             position_ids, _, _ = (
-                        #                 self.model.get_position_ids(**batch)
-                        #             )
-                        #             batch["position_ids"] = position_ids
-
-                        #         logits = self.model(**batch)
-                        #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
-                        #         last_token_ids.append(token_ids)
-                        #     if self.global_rank == 0:
-                        #         text = ''
-                        #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
-                        #         logger.info(f'{new_last_token_ids=}')
-                        #         text = self.tokenizer.decode(new_last_token_ids)
-                        #         logger.info(
-                        #             f"generated tokens at sample : {text}"
-                        #         )
-                        # return
-                        #########################################################################################
-
+                        # Non-PP case: self.model_parts has only 1 element (the entire model),
+                        # so model_parts[0] is the complete model for direct forward pass.
                         with self.act_offloading_ctx_manager:
-                            logits = self.model(**batch)
+                            logits = self.model_parts[0](**batch)
 
                         loss = self.loss_fn(
                             logits,
@@ -877,10 +858,6 @@ class SFTTrainer(Trainer):
                             target_packing_mask=batch.get("label_packing_mask", None),
                             loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                         )
-                        # # Hint FSDP to do all-reduce on the last backward pass
-                        # if hasattr(self.model, "set_is_last_backward"):
-                        #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
-                        #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
                         loss.backward()
                     acc_loss += loss.detach()
 
