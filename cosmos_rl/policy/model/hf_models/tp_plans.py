@@ -37,6 +37,7 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
 )
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+from torch.distributed.tensor.parallel import SequenceParallel
 
 try:
     from transformers.models.qwen3_vl.modeling_qwen3_vl import (
@@ -93,7 +94,13 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
         tp_plan: dict[str, ParallelStyle] = {
             f"{model_prefix}.embed_tokens": rowwise_parallel(input_layouts=Replicate()),
             f"{model_prefix}.layers.*.self_attn.q_proj": colwise_parallel(),
+            f"{model_prefix}.layers.*.self_attn.q_norm": SequenceParallel(
+                sequence_dim=2, use_local_output=True
+            ),
             f"{model_prefix}.layers.*.self_attn.k_proj": colwise_parallel(),
+            f"{model_prefix}.layers.*.self_attn.k_norm": SequenceParallel(
+                sequence_dim=2, use_local_output=True
+            ),
             f"{model_prefix}.layers.*.self_attn.v_proj": colwise_parallel(),
             f"{model_prefix}.layers.*.self_attn.o_proj": rowwise_parallel(),
             f"{model_prefix}.layers.*.mlp.up_proj": colwise_parallel(),

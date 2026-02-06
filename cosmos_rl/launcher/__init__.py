@@ -1,4 +1,5 @@
 import os
+from . import worker_entry
 
 
 def launch():
@@ -14,6 +15,8 @@ def launch():
         run_rollout()
     pass
 
+
+__all__ = ["launch", "worker_entry"]
 
 if __name__ == "__main__":
     launch()

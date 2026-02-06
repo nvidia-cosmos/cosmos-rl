@@ -36,7 +36,6 @@ from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
-from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 from cosmos_rl.policy.kernel.moe.moe import MoE, GroupedExpertsDeepEP
 from torch.distributed.tensor import distribute_module, distribute_tensor
@@ -294,8 +293,8 @@ def apply_tp_ep(
             ),
             "self_attn.q_proj": colwise_parallel(),
             "self_attn.k_proj": colwise_parallel(),
-            "self_attn.q_norm": ReplicateParallel(),
-            "self_attn.k_norm": ReplicateParallel(),
+            "self_attn.q_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
+            "self_attn.k_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
             "self_attn.v_proj": colwise_parallel(),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
             "post_attention_layernorm": SequenceParallel(use_local_output=True),

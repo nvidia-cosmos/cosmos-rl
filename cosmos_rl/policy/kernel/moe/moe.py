@@ -465,8 +465,8 @@ class FakeBalancedGate(nn.Module):
 
         return weights.type_as(x), indices, None
 
-    def update_bias(self) -> None:
-        pass
+    def update_bias(self) -> torch.Tensor:
+        return None
 
 
 class Gate(nn.Module):
@@ -600,7 +600,7 @@ class Gate(nn.Module):
         return weights.type_as(x), indices, aux_loss
 
     @torch.no_grad()
-    def update_bias(self) -> None:
+    def update_bias(self) -> torch.Tensor:
         """
         Updates the correction bias used in the gate based on the popularity of experts.
         This function is a NoOp if the gate is not trained.
@@ -677,6 +677,8 @@ class Gate(nn.Module):
         self.e_score_correction_bias.to_local().copy_(
             self.e_score_correction_bias_master.to_local()
         )
+
+        return expert_load.to_local().detach()
 
     def _compute_expert_load(
         self,

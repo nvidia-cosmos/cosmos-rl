@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any, NamedTuple
+from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
@@ -37,9 +37,12 @@ from cosmos_rl.utils.dim_slice_info import (
     extract_infomation_from_dtensor,
     tensor_overlap_info_at_dim,
 )
+from transformers.utils import ModelOutput
+from dataclasses import dataclass
 
 
-class CosmosModelOutput(NamedTuple):
+@dataclass
+class CosmosModelOutput(ModelOutput):
     """
     Base class for model's outputs, with logits and potential auxiliary loss.
 
@@ -452,11 +455,13 @@ class BaseModel(torch.nn.Module, ABC):
         """
         raise NotImplementedError
 
-    def step_hook(self):
+    def step_hook(self, step: int) -> Optional[dict]:
         """
         Hook to be called after each step update.
+        Returns:
+            Optional[dict]: A dictionary of report data.
         """
-        pass
+        return None
 
     @abstractmethod
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:

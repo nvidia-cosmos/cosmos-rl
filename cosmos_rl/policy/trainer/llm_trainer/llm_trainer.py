@@ -556,7 +556,8 @@ class LLMTrainer(Trainer):
     def model_load_from_hf(self):
         start_time = time.time()
         self.model.load_hf_weights(
-            self.config.policy.model_name_or_path,
+            self.config.policy.model_safetensor_path
+            or self.config.policy.model_name_or_path,
             self.parallel_dims,
             self.device,
             revision=self.config.policy.model_revision,
