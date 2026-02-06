@@ -131,9 +131,7 @@ class TeacherWorker(PolicyWorkerBase):
             config.distillation.fsdp_reshard_after_forward
         )
         config.policy.model_name_or_path = config.distillation.model_name_or_path
-        config.policy.model_safetensor_path = (
-            None  # For reference worker, we don't need to load the safetensor path
-        )
+        config.policy.model_safetensor_path = None  # For reference worker, we don't have the case of loading the safetensor path specified manually
         config.policy.model_revision = config.distillation.model_revision
         config.policy.parallelism = config.distillation.parallelism
         return config
