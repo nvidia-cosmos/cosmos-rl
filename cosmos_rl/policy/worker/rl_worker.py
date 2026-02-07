@@ -689,7 +689,7 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
         assert batch_for_this_step % self.dp_world_size == 0
 
-        if self.config.train.train_policy.uncetralized_training:
+        if self.config.train.train_policy.uncentralized_training:
             for _ in range(batch_for_this_step):
                 try:
                     rollout = self.data_queue.get(block=True, timeout=None)
