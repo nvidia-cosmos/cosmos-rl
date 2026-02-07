@@ -41,7 +41,7 @@ deterministic_sampling = true
 
 [rollout]
 backend = "diffusion_nft_rollout"
-n_generation = 4
+n_generation = 12
 
 [logging]
 logger = ['console', 'wandb']
@@ -51,7 +51,7 @@ experiment_name = "None"
 [train]
 non_text = true
 resume = false
-train_batch_per_replica = 4
+train_batch_per_replica = 32  # 4*8
 epoch = 10
 output_dir = "./outputs/cosmos-predict2-5_2b-medium_720_nft"
 epsilon = 1e-8
@@ -71,6 +71,7 @@ compile = false
 type = "grpo"
 trainer_type = "diffusion_nft"
 use_remote_reward = true
+uncentralized_training = true
 dataset.name = "pickscore"
 dataset.split = "train"
 kl_beta = 1.0
@@ -96,13 +97,13 @@ dataset.split = "test"
 [rollout.parallelism]
 n_init_replicas = 1
 tp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
