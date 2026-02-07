@@ -873,6 +873,15 @@ class ParallelismConfig(BaseModel):
         description="Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
         choices=[1],
     )
+    pp_schedule: str = Field(
+        default="Interleaved1F1B",
+        description="Pipeline parallelism schedule",
+        choices=["Interleaved1F1B"],
+    )
+    pp_layers_per_stage: int = Field(
+        default=2,
+        description="Number of MOE layers per PP stage",
+    )
 
     @property
     def world_size(self):

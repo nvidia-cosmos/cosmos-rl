@@ -35,6 +35,13 @@ try:
 except ImportError:
     print("torch.distributed.fsdp is not available. DeepSeek model will not work.")
 
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
+from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_model import (
+    pipeline_model,
+)
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
+from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -64,11 +71,6 @@ def importlib_metadata_version_context():
 
 with importlib_metadata_version_context():
     from transformer_engine.pytorch.attention import DotProductAttention
-
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
-from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
-from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 
 
 def _get_dp_mesh(
@@ -263,12 +265,14 @@ def _init_meshes(
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
     device_module.set_device(device)
+
     meshes = parallel_dims.build_meshes_with_ep(device_type=device_type)
+
     return meshes
 
 
 @pre_parallelize_sanity_check
-def parallelize_model(
+def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
     config: CosmosConfig,
@@ -295,15 +299,25 @@ def parallelize_model(
     )
     assert parallel_dims.tp == 1, "Tensor parallelism not support for DeepSeek model"
 
-    if parallel_dims.cp_enabled:
-        _apply_cp(model, meshes["default"]["cp"], parallel_dims)
+    if parallel_dims.pp_enabled:
+        local_rank = int(os.getenv("LOCAL_RANK", 0))
+        device_type, _ = _get_device_info()
+        device = torch.device(f"{device_type}:{local_rank}")
 
-    if parallel_dims.ep_enabled:
-        assert "moe" in meshes
-        _apply_ep(model, meshes["moe"]["ep"])
+        model_parts = pipeline_model(model, meshes, parallel_dims, device)
+    else:
+        model_parts = [model]
 
-    _apply_ac(model)
+    for model_part in model_parts:
+        if parallel_dims.cp_enabled:
+            _apply_cp(model_part, meshes["default"]["cp"], parallel_dims)
 
-    _apply_fsdp(model, meshes, parallel_dims)
+        if parallel_dims.ep_enabled:
+            assert "moe" in meshes
+            _apply_ep(model_part, meshes["moe"]["ep"])
 
-    return None, None
+        _apply_ac(model_part)
+
+        _apply_fsdp(model_part, meshes, parallel_dims)
+
+    return model, model
