@@ -52,7 +52,7 @@ experiment_name = "None"
 non_text = true
 resume = false
 epoch = 10
-train_batch_per_replica = 24
+train_batch_per_replica = 192  # 24 * 8
 output_dir = "./outputs/stable-diffusion-3-5-medium_720_nft"
 epsilon = 1e-8
 optm_name = "AdamW"
@@ -97,13 +97,13 @@ dataset.split = "test"
 [rollout.parallelism]
 n_init_replicas = 1
 tp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
