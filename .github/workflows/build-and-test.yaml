@@ -102,6 +102,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_vllm_rollout_async.py
           ${DOCKER_RUN} python tests/test_custom_args.py
           ${DOCKER_RUN} python tests/test_colocated_separated.py
+          ${DOCKER_RUN} python tests/test_load_balanced_dataset.py
 
       - name: Cleanup
         if: always()

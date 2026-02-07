@@ -169,11 +169,68 @@ class SFTDataConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    enable_dp_load_balancing: bool = Field(
+        default=False,
+        description="Enable load-balanced dynamic batching to balance tokens across DP ranks.",
+    )
+
+    load_balanced_pool_size: int = Field(
+        default=32,
+        description="Size of the sample pool maintained by each DP rank for load-balanced batching.",
+    )
+
+    load_balanced_max_tokens_for_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum tokens per batch for load-balanced batching. ",
+    )
+
+    load_balanced_batching_strategy: str = Field(
+        default="prefer_closest",
+        description="Batching strategy: 'prefer_first' (FIFO) or 'prefer_closest' (minimize padding).",
+    )
+
+    load_balanced_max_steps: int = Field(
+        default=100,
+        description=(
+            "Maximum number of optimizer steps (training steps) for load-balanced batching. "
+            "This is the number of times optimizer.step() will be called. "
+            "Note: The actual number of batches processed will be "
+            "load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
+    )
+
+    load_balanced_batches_per_optimizer_step: int = Field(
+        default=1,
+        description=(
+            "Number of batches to accumulate per optimizer step for gradient accumulation. "
+            "Each DataLoader iteration will return this many batches, which are processed "
+            "before calling optimizer.step(). "
+            "The total number of batches processed = load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
+        if self.enable_dp_load_balancing:
+            if self.load_balanced_batching_strategy not in [
+                "prefer_first",
+                "prefer_closest",
+            ]:
+                raise ValueError(
+                    f"load_balanced_batching_strategy must be 'prefer_first' or 'prefer_closest', "
+                    f"got {self.load_balanced_batching_strategy}"
+                )
+            if self.load_balanced_max_steps <= 0:
+                raise ValueError(
+                    f"load_balanced_max_steps must be greater than 0, got {self.load_balanced_max_steps}"
+                )
+            if self.load_balanced_batches_per_optimizer_step <= 0:
+                raise ValueError(
+                    f"load_balanced_batches_per_optimizer_step must be greater than 0, got {self.load_balanced_batches_per_optimizer_step}"
+                )
         return self
 
 
