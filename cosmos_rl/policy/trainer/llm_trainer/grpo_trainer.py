@@ -1073,16 +1073,19 @@ class GRPOTrainer(LLMTrainer):
             is_computing_old_ahead = phase == TrainerPhase.OLD_LOGP_COMPUTE
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
-                self.model.eval()
+                for model_part in self.model_parts:
+                    model_part.eval()
             else:
                 if need_compute_ref:
                     # Swap model state dict back to the original model
                     need_compute_ref = False
                     self._swap_model_state_dict()
                 if is_computing_old_ahead:
-                    self.model.eval()
+                    for model_part in self.model_parts:
+                        model_part.eval()
                 else:
-                    self.model.train()
+                    for model_part in self.model_parts:
+                        model_part.train()
 
             with torch.set_grad_enabled(phase == TrainerPhase.TRAIN):
                 for i_mu in range(
@@ -2038,7 +2041,8 @@ class GRPOTrainer(LLMTrainer):
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
 
-        self.model.train()
+        for model_part in self.model_parts:
+            model_part.train()
 
         return False
 

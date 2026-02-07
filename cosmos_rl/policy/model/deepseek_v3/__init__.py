@@ -171,7 +171,7 @@ class DeepseekV3MoEModel(BaseModel):
         return
 
     def separate_model_parts(self) -> List[nn.Module]:
-        return [self]
+        return getattr(self, "model_parts", [self])
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1

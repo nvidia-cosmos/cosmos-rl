@@ -227,7 +227,8 @@ class SFTTrainer(LLMTrainer):
                 computed_max_len=max_len,
                 ignore_label_id=-100,
             )
-            self.model.train()
+            for model_part in self.model_parts:
+                model_part.train()
             for k, v in batch.items():
                 batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 
@@ -449,7 +450,8 @@ class SFTTrainer(LLMTrainer):
         if not self.config.validation.enable:
             return
 
-        self.model.eval()
+        for model_part in self.model_parts:
+            model_part.eval()
         with torch.no_grad():
             fixed_length = (
                 self.config.policy.model_max_length
@@ -613,12 +615,13 @@ class SFTTrainer(LLMTrainer):
                     )
                     self.lr_schedulers = None
                     self.build_optimizers()
-                    self.model.load_hf_weights(
-                        self.config.policy.model_name_or_path,
-                        self.parallel_dims,
-                        self.device,
-                        revision=self.config.policy.model_revision,
-                    )
+                    for model_part in self.model_parts:
+                        model_part.load_hf_weights(
+                            self.config.policy.model_name_or_path,
+                            self.parallel_dims,
+                            self.device,
+                            revision=self.config.policy.model_revision,
+                        )
             else:
                 self.model_load_from_hf()
 
@@ -663,7 +666,8 @@ class SFTTrainer(LLMTrainer):
                 f"Synchronized {len_params} parameters across data parallel replicas."
             )
 
-        self.model.train()
+        for model_part in self.model_parts:
+            model_part.train()
         return ckpt_total_steps, train_step
 
     @property
