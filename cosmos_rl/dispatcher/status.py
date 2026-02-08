@@ -646,6 +646,19 @@ class PolicyStatusManager:
                     max_reward = np.max(rewards)
                     min_reward = np.min(rewards)
 
+                    # Calculate epoch info for TAO-compatible logging
+                    total_epochs = self.config.train.epoch
+                    steps_per_epoch = (
+                        self.total_steps // total_epochs
+                        if total_epochs > 0
+                        else self.total_steps
+                    )
+                    val_cur_epoch = (
+                        (validation_step - 1) // steps_per_epoch + 1
+                        if steps_per_epoch > 0
+                        else 1
+                    )
+
                     report_data = {
                         "val/reward_avg": avg_reward,
                         "val/reward_std": std_reward,
@@ -654,9 +667,14 @@ class PolicyStatusManager:
                         "val/rollout_count": len(rewards),
                         "val/step": validation_step,
                         "val/train_total_steps": self.total_steps,  # the total steps of the training when current validation step is triggered. This total_steps may change due to dynamic sampling.
+                        # Epoch info for TAO epoch-based logging
+                        "val/cur_epoch": val_cur_epoch,
+                        "val/train_epochs": total_epochs,
+                        "val/total_steps": self.total_steps,
+                        "steps_per_epoch": steps_per_epoch,
                     }
                     logger.info(
-                        f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
+                        f"[Controller] Validation finished at Epoch {val_cur_epoch}/{total_epochs}, Step {validation_step}: average reward: {avg_reward:.4f}, total rollouts: {len(rewards)}, max reward: {max_reward:.4f}, min reward: {min_reward:.4f}, std reward: {std_reward:.4f}"
                     )
                     report_data_list = [
                         rollout.report_metrics
@@ -998,6 +1016,18 @@ class PolicyStatusManager:
                         ]
                     )
                     train_step = self.report_data_list[0]["train_step"]
+
+                    # Calculate epoch info for TAO-compatible logging
+                    total_epochs = self.config.train.epoch
+                    steps_per_epoch = (
+                        total_steps // total_epochs if total_epochs > 0 else total_steps
+                    )
+                    cur_epoch = (
+                        (train_step - 1) // steps_per_epoch + 1
+                        if steps_per_epoch > 0
+                        else 1
+                    )
+
                     policy_report_data = {
                         "train/loss_avg": total_loss_avg,
                         "train/loss_max": total_loss_max,
@@ -1009,6 +1039,10 @@ class PolicyStatusManager:
                         "train/entropy": total_entropy,
                         "train/effective_entropy": total_effective_entropy,
                         "train/total_steps": total_steps,
+                        # Epoch info for TAO epoch-based logging
+                        "train/cur_epoch": cur_epoch,
+                        "train/total_epochs": total_epochs,
+                        "steps_per_epoch": steps_per_epoch,
                     }
                     policy_report_data = aggregate_report_data(
                         self.report_data_list, policy_report_data
@@ -1052,7 +1086,7 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Epoch: {cur_epoch}/{total_epochs}, Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                         if len(self.filter_records) > 0:
                             logger.info(

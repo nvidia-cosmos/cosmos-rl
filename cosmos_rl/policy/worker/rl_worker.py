@@ -19,9 +19,11 @@ import time
 import msgpack
 import asyncio
 import threading
+import numpy as np
 from functools import partial
-from typing import List, Optional, Union, Callable, Dict
-from torch.utils.data import Dataset
+from typing import List, Optional, Union, Callable, Dict, Any
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from queue import Queue
 import torch.distributed as dist
 from queue import Empty
@@ -143,6 +145,28 @@ class RLPolicyWorker(PolicyWorkerBase):
             role=self.role,
         )
 
+        # Epoch and validation tracking
+        self.current_epoch = 0
+        self.current_step = 0
+        self.samples_processed = 0
+        self.samples_per_epoch = 0  # Will be set during setup
+        self.val_data_loader = None
+        self.val_sampler = None
+
+        # Setup validation hooks from hook_fns
+        self._setup_validation_hooks()
+
+    def _setup_validation_hooks(self):
+        """Setup validation hooks from hook_fns for TAO-compatible monitoring."""
+        self.pre_validation_hook = self.hook_fns.get("pre_validation_hook", None)
+        self.pre_per_step_validation_hook = self.hook_fns.get(
+            "pre_per_step_validation_hook", None
+        )
+        self.post_per_step_validation_hook = self.hook_fns.get(
+            "post_per_step_validation_hook", None
+        )
+        self.post_validation_hook = self.hook_fns.get("post_validation_hook", None)
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -164,6 +188,297 @@ class RLPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             is_rl=True,
         )
+
+        # Setup epoch tracking based on dataset size
+        if dataset is not None:
+            if isinstance(dataset, Callable):
+                loaded_dataset = dataset(self.config)
+            else:
+                loaded_dataset = dataset
+            if hasattr(loaded_dataset, "__len__"):
+                self.samples_per_epoch = len(loaded_dataset)
+                logger.info(
+                    f"[Policy] Epoch tracking enabled with {self.samples_per_epoch} samples per epoch"
+                )
+
+        # Setup validation dataloader if validation is enabled
+        self._setup_validation_dataloader(val_dataset)
+
+    def _setup_validation_dataloader(
+        self,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+    ):
+        """Setup validation dataloader using validation config settings."""
+        if not self.config.validation.enable:
+            logger.info("[Policy] Validation is disabled")
+            return
+
+        if val_dataset is None:
+            logger.warning("[Policy] Validation is enabled but no val_dataset provided")
+            return
+
+        # Load val_dataset if it's a factory function
+        if isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(self.config)
+
+        # Setup the dataset if it has a setup method
+        if hasattr(val_dataset, "setup"):
+            # Safely get trainer if it exists (may not be initialized yet during build_runner)
+            trainer = getattr(self, "trainer", None)
+            tokenizer = getattr(trainer, "tokenizer", None) if trainer else None
+            val_dataset.setup(self.config, tokenizer)
+
+        # Get validation config settings
+        val_batch_size = (
+            self.config.validation.batch_size
+            or self.config.train.train_batch_per_replica
+        )
+        val_num_workers = (
+            self.config.validation.dataloader_num_workers
+            if self.config.validation.dataloader_num_workers > 0
+            else self.config.train.train_policy.dataloader_num_workers
+        )
+        val_prefetch_factor = (
+            self.config.validation.dataloader_prefetch_factor
+            if self.config.validation.dataloader_prefetch_factor is not None
+            else self.config.train.train_policy.dataloader_prefetch_factor
+        )
+
+        # Create sampler for distributed validation
+        self.val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        # Create validation dataloader
+        self.val_data_loader = DataLoader(
+            val_dataset,
+            batch_size=val_batch_size,
+            sampler=self.val_sampler,
+            num_workers=val_num_workers,
+            prefetch_factor=val_prefetch_factor if val_num_workers > 0 else None,
+            pin_memory=True,
+        )
+
+        logger.info(
+            f"[Policy] Validation dataloader setup with batch_size={val_batch_size}, "
+            f"num_workers={val_num_workers}, dataset_size={len(val_dataset)}"
+        )
+
+    def _should_validate(self, current_step: int, is_last_step: bool = False) -> bool:
+        """Determine if validation should run based on epoch or step frequency."""
+        if not self.config.validation.enable or self.val_data_loader is None:
+            return False
+
+        # Always validate on last step
+        if is_last_step:
+            return True
+
+        # Validate before training if configured
+        if current_step == 0 and self.config.validation.val_before_train:
+            return True
+
+        # Check for epoch-based validation (takes priority if configured)
+        freq_in_epoch = getattr(self.config.validation, "freq_in_epoch", 0)
+        if freq_in_epoch > 0 and self.samples_per_epoch > 0:
+            # Calculate current epoch based on samples processed
+            batch_size = self.config.train.train_batch_per_replica
+            samples_this_step = batch_size * self.config.rollout.n_generation
+            prev_epoch = self.current_epoch
+
+            # Update samples processed and epoch
+            self.samples_processed += samples_this_step
+            self.current_epoch = self.samples_processed // self.samples_per_epoch
+
+            # Validate at epoch boundaries
+            if (
+                self.current_epoch > prev_epoch
+                and self.current_epoch % freq_in_epoch == 0
+            ):
+                logger.info(
+                    f"[Policy] Triggering epoch-based validation at step {current_step} "
+                    f"(end of epoch {self.current_epoch})"
+                )
+                return True
+        elif self.config.validation.freq > 0:
+            # Fall back to step-based validation
+            if current_step > 0 and current_step % self.config.validation.freq == 0:
+                return True
+
+        return False
+
+    @torch.no_grad()
+    def validate(
+        self,
+        current_step: int,
+        current_epoch: int = 0,
+        reward_fns: Optional[List[Callable]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run validation on val_dataset and compute reward metrics.
+
+        This method iterates through the validation dataloader, generates responses
+        using the current model, computes rewards, and aggregates the results.
+
+        Args:
+            current_step: Current training step
+            current_epoch: Current epoch number
+            reward_fns: List of reward functions to compute rewards
+
+        Returns:
+            Dictionary containing validation metrics (val/reward_avg, etc.)
+        """
+        if self.val_data_loader is None:
+            logger.warning("[Policy] No validation dataloader, skipping validation")
+            return {}
+
+        logger.info(
+            f"[Policy] Starting validation at step {current_step}, epoch {current_epoch}"
+        )
+
+        # Call pre_validation_hook
+        if self.pre_validation_hook is not None:
+            report_data = {
+                "current_epoch": current_epoch,
+                "current_step": current_step,
+            }
+            self.pre_validation_hook(self, report_data=report_data)
+
+        all_rewards = []
+        total_samples = 0
+
+        # Set sampler epoch for proper shuffling
+        if hasattr(self.val_sampler, "set_epoch"):
+            self.val_sampler.set_epoch(current_epoch)
+
+        for batch_idx, batch in enumerate(self.val_data_loader):
+            # Call pre_per_step_validation_hook
+            if self.pre_per_step_validation_hook is not None:
+                report_data = {
+                    "current_epoch": current_epoch,
+                    "batch_index": batch_idx,
+                }
+                self.pre_per_step_validation_hook(self, report_data=report_data)
+
+            batch_rewards = []
+            batch_size = len(batch) if hasattr(batch, "__len__") else 1
+
+            # Process each sample in the batch
+            # For GRPO, we need to generate responses and compute rewards
+            # The actual generation is handled by the data packer or dataset
+            if hasattr(batch, "reward") and batch.reward is not None:
+                # If rewards are already computed (e.g., from rollout)
+                if isinstance(batch.reward, list):
+                    batch_rewards.extend(batch.reward)
+                else:
+                    batch_rewards.append(batch.reward)
+            elif reward_fns is not None and len(reward_fns) > 0:
+                # Compute rewards using provided reward functions
+                for sample_idx in range(batch_size):
+                    sample = (
+                        batch[sample_idx] if hasattr(batch, "__getitem__") else batch
+                    )
+                    to_be_evaluated = getattr(sample, "response", "")
+                    reference = getattr(sample, "reference", None)
+
+                    # Compute reward from all reward functions
+                    total_reward = 0.0
+                    for reward_fn in reward_fns:
+                        try:
+                            reward = reward_fn(to_be_evaluated, reference)
+                            total_reward += reward
+                        except Exception as e:
+                            logger.warning(f"Reward function failed: {e}")
+                    batch_rewards.append(total_reward)
+
+            all_rewards.extend(batch_rewards)
+            total_samples += batch_size
+
+            # Compute batch average for hook
+            batch_avg_reward = np.mean(batch_rewards) if batch_rewards else 0.0
+
+            # Call post_per_step_validation_hook
+            if self.post_per_step_validation_hook is not None:
+                report_data = {
+                    "current_epoch": current_epoch,
+                    "batch_index": batch_idx,
+                    "val_score": batch_avg_reward,
+                    "batch_samples": batch_size,
+                }
+                self.post_per_step_validation_hook(self, report_data=report_data)
+
+        # Aggregate rewards across all ranks using all_reduce
+        if len(all_rewards) > 0:
+            local_sum = sum(all_rewards)
+            local_count = len(all_rewards)
+
+            # All-reduce to get global sum and count
+            sum_tensor = torch.tensor(
+                [local_sum], dtype=torch.float32, device=self.device
+            )
+            count_tensor = torch.tensor(
+                [local_count], dtype=torch.float32, device=self.device
+            )
+
+            if self.dp_world_size > 1:
+                dist.all_reduce(sum_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+
+            global_sum = sum_tensor.item()
+            global_count = int(count_tensor.item())
+
+            val_avg_reward = global_sum / global_count if global_count > 0 else 0.0
+            val_std_reward = float(np.std(all_rewards)) if len(all_rewards) > 1 else 0.0
+            val_max_reward = float(np.max(all_rewards)) if all_rewards else 0.0
+            val_min_reward = float(np.min(all_rewards)) if all_rewards else 0.0
+        else:
+            val_avg_reward = 0.0
+            val_std_reward = 0.0
+            val_max_reward = 0.0
+            val_min_reward = 0.0
+            global_count = 0
+
+        # Build validation report data
+        val_report_data = {
+            "val/reward_avg": val_avg_reward,
+            "val/reward_std": val_std_reward,
+            "val/reward_max": val_max_reward,
+            "val/reward_min": val_min_reward,
+            "val/rollout_count": global_count,
+            "val/cur_epoch": current_epoch + 1,  # 1-indexed for display
+            "val/step": current_step,
+        }
+
+        logger.info(
+            f"[Policy] Validation complete at epoch {current_epoch + 1}: "
+            f"avg_reward={val_avg_reward:.4f}, std={val_std_reward:.4f}, "
+            f"max={val_max_reward:.4f}, min={val_min_reward:.4f}, "
+            f"samples={global_count}"
+        )
+
+        # Call post_validation_hook
+        if self.post_validation_hook is not None:
+            report_data = {
+                "current_epoch": current_epoch,
+                "val_avg_reward": val_avg_reward,
+                **val_report_data,
+            }
+            self.post_validation_hook(self, report_data=report_data)
+
+        # Call custom logger functions for TAO status logging
+        if is_master_rank(self.parallel_dims, self.global_rank):
+            for custom_logger_fn in self.custom_logger_fns:
+                try:
+                    custom_logger_fn(val_report_data, current_step)
+                except Exception as e:
+                    logger.warning(
+                        f"Custom logger function failed during validation: {e}"
+                    )
+
+        return val_report_data
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -530,6 +845,25 @@ class RLPolicyWorker(PolicyWorkerBase):
         # For profiling
         self.profiler.step()
 
+        # Call custom logger functions for TAO status logging
+        if is_master_rank(self.parallel_dims, self.global_rank) and report_data:
+            for custom_logger_fn in self.custom_logger_fns:
+                try:
+                    custom_logger_fn(report_data, command.global_step)
+                except Exception as e:
+                    logger.warning(f"Custom logger function failed: {e}")
+
+        # Check if validation should run (epoch-based or step-based)
+        is_last_step = command.replica_should_stop()
+        if self._should_validate(command.global_step, is_last_step):
+            val_report_data = self.validate(
+                current_step=command.global_step,
+                current_epoch=self.current_epoch,
+            )
+            # Merge validation metrics into report_data
+            if val_report_data:
+                report_data.update(val_report_data)
+
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):
             self.api_client.post_policy_train_ack(
@@ -541,7 +875,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             )
 
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
-        return command.replica_should_stop()
+        return is_last_step
 
     async def fetch_command(self):
         # assert self.global_rank == 0, "Only rank 0 can fetch command"

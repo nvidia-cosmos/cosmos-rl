@@ -405,6 +405,7 @@ class TAOStatusLogger:
         self,
         experiment_name: str = "cosmos-rl-experiment",
         status_file_path: Optional[str] = None,
+        monitor_metric: str = "val/loss",
     ):
         """Initialize TAO status logger.
 
@@ -412,10 +413,14 @@ class TAOStatusLogger:
             experiment_name: Name of the experiment/component for logging.
             status_file_path: Optional explicit path to status.json file.
                 If not provided, uses TAO_API_RESULTS_DIR/TAO_API_JOB_ID/status.json
+            monitor_metric: The metric to use for TAO AutoML monitoring.
+                For SFT: "val/loss" (default)
+                For GRPO/RL: "val/reward_avg"
         """
         self.experiment_name = experiment_name
         self._status_file_path = status_file_path
         self._status_logger = None
+        self.monitor_metric = monitor_metric
 
     def _get_status_file_path(self) -> Optional[str]:
         """Get the TAO status file path based on environment variables.
@@ -538,11 +543,18 @@ class TAOStatusLogger:
             }
 
             # Create summary message based on available metrics
-            if "train/loss_avg" in report_data:
+            # Use monitor_metric for validation if available
+            if self.monitor_metric in report_data:
+                metric_value = report_data[self.monitor_metric]
+                metric_name = self.monitor_metric.split("/")[-1]
+                message = f"Validation {log_key} {current_value}/{max_value} - {metric_name}: {metric_value:.6f}"
+            elif "train/loss_avg" in report_data:
                 message = f"Training {log_key} {current_value}/{max_value} - Loss: {report_data['train/loss_avg']:.6f}"
             elif "val/loss" in report_data or "val/avg_loss" in report_data:
                 val_loss = report_data.get("val/loss", report_data.get("val/avg_loss"))
                 message = f"Validation {log_key} {current_value}/{max_value} - Loss: {val_loss:.6f}"
+            elif "val/reward_avg" in report_data:
+                message = f"Validation {log_key} {current_value}/{max_value} - Reward: {report_data['val/reward_avg']:.6f}"
             else:
                 message = f"{self.experiment_name} in progress"
 
