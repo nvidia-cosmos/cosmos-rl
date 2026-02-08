@@ -837,9 +837,9 @@ class TrainingConfig(BaseModel):
         if (
             self.optm_warmup_epochs is not None and self.optm_warmup_steps != 20
         ):  # 20 is the default
-            import logging
+            from cosmos_rl.utils.logging import get_logger
 
-            _logger = logging.getLogger(__name__)
+            _logger = get_logger(__name__)
             _logger.warning(
                 f"Both optm_warmup_epochs ({self.optm_warmup_epochs}) and optm_warmup_steps ({self.optm_warmup_steps}) are set. "
                 f"optm_warmup_epochs will take priority and optm_warmup_steps will be ignored."
@@ -1515,6 +1515,28 @@ class DistillationConfig(BaseModel):
         description="Whether to include prompt in the teacher model KL calculation.",
     )
 
+    top_k: int = Field(
+        default=0,
+        description="Top-k filtering for teacher model logits before KL calculation. If larger than 0, generalized Jensen-Shannon Divergence will be used.",
+    )
+
+    jsd_beta: float = Field(
+        default=0.5,
+        description="Interpolation coefficient between `0.0` and `1.0` of the Generalized Jensen-Shannon Divergence "
+        "loss. When beta is `0.0`, the loss is the KL divergence. When beta is `1.0`, the loss is the Inverse KL "
+        "Divergence.",
+    )
+
+    trainer_token_ids_from_teacher: bool = Field(
+        default=True,
+        description="Whether the trainer gets all top_k token ids directly from its redis interacted teacher model during distillation rather than from the rollout structure. This can simplify the rollout payload when being transferred in the framework.",
+    )
+
+    rollout_top_k_recompute: bool = Field(
+        default=False,
+        description="Whether to recompute all top-k logprobs with top-k token ids after the full sequence generated during rollout for distillation. This can ensure the completion generation process with no large top-k kept so that not degrade the generation efficiency.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert (
@@ -1527,6 +1549,11 @@ class DistillationConfig(BaseModel):
         assert (
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        if self.top_k <= 0:
+            self.trainer_token_ids_from_teacher = False
+            logger.warning(
+                "top_k is not set for distillation, so trainer_token_ids_from_teacher is set to False."
+            )
         return self
 
 
@@ -1668,6 +1695,11 @@ class Config(BaseModel):
             logger.info(
                 "Distillation is enabled, so rollout_as_token_ids is set to True."
             )
+            self.train.train_policy.bypass_reward = True
+            logger.info("Distillation is enabled, so bypass_reward is set to True.")
+        else:
+            self.distillation.top_k = 0  # disable top_k if distillation is not enabled
+            logger.info("Distillation is not enabled, so top_k is set to 0.")
         return self
 
 
