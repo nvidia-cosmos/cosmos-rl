@@ -101,10 +101,6 @@ class CustomConfig(pydantic.BaseModel):
     )
     """Vision processor config."""
 
-    # TAO logging configuration
-    tao_logging_enabled: bool = pydantic.Field(default=True)
-    """Enable TAO status.json logging."""
-
 
 class CustomDataset(torch.utils.data.Dataset):
     def __init__(
@@ -357,12 +353,21 @@ def main():
             media_path=custom_cfg.val_dataset.media_path,
         )
 
-    # Setup TAO logging if enabled and TAO_API_JOB_ID is set
+    # Setup TAO logging if enabled via logging.logger config and TAO_API_JOB_ID is set
     custom_logger_fns = []
     hook_fns = {}
 
-    if custom_config.tao_logging_enabled and os.environ.get("TAO_API_JOB_ID"):
-        logger.info("TAO logging enabled - will write to status.json")
+    # Check if TAO logging is enabled via logging.logger config
+    # Expected format: logging.logger = ["console", "tao"]
+    loggers = config.logging.logger if hasattr(config.logging, "logger") else []
+    tao_logging_enabled = (
+        "tao" in loggers if isinstance(loggers, list) else loggers == "tao"
+    )
+
+    if tao_logging_enabled and os.environ.get("TAO_API_JOB_ID"):
+        logger.info(
+            "TAO logging enabled via logging.logger config - will write to status.json"
+        )
 
         tao_logger = TAOStatusLogger(
             experiment_name=config.logging.experiment_name or "Cosmos-RL SFT Training"
@@ -374,11 +379,10 @@ def main():
         logger.info(
             f"TAO status will be logged to: {tao_logger._get_status_file_path()}"
         )
-    else:
-        if custom_config.tao_logging_enabled:
-            logger.info(
-                "TAO logging enabled but TAO_API_JOB_ID not set - skipping TAO status logging"
-            )
+    elif tao_logging_enabled:
+        logger.info(
+            "TAO logging enabled but TAO_API_JOB_ID not set - skipping TAO status logging"
+        )
 
     # Launch worker with factory functions and TAO logging
     val_dataset_factory = get_val_dataset if custom_config.val_dataset else None
