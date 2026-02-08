@@ -685,14 +685,17 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_total_loss += val_score
             val_total_samples += batch_samples
 
-        if self.parallel_dims.dp_replicate_enabled or self.parallel_dims.dp_shard_enabled:
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+        ):
             val_samples_tensor = torch.tensor(
                 [val_total_samples], device=self.device, dtype=torch.float32
             )
             dist.all_reduce(
                 val_samples_tensor,
                 op=dist.ReduceOp.SUM,
-                group=self.parallel_dims.mesh["dp"].get_group()
+                group=self.parallel_dims.mesh["dp"].get_group(),
             )
             global_samples = val_samples_tensor.item()
 
