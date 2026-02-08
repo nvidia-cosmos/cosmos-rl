@@ -15,9 +15,11 @@
 
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
+from transformers import AutoConfig
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed, init_distributed
 from cosmos_rl.utils.logging import logger
@@ -46,6 +48,19 @@ def main(*args, **kwargs):
 
     policy_type = cosmos_config.train.train_policy.type
 
+    data_packer = kwargs.get("data_packer")
+    if data_packer is None:
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            cosmos_config.policy.model_name_or_path,
+            trust_remote_code=True,
+        )
+        data_packer = BaseDataPacker.get_default_data_packer(hf_config.model_type)
+        data_packer.setup(cosmos_config)
+
+    val_data_packer = kwargs.get("val_data_packer")
+    if val_data_packer is None and cosmos_config.validation.enable:
+        val_data_packer = data_packer
+
     try:
         with torch.autocast(
             device_type="cuda",
@@ -53,19 +68,25 @@ def main(*args, **kwargs):
         ):
             if policy_type == "grpo":
                 logger.info("Starting GRPO training...")
-                trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer = GRPOTrainer(
+                    config=cosmos_config,
+                    parallel_dims=parallel_dims,
+                    train_stream=torch.cuda.current_stream(),
+                    data_packer=data_packer,
+                    val_data_packer=val_data_packer,
+                )
                 trainer.main_loop()
             elif policy_type == "sft":
                 custom_sft_dataset = kwargs.get("dataset")
-                custom_sft_data_packer = kwargs.get("data_packer")
                 logger.info("Starting SFT training...")
                 trainer = SFTTrainer(
                     config=cosmos_config,
                     parallel_dims=parallel_dims,
+                    train_stream=torch.cuda.current_stream(),
                     dataset=custom_sft_dataset,
-                    data_packer=custom_sft_data_packer,
+                    data_packer=data_packer,
                     val_dataset=kwargs.get("val_dataset", None),
-                    val_data_packer=kwargs.get("val_data_packer", None),
+                    val_data_packer=val_data_packer,
                     sampler=kwargs.get("sampler", None),
                     batch_sampler=kwargs.get("batch_sampler", None),
                     val_sampler=kwargs.get("val_sampler", None),
