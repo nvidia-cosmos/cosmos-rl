@@ -603,9 +603,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if not self.config.validation.enable:
             return None
 
-        if self.parallel_dims.dp_replicate_coord[0] != 0:
-            return
-
         # Determine if we should validate based on epoch or step frequency
         should_validate = False
 
@@ -668,103 +665,44 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
             # Track samples processed in this batch
             batch_samples = len(val_global_batch)
+            avg_batch_loss = val_score / batch_samples if batch_samples > 0 else 0.0
 
-            # Aggregate batch loss across all data-parallel ranks for consistent reporting
-            # This ensures post_per_step_validation_hook receives the averaged batch loss
-            local_batch_loss = val_score / batch_samples if batch_samples > 0 else 0.0
-            if self.dp_world_size > 1 and dist.is_initialized():
-                batch_loss_tensor = torch.tensor(
-                    [val_score], dtype=torch.float64, device=self.trainer.device
-                )
-                batch_samples_tensor = torch.tensor(
-                    [batch_samples], dtype=torch.float64, device=self.trainer.device
-                )
-                dist.all_reduce(batch_loss_tensor, op=dist.ReduceOp.SUM)
-                dist.all_reduce(batch_samples_tensor, op=dist.ReduceOp.SUM)
-                global_batch_loss = batch_loss_tensor.item()
-                global_batch_samples = int(batch_samples_tensor.item())
-                # Compute per-sample average loss for this batch across all ranks
-                avg_batch_loss = (
-                    global_batch_loss / global_batch_samples
-                    if global_batch_samples > 0
-                    else 0.0
-                )
-                logger.debug(
-                    f"[Validation] Batch {batch_index}: rank={self.global_rank}, "
-                    f"local_loss={local_batch_loss:.6f}, local_samples={batch_samples}, "
-                    f"global_avg_loss={avg_batch_loss:.6f}, global_samples={global_batch_samples}"
-                )
-            else:
-                avg_batch_loss = local_batch_loss
-                global_batch_samples = batch_samples
-                logger.debug(
-                    f"[Validation] Batch {batch_index}: rank={self.global_rank}, "
-                    f"local_loss={local_batch_loss:.6f}, local_samples={batch_samples}"
-                )
+            logger.debug(
+                f"[Validation] Batch {batch_index}: rank={self.global_rank}, "
+                f"loss={avg_batch_loss:.6f}, samples={batch_samples}"
+            )
 
-            # Call post_per_step_validation_hook with averaged batch loss
+            # Call post_per_step_validation_hook
             if self.post_per_step_validation_hook is not None:
                 report_data = {
                     "current_epoch": current_epoch,
                     "batch_index": batch_index,
-                    "val_score": avg_batch_loss,  # Now averaged across ranks
-                    "batch_samples": global_batch_samples,  # Total samples across ranks
+                    "val_score": avg_batch_loss,
+                    "batch_samples": batch_samples,
                 }
                 self.post_per_step_validation_hook(self, report_data=report_data)
 
             val_total_loss += val_score
             val_total_samples += batch_samples
 
-        # Aggregate validation loss across all data-parallel ranks
-        # Each rank processes a different subset of the validation data due to DistributedSampler
-        # We need to sum losses and sample counts across ranks, then compute global average
-        local_avg_loss = (
-            val_total_loss / val_total_samples if val_total_samples > 0 else 0.0
-        )
-
-        if self.dp_world_size > 1 and dist.is_initialized():
-            # Create tensors for reduction
-            loss_tensor = torch.tensor(
-                [val_total_loss], dtype=torch.float64, device=self.trainer.device
+        if self.parallel_dims.dp_replicate_enabled or self.parallel_dims.dp_shard_enabled:
+            val_samples_tensor = torch.tensor(
+                [val_total_samples], device=self.device, dtype=torch.float32
             )
-            samples_tensor = torch.tensor(
-                [val_total_samples], dtype=torch.float64, device=self.trainer.device
+            dist.all_reduce(
+                val_samples_tensor,
+                op=dist.ReduceOp.SUM,
+                group=self.parallel_dims.mesh["dp"].get_group()
             )
+            global_samples = val_samples_tensor.item()
 
-            # Sum across all DP ranks
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(samples_tensor, op=dist.ReduceOp.SUM)
-
-            global_total_loss = loss_tensor.item()
-            global_total_samples = int(samples_tensor.item())
             val_avg_loss = (
-                global_total_loss / global_total_samples
-                if global_total_samples > 0
-                else 0.0
+                val_total_loss / global_samples if global_samples > 0 else 0.0
             )
-
-            # Log per-rank loss (info level)
-            logger.info(
-                f"[SFT] Validation rank {self.global_rank}: local_avg_loss={local_avg_loss:.6f}, "
-                f"local_samples={val_total_samples}"
-            )
-            # Log global aggregated loss (info level) - only on master rank to avoid duplicate logs
-            if util.is_master_rank(self.parallel_dims, self.global_rank):
-                logger.info(
-                    f"[SFT] Validation GLOBAL: avg_loss={val_avg_loss:.6f}, "
-                    f"total_samples={global_total_samples}, dp_world_size={self.dp_world_size}"
-                )
         else:
-            val_avg_loss = local_avg_loss
-            # Log for single-GPU / non-distributed case
-            logger.info(
-                f"[SFT] Validation rank {self.global_rank}: local_avg_loss={local_avg_loss:.6f}, "
-                f"local_samples={val_total_samples}"
+            val_avg_loss = (
+                val_total_loss / val_total_samples if val_total_samples > 0 else 0.0
             )
-
-        logger.info(
-            f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
-        )
 
         # Call post_validation_hook
         if self.post_validation_hook is not None:
@@ -784,6 +722,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
         }
 
         if util.is_master_rank(self.parallel_dims, self.global_rank):
+            logger.info(
+                f"[SFT] Validation rank {self.global_rank}: avg_loss={val_avg_loss:.6f}, "
+                f"samples={val_total_samples}"
+            )
+
+            logger.info(
+                f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
+            )
             if "wandb" in self.config.logging.logger and is_wandb_available():
                 log_wandb(
                     data=report_data,
