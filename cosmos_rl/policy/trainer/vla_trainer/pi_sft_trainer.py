@@ -65,7 +65,9 @@ class PISFTTrainer(SFTTrainer):
             assert (
                 train_step == 0
             ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
-            self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, total_steps)
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, total_steps
+            )
 
         self.lr_schedulers.step()
         self.optimizers.zero_grad()
@@ -174,9 +176,10 @@ class PISFTTrainer(SFTTrainer):
         }
         observation.state = observation.state.to(self.device)
         observation.tokenized_prompt = observation.tokenized_prompt.to(self.device)
-        observation.tokenized_prompt_mask = observation.tokenized_prompt_mask.to(self.device)
+        observation.tokenized_prompt_mask = observation.tokenized_prompt_mask.to(
+            self.device
+        )
         return observation
-
 
     def step_validation(self, *args, **kwargs):
         pass
