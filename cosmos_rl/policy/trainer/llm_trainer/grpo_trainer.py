@@ -1520,10 +1520,7 @@ class GRPOTrainer(LLMTrainer):
                                 else:
                                     with self.act_offloading_ctx_manager:
                                         model_output = self.model(**user_mini_batch)
-                                        if isinstance(model_output, torch.Tensor):
-                                            raw_logits = model_output
-                                        else:
-                                            raw_logits = model_output.logits
+                                        raw_logits = model_output.logits
 
                                     if self.parallel_dims.cp_enabled:
                                         # reset the position ids and input ids

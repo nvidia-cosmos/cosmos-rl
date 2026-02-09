@@ -940,7 +940,7 @@ def run_overfitting_policy(args: argparse.Namespace):
 
         self.optimizers.zero_grad()
         self.model.train()
-        logits = self.model(**global_batch)
+        logits = self.model(**global_batch).logits
         loss = self.loss_fn(
             logits,
             labels,
@@ -1522,7 +1522,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                 if sft_worker.parallel_dims.cp_enabled and packing_seq:
                     # Slice for cp after embedding generation and sequence packing in the model forward later.
                     batch["cp_mesh"] = sft_worker.parallel_dims.mesh["cp"]
-                logits = sft_worker.trainer.model(**batch)
+                logits = sft_worker.trainer.model(**batch).logits
 
                 loss = sft_worker.trainer.loss_fn(
                     logits,

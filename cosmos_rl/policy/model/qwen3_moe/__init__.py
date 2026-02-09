@@ -38,7 +38,7 @@ from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
@@ -371,10 +371,10 @@ class Qwen3MoEBlock(nn.Module):
             max_seqlen=kwargs.get("max_seqlen", None),
         )
 
-        out = self.mlp(self.post_attention_layernorm(h))[0]
+        out, aux_loss = self.mlp(self.post_attention_layernorm(h))
 
         out = h + out
-        return out
+        return out, aux_loss
 
 
 @ModelRegistry.register(Qwen3MoeWeightMapper)
@@ -488,13 +488,14 @@ class Qwen3MoE(BaseModel):
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
-
+        # Auxiliary loss from MoE layers.
+        aux_loss = None
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
                 and layer._gradient_checkpointing_enabled
             ):
-                h = torch.utils.checkpoint.checkpoint(
+                h, local_aux_loss = torch.utils.checkpoint.checkpoint(
                     layer,
                     h,
                     position_embeddings,
@@ -502,7 +503,13 @@ class Qwen3MoE(BaseModel):
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings, **kwargs)
+                h, local_aux_loss = layer(
+                    h, position_embeddings=position_embeddings, **kwargs
+                )
+            if local_aux_loss is not None:
+                aux_loss = (
+                    local_aux_loss if aux_loss is None else aux_loss + local_aux_loss
+                )
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
@@ -530,9 +537,9 @@ class Qwen3MoE(BaseModel):
                 # for run torch.mm on input's dtype
                 with torch.autocast(device="cuda", dtype=h.dtype):
                     output = h @ embed_tokens_weight.t()
-            return output
+            return CosmosModelOutput(logits=output, aux_loss=aux_loss)
         else:
-            return h
+            return CosmosModelOutput(logits=h)
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         if not self.moe_args.fake_balanced_gate:
@@ -844,6 +851,7 @@ class Qwen3MoE(BaseModel):
                     rope_type=rope_type,
                     biases=bias_list,
                     hf_config=hf_config,
+                    aux_loss_coeff=getattr(hf_config, "aux_loss_coeff", 0.0),
                 )
             )
 

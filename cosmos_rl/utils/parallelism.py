@@ -29,6 +29,11 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import ParallelismConfig
 
 
+TP_EP_INTERCHANGABLE_WITH_DP_FUSED = os.environ.get(
+    "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
+).lower() in ["1", "true"]
+
+
 def train_context(enable_compiled_autograd: bool):
     @contextlib.contextmanager
     def context(cp_context: Optional[Generator[None, None, None]] = None):
@@ -257,8 +262,10 @@ class ParallelDims:
             dp_cp_tp_mesh_dim_names.append("tp")
             mp_mesh_dim_names.append("tp")
             pp_cp_tp_mesh_dim_names.append("tp")
-        if os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0") == "1":
-            dp_mesh_dim_names.append("tp")
+            if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
+                dp_mesh_dim_names.append("tp")
+                dp_cp_mesh_dim_names.append("tp")
+
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
             pp_cp_tp_mesh_dim_names.append("pp")
@@ -324,7 +331,11 @@ class ParallelDims:
 
     @property
     def dp_enabled(self) -> bool:
-        return self.dp_replicate > 1 or self.dp_shard > 1
+        return (
+            self.dp_replicate > 1
+            or self.dp_shard > 1
+            or (TP_EP_INTERCHANGABLE_WITH_DP_FUSED and self.tp > 1)
+        )
 
     @property
     def dp_replicate_enabled(self) -> bool:

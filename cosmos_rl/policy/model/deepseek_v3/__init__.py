@@ -31,7 +31,7 @@ except ImportError:
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe import moe
-from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
+from cosmos_rl.policy.model.base import BaseModel, ModelRegistry, CosmosModelOutput
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
     DeepseekV3MoEWeightMapper,
@@ -147,18 +147,19 @@ class DeepseekV3MoEModel(BaseModel):
         if self.config.aux_loss_coeff > 0:
             if initial_aux_loss is not None and aux_loss is not None:
                 final_aux_loss = initial_aux_loss + aux_loss
-                return logits, final_aux_loss
             elif initial_aux_loss is not None:
                 final_aux_loss = initial_aux_loss
-                return logits, final_aux_loss
             else:
-                return logits
+                final_aux_loss = None
+
+            return CosmosModelOutput(logits=logits, aux_loss=final_aux_loss)
+
         else:
             assert (
                 initial_aux_loss is None
             ), "initial_aux_loss must be None when aux_loss_coeff = 0"
             assert aux_loss is None, "aux_loss must be None when aux_loss_coeff = 0"
-            return logits
+            return CosmosModelOutput(logits=logits)
 
     @property
     def parallelize_fn(self):

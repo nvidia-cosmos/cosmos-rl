@@ -286,7 +286,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     user_mini_batch["position_ids"] = position_ids
     user_mini_batch["input_ids"] = input_ids
 
-    ulysses_logits = model(**user_mini_batch)
+    ulysses_logits = model(**user_mini_batch).logits
     # for foward, each rank will have the same output.
     mean_ulysses_logits = ulysses_logits.mean()
 
@@ -356,7 +356,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     )
 
     # run the normal inference
-    normal_logits = model(**user_mini_batch)
+    normal_logits = model(**user_mini_batch).logits
 
     mean_normal_logits = normal_logits.mean()
 

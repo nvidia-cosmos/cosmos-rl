@@ -24,7 +24,7 @@ import shutil
 import re
 import argparse
 from argparse import REMAINDER
-from typing import List, Dict, Optional, Any, Callable
+from typing import Dict, Optional, Any
 import toml
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.launcher.launch_vision import launch_vision_gen
@@ -39,6 +39,7 @@ from cosmos_rl.launcher.utility import (
     launch_processes,
     dump_config_with_literal_patterns_to_tmpfile,
     SingleWorkerCommands,
+    NodesManager,
 )
 from cosmos_rl.utils.logging import logger
 
@@ -372,309 +373,6 @@ def get_local_ip():
         return None
 
 
-def replica_placement_per_role(
-    # Dynamically updated arguments
-    commands: List[str],
-    gpu_devices: List[str],
-    control_urls: List[str],
-    output_files: List[str],
-    envs: List[Dict[str, str]],
-    global_launch_settings: List[SingleWorkerCommands],
-    global_worker_idx: int,
-    global_available_gpus: List[List[int]],
-    available_gpus: List[int],
-    gpu_idx: int,
-    # Fixed arguments
-    n_replicas: int,
-    min_n_gpus_replica: int,
-    role: str,
-    replica_script: str,
-    control_url: str,
-    args: argparse.Namespace,
-    rdzv_port: int,
-    check_last_state: bool,
-    output_dir: Optional[str] = None,
-    get_worker_ip: Optional[Callable] = None,
-    script: Optional[str] = None,
-    backend: str = "vllm",
-    config_path: Optional[str] = None,
-    script_args: Optional[List[Any]] = None,
-    rl_mode: str = "disaggregated",
-):
-    if check_last_state and min_n_gpus_replica > len(
-        global_available_gpus[global_worker_idx]
-    ):
-        # If the number of GPUs needed for one replica of this role is more than available GPUs, we need to allocate a new worker
-        if gpu_idx > 0:
-            commands: List[str] = []
-            gpu_devices: List[str] = []
-            control_urls: List[str] = []
-            output_files: List[str] = []
-            envs: List[Dict[str, str]] = []
-
-            tmp_worker_commands = SingleWorkerCommands(global_worker_idx)
-            tmp_worker_commands.extend_commands(
-                commands, gpu_devices, control_urls, output_files, envs
-            )
-            global_launch_settings.append(tmp_worker_commands)
-            gpu_idx = 0
-            global_worker_idx += 1
-            global_available_gpus.append(available_gpus)
-
-    for i in range(n_replicas):
-        if min_n_gpus_replica > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_replica % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus_replica {min_n_gpus_replica} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_replica // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices_for_node = ",".join(
-                    [str(g) for g in global_available_gpus[global_worker_idx]]
-                )
-                gpu_devices.append(gpu_devices_for_node)
-
-                command_for_node = f"{replica_script} --type {role} --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                if script is not None:
-                    command_for_node += f" --script {script}"
-                if node_in_replica == 0:
-                    command_for_node += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        # update rdzv_ip to the IP of the first node.
-                        rdzv_ip = get_worker_ip(global_worker_idx, args)
-                else:
-                    command_for_node += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-
-                if script is not None:
-                    command_for_node += f" --script {script}"
-                if script_args is not None:
-                    command_for_node += f" {' '.join(script_args)}"
-                commands.append(command_for_node)
-
-                control_url_for_node = control_url
-                output_file_for_node = (
-                    os.path.join(output_dir, f"{role}_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-
-                control_urls.append(control_url_for_node)
-                output_files.append(output_file_for_node)
-
-                env_for_node = None
-                if rl_mode != "colocated_separated":
-                    # If in colocated-separated mode, this config will cause
-                    # CUDA IPC broken.
-                    env_for_node = {
-                        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
-                    }
-                envs.append(env_for_node)
-
-                worker_commands = SingleWorkerCommands(global_worker_idx)
-                worker_commands.extend_commands(
-                    commands, gpu_devices, control_urls, output_files, envs
-                )
-
-                if rl_mode == "colocated_separated" and role == "policy":
-                    # we duplicate the command but change the role to rollout
-                    rollout_launch_command = command_for_node.replace(
-                        f"--type {role}", "--type rollout"
-                    )
-                    output_file_for_rollout = (
-                        os.path.join(output_dir, f"rollout_{i}.log")
-                        if output_dir is not None
-                        else None
-                    )
-                    worker_commands.append_command(
-                        rollout_launch_command,
-                        gpu_devices_for_node,
-                        control_url_for_node,
-                        output_file_for_rollout,
-                        env_for_node,
-                    )
-
-                global_launch_settings.append(worker_commands)
-
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                envs = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_replica > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                worker_commands = SingleWorkerCommands(global_worker_idx)
-                worker_commands.extend_commands(
-                    commands, gpu_devices, control_urls, output_files, envs
-                )
-                global_launch_settings.append(worker_commands)
-
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                envs = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices_for_replica = ",".join(
-                [str(g) for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_replica]]
-            )
-            command_for_replica = f"{replica_script} --type {role} --ngpus {min_n_gpus_replica} --backend {backend} --config {config_path}"
-            if script is not None:
-                command_for_replica += f" --script {script}"
-            if script_args is not None:
-                command_for_replica += f" {' '.join(script_args)}"
-            control_url_for_replica = control_url
-            output_file_for_replica = (
-                os.path.join(output_dir, f"{role}_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            env_for_replica = None
-            if rl_mode != "colocated_separated":
-                env_for_replica = {
-                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
-                }
-
-            gpu_devices.append(gpu_devices_for_replica)
-            commands.append(command_for_replica)
-            control_urls.append(control_url_for_replica)
-            output_files.append(output_file_for_replica)
-            envs.append(env_for_replica)
-
-            if rl_mode == "colocated_separated" and role == "policy":
-                rollout_launch_command = command_for_replica.replace(
-                    f"--type {role}", "--type rollout"
-                )
-                output_file_for_rollout = (
-                    os.path.join(output_dir, f"rollout_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-
-                gpu_devices.append(gpu_devices_for_replica)
-                commands.append(rollout_launch_command)
-                control_urls.append(control_url_for_replica)
-                output_files.append(output_file_for_rollout)
-                envs.append(env_for_replica)
-
-            gpu_idx += min_n_gpus_replica
-
-    return (
-        gpu_idx,
-        global_worker_idx,
-        commands,
-        gpu_devices,
-        control_urls,
-        output_files,
-        envs,
-    )
-
-
-def replica_placement(
-    available_gpus: List[int],
-    n_policy: int,
-    n_rollouts: int,
-    n_reference: int,
-    min_n_gpus_policy: int,
-    min_n_gpus_rollout: int,
-    min_n_gpus_reference: int,
-    replica_script: str,
-    control_url: str,
-    output_dir: Optional[str],
-    args: argparse.Namespace,
-    get_worker_ip: Optional[Callable] = None,
-    rdzv_port: Optional[int] = None,
-    script: Optional[str] = None,
-    backend: str = "vllm",
-    config_path: Optional[str] = None,
-    script_args: Optional[List[Any]] = None,
-    rl_mode: str = "disaggregated",
-) -> List[List[str]]:
-    commands: List[str] = []
-    gpu_devices: List[str] = []
-    control_urls: List[str] = []
-    output_files: List[str] = []
-    envs: List[Dict[str, str]] = []
-    assert len(available_gpus) in [
-        1,
-        2,
-        4,
-        8,
-    ], "Number of GPUs per worker must be 1, 2, 4, or 8"
-    # Prepare the command to launch the controller for all workers
-    global_available_gpus = [available_gpus]
-    # Create commands for policy and rollout replicas
-    gpu_idx = 0  # start index of the local node's GPUs
-    global_worker_idx = 0  # index of the node
-    global_launch_settings = []
-    # Assign launch settings for each worker
-
-    # For separated colocated mode, rollout should launch as policy replicas.
-    if rl_mode in ["colocated", "colocated_separated"]:
-        if n_rollouts > 0:
-            n_rollouts = 0
-            logger.warning(
-                f"Launching Cosmos-RL in colocated mode, rollout replicas will share the same devices as policy replicas, reset n_rollouts from {n_rollouts} to 0"
-            )
-
-    for role, n_replicas, min_n_gpus_replica in zip(
-        ["policy", "rollout", "reference"],
-        [n_policy, n_rollouts, n_reference],
-        [min_n_gpus_policy, min_n_gpus_rollout, min_n_gpus_reference],
-    ):
-        (
-            gpu_idx,
-            global_worker_idx,
-            commands,
-            gpu_devices,
-            control_urls,
-            output_files,
-            envs,
-        ) = replica_placement_per_role(
-            commands=commands,
-            gpu_devices=gpu_devices,
-            control_urls=control_urls,
-            output_files=output_files,
-            envs=envs,
-            global_launch_settings=global_launch_settings,
-            global_worker_idx=global_worker_idx,
-            global_available_gpus=global_available_gpus,
-            available_gpus=available_gpus,
-            gpu_idx=gpu_idx,
-            n_replicas=n_replicas,
-            min_n_gpus_replica=min_n_gpus_replica,
-            role=role,
-            replica_script=replica_script,
-            control_url=control_url,
-            args=args,
-            rdzv_port=rdzv_port,
-            check_last_state=role != "policy",
-            output_dir=output_dir,
-            get_worker_ip=get_worker_ip,
-            script=script,
-            backend=backend,
-            config_path=config_path,
-            script_args=script_args,
-            rl_mode=rl_mode,
-        )
-
-    if len(commands) > 0:
-        worker_commands = SingleWorkerCommands(global_worker_idx)
-        worker_commands.extend_commands(
-            commands, gpu_devices, control_urls, output_files, envs
-        )
-        global_launch_settings.append(worker_commands)
-    return global_launch_settings
-
-
 def get_hostname_from_host(ip):
     try:
         # Run 'host' command
@@ -838,7 +536,9 @@ def main():
     if not cosmos_config.get("distillation", {}).get("enable", False):
         n_reference = 0
 
-    if is_colocated:
+    if rl_mode == "colocated":
+        # Only in strict colocated mode, we want min_n_gpus_policy == min_n_gpus_rollout
+        # In colocated-separated mode, we allow min_n_gpus_policy != min_n_gpus_rollout
         assert (
             n_policy == n_rollouts
         ), "Colocated mode only supports equal number of policy and rollout replicas"
@@ -881,22 +581,28 @@ cosmos-rl --config config.toml"""
 
         set_lepton_job(args, job_spec)
 
-        global_launch_settings = replica_placement(
-            list(range(num_gpus_per_node)),
-            n_policy,
-            0 if is_colocated else n_rollouts,
-            n_reference,
-            min_n_gpus_policy,
-            min_n_gpus_rollout,
-            min_n_gpus_reference,
-            replica_script="",
-            control_url="",
+        nodes_manager = NodesManager(
+            replica_sh="",
+            available_gpus=list(range(num_gpus_per_node)),
+            controller_url="",
             output_dir=None,
-            script=script,
-            backend=backend,
-            args=args,
+            config_path="",
+            rdzv_port=args.rdzv_port,
             rl_mode=rl_mode,
+            backend=backend,
+            get_worker_ip=get_worker_ip,
         )
+        nodes_manager.replica_placement(
+            args=args,
+            n_policy=n_policy,
+            n_rollouts=0 if is_colocated else n_rollouts,
+            n_reference=n_reference,
+            min_n_gpus_policy=min_n_gpus_policy,
+            min_n_gpus_rollout=min_n_gpus_rollout,
+            min_n_gpus_reference=min_n_gpus_reference,
+            replica_script="",
+        )
+        global_launch_settings = nodes_manager.finalize()
         if args.num_workers is not None:
             assert args.num_workers >= len(global_launch_settings)
         num_workers = len(global_launch_settings)
@@ -1032,26 +738,30 @@ cosmos-rl --config config.toml"""
             controller_cmd += f" {' '.join(args.script_args)}"
         control_url = f"localhost:{port}"
 
-    global_launch_settings = replica_placement(
-        available_gpus,
-        n_policy,
-        0 if is_colocated else n_rollouts,
-        n_reference,
-        min_n_gpus_policy,
-        min_n_gpus_rollout,
-        min_n_gpus_reference,
-        replica_script,
-        control_url,
-        output_dir,
-        get_worker_ip=get_worker_ip,
-        rdzv_port=args.rdzv_port,
-        script=script,
-        backend=backend,
+    nodes_manager = NodesManager(
+        replica_sh=replica_script,
+        available_gpus=available_gpus,
+        controller_url=control_url,
+        output_dir=output_dir,
         config_path=tmpfile_toml,
-        script_args=args.script_args,
-        args=args,
+        rdzv_port=args.rdzv_port,
         rl_mode=rl_mode,
+        backend=backend,
+        get_worker_ip=get_worker_ip,
     )
+    nodes_manager.replica_placement(
+        args=args,
+        n_policy=n_policy,
+        n_rollouts=0 if is_colocated else n_rollouts,
+        n_reference=n_reference,
+        min_n_gpus_policy=min_n_gpus_policy,
+        min_n_gpus_rollout=min_n_gpus_rollout,
+        min_n_gpus_reference=min_n_gpus_reference,
+        replica_sh=replica_script,
+        script=script,
+        script_args=args.script_args,
+    )
+    global_launch_settings = nodes_manager.finalize()
 
     num_workers = len(global_launch_settings)
     logger.info(f"Number of workers required: {num_workers}")

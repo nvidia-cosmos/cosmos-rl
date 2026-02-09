@@ -91,7 +91,6 @@ class DatasetConfig(BaseModel):
         default=None,
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
-
     local_dir: str = Field(
         default="",
         description="Local path to load dataset",
@@ -1065,6 +1064,11 @@ class PolicyConfig(BaseModel):
         description="The model name or path, compatible with huggingface model name or local path",
     )
 
+    model_safetensor_path: Optional[str] = Field(
+        default=None,
+        description="The safetensor path",
+    )
+
     model_revision: Optional[str] = Field(
         default=None,
         description="The revision of the model to use",
@@ -1105,6 +1109,10 @@ class PolicyConfig(BaseModel):
 
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
+    )
+    aux_loss_coeff: float = Field(
+        default=0.0,
+        description="Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.",
     )
 
     @model_validator(mode="after")
@@ -1354,6 +1362,10 @@ class LoggingConfig(BaseModel):
     logger: List[str] = Field(
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
+    )
+    log_interval: int = Field(
+        default=100,
+        description="Log interval (in steps) for loss averaging.",
     )
     project_name: str = Field(
         default="cosmos_rl",

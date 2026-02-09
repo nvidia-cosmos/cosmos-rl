@@ -145,9 +145,6 @@ class P2RCollectiveManager:
                 raise RuntimeError(
                     f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
                 )
-            assert (
-                command.dst_replica_size == self.world_size
-            ), "The destination replica size should be the same as the world size."
             # policy
             p_rank = self.global_rank
             for r_rank in range(command.dst_replica_size):
@@ -181,9 +178,6 @@ class P2RCollectiveManager:
                 raise RuntimeError(
                     f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
                 )
-            assert (
-                command.src_replica_size == self.world_size
-            ), "The source replica size should be the same as the rollout world size."
             r_rank = self.global_rank
             for p_rank in range(command.src_replica_size):
                 if r_rank != p_rank:
@@ -241,9 +235,6 @@ class P2RCollectiveManager:
 
         if self.role != Role.ROLLOUT:
             # Policy initialization
-            assert (
-                command.dst_replica_size == self.world_size
-            ), "The dst replica size should be the same as the world size."
             if not command.src_replica_name == self.replica_name:
                 raise RuntimeError(
                     f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
@@ -274,15 +265,16 @@ class P2RCollectiveManager:
                 self.api_client.post_ipc_info(mesh_key, ipc_addr)
         else:
             # Rollout initialization
-            assert (
-                command.src_replica_size == self.world_size
-            ), "The src replica size should be the same as the world size."
             if not command.dst_replica_name == self.replica_name:
                 raise RuntimeError(
                     f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
                 )
             r_rank = self.global_rank
             p_rank = self.global_rank
+            if p_rank + 1 > command.src_replica_size:
+                # For rollout rank exceeds the policy world size, we don't need to setup IPC.
+                return
+
             mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
             if mesh_key not in self.ipc_comm_cache:
                 logger.info(

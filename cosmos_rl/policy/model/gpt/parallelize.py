@@ -35,7 +35,6 @@ from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
-from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.ulysses import (
     ulysses_attn_func,
     swizzle_cp_forward,
@@ -67,6 +66,7 @@ def parallelize(
             and config.train.fp8.quant_recipe == "tensorwise",
             enable_async_tp=config.train.async_tp_enabled,
         )
+        logger.info("Applied Tensor Parallel to the model")
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims)
@@ -308,8 +308,8 @@ def apply_tp(
             ),
             "self_attn.q_proj": colwise_parallel(),
             "self_attn.k_proj": colwise_parallel(),
-            "self_attn.q_norm": ReplicateParallel(),
-            "self_attn.k_norm": ReplicateParallel(),
+            "self_attn.q_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
+            "self_attn.k_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
             "self_attn.v_proj": colwise_parallel(),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
             "post_attention_layernorm": SequenceParallel(),

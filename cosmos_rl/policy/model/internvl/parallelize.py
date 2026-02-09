@@ -30,7 +30,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
     ParallelStyle,
 )
-from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
@@ -393,8 +392,8 @@ def apply_tp_ep(
             ),
             "self_attn.q_proj": colwise_parallel(),
             "self_attn.k_proj": colwise_parallel(),
-            "self_attn.q_norm": ReplicateParallel(),
-            "self_attn.k_norm": ReplicateParallel(),
+            "self_attn.q_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
+            "self_attn.k_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
             "self_attn.v_proj": colwise_parallel(),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
             "post_attention_layernorm": SequenceParallel(use_local_output=True),

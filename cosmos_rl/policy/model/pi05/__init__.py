@@ -25,12 +25,13 @@ from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 from cosmos_rl.policy.model.pi05.model_utils import get_config
 from cosmos_rl.policy.model.pi05.model_utils import PaliGemmaWithExpertModel
 from cosmos_rl.policy.model.pi05.explore_noise_net import ExploreNoiseNet
-from cosmos_rl.utils.util import resolve_model_path
+from cosmos_rl.dispatcher.data.packer.pi05_data_packer import PI05DataPacker
 
 import logging
 import math
 import os
 import random
+from types import SimpleNamespace
 import numpy as np
 
 import torch
@@ -38,15 +39,18 @@ from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
 from typing import Callable, List, Optional, Tuple, Dict, Any
-from PIL import Image
-from types import SimpleNamespace
 
 from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import resolve_model_path
 from transformers import AutoConfig, AutoTokenizer
 from safetensors import safe_open
 
+from cosmos_rl.policy.model.pi05.model_utils import (
+    resize_with_pad_torch,
+    np_to_pi05_img,
+)
 
 IMAGE_KEYS = (
     "base_0_rgb",
@@ -55,71 +59,6 @@ IMAGE_KEYS = (
 )
 
 IMAGE_RESOLUTION = (224, 224)
-
-
-def convert_to_uint8(img: np.ndarray) -> np.ndarray:
-    """Converts an image to uint8 if it is a float image.
-
-    This is important for reducing the size of the image when sending it over the network.
-    """
-    if np.issubdtype(img.dtype, np.floating):
-        img = (255 * img).astype(np.uint8)
-    return img
-
-
-def resize_with_pad(
-    images: np.ndarray, height: int, width: int, method=Image.BILINEAR
-) -> np.ndarray:
-    """Replicates tf.image.resize_with_pad for multiple images using PIL. Resizes a batch of images to a target height.
-
-    Args:
-        images: A batch of images in [..., height, width, channel] format.
-        height: The target height of the image.
-        width: The target width of the image.
-        method: The interpolation method to use. Default is bilinear.
-
-    Returns:
-        The resized images in [..., height, width, channel].
-    """
-    # If the images are already the correct size, return them as is.
-    if images.shape[-3:-1] == (height, width):
-        return images
-
-    original_shape = images.shape
-
-    images = images.reshape(-1, *original_shape[-3:])
-    resized = np.stack(
-        [
-            _resize_with_pad_pil(Image.fromarray(im), height, width, method=method)
-            for im in images
-        ]
-    )
-    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
-
-
-def _resize_with_pad_pil(
-    image: Image.Image, height: int, width: int, method: int
-) -> Image.Image:
-    """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and
-    width without distortion by padding with zeros.
-
-    Unlike the jax version, note that PIL uses [width, height, channel] ordering instead of [batch, h, w, c].
-    """
-    cur_width, cur_height = image.size
-    if cur_width == width and cur_height == height:
-        return image  # No need to resize if the image is already the correct size.
-
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-    resized_image = image.resize((resized_width, resized_height), resample=method)
-
-    zero_image = Image.new(resized_image.mode, (width, height), 0)
-    pad_height = max(0, int((height - resized_height) / 2))
-    pad_width = max(0, int((width - resized_width) / 2))
-    zero_image.paste(resized_image, (pad_width, pad_height))
-    assert zero_image.size == (width, height)
-    return zero_image
 
 
 def preprocess_observation_pytorch(
@@ -140,10 +79,15 @@ def preprocess_observation_pytorch(
 
     batch_shape = observation.state.shape[:-1]
 
+    meta_image_keys = [k for k in observation.images if k not in image_keys]
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
 
+        if key == "base_0_rgb":
+            image = torch.cat(
+                [image, *(observation.images[k] for k in meta_image_keys)], dim=0
+            )  # b + m * b
         # Handle both [B, C, H, W] and [B, H, W, C] formats
         is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
 
@@ -151,13 +95,8 @@ def preprocess_observation_pytorch(
             # Convert [B, C, H, W] to [B, H, W, C] for processing
             image = image.permute(0, 2, 3, 1)
 
-        # Align with OpenPI Observation.from_dict(): if image is uint8 in [0,255],
-        # convert to float32 in [-1, 1] before any resizing/augmentations.
-        if image.dtype == torch.uint8:
-            image = image.to(torch.float32) / 255.0 * 2.0 - 1.0
-
         if image.shape[1:3] != image_resolution:
-            logging.info(
+            logger.info(
                 f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}"
             )
             image = resize_with_pad_torch(image, *image_resolution)
@@ -167,9 +106,9 @@ def preprocess_observation_pytorch(
             image = image / 2.0 + 0.5
 
             # Apply PyTorch-based augmentations
-            if "wrist" not in key:
+            if key == "base_0_rgb":
                 # Geometric augmentations for non-wrist cameras
-                height, width = image.shape[1:3]
+                batch, height, width = image.shape[:3]
 
                 # Random crop and resize
                 crop_height = int(height * 0.95)
@@ -236,6 +175,17 @@ def preprocess_observation_pytorch(
                         align_corners=False,
                     ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
+                # split back into base_image and meta_images
+                split_images = torch.split(
+                    image, batch // (1 + len(meta_image_keys)), dim=0
+                )
+                image = split_images[0]
+                for i, meta_key in enumerate(meta_image_keys):
+                    meta_image = split_images[i + 1]
+                    if is_channels_first:
+                        meta_image = split_images[i + 1].permute(0, 3, 1, 2)
+                    out_images[meta_key] = meta_image * 2.0 - 1.0
+
             # Color augmentations for all cameras
             # Random brightness
             # Use tensor operations instead of .item() for torch.compile compatibility
@@ -267,6 +217,21 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
+        elif key == "base_0_rgb":
+            batch, height, width = image.shape[:3]
+
+            # split back into base_image and meta_images
+            split_images = torch.split(
+                image, batch // (1 + len(meta_image_keys)), dim=0
+            )
+            image = split_images[0]
+            for i, meta_key in enumerate(meta_image_keys):
+                if is_channels_first:
+                    meta_image = split_images[i + 1].permute(0, 3, 1, 2)
+                else:
+                    meta_image = split_images[i + 1]
+                out_images[meta_key] = meta_image
+
         # Convert back to [B, C, H, W] format if it was originally channels-first
         if is_channels_first:
             image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
@@ -296,6 +261,8 @@ def preprocess_observation_pytorch(
         state=observation.state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
+        token_ar_mask=observation.token_ar_mask,
+        token_loss_mask=observation.token_loss_mask,
     )
 
 
@@ -373,9 +340,6 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
-from cosmos_rl.dispatcher.data.packer.pi05_data_packer import PI05DataPacker
-
-
 @ModelRegistry.register(Pi05WeightMapper, default_data_packer_cls=PI05DataPacker)
 class PI05(BaseModel):
     def __init__(self, model_name_or_path: str, hf_config):
@@ -400,15 +364,17 @@ class PI05(BaseModel):
         self.num_steps = hf_config.num_steps
         self.action_chunk = hf_config.action_chunk
         self.action_env_dim = hf_config.action_env_dim
-        self.noise_method = hf_config.noise_method
-        self.noise_level = hf_config.noise_level
-        self.noise_anneal = hf_config.noise_anneal
-        self.noise_params = hf_config.noise_params
-        self.noise_logvar_range = hf_config.noise_logvar_range
-        self.joint_logprob = hf_config.joint_logprob
-        self.safe_get_logprob = hf_config.safe_get_logprob
-        self.ignore_last = hf_config.ignore_last
+        self.noise_method = getattr(hf_config, "noise_method", "flow_sde")
+        self.noise_level = getattr(hf_config, "noise_level", 0.5)
+        self.noise_anneal = getattr(hf_config, "noise_anneal", False)
+        self.noise_params = getattr(hf_config, "noise_params", [0.7, 0.3, 400])
+        self.noise_logvar_range = getattr(hf_config, "noise_logvar_range", [0.08, 0.16])
+        self.joint_logprob = getattr(hf_config, "joint_logprob", False)
+        self.safe_get_logprob = getattr(hf_config, "safe_get_logprob", False)
+        self.ignore_last = getattr(hf_config, "ignore_last", False)
         self.train_expert_only = hf_config.train_expert_only
+        self.discrete_state_input = hf_config.discrete_state_input
+        self.max_token_len = hf_config.max_token_len
         self.global_step = 0  # Used for noise annealing
         paligemma_variant = hf_config.paligemma_variant
         action_expert_variant = hf_config.action_expert_variant
@@ -478,6 +444,9 @@ class PI05(BaseModel):
         self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
 
+    def get_trained_model_state_dict(self):
+        return {n: p for n, p in self.named_parameters() if p.requires_grad}
+
     @staticmethod
     def preprocess_hf_config(config):
         """
@@ -492,30 +461,9 @@ class PI05(BaseModel):
         )
         hf_config.cosmos_compile = bool(getattr(config.train, "compile", False))
 
-        # Runtime PI05 overrides live under `config.custom["pi05"]` (optional).
-        overrides = {}
-        if hasattr(config, "custom") and isinstance(config.custom, dict):
-            overrides = config.custom.get("pi05", {}) or {}
-
-        # Defaults (RLinf-style)
-        defaults = {
-            "num_steps": 10,
-            "action_chunk": 5,
-            "action_env_dim": 7,
-            "noise_method": "flow_sde",
-            "noise_level": 0.5,
-            "noise_anneal": False,
-            "noise_params": [0.7, 0.3, 400],
-            "noise_logvar_range": [0.08, 0.16],
-            "joint_logprob": False,
-            "safe_get_logprob": False,
-            "ignore_last": False,
-            "train_expert_only": True,
-            "discrete_state_input": False,
-            "max_token_len": 200,
-        }
-        for k, v in defaults.items():
-            setattr(hf_config, k, overrides.get(k, getattr(hf_config, k, v)))
+        if hasattr(config, "custom"):
+            for k, v in config.custom.items():
+                setattr(hf_config, k, v)
 
         hf_config.dataset_name = config.train.train_policy.dataset.name
 
@@ -576,10 +524,6 @@ class PI05(BaseModel):
         """Helper method to preprocess observation."""
         observation = preprocess_observation_pytorch(observation, train=train)
         imgs = list(observation.images.values())
-        if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
-            imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
-        elif imgs and imgs[0].ndim == 5 and imgs[0].shape[-1] == 3:
-            imgs = [x.permute(0, 1, 4, 2, 3).contiguous() for x in imgs]
         return (
             imgs,
             list(observation.image_masks.values()),
@@ -595,7 +539,6 @@ class PI05(BaseModel):
             size=shape,
             dtype=torch.float32,
             device=device,
-            # generator=torch.Generator(device=device).manual_seed(42),
         )
 
     def sample_time(self, bsize, device):
@@ -615,16 +558,6 @@ class PI05(BaseModel):
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
-            # NOTE: SigLIP vision tower expects NCHW (B, 3, H, W).
-            # Online rollout path usually goes through `_preprocess_observation()` which already converts,
-            # but GRPO replay/data-packer path can pass NHWC tensors here.
-            if torch.is_tensor(img):
-                if img.dtype == torch.uint8:
-                    img = img.to(torch.float32) / 255.0 * 2.0 - 1.0
-                if img.ndim == 4 and img.shape[-1] == 3 and img.shape[1] != 3:
-                    img = img.permute(0, 3, 1, 2).contiguous()
-                elif img.ndim == 3 and img.shape[-1] == 3 and img.shape[0] != 3:
-                    img = img.permute(2, 0, 1).unsqueeze(0).contiguous()
 
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
@@ -749,23 +682,8 @@ class PI05(BaseModel):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, inputs, actions, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """SFT Forward Pass for training."""
-        observation = SimpleNamespace(
-            images={
-                "base_0_rgb": inputs["images"][:, 0],
-                "left_wrist_0_rgb": inputs["images"][:, 1],
-                "right_wrist_0_rgb": inputs["images"][:, 2],
-            },
-            image_masks={
-                "base_0_rgb": inputs["image_masks"][:, 0],
-                "left_wrist_0_rgb": inputs["image_masks"][:, 1],
-                "right_wrist_0_rgb": inputs["image_masks"][:, 2],
-            },
-            tokenized_prompt=inputs["input_ids"],
-            tokenized_prompt_mask=inputs["attention_mask"],
-            state=inputs["states"],
-        )
         images, img_masks, lang_tokens, lang_masks, state = (
             self._preprocess_observation(observation, train=True)
         )
@@ -956,7 +874,7 @@ class PI05(BaseModel):
 
         return {
             "actions": x_0[..., : self.action_env_dim],
-            "chains": chains[..., : self.action_env_dim],
+            "chains": chains,
             "old_log_probs": log_probs,
             "denoise_inds": denoise_inds,
         }
@@ -1295,7 +1213,7 @@ class PI05(BaseModel):
     ):
         """
         Load PI05 weights from a HuggingFace-style checkpoint directory/repo.
-        Simple DDP-compatible version that loads weights directly.
+        Uses safetensors.torch.load_model to preserve original dtypes (e.g., float32 for vision embeddings).
         """
         logger.info(f"Loading PI05 weights from {model_name_or_path}")
 
@@ -1305,12 +1223,6 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
-        if any(p.is_meta for p in self.parameters()) or any(
-            b.is_meta for b in self.buffers()
-        ):
-            self.to_empty(device=device)
-        else:
-            self.to(device)
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
@@ -1332,12 +1244,10 @@ class PI05(BaseModel):
 
         missing, unexpected = self.load_state_dict(state_dict, strict=True)
         if missing:
-            logger.warning(
-                f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}"
-            )
+            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys: {missing}")
         if unexpected:
             logger.info(
-                f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)"
+                f"PI05 relaxed load: {len(unexpected)} unexpected keys: {unexpected}"
             )
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
@@ -1346,19 +1256,34 @@ class PI05(BaseModel):
     def check_tp_compatible(self, tp_size: int):
         raise ValueError("PI05 does not support tensor parallelism")
 
+    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
+        """Load PI05 norm_stats from canonical OpenPI path."""
+        import json
+
+        resolved = resolve_model_path(model_path)
+        if self.hf_config.dataset_name == "libero":
+            p = os.path.join(
+                resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
+            )
+        else:
+            p = os.path.join(
+                resolved,
+                "assets",
+                "behavior-1k",
+                "2025-challenge-demos",
+                "norm_stats.json",
+            )
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r") as f:
+            raw = json.load(f)
+        return raw["norm_stats"]
+
     def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        batch_size = inputs["full_images"].shape[0]
+        batch_size = inputs["full_images"].shape[0]  # [H, W, C], values in [0, 255]
 
-        def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
-            # 1. Convert to PIL Image
-            pil_img = np.ascontiguousarray(arr)
-            # 2. Resize with padding (matching official_openpi)
-            pil_img = convert_to_uint8(resize_with_pad(pil_img, 224, 224))
-            # 3. Convert to torch.Tensor
-            return torch.from_numpy(pil_img)  # [H, W, C], values in [0, 255]
-
-        base_imgs = [_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]
-        wrist_imgs = [_to_pi05_img(img[..., :3]) for img in inputs["wrist_images"]]
+        base_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]
+        wrist_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["wrist_images"]]
 
         base_imgs_t = torch.stack(base_imgs, 0)
         wrist_imgs_t = torch.stack(wrist_imgs, 0)
@@ -1410,29 +1335,6 @@ class PI05(BaseModel):
             "input_ids": tokenized_prompt.cuda(),
             "attention_mask": tokenized_prompt_mask.cuda(),
         }
-
-    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
-        """Load PI05 norm_stats from canonical OpenPI path."""
-        import json
-
-        resolved = resolve_model_path(model_path)
-        if self.hf_config.dataset_name == "libero":
-            p = os.path.join(
-                resolved, "assets", "physical-intelligence", "libero", "norm_stats.json"
-            )
-        else:
-            p = os.path.join(
-                resolved,
-                "assets",
-                "behavior-1k",
-                "2025-challenge-demos",
-                "norm_stats.json",
-            )
-        if not os.path.isfile(p):
-            return None
-        with open(p, "r") as f:
-            raw = json.load(f)
-        return raw["norm_stats"]
 
     def _normalize_pi05_state(self, state: np.ndarray) -> np.ndarray:
         """official_openpi Normalize(use_quantiles=True): map state into [-1, 1] using q01/q99."""
@@ -1489,84 +1391,3 @@ class PI05(BaseModel):
         )
         # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
         return outputs
-
-
-def resize_with_pad_torch(
-    images: torch.Tensor,
-    height: int,
-    width: int,
-    mode: str = "bilinear",
-) -> torch.Tensor:
-    """PyTorch version of resize_with_pad. Resizes an image to a target height and width without distortion
-    by padding with black. If the image is float32, it must be in the range [-1, 1].
-
-    Args:
-        images: Tensor of shape [*b, h, w, c] or [*b, c, h, w]
-        height: Target height
-        width: Target width
-        mode: Interpolation mode ('bilinear', 'nearest', etc.)
-
-    Returns:
-        Resized and padded tensor with same shape format as input
-    """
-    # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
-    if images.shape[-1] <= 4:  # Assume channels-last format
-        channels_last = True
-        # Convert to channels-first for torch operations
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-        images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
-    else:
-        channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
-
-    batch_size, channels, cur_height, cur_width = images.shape
-
-    # Calculate resize ratio
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-
-    # Resize
-    resized_images = F.interpolate(
-        images,
-        size=(resized_height, resized_width),
-        mode=mode,
-        align_corners=False if mode == "bilinear" else None,
-    )
-
-    # Handle dtype-specific clipping
-    if images.dtype == torch.uint8:
-        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
-    elif images.dtype == torch.float32:
-        resized_images = resized_images.clamp(-1.0, 1.0)
-    else:
-        raise ValueError(f"Unsupported image dtype: {images.dtype}")
-
-    # Calculate padding
-    pad_h0, remainder_h = divmod(height - resized_height, 2)
-    pad_h1 = pad_h0 + remainder_h
-    pad_w0, remainder_w = divmod(width - resized_width, 2)
-    pad_w1 = pad_w0 + remainder_w
-
-    # Pad
-    constant_value = 0 if images.dtype == torch.uint8 else -1.0
-    padded_images = F.pad(
-        resized_images,
-        (pad_w0, pad_w1, pad_h0, pad_h1),  # left, right, top, bottom
-        mode="constant",
-        value=constant_value,
-    )
-
-    # Convert back to original format if needed
-    if channels_last:
-        padded_images = padded_images.permute(
-            0, 2, 3, 1
-        )  # [b, c, h, w] -> [b, h, w, c]
-        if batch_size == 1 and images.shape[0] == 1:
-            padded_images = padded_images.squeeze(
-                0
-            )  # Remove batch dimension if it was added
-
-    return padded_images

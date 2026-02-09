@@ -16,14 +16,10 @@
 import os
 import torch
 import numpy as np
-
 import torch.distributed as dist
-
+from collections import OrderedDict
 from functools import partial
-
 from typing import Optional
-
-
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
@@ -164,7 +160,8 @@ class SFTTrainer(LLMTrainer):
                 self.optimizers, self.config, total_steps
             )
 
-        acc_loss = torch.zeros(1, device=self.device)
+        aux_loss_dict = OrderedDict()
+
         self.optimizers.zero_grad()
         global_batch_size = self.data_packer.batch_size(global_batch)
         # split global_batch into mini_batches
@@ -302,6 +299,11 @@ class SFTTrainer(LLMTrainer):
                     if pp_last_stage
                     else torch.tensor([-1.0], device=self.device)
                 )
+                aux_loss_dict["loss"] = (
+                    ce_loss.detach()
+                    if "loss" not in aux_loss_dict
+                    else aux_loss_dict["loss"] + ce_loss.detach()
+                )
             else:
                 # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
                 # last_token_ids = []
@@ -332,17 +334,20 @@ class SFTTrainer(LLMTrainer):
                 # return
                 #########################################################################################
 
-                aux_loss = None
+                loss = 0.0
                 with self.act_offloading_ctx_manager:
                     output = self.model(**batch)
-                    if isinstance(output, torch.Tensor):
-                        logits = output
-                    else:
-                        logits = output.logits
-                        # Enumerate the output to involve any `loss` like output
-                        for k, v in output.items():
-                            if "loss" in k.lower() and isinstance(v, torch.Tensor):
-                                aux_loss = v if aux_loss is None else aux_loss + v
+                    logits = output.logits
+                    # Enumerate the output to involve any `loss` like output
+                    for k, v in output.items():
+                        if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                            aux_loss_dict[k] = (
+                                v.detach()
+                                if k not in aux_loss_dict
+                                else aux_loss_dict[k] + v.detach()
+                            )
+                            v = v / len(mini_batch_begin_idxs)
+                            loss = loss + v
 
                 ce_loss = self.loss_fn(
                     logits,
@@ -351,17 +356,16 @@ class SFTTrainer(LLMTrainer):
                     target_packing_mask=batch.get("label_packing_mask", None),
                     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                 )
-                if aux_loss is not None:
-                    loss = ce_loss + aux_loss
-                else:
-                    loss = ce_loss
-                # # Hint FSDP to do all-reduce on the last backward pass
-                # if hasattr(self.model, "set_is_last_backward"):
-                #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
-                #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
+                aux_loss_dict["loss"] = (
+                    ce_loss.detach()
+                    if "loss" not in aux_loss_dict
+                    else aux_loss_dict["loss"] + ce_loss.detach()
+                )
+                loss = loss + ce_loss
                 loss.backward()
-            acc_loss += ce_loss.detach()
 
+            loss_flat = torch.stack(list(aux_loss_dict.values()))
+            loss_flat_keys = list(aux_loss_dict.keys())
         """
         Compute the global grad norm on all parameters and then apply
         gradient clipping using the global grad norm.
@@ -395,7 +399,8 @@ class SFTTrainer(LLMTrainer):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        self.model.step_hook()
+        step_hook_report_data = self.model.step_hook(train_step)
+        report_data = step_hook_report_data if step_hook_report_data is not None else {}
 
         end_event.record()
 
@@ -404,27 +409,41 @@ class SFTTrainer(LLMTrainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            global_avg_loss, global_max_loss = (  # noqa: F841
-                dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
-                dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+            global_avg_loss = loss_flat.clone()
+            global_max_loss = loss_flat.clone()
+            torch.distributed.all_reduce(
+                global_avg_loss,
+                op=torch.distributed.ReduceOp.AVG,
+                group=self.parallel_dims.mesh["dp_cp"].get_group(),
             )
+            torch.distributed.all_reduce(
+                global_max_loss,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.parallel_dims.mesh["dp_cp"].get_group(),
+            )
+            global_avg_loss = global_avg_loss.cpu()
+            global_max_loss = global_max_loss.cpu()
         else:
-            global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+            global_avg_loss = global_max_loss = loss_flat.cpu()
 
-        report_data = {}
         if self.config.logging.logger:
             if util.is_master_rank(self.parallel_dims, self.global_rank):
                 # Calculate last iteration time
                 assert end_event.query()
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
 
-                report_data = {
+                loss_metrics = {
                     "train/iteration_time": iter_time,
-                    "train/loss_avg": global_avg_loss,
-                    "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
+                for idx, name in enumerate(loss_flat_keys):
+                    loss_metrics[f"train/{name}_avg"] = global_avg_loss[idx]
+                    loss_metrics[f"train/{name}_max"] = global_max_loss[idx]
+
+                report_data.update(
+                    loss_metrics,
+                )
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
@@ -438,9 +457,6 @@ class SFTTrainer(LLMTrainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
-
-                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
-
         return report_data
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
@@ -517,7 +533,7 @@ class SFTTrainer(LLMTrainer):
                         position_ids=val_position_ids,
                         pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                         seq_len_multiple=self.seq_len_multiple,
-                    )
+                    ).logits
 
                 if pp_last_stage:
                     val_loss = self.loss_fn(pp_out, val_labels)
@@ -651,7 +667,8 @@ class SFTTrainer(LLMTrainer):
                     self.lr_schedulers = None
                     self.build_optimizers()
                     self.model.load_hf_weights(
-                        self.config.policy.model_name_or_path,
+                        self.config.policy.model_safetensor_path
+                        or self.config.policy.model_name_or_path,
                         self.parallel_dims,
                         self.device,
                         revision=self.config.policy.model_revision,
@@ -674,14 +691,14 @@ class SFTTrainer(LLMTrainer):
 
                 if (
                     self.parallel_dims.dp_replicate_coord[0] != 0
-                    and ckpt_total_steps is not None
+                    and ckpt_total_steps > 0
                 ):
                     # Initialize lr_schedulers on non-zero dp_replicate ranks when resuming training
                     # only when ckpt_total_steps > 0, means a checkpoint is loaded
                     self.lr_schedulers = build_lr_schedulers(
                         self.optimizers, self.config, ckpt_total_steps
                     )
-                if ckpt_total_steps is not None:
+                if ckpt_total_steps > 0:
                     assert (
                         self.lr_schedulers is not None
                     ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."

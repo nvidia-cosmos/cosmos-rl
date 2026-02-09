@@ -124,12 +124,56 @@ class RemoteRewardCalculator:
     def enqueue_request(self, mm_tensor, data):
         """Enqueue the request and return UUID."""
 
+        def _as_float_env(name: str, default: float) -> float:
+            value = os.environ.get(name)
+            if value is None or str(value).strip() == "":
+                return default
+            try:
+                return float(value)
+            except ValueError:
+                logger.warning(
+                    f"[RemoteRewardCalculator] Invalid env var {name}={value!r}; using default={default}."
+                )
+                return default
+
         buffer = io.BytesIO()
         np.save(buffer, mm_tensor, allow_pickle=False)
         buffer.seek(0)
 
         # Combine JSON + binary data
         payload = json.dumps(data).encode("utf-8") + b"\n" + buffer.getvalue()
+
+        # Timeout tuning
+        # - Requests timeout can be a (connect, read) tuple.
+        # - Enqueue endpoint may include server-side preprocessing/queueing, so we size conservatively.
+        payload_size_mb = len(payload) / (1024 * 1024)
+        fixed_timeout_s = os.environ.get("REMOTE_REWARD_ENQUEUE_TIMEOUT_S")
+        if fixed_timeout_s is not None and fixed_timeout_s.strip() != "":
+            try:
+                read_timeout_s = float(fixed_timeout_s)
+            except ValueError:
+                logger.warning(
+                    "[RemoteRewardCalculator] Invalid env var REMOTE_REWARD_ENQUEUE_TIMEOUT_S="
+                    f"{fixed_timeout_s!r}; falling back to dynamic timeout."
+                )
+                fixed_timeout_s = None
+
+        if fixed_timeout_s is None:
+            base_s = _as_float_env("REMOTE_REWARD_ENQUEUE_TIMEOUT_BASE_S", 30.0)
+            per_mb_s = _as_float_env("REMOTE_REWARD_ENQUEUE_TIMEOUT_PER_MB_S", 3.0)
+            min_s = _as_float_env("REMOTE_REWARD_ENQUEUE_TIMEOUT_MIN_S", 60.0)
+            max_s = _as_float_env("REMOTE_REWARD_ENQUEUE_TIMEOUT_MAX_S", 600.0)
+            read_timeout_s = base_s + per_mb_s * payload_size_mb
+            read_timeout_s = max(min_s, min(max_s, read_timeout_s))
+
+        connect_timeout_s = _as_float_env(
+            "REMOTE_REWARD_ENQUEUE_CONNECT_TIMEOUT_S", 100.0
+        )
+        timeout = (connect_timeout_s, read_timeout_s)
+        logger.debug(
+            "[RemoteRewardCalculator] Enqueue timeout computed. "
+            f"payload_size_mb={payload_size_mb:.2f}, timeout={timeout}"
+        )
 
         response = make_request_with_retry(
             partial(
@@ -139,7 +183,7 @@ class RemoteRewardCalculator:
                     "Content-Type": "application/octet-stream",
                     "Authorization": f"Bearer {self.token}",
                 },
-                timeout=30.0,
+                timeout=timeout,
             ),
             [self.enqueue_url],
         )

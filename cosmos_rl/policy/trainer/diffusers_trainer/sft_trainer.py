@@ -124,6 +124,7 @@ class SFTTrainer(DiffusersTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    is_final=is_last_step,
                 )
                 # TODO(yy): support save safetensor
                 # self.ckpt_manager.save_check(

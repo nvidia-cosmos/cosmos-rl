@@ -26,7 +26,7 @@ from cosmos_rl.utils.util import (
     sync_model_vocab,
     retry,
 )
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
 from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
@@ -521,9 +521,9 @@ class GPT(BaseModel):
                 # for run torch.mm on input's dtype
                 with torch.autocast(device_type="cuda", dtype=h.dtype):
                     output = h @ embed_tokens_weight.t()
-            return output
+            return CosmosModelOutput(logits=output)
         else:
-            return h
+            return CosmosModelOutput(logits=h)
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # rotary.inv_freq could get deleted and not re-initialized

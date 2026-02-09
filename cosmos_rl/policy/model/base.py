@@ -37,6 +37,22 @@ from cosmos_rl.utils.dim_slice_info import (
     extract_infomation_from_dtensor,
     tensor_overlap_info_at_dim,
 )
+from transformers.utils import ModelOutput
+from dataclasses import dataclass
+
+
+@dataclass
+class CosmosModelOutput(ModelOutput):
+    """
+    Base class for model's outputs, with logits and potential auxiliary loss.
+
+    Args:
+        logits: The logits of the model.
+        aux_loss: The auxiliary loss of the model.
+    """
+
+    logits: torch.Tensor = None
+    aux_loss: Optional[torch.Tensor] = None
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -439,11 +455,13 @@ class BaseModel(torch.nn.Module, ABC):
         """
         raise NotImplementedError
 
-    def step_hook(self):
+    def step_hook(self, step: int) -> Optional[dict]:
         """
         Hook to be called after each step update.
+        Returns:
+            Optional[dict]: A dictionary of report data.
         """
-        pass
+        return None
 
     @abstractmethod
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
@@ -581,9 +599,15 @@ class ModelRegistry:
         hf_config_args = hf_config_args if hf_config_args is not None else {}
         for k, v in hf_config_args.items():
             logger.info(f"Set hf config args {k} to {v}")
+
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True, **hf_config_args
         )
+        aux_loss_coeff = config.policy.aux_loss_coeff
+        if aux_loss_coeff > 0.0 and "aux_loss_coeff" not in hf_config:
+            hf_config.aux_loss_coeff = aux_loss_coeff
+            logger.info(f"Set hf config aux_loss_coeff to {aux_loss_coeff}")
+
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
         if not is_supported_model_type or config.train.force_use_hf:

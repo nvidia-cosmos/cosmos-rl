@@ -42,7 +42,7 @@ from cosmos_rl.policy.model.qwen3_vl_moe.weight_mapper import Qwen3VLMoeWeightMa
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
@@ -231,12 +231,14 @@ class Qwen3MoE(nn.Module):
             )
             h = self.identity_layer(inputs_embeds)
 
+        # Auxiliary loss from MoE layers.
+        aux_loss = None
         for layer_idx, layer in self.layers.items():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
                 and layer._gradient_checkpointing_enabled
             ):
-                h = torch.utils.checkpoint.checkpoint(
+                h, local_aux_loss = torch.utils.checkpoint.checkpoint(
                     layer,
                     h,
                     position_embeddings,
@@ -244,7 +246,13 @@ class Qwen3MoE(nn.Module):
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings, **kwargs)
+                h, local_aux_loss = layer(
+                    h, position_embeddings=position_embeddings, **kwargs
+                )
+            if local_aux_loss is not None:
+                aux_loss = (
+                    local_aux_loss if aux_loss is None else aux_loss + local_aux_loss
+                )
             # add visual features to the hidden states of first several layers
             if deepstack_visual_embeds is not None and int(layer_idx) in range(
                 len(deepstack_visual_embeds)
@@ -266,7 +274,7 @@ class Qwen3MoE(nn.Module):
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
-        return h
+        return CosmosModelOutput(logits=h, aux_loss=aux_loss)
 
     def _deepstack_process(
         self,
@@ -978,7 +986,7 @@ class Qwen3VLMoeModel(BaseModel):
             biases=bias_list,
             train_gate=True,
             gate_bias_update_factor=1.0,
-            aux_loss_coeff=0.0,
+            aux_loss_coeff=getattr(hf_config, "aux_loss_coeff", 0.0),
             hf_config=lm_config,
         )
 

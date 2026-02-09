@@ -293,6 +293,7 @@ class HFModel(BaseModel):
         for path in [
             "embed_tokens",
             "model.embed_tokens",
+            "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
@@ -345,6 +346,7 @@ class HFModel(BaseModel):
         return self.is_vlm
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
+        self.cosmos_config = cosmos_config
         # Named buffers will be reset during the load_hf_weights process
         return
 
