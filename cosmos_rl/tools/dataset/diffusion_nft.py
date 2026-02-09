@@ -122,7 +122,7 @@ class DiffusionNFTDataPacker(BaseDataPacker):
         # Batching the list of rollouts into a single input for the policy
         # Only extra_info is needed for diffusion NFT
         for s in sample:
-            s.extra_info["advantages"] = torch.tensor(s.advantage)
+            s.extra_info["advantages"] = torch.tensor(s.advantage, device=device)
 
         inputs_list = [rollout.extra_info for rollout in sample]
         collated_samples = {}

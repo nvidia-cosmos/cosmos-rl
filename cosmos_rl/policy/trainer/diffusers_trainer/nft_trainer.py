@@ -325,12 +325,6 @@ class NFTTrainer(DiffusersTrainer):
                 # shuffle within the batch for better training stability
                 perm = torch.randperm(batch_size, device=self.device)
 
-                # TODO(dinghaoy): need better parallelism for diffusers pipeline (e.g., VAE, text encoder), need reduce D2D copies
-                for k, v in packed_train_batch.items():
-                    if isinstance(v, torch.Tensor) and v.device != self.device:
-                        logger.debug(f"Moving tensor {k} to device {self.device}")
-                        packed_train_batch[k] = v.to(self.device)
-
                 train_sample_batch = {
                     k: v[perm]
                     if isinstance(v, torch.Tensor) and v.shape[0] == batch_size

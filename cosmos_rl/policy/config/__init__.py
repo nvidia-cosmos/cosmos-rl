@@ -485,6 +485,11 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
+    uncentralized_training: bool = Field(
+        default=False,
+        description="Whether to use uncentralized training. If set to True, the rollout results will be directly sent to the policy engine without going through the controller. This can reduce the communication overhead and speed up the training, only suitable for colocated mode.",
+    )
+
     outdated_rollout_fetch_batch_size: int = Field(
         default=0,
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
@@ -587,7 +592,12 @@ class GrpoConfig(BaseModel):
                 logger.warning(
                     "DAPO is enabled, so outdated_rollout_fetch_batch_size is set to 128 as a large value."
                 )
-
+        if self.uncentralized_training and self.variant != "grpo":
+            raise ValueError(
+                "Uncentralized training is only suitable for GRPO, but the current variant is {}. Please make sure this is intended.".format(
+                    self.variant
+                )
+            )
         return self
 
 
