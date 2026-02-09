@@ -45,7 +45,8 @@ from collections.abc import Sequence
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
 from transformers import AutoConfig, AutoTokenizer
-from safetensors import safe_open
+import glob
+from safetensors.torch import load_file
 
 from cosmos_rl.policy.model.pi05.model_utils import (
     resize_with_pad_torch,
@@ -509,11 +510,15 @@ class PI05(BaseModel):
         logging.info("Frozen PaliGemma VLM, only training action expert")
 
     def freeze_unused_params(self) -> None:
+        """Freeze params that never receive grads in PI05's forward (avoids find_unused_parameters)."""
+        # lm_heads are never called — PI05 uses action_out_proj instead.
         self.paligemma_with_expert.gemma_expert.lm_head.requires_grad_(False)
+        self.paligemma_with_expert.paligemma.lm_head.requires_grad_(False)
         if self.train_expert_only:
             self.freeze_vlm()
             return
-        # In pi05, the last layer of LLM is not used for loss computation.
+        # PI05 discards paligemma's prefix_output, so paligemma's last-layer
+        # o_proj / MLP / post_attention_layernorm and final norm have no grad path.
         lm = self.paligemma_with_expert.paligemma.model.language_model
         last = lm.layers[-1]
         for m in (last.self_attn.o_proj, last.mlp, last.post_attention_layernorm, lm.norm):
@@ -1234,9 +1239,6 @@ class PI05(BaseModel):
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
         device_str = "cuda" if device.type == "cuda" else "cpu"
-        import glob
-        from safetensors.torch import load_file
-
         shard_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
 
         state_dict = {}
