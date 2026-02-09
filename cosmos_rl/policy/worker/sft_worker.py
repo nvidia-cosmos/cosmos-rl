@@ -716,7 +716,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_score=val_avg_loss,
         )
 
-        if hasattr(self.trainer, "upload_thread") and self.trainer.upload_thread is not None:
+        if (
+            hasattr(self.trainer, "upload_thread")
+            and self.trainer.upload_thread is not None
+        ):
             logger.info("[Policy] Waiting for upload thread to finish...")
             self.trainer.upload_thread.join()
             logger.info("[Policy] Upload thread finished.")
