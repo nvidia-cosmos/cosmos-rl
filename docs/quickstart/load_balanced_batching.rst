@@ -11,8 +11,10 @@ Key Features
 
 - **Dynamic Batch Formation**: Batches are created on-the-fly based on sample lengths, maximizing batch size while staying within token limits
 - **Load Balancing**: Balances the number of tokens across different data parallel ranks, reducing padding waste
+- **Step-Based Training**: Training is controlled by optimizer steps (``load_balanced_max_steps``), not epochs. User-provided epoch configuration is ignored
+- **Automatic Data Looping**: When ``infinite_loop = true`` (default), data automatically restarts when exhausted, with epoch incremented for new data ordering
 - **Gradient Accumulation Support**: Built-in support for accumulating multiple batches per optimizer step
-- **Resume Support**: Properly handles training resumption with deterministic data ordering
+- **Resume Support**: Properly handles training resumption with deterministic data ordering based on train_step
 
 How It Works
 ------------
@@ -21,6 +23,14 @@ The load-balanced batching system consists of two main components:
 
 1. **ShardedIterableDataset**: Shards the base dataset across data parallel ranks and converts it to an IterableDataset
 2. **LoadBalancedDataset**: Maintains a pool of samples and dynamically creates batches using a best-fit strategy
+
+**Training Mode**:
+- When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based
+- Training duration is controlled by ``load_balanced_max_steps`` (number of optimizer steps)
+- User-provided ``epoch`` configuration parameter is **ignored**
+- Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
+- When ``infinite_loop = true`` (default), data automatically restarts when exhausted, with epoch incremented
+- Each rank may consume data at different rates due to dynamic batching, but training stops when ``total_steps`` is reached
 
 Batch Formation Strategy
 ------------------------
@@ -87,6 +97,8 @@ load_balanced_max_steps
    Maximum number of optimizer steps (training steps) for load-balanced batching (default: 100)
    
    This defines the number of times ``optimizer.step()`` will be called. The actual number of batches processed will be ``load_balanced_max_steps * load_balanced_batches_per_optimizer_step``.
+   
+   **Important**: When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based. The user-provided ``epoch`` configuration parameter is ignored. The system uses ``load_balanced_max_steps`` to determine when training should stop.
 
 load_balanced_batches_per_optimizer_step
    Number of batches to accumulate per optimizer step for gradient accumulation (default: 1)
@@ -163,19 +175,53 @@ Load-balanced batching supports gradient accumulation at the data loading level.
 
 This approach moves gradient accumulation logic from the trainer to the data loading layer, providing better modularity and efficiency.
 
+Infinite Loop and Epoch Management
+----------------------------------
+
+When ``enable_dp_load_balancing = true``, the system uses an ``infinite_loop`` parameter to control data iteration behavior:
+
+**Infinite Loop (default: true)**:
+- When ``infinite_loop = true``: Data automatically restarts when exhausted
+  - Epoch is automatically incremented each time data restarts
+  - Different epochs use different random seeds for data shuffling (deterministic but varied ordering)
+  - This ensures training can reach ``load_balanced_max_steps`` even if data is exhausted
+  - Recommended for step-based training where you want to train for a fixed number of optimizer steps
+
+- When ``infinite_loop = false``: Data stops when exhausted
+  - Training stops when all data has been processed
+  - Not recommended for step-based training as training may stop before reaching ``load_balanced_max_steps``
+
+**Epoch Management**:
+- Epoch is **managed internally** and is used only for deterministic data ordering
+- User-provided ``epoch`` configuration parameter is **ignored** when ``enable_dp_load_balancing = true``
+- Epoch does not control training duration (training is step-based, controlled by ``load_balanced_max_steps``)
+- When data restarts (``infinite_loop = true``), epoch is automatically incremented to ensure different data ordering
+- Initial epoch is set to 0 when resuming training
+
+**Why Infinite Loop?**:
+- In dynamic batching, different ranks consume data at different rates
+- Some ranks may exhaust their data shard before reaching ``load_balanced_max_steps``
+- With ``infinite_loop = true``, data automatically restarts, ensuring all ranks can continue training
+- Training stops when ``train_step >= total_steps`` (where ``total_steps = load_balanced_max_steps``), not when data is exhausted
+
 Resume Support
 --------------
 
 Load-balanced batching properly handles training resumption:
 
-1. **Epoch Calculation**: Uses ``load_balanced_max_steps`` as the "epoch size" in terms of optimizer steps
-2. **Deterministic Ordering**: Sets the correct epoch to ensure deterministic data ordering (different epochs use different random seeds)
-3. **Batch Skipping**: Skips batch groups that have already been processed in the current epoch
+1. **Step-Based Training**: Training is based on optimizer steps (``load_balanced_max_steps``), not epochs
+2. **Automatic Epoch Management**: Epoch is automatically managed internally for deterministic data ordering
+   - Initial epoch is set to 0 when resuming
+   - Epoch is automatically incremented when data loops (if ``infinite_loop = true``)
+   - Different epochs use different random seeds for data shuffling
+3. **Batch Skipping**: Skips batch groups that have already been processed based on ``train_step``
 
 The resume logic ensures that:
-- Data ordering matches the original training (same epoch = same data order)
-- Only batches within the current epoch are skipped
+- Data ordering matches the original training (deterministic shuffling)
+- Only batches within the current step range are skipped
 - Training continues from the correct position
+
+**Note**: The user-provided ``epoch`` configuration parameter is **ignored** when ``enable_dp_load_balancing = true``. Epoch is managed internally for data ordering purposes only.
 
 Implementation Details
 ----------------------
@@ -199,9 +245,17 @@ The ``LoadBalancedDataset`` class:
 - Implements best-fit batching strategies (with or without sequence packing)
 - Supports gradient accumulation by yielding multiple batches per iteration
 - Provides ``set_epoch()`` and ``skip_batches()`` methods for resume support
+- Supports automatic data looping with ``infinite_loop`` parameter:
+  - When ``infinite_loop = true`` (default): Automatically restarts data iteration when exhausted, incrementing epoch for new data ordering
+  - When ``infinite_loop = false``: Stops iteration when data is exhausted
 - Adapts batch formation algorithm based on ``seq_packing_enabled`` flag:
   - Without packing: maximizes batch_size * max_length (with padding)
   - With packing: maximizes sum of sequence lengths (without padding)
+
+**Epoch Management**:
+- Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
+- When ``infinite_loop = true``, epoch is automatically incremented each time data restarts
+- Epoch does not control training duration (training is step-based, controlled by ``load_balanced_max_steps``)
 
 Best-Fit Algorithm
 ~~~~~~~~~~~~~~~~~~
@@ -244,7 +298,9 @@ Limitations
 
 1. **Approximate Length**: ``len(dataset)`` returns an approximate value based on sample count, not actual batch count
 2. **Memory Overhead**: Maintaining a sample pool requires additional memory
-3. **Deterministic Resume**: Resume is deterministic within an epoch, but exact batch composition may vary slightly due to dynamic batching
+3. **Step-Based Training**: When ``enable_dp_load_balancing = true``, training is step-based, not epoch-based. User-provided epoch configuration is ignored
+4. **Epoch Management**: Epoch is managed internally for data ordering purposes only. It does not control training duration
+5. **Deterministic Resume**: Resume is deterministic based on train_step, but exact batch composition may vary slightly due to dynamic batching
 
 Best Practices
 --------------
@@ -255,6 +311,8 @@ Best Practices
 4. **Sequence Packing**: Enable sequence packing if your model supports it for better token utilization. Check model compatibility before enabling
 5. **Gradient Accumulation**: Use ``load_balanced_batches_per_optimizer_step`` to control effective batch size
 6. **Seed**: Set ``dataloader_seed`` for reproducibility
+7. **Step-Based Training**: Remember that when ``enable_dp_load_balancing = true``, training is step-based. Set ``load_balanced_max_steps`` to control training duration, not ``epoch``
+8. **Infinite Loop**: Keep ``infinite_loop = true`` (default) for step-based training. Data will automatically restart when exhausted, ensuring training can reach ``load_balanced_max_steps``
 
 When to Use Sequence Packing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -287,6 +345,12 @@ Troubleshooting
    - Ensure ``load_balanced_max_steps`` matches the original training configuration
    - Check that checkpoint contains correct ``train_step`` information
    - Verify ``dataloader_seed`` is the same as original training
+   - Note: User-provided ``epoch`` parameter is ignored when ``enable_dp_load_balancing = true``. Epoch is managed internally
+
+**Issue**: Data keeps looping indefinitely
+   - This is expected behavior when ``infinite_loop = true`` (default)
+   - Training stops based on ``load_balanced_max_steps``, not data exhaustion
+   - Set ``infinite_loop = false`` if you want data to stop when exhausted (not recommended for step-based training)
 
 **Issue**: Sequence packing not working
    - Verify that ``sequence_packing = true`` is set in the configuration
