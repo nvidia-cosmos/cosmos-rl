@@ -650,48 +650,47 @@ class SFTTrainer(LLMTrainer):
         do_save: bool = False,
         **kwargs,
     ):
-        if (
-            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
-        ) and self.parallel_dims.dp_replicate_coord[0] == 0:
-            # save safetensors
-            # TODO(dinghaoy): support export safetensors asynchronously.
-            if is_last_step or (
-                self.config.train.ckpt.export_safetensors
-                and self.config.train.ckpt.enable_checkpoint
-            ):
-                logger.info(
-                    f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
-                )
-                self.export_safetensors(
-                    output_dir=self.config.train.output_dir,
-                    rel_path=os.path.join(
-                        "safetensors",
-                        f"step_{train_step}",
-                    ),
-                    trainable_only=False,
-                    is_final=is_last_step,
-                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
-                )
-            # save checkpoint
-            if self.config.train.ckpt.enable_checkpoint:
-                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
-                self.ckpt_manager.save_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
-                    step=train_step,
-                    total_steps=total_steps,
-                    is_final=is_last_step,
-                    **kwargs,
-                )
-                self.ckpt_manager.save_check(
-                    step=train_step,
-                    val_score=val_score,
-                    pp_enabled=self.parallel_dims.pp_enabled,
-                    pp_last_stage=pp_last_stage,
-                    pp_master_rank=self.parallel_dims.world_size
-                    - self.parallel_dims.world_size / self.parallel_dims.pp,
-                )
+        if is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0):
+            if self.parallel_dims.dp_replicate_coord[0] == 0:
+                # save safetensors
+                # TODO(dinghaoy): support export safetensors asynchronously.
+                if is_last_step or (
+                    self.config.train.ckpt.export_safetensors
+                    and self.config.train.ckpt.enable_checkpoint
+                ):
+                    logger.info(
+                        f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
+                    )
+                    self.export_safetensors(
+                        output_dir=self.config.train.output_dir,
+                        rel_path=os.path.join(
+                            "safetensors",
+                            f"step_{train_step}",
+                        ),
+                        trainable_only=False,
+                        dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                    )
+                # save checkpoint
+                if self.config.train.ckpt.enable_checkpoint:
+                    logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                    self.ckpt_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.optimizers,
+                        scheduler=self.lr_schedulers,
+                        step=train_step,
+                        total_steps=total_steps,
+                        is_final=is_last_step,
+                        **kwargs,
+                    )
+                    self.ckpt_manager.save_check(
+                        step=train_step,
+                        val_score=val_score,
+                        pp_enabled=self.parallel_dims.pp_enabled,
+                        pp_last_stage=pp_last_stage,
+                        pp_master_rank=self.parallel_dims.world_size
+                        - self.parallel_dims.world_size / self.parallel_dims.pp,
+                    )
+            torch.distributed.barrier()
 
     def load_model(self):
         """Load model weights from checkpoint if available."""
