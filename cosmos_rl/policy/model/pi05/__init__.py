@@ -444,9 +444,7 @@ class PI05(BaseModel):
         self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
 
-        self.paligemma_with_expert.gemma_expert.lm_head.requires_grad_(False)
-        if self.train_expert_only:
-            self.freeze_vlm()
+        self.freeze_unused_params()
 
     def get_trained_model_state_dict(self):
         return {n: p for n, p in self.named_parameters() if p.requires_grad}
@@ -509,6 +507,18 @@ class PI05(BaseModel):
         for params in self.paligemma_with_expert.paligemma.parameters():
             params.requires_grad_(False)
         logging.info("Frozen PaliGemma VLM, only training action expert")
+
+    def freeze_unused_params(self) -> None:
+        self.paligemma_with_expert.gemma_expert.lm_head.requires_grad_(False)
+        if self.train_expert_only:
+            self.freeze_vlm()
+            return
+        # In pi05, the last layer of LLM is not used for loss computation.
+        lm = self.paligemma_with_expert.paligemma.model.language_model
+        last = lm.layers[-1]
+        for m in (last.self_attn.o_proj, last.mlp, last.post_attention_layernorm, lm.norm):
+            for p in m.parameters():
+                p.requires_grad_(False)
 
     def _apply_checkpoint(self, func, *args, **kwargs):
         """Helper method to apply gradient checkpointing if enabled."""
@@ -1223,16 +1233,15 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
-        weight_path = os.path.join(model_path, "model.safetensors")
+        device_str = "cuda" if device.type == "cuda" else "cpu"
+        import glob
+        from safetensors.torch import load_file
+
+        shard_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
 
         state_dict = {}
-        with safe_open(
-            weight_path,
-            framework="pt",
-            device=("cuda" if device.type == "cuda" else "cpu"),
-        ) as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
+        for path in shard_files:
+            state_dict.update(load_file(path, device=device_str))
         # logger.info(f'{state_dict.keys()}')
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
         embed_key = (
