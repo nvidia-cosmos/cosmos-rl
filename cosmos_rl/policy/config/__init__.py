@@ -836,10 +836,8 @@ class TrainingConfig(BaseModel):
         if (
             self.optm_warmup_epochs is not None and self.optm_warmup_steps != 20
         ):  # 20 is the default
-            from cosmos_rl.utils.logging import get_logger
 
-            _logger = get_logger(__name__)
-            _logger.warning(
+            logger.warning(
                 f"Both optm_warmup_epochs ({self.optm_warmup_epochs}) and optm_warmup_steps ({self.optm_warmup_steps}) are set. "
                 f"optm_warmup_epochs will take priority and optm_warmup_steps will be ignored."
             )
