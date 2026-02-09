@@ -914,6 +914,10 @@ class LoraConfig(BaseModel):
         default=None,
         description="LoRA target modules, can be a list of strings or 'all-linear'",
     )
+    primary_adapter: Optional[str] = Field(
+        default=None,
+        description="The primary adapter name to be used for inference and evaluation when multiple adapters are trained simultaneously. If not set, the first adapter in `lora_names` will be used as the primary adapter.",
+    )
     use_rslora: bool = Field(
         default=False,
         description="When set to True, uses [Rank-Stabilized LoRA](https://huggingface.co/papers/2312.03732)"
