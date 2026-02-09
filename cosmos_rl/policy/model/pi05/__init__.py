@@ -444,6 +444,10 @@ class PI05(BaseModel):
         self.model_output_keys = ["action", "chains", "denoise_inds", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
 
+        self.paligemma_with_expert.gemma_expert.lm_head.requires_grad_(False)
+        if self.train_expert_only:
+            self.freeze_vlm()
+
     def get_trained_model_state_dict(self):
         return {n: p for n, p in self.named_parameters() if p.requires_grad}
 
@@ -501,11 +505,10 @@ class PI05(BaseModel):
 
     def freeze_vlm(self):
         """Freeze VLM (PaliGemma) and only train action expert (RLinf-style)."""
-        if self.train_expert_only:
-            self.paligemma_with_expert.paligemma.eval()
-            for params in self.paligemma_with_expert.paligemma.parameters():
-                params.requires_grad = False
-            logging.info("Frozen PaliGemma VLM, only training action expert")
+        self.paligemma_with_expert.paligemma.eval()
+        for params in self.paligemma_with_expert.paligemma.parameters():
+            params.requires_grad_(False)
+        logging.info("Frozen PaliGemma VLM, only training action expert")
 
     def _apply_checkpoint(self, func, *args, **kwargs):
         """Helper method to apply gradient checkpointing if enabled."""
@@ -1172,9 +1175,6 @@ class PI05(BaseModel):
         return parallelize, self
 
     def post_to_empty_hook(self, cosmos_config):
-        # Apply training-time freezing policy here (requested): if `train_expert_only=True`,
-        # freeze the VLM (PaliGemma) so optimizer won't include it.
-        self.freeze_vlm()
         return
 
     def apply_pipeline_split(self, pp_rank, pp_size):
