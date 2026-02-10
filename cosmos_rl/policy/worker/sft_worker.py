@@ -716,6 +716,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_score=val_avg_loss,
         )
 
+        if (
+            hasattr(self.trainer, "upload_thread")
+            and self.trainer.upload_thread is not None
+        ):
+            logger.info("[Policy] Waiting for upload thread to finish...")
+            self.trainer.upload_thread.join()
+            logger.info("[Policy] Upload thread finished.")
+            self.trainer.upload_thread = None
+
         self.unregister_from_controller()
 
     def destroy_worker(self):
