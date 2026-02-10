@@ -408,11 +408,9 @@ class ColocatedController(Controller):
 
                 if self.config.train.train_policy.uncentralized_training:
                     # Gather rewards, completion_lengths, advantages and filter_rewards from all replicas for accurate logging.
-                    cpu_device = torch.device("cpu")
-
                     def all_gather_flatten(values: list):
                         gathered = dist_util.all_gather_object_cpu(
-                            values, device=cpu_device
+                            values, device=torch.device("cpu")
                         )
                         return list(chain.from_iterable(gathered))
 

@@ -42,6 +42,7 @@ deterministic_sampling = true
 [rollout]
 backend = "diffusion_nft_rollout"
 n_generation = 24
+batch_size = 6
 
 [logging]
 logger = ['console', 'wandb']
@@ -51,9 +52,9 @@ experiment_name = "None"
 [train]
 non_text = true
 resume = false
-epoch = 10
+epoch = 100000
 seed = 42
-train_batch_per_replica = 192  # 24 * 8
+train_batch_per_replica = 1152  # 6*24*8
 output_dir = "./outputs/stable-diffusion-3-5-medium_720_nft"
 epsilon = 1e-8
 optm_name = "AdamW"
@@ -76,6 +77,7 @@ use_remote_reward = true
 dataset.name = "pickscore"
 dataset.split = "train"
 kl_beta = 0.0001
+mini_batch = 9
 advantage_high = 5.0
 advantage_low = -5.0
 
