@@ -7,7 +7,7 @@ is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.lora]
-lora_names = ["default", "ref"]
+lora_names = ["default", "old"]
 r = 32
 lora_alpha = 64
 init_lora_weights = "gaussian"
