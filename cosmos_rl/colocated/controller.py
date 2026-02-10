@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from typing import List, Optional, Callable, Any, Type, Union
+from itertools import chain
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -371,61 +372,99 @@ class ColocatedController(Controller):
             data_fetch_cmd.pack(), self.policy.replica_name
         )
 
-        if self.config.logging.logger and len(self.policy.data_queue.queue) > 0:
-            assert (
-                self.policy.global_rank == 0
-            ), "Only global rank 0 collects and reports training statistics."
-            rewards = []
-            completion_lengths = []
-            advantages = []
-            filter_rewards = []
-            for rollout in self.policy.data_queue.queue:
-                rewards.append(rollout.reward)
-                completion_length = (
-                    (
-                        len(rollout.completion_token_ids)
-                        if self.config.train.train_policy.rollout_as_token_ids
-                        else len(
-                            self.policy.trainer.tokenizer.encode(rollout.completion)
-                        )
-                    )
-                    if not self.config.train.non_text
-                    else 1
+        if self.config.logging.logger:
+            # IMPORTANT: In uncentralized training we must ensure every rank participates in
+            # collectives (all_gather), otherwise rank0 will hang waiting for ranks that
+            # skipped the collective due to logging guards.
+            should_run_collectives = (
+                self.config.train.train_policy.uncentralized_training
+                or self.policy.global_rank == 0
+            )
+            if should_run_collectives:
+                logger.debug(
+                    f"[Controller] Starting logging for step {self.current_step} with {required_rollouts} new rollouts and {self.remain_samples_num} remaining samples."
                 )
-                advantages.extend([rollout.advantage] * completion_length)
-                filter_rewards.append(rollout.filter_reward)
-                completion_lengths.append(completion_length)
-            report_data = {
-                "train/reward_mean": np.mean(rewards).item(),
-                "train/reward_std": np.std(rewards).item(),
-                "train/reward_max": np.max(rewards).item(),
-                "train/reward_min": np.min(rewards).item(),
-                "rollout/completion_length_mean": np.mean(completion_lengths).item(),
-                "rollout/completion_length_std": np.std(completion_lengths).item(),
-                "rollout/completion_length_max": np.max(completion_lengths).item(),
-                "rollout/completion_length_min": np.min(completion_lengths).item(),
-                "rollout/advantage_mean": np.mean(advantages).item(),
-                "rollout/advantage_std": np.std(advantages).item(),
-                "rollout/advantage_max": np.max(advantages).item(),
-                "rollout/advantage_min": np.min(advantages).item(),
-                "rollout/filter_reward_mean": np.mean(filter_rewards).item(),
-                "rollout/filter_reward_std": np.std(filter_rewards).item(),
-                "rollout/filter_reward_max": np.max(filter_rewards).item(),
-                "rollout/filter_reward_min": np.min(filter_rewards).item(),
-            }
-            self.train_report_data.setdefault(self.current_step, {}).update(report_data)
 
-    def put_rollouts(self, rollout: RolloutRequest):
+                rewards = []
+                completion_lengths = []
+                advantages = []
+                filter_rewards = []
+                for rollout in self.policy.data_queue.queue:
+                    rewards.append(rollout.reward)
+                    completion_length = (
+                        (
+                            len(rollout.completion_token_ids)
+                            if self.config.train.train_policy.rollout_as_token_ids
+                            else len(
+                                self.policy.trainer.tokenizer.encode(rollout.completion)
+                            )
+                        )
+                        if not self.config.train.non_text
+                        else 1
+                    )
+                    advantages.extend([rollout.advantage] * completion_length)
+                    filter_rewards.append(rollout.filter_reward)
+                    completion_lengths.append(completion_length)
+
+                if self.config.train.train_policy.uncentralized_training:
+                    # Gather rewards, completion_lengths, advantages and filter_rewards from all replicas for accurate logging.
+                    cpu_device = torch.device("cpu")
+
+                    def all_gather_flatten(values: list):
+                        gathered = dist_util.all_gather_object_cpu(
+                            values, device=cpu_device
+                        )
+                        return list(chain.from_iterable(gathered))
+
+                    rewards = all_gather_flatten(rewards)
+                    completion_lengths = all_gather_flatten(completion_lengths)
+                    advantages = all_gather_flatten(advantages)
+                    filter_rewards = all_gather_flatten(filter_rewards)
+
+                if self.policy.global_rank == 0 and len(rewards) > 0:
+                    report_data = {
+                        "train/reward_mean": np.mean(rewards).item(),
+                        "train/reward_std": np.std(rewards).item(),
+                        "train/reward_max": np.max(rewards).item(),
+                        "train/reward_min": np.min(rewards).item(),
+                        "rollout/completion_length_mean": np.mean(
+                            completion_lengths
+                        ).item(),
+                        "rollout/completion_length_std": np.std(
+                            completion_lengths
+                        ).item(),
+                        "rollout/completion_length_max": np.max(
+                            completion_lengths
+                        ).item(),
+                        "rollout/completion_length_min": np.min(
+                            completion_lengths
+                        ).item(),
+                        "rollout/advantage_mean": np.mean(advantages).item(),
+                        "rollout/advantage_std": np.std(advantages).item(),
+                        "rollout/advantage_max": np.max(advantages).item(),
+                        "rollout/advantage_min": np.min(advantages).item(),
+                        "rollout/filter_reward_mean": np.mean(filter_rewards).item(),
+                        "rollout/filter_reward_std": np.std(filter_rewards).item(),
+                        "rollout/filter_reward_max": np.max(filter_rewards).item(),
+                        "rollout/filter_reward_min": np.min(filter_rewards).item(),
+                    }
+                    self.train_report_data.setdefault(self.current_step, {}).update(
+                        report_data
+                    )
+
+    def put_rollouts(self, rollout_request: RolloutRequest):
         """
         Put rollouts into the policy's data queue.
         This method extracts rollouts from the rollout request and enqueues them for training.
         """
-        for k, v in rollout.metrics.items():
+        for k, v in rollout_request.metrics.items():
             # Handle dynamic sampling statistics update in colocated mode
             self.train_report_data.setdefault(self.current_step, {})[k] = (
                 self.train_report_data.get(self.current_step, {}).get(k, 0) + v
             )
-        rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
+        rollouts_list = extract_rollouts(
+            rollout_request.payloads, rollout_request.is_end
+        )
         # Flatten the rollouts into a single list
         rollouts = [
             rollout
@@ -433,23 +472,28 @@ class ColocatedController(Controller):
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
 
-        gathered_rollouts = dist_util.all_gather_object_cpu(
-            rollouts,
-            device=torch.device("cpu"),
-            group=self.rollout.parallel_dims.mesh["dp"].get_group(),
-        )
-        rollouts = [rollout for sublist in gathered_rollouts for rollout in sublist]
-        if len(rollouts) > 0:
-            logger.debug(
-                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
-                f"example: rollouts[0]\n{rollouts[0]}"
-            )
-        assert (
-            self.rollout.parallel_dims.cp_coord[1] == 1
-        ), "Colocated rollout worker only supports cp size 1."
-        if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
+        if self.config.train.train_policy.uncentralized_training:
+            # In uncentralized training, directly put the rollouts into the policy's data queue without going through the controller.
             for rollout in rollouts:
                 self.policy.data_queue.put_nowait(rollout)
+        else:
+            gathered_rollouts = dist_util.all_gather_object_cpu(
+                rollouts,
+                device=torch.device("cpu"),
+                group=self.rollout.parallel_dims.mesh["dp"].get_group(),
+            )
+            rollouts = [rollout for sublist in gathered_rollouts for rollout in sublist]
+            if len(rollouts) > 0:
+                logger.debug(
+                    f"[RolloutGroup] from replica: {rollout_request.src_replica_name} with {len(rollout_request.payloads)} samples:"
+                    f"example: rollouts[0]\n{rollouts[0]}"
+                )
+            assert (
+                self.rollout.parallel_dims.cp_coord[1] == 1
+            ), "Colocated rollout worker only supports cp size 1."
+            if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
+                for rollout in rollouts:
+                    self.policy.data_queue.put_nowait(rollout)
 
     def pending_policy_samples(self) -> int:
         """
@@ -462,13 +506,16 @@ class ColocatedController(Controller):
         Get the total number of pending samples in the policy's data queue across all replicas.
         """
         local_pending = self.pending_policy_samples()
-        if self.policy.global_rank != 0:
-            assert (
-                self.pending_policy_samples() == 0
-            ), "Only global rank 0 should have pending samples."
-        return dist_util.broadcast_object_cpu(
-            local_pending, src=0, device=torch.device("cpu")
-        )
+        if self.config.train.train_policy.uncentralized_training:
+            return local_pending * self.policy.world_size
+        else:
+            if self.policy.global_rank != 0:
+                assert (
+                    self.pending_policy_samples() == 0
+                ), "Only global rank 0 should have pending samples."
+            return dist_util.broadcast_object_cpu(
+                local_pending, src=0, device=torch.device("cpu")
+            )
 
     def get_policy_model(self) -> Any:
         """

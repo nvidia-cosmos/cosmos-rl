@@ -716,7 +716,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_score=val_avg_loss,
         )
 
-        # Wait for upload thread to finish before exiting
         if (
             hasattr(self.trainer, "upload_thread")
             and self.trainer.upload_thread is not None
