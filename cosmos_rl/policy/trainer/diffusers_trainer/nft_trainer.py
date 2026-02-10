@@ -35,12 +35,12 @@ from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.util import copy_weights, is_master_rank
+from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
 from cosmos_rl.utils.wandb_logger import log_wandb
 from cosmos_rl.utils.logging import logger
 
 
-def weight_copy_decay(step, decay_type):
+def get_weight_copy_decay(step, decay_type):
     if decay_type == 0:
         flat = 0
         uprate = 0.0
@@ -94,7 +94,7 @@ class NFTTrainer(DiffusersTrainer):
         self.model.transformer.set_adapter("ref")
         self.ref_trainable_params = self.model.trainable_params
         self.model.transformer.set_adapter("default")
-        copy_weights(
+        copy_weights_with_decay(
             src_params=self.trainable_params,
             tgt_params=self.ref_trainable_params,
         )
@@ -189,27 +189,17 @@ class NFTTrainer(DiffusersTrainer):
         # Add nccl allreduce operations for all parameters and necessary states.
         """
         with torch.cuda.stream(self.train_stream):
-            for model_part in self.model_parts:
-                # Model part may use same physical mesh for different logical mesh,
-                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
-                # So we need to do allreduce for each model part
-                if model_part is not None:
-                    dist_util.gradient_reduce_across_dp_replicas_(
-                        [p for p in model_part.parameters()], inter_policy_nccl
-                    )
+            dist_util.gradient_reduce_across_dp_replicas_(
+                self.trainable_params, inter_policy_nccl
+            )
             """
             Compute the global grad norm on all parameters and then apply
             gradient clipping using the global grad norm.
             """
             # Must pass empty list even if model_part is None,
             # GradNorm across pp stages will fail if some rank does not join the barrier
-            all_params = [
-                p
-                for m in [model for model in self.model_parts if model is not None]
-                for p in m.parameters()
-            ]
             grad_norm = dist_util.gradient_norm_clipping(
-                all_params,
+                self.trainable_params,
                 self.config.train.optm_grad_norm_clip,
                 foreach=True,
                 pp_mesh=self.parallel_dims.mesh["pp"]
@@ -514,23 +504,20 @@ class NFTTrainer(DiffusersTrainer):
                     loss_sum += loss
                     kl_loss_sum += kl_div_loss
                     loss_count += 1
-
-                    if os.environ.get("COSMOS_GRPO_STEP_INTERVAL", None) is not None:
-                        grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
-                        grad_norm_count += 1
+                    grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
+                    grad_norm_count += 1
 
                 if self.config.train.ema_enable and self.ema is not None:
                     self.ema.step(self.trainable_params, current_step)
 
         with torch.no_grad():
-            decay = weight_copy_decay(current_step, self.weight_copy_decay_type)
-            for src_param, tgt_param in zip(
-                self.trainable_params, self.ref_trainable_params, strict=True
-            ):
-                tgt_param.data.copy_(
-                    tgt_param.detach().data * decay
-                    + src_param.detach().clone().data * (1.0 - decay)
-                )
+            decay = get_weight_copy_decay(current_step, self.weight_copy_decay_type)
+            copy_weights_with_decay(
+                src_params=self.trainable_params,
+                tgt_params=self.ref_trainable_params,
+                decay=decay,
+            )
+
         end_event.record()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum

@@ -67,6 +67,10 @@ class NFTRollout(RolloutBase):
         *args,
         **kwargs,
     ) -> List[RolloutResult]:
+        self.model.transformer.eval()  # set transformer to eval mode for rollout
+        self.model.transformer.set_adapter(
+            "default"
+        )  # ensure using the default adapter for rollout
         response = []
         for pl in payloads:
             prompts, metadatas = data_packer.get_rollout_input(
