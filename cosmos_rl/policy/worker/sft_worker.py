@@ -451,14 +451,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if hasattr(train_dataset.dataset, "data_loader"):
             # Use custom data loader if provided by dataset
             self.train_data_loader = train_dataset.dataset.data_loader
+            self.custom_data_loader = True
         else:
             self.train_data_loader = get_train_data_loader(
                 self.train_sampler, batch_sampler
             )
+            self.custom_data_loader = False
 
+        self.custom_val_data_loader = False
         if hasattr(val_dataset.dataset, "data_loader"):
             # Use custom data loader if provided by dataset
             self.val_data_loader = val_dataset.dataset.data_loader
+            self.custom_val_data_loader = True
         elif val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
@@ -550,7 +554,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_total_loss = 0.0
 
         for batch_index, val_global_batch in enumerate(
-            tqdm(self.val_data_loader, desc="Validation")
+            tqdm(
+                self.get_batch_from_dataloader(
+                    self.val_data_loader, self.custom_val_data_loader
+                ),
+                desc="Validation",
+            )
         ):
             # Call pre_per_step_validation_hook
             if self.pre_per_step_validation_hook is not None:
@@ -611,6 +620,29 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         return val_avg_loss
 
+    def get_batch_from_dataloader(self, data_loader, custom):
+        if custom:
+            assert (
+                self.config.train.train_batch_per_replica
+                % self.config.train.train_policy.mini_batch
+                == 0
+            ), "For custom data loader, `train_batch_per_replica` should be divisible by `train_policy.mini_batch`."
+            num_mini_batches = (
+                self.config.train.train_batch_per_replica
+                // self.config.train.train_policy.mini_batch
+            )
+            mini_batches = []
+            for batch in data_loader:
+                mini_batches.append(batch)
+                if len(mini_batches) == num_mini_batches:
+                    yield mini_batches
+                    mini_batches = []
+            if len(mini_batches) > 0:
+                yield mini_batches
+        else:
+            for batch in data_loader:
+                yield batch
+
     def main_loop(self):
         self.profiler.start()
         pp_last_stage = False
@@ -629,7 +661,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             # global_batch is a list of items from `datapacker.sft_process_sample()`
-            for global_batch in self.train_data_loader:
+            for global_batch in self.get_batch_from_dataloader(
+                self.train_data_loader, self.custom_data_loader
+            ):
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
                 if (
