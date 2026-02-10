@@ -49,6 +49,7 @@
 <li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
 <ul>
@@ -251,6 +252,36 @@ For Rollout Model, only Tensor Parallelism and Pipeline Parallelism are supporte
 <li class="toctree-l3"><a class="reference internal" href="quickstart/hf_models_support.html#vlms">VLMs</a></li>
 </ul>
 </li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#key-features">Key Features</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#how-it-works">How It Works</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#batch-formation-strategy">Batch Formation Strategy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#configuration">Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#configuration-parameters">Configuration Parameters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#usage-example">Usage Example</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart/load_balanced_batching.html#example-with-sequence-packing">Example with Sequence Packing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#gradient-accumulation">Gradient Accumulation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#infinite-loop-and-epoch-management">Infinite Loop and Epoch Management</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#resume-support">Resume Support</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#implementation-details">Implementation Details</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart/load_balanced_batching.html#shardediterabledataset">ShardedIterableDataset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart/load_balanced_batching.html#loadbalanceddataset">LoadBalancedDataset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart/load_balanced_batching.html#best-fit-algorithm">Best-Fit Algorithm</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#advantages">Advantages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#limitations">Limitations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart/load_balanced_batching.html#when-to-use-sequence-packing">When to Use Sequence Packing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart/load_balanced_batching.html#related-documentation">Related Documentation</a></li>
 </ul>
 </li>
 </ul>
