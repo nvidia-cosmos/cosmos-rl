@@ -389,6 +389,9 @@ class NFTTrainer(DiffusersTrainer):
                     all_reduced = False
 
                     for i_mini in range(0, optimize_batch_size, mini_batch_size):
+                        logger.debug(
+                            f"Mini batch {i_mini // mini_batch_size + 1}/{(optimize_batch_size + mini_batch_size - 1) // mini_batch_size} for optimize batch {i_opt // per_optimize_batch_size + 1}/{(batch_size + per_optimize_batch_size - 1) // per_optimize_batch_size}"
+                        )
                         mini_end = min(i_mini + mini_batch_size, optimize_batch_size)
                         mini_batch = {
                             k: (
@@ -582,6 +585,8 @@ class NFTTrainer(DiffusersTrainer):
                             all_reduced = True
                             grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                             grad_norm_count += 1
+                            if self.config.train.ema_enable and self.ema is not None:
+                                self.ema.step(self.trainable_params, current_step)
                         else:
                             all_reduced = False
 
@@ -591,9 +596,8 @@ class NFTTrainer(DiffusersTrainer):
                     if not all_reduced:
                         grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                         grad_norm_count += 1
-
-                if self.config.train.ema_enable and self.ema is not None:
-                    self.ema.step(self.trainable_params, current_step)
+                        if self.config.train.ema_enable and self.ema is not None:
+                            self.ema.step(self.trainable_params, current_step)
 
         with torch.no_grad():
             decay = get_weight_copy_decay(current_step, self.weight_copy_decay_type)
