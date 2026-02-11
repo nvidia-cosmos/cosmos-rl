@@ -153,6 +153,7 @@ class SFTTrainer(LLMTrainer):
         train_step: int,
         save_freq: int,
         inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
+        data_arrival_event: Optional[torch.cuda.Event] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
@@ -164,6 +165,10 @@ class SFTTrainer(LLMTrainer):
             )
 
         aux_loss_dict = OrderedDict()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
 
         self.optimizers.zero_grad()
 
@@ -183,10 +188,6 @@ class SFTTrainer(LLMTrainer):
                 mini_batch,
             )
         )
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
         for i in mini_batch_begin_idxs:
             fixed_length = (
@@ -511,13 +512,45 @@ class SFTTrainer(LLMTrainer):
             global_avg_loss = global_max_loss = loss_flat.cpu()
 
         if self.config.logging.logger:
-            if util.is_master_rank(self.parallel_dims, self.global_rank):
-                # Calculate last iteration time
-                assert end_event.query()
-                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            assert end_event.query()
+            fwd_bwd_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            batch_arrival_time = data_arrival_event.elapsed_time(start_event) / 1000.0
+            if (
+                self.parallel_dims.dp_replicate_enabled
+                or self.parallel_dims.dp_shard_enabled
+                or self.parallel_dims.cp_enabled
+            ):
+                time_metric_tensor_mean = torch.tensor(
+                    [fwd_bwd_time, batch_arrival_time],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                time_metric_tensor_max = time_metric_tensor_mean.clone()
+                torch.distributed.all_reduce(
+                    time_metric_tensor_mean,
+                    op=torch.distributed.ReduceOp.AVG,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                torch.distributed.all_reduce(
+                    time_metric_tensor_max,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                time_metric_tensor_mean_cpu = time_metric_tensor_mean.cpu()
+                fwd_bwd_time_mean = time_metric_tensor_mean_cpu[0].item()
+                batch_arrival_time_mean = time_metric_tensor_mean_cpu[1].item()
+                # fwd_bwd_time_max = time_metric_tensor_max.cpu()[0].item()
+                batch_arrival_time_max = time_metric_tensor_max.cpu()[1].item()
+            else:
+                # fwd_bwd_time_mean = fwd_bwd_time_max = fwd_bwd_time
+                fwd_bwd_time_mean = fwd_bwd_time
+                batch_arrival_time_mean = batch_arrival_time_max = batch_arrival_time
 
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
                 loss_metrics = {
-                    "train/iteration_time": iter_time,
+                    "train/iteration_time": fwd_bwd_time_mean,
+                    "train/batch_arrival_time_mean": batch_arrival_time_mean,
+                    "train/batch_arrival_time_max": batch_arrival_time_max,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
@@ -535,7 +568,7 @@ class SFTTrainer(LLMTrainer):
                     mfu = util.compute_mfu(
                         model=self.model,
                         n_tokens=np.prod(input_ids.shape),
-                        iter_time=iter_time,
+                        iter_time=fwd_bwd_time_mean,
                         num_gpus=self.world_size,
                         dtype=self.config.train.param_dtype,
                     )

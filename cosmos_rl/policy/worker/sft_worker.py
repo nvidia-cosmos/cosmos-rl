@@ -102,7 +102,6 @@ class SFTDataset(Dataset):
             item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
 
         if self.cache is not None:
-            # try cache obj
             self.cache.set(idx, item)
         return item
 
@@ -849,6 +848,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             if hasattr(self.train_sampler, "set_epoch"):
                 self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+
+            data_arrival_event = torch.cuda.Event(enable_timing=True)
+            data_arrival_event.record()
             # global_batch is a list of items from `datapacker.sft_process_sample()`
             for global_batch in self.get_batch_from_dataloader(self.train_data_loader):
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
@@ -875,6 +877,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     total_steps=self.total_steps,
                     train_step=self.train_step,
                     save_freq=self._save_freq,
+                    data_arrival_event=data_arrival_event,
                 )
 
                 self.train_step += 1
@@ -918,6 +921,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
 
                 self.profiler.step()
+                data_arrival_event = torch.cuda.Event(enable_timing=True)
+                data_arrival_event.record()
 
             if stop_training:
                 break

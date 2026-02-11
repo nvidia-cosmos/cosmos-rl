@@ -348,13 +348,6 @@ class HFVLMDataPacker(DataPacker):
             video_inputs = []
             video_metadatas = None
 
-            # For dataset with PIL image objects
-            if "images" in conversation:
-                image_inputs = conversation["images"]
-            else:
-                image_inputs, video_inputs = process_vision_info(conversation)
-                image_inputs = decode_base64_to_image(image_inputs)
-
             kwarg = {
                 "return_tensors": "pt",
                 "images": image_inputs,
@@ -363,7 +356,7 @@ class HFVLMDataPacker(DataPacker):
             if self.use_qwen_vl_process and isinstance(conversation, list):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     conversation,
-                    image_patch_size=16,
+                    image_patch_size=16,  # TODO: hardcode
                     return_video_kwargs=True,
                     return_video_metadata=True,
                 )
