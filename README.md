@@ -10,7 +10,7 @@ Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialize
 [Documentation](https://nvidia-cosmos.github.io/cosmos-rl).
 
 ## System Architecture
-Cosmos-RL provides toolchain to enable large scale RL training workload with following features:
+Cosmos-RL provides a toolchain to enable large scale RL training workload with following features:
 1. **Parallelism**
     - Tensor Parallelism
     - Sequence Parallelism
