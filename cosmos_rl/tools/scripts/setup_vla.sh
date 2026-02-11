@@ -159,9 +159,17 @@ banner "Configuring Libero"
 
 mkdir -p ~/.libero
 touch ~/.libero/config.yaml
-ROBOSUITE_PATH=$(uv pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
-uv run python $ROBOSUITE_PATH/scripts/setup_macros.py
-uv run python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
+
+# Use uv if available, otherwise fall back to plain pip/python
+if command -v uv &> /dev/null; then
+    ROBOSUITE_PATH=$(uv pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
+    uv run python "$ROBOSUITE_PATH/scripts/setup_macros.py"
+    uv run python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
+else
+    ROBOSUITE_PATH=$(pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
+    python "$ROBOSUITE_PATH/scripts/setup_macros.py"
+    python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
+fi
 ok "Libero default path configured"
 
 # ── Done ───────────────────────────────────────────────────────────────────────
