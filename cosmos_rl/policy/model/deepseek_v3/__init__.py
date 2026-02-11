@@ -134,15 +134,22 @@ class DeepseekV3MoEModel(BaseModel):
         initial_aux_loss: Optional[torch.Tensor] = None,
         **data_batch: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        logger.debug(
-            f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
-        )
+        if input_ids is not None and isinstance(input_ids, torch.Tensor):
+            logger.debug(
+                f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
+            )
 
         logits, aux_loss = self.model(
             tokens=input_ids,
             position_ids=position_ids,
             padding_mask=data_batch.get("padding_mask", None),
         )
+
+        # When running under pipeline parallelism, the pipeline stage infrastructure
+        # expects plain tensors (with .shape) as outputs, not CosmosModelOutput.
+        # Return just the logits tensor so it can be passed between stages.
+        if getattr(self, "_pp_enabled", False):
+            return logits
 
         if self.config.aux_loss_coeff > 0:
             if initial_aux_loss is not None and aux_loss is not None:
@@ -163,15 +170,15 @@ class DeepseekV3MoEModel(BaseModel):
 
     @property
     def parallelize_fn(self):
-        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize_model
+        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize
 
-        return parallelize_model, self
+        return parallelize, self
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         return
 
     def separate_model_parts(self) -> List[nn.Module]:
-        return [self]
+        return getattr(self, "model_parts", [self])
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1
