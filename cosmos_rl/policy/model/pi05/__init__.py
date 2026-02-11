@@ -517,8 +517,7 @@ class PI05(BaseModel):
         if self.train_expert_only:
             self.freeze_vlm()
             return
-        # PI05 discards paligemma's prefix_output, so paligemma's last-layer
-        # o_proj / MLP / post_attention_layernorm and final norm have no grad path.
+        # In pi05, the last layer of LLM is not used for loss computation.
         lm = self.paligemma_with_expert.paligemma.model.language_model
         last = lm.layers[-1]
         for m in (last.self_attn.o_proj, last.mlp, last.post_attention_layernorm, lm.norm):
