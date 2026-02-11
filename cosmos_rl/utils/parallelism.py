@@ -265,6 +265,7 @@ class ParallelDims:
             if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
                 dp_mesh_dim_names.append("tp")
                 dp_cp_mesh_dim_names.append("tp")
+                dp_shard_cp_mesh_dim_names.append("tp")
 
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")

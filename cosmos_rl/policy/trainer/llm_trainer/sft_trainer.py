@@ -427,21 +427,54 @@ class SFTTrainer(LLMTrainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            local_loss = loss_flat.clone().to(self.device)
-            gathered_losses = [
-                torch.zeros_like(local_loss).to(self.device)
-                for _ in range(self.parallel_dims.mesh["dp_cp"].size())
-            ]
-            # Gather the loss from all dp/cp replicas to compute the global average and max loss for logging.
-            # Reduce one communication overhead from using all_reduce api twice for average and max separately.
-            torch.distributed.all_gather(
-                gathered_losses,
-                local_loss,
-                group=self.parallel_dims.mesh["dp_cp"].get_group(),
-            )
-            all_losses_tensor = torch.stack(gathered_losses)
-            global_avg_loss = all_losses_tensor.mean(dim=0).cpu()
-            global_max_loss = all_losses_tensor.max(dim=0).values.cpu()
+            global_avg_loss = loss_flat.clone().to(self.device)
+            global_max_loss = loss_flat.clone().to(self.device)
+            if self.parallel_dims.dp_shard_enabled or self.parallel_dims.cp_enabled:
+                torch.distributed.all_reduce(
+                    global_avg_loss,
+                    op=torch.distributed.ReduceOp.AVG,
+                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                )
+                torch.distributed.all_reduce(
+                    global_max_loss,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                )
+            if self.parallel_dims.dp_replicate_enabled:
+                if (
+                    not (
+                        self.parallel_dims.dp_shard_enabled
+                        or self.parallel_dims.cp_enabled
+                    )
+                ) or self.parallel_dims.mesh["dp_shard_cp"].get_local_rank() == 0:
+                    torch.distributed.all_reduce(
+                        global_avg_loss,
+                        op=torch.distributed.ReduceOp.AVG,
+                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                    )
+                    torch.distributed.all_reduce(
+                        global_max_loss,
+                        op=torch.distributed.ReduceOp.MAX,
+                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                    )
+            global_avg_loss = global_avg_loss.cpu()
+            global_max_loss = global_max_loss.cpu()
+
+            # local_loss = loss_flat.clone().to(self.device)
+            # gathered_losses = [
+            #     torch.zeros_like(local_loss).to(self.device)
+            #     for _ in range(self.parallel_dims.mesh["dp_cp"].size())
+            # ]
+            # # Gather the loss from all dp/cp replicas to compute the global average and max loss for logging.
+            # # Reduce one communication overhead from using all_reduce api twice for average and max separately.
+            # torch.distributed.all_gather(
+            #     gathered_losses,
+            #     local_loss,
+            #     group=self.parallel_dims.mesh["dp_cp"].get_group(),
+            # )
+            # all_losses_tensor = torch.stack(gathered_losses)
+            # global_avg_loss = all_losses_tensor.mean(dim=0).cpu()
+            # global_max_loss = all_losses_tensor.max(dim=0).values.cpu()
         else:
             global_avg_loss = global_max_loss = loss_flat.cpu()
 
