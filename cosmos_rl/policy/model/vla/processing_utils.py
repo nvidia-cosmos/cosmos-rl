@@ -17,10 +17,6 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 from typing import Dict, Any
-from cosmos_rl.policy.model.vla.openvla_oft.constants import (
-    ACTION_PROPRIO_NORMALIZATION_TYPE,
-    NormalizationType,
-)
 
 
 def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
@@ -73,6 +69,10 @@ def normalize_proprio(proprio: np.ndarray, norm_stats: dict[str, Any]) -> np.nda
     Returns:
         np.ndarray: Normalized proprioception data
     """
+    from cosmos_rl.policy.model.vla.openvla_oft.constants import (
+        ACTION_PROPRIO_NORMALIZATION_TYPE,
+        NormalizationType,
+    )
     if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
         mask = norm_stats.get("mask", np.ones_like(norm_stats["min"], dtype=bool))
         proprio_high, proprio_low = (

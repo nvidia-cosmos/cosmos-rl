@@ -154,22 +154,23 @@ EJSON
 
 install_egl_packages
 
-# ── 2. Libero first-run setup ─────────────────────────────────────────────────
+# ── 2. Detect pip/python commands ─────────────────────────────────────────────
+PIP_CMD="pip"
+PYTHON_CMD="python"
+if command -v uv &> /dev/null; then
+    PIP_CMD="uv pip"
+    PYTHON_CMD="uv run python"
+fi
+
+# ── 3. Libero first-run setup ─────────────────────────────────────────────────
 banner "Configuring Libero"
 
 mkdir -p ~/.libero
 touch ~/.libero/config.yaml
 
-# Use uv if available, otherwise fall back to plain pip/python
-if command -v uv &> /dev/null; then
-    ROBOSUITE_PATH=$(uv pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
-    uv run python "$ROBOSUITE_PATH/scripts/setup_macros.py"
-    uv run python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
-else
-    ROBOSUITE_PATH=$(pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
-    python "$ROBOSUITE_PATH/scripts/setup_macros.py"
-    python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
-fi
+ROBOSUITE_PATH=$($PIP_CMD show robosuite | grep 'Location' | awk '{print $2}')/robosuite
+$PYTHON_CMD "$ROBOSUITE_PATH/scripts/setup_macros.py"
+$PYTHON_CMD -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
 ok "Libero default path configured"
 
 # ── Done ───────────────────────────────────────────────────────────────────────
