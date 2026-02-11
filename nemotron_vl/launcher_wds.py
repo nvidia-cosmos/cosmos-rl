@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-import copy
 from typing import Optional
 import os, sys
 # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
@@ -102,41 +101,9 @@ def modify_messages(messages, max_pixels=None, max_video_frames=None):
                 if max_pixels is not None:
                     content['max_pixels'] = max_pixels
             elif content['type'] == 'video':
-                content['fps'] = 1
-                if max_video_frames is not None:
-                    content['max_frames'] = max_video_frames
                 if max_pixels is not None:
                     content['total_pixels'] = max_pixels
     return messages
-
-class CustomJSONLDataset(Dataset):
-    '''
-    Custom dataset for Nemotron-3-Nano Vision-Language Model alignment.
-    Assume the dataset are in JSONL format stored in `config.train.train_policy.dataset.name`, and each line is a JSON object with 'messages' key.
-    '''
-    def setup(self, config: CosmosConfig, *args, **kwargs):
-        self.data_list = []
-        data_path = config.train.train_policy.dataset.name
-        jsonl_files = sorted(
-            [f for f in os.listdir(data_path) if f.endswith(".jsonl")]
-        )
-        for file_name in jsonl_files:
-            if not config.custom.get("include_video", False) and 'webvid' in file_name:
-                continue
-            with open(os.path.join(data_path, file_name)) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.data_list.append(json.loads(line)['messages'])
-        self.max_pixels = config.policy.model_max_length * 0.9 * ((16 * 2) ** 2)
-
-    def __len__(self):
-        return len(self.data_list)
-
-    def __getitem__(self, idx: int) -> list[dict]:
-        sample = copy.deepcopy(self.data_list[idx])
-        sample = modify_messages(sample, self.max_pixels)
-        return sample
 
 def _expand_wds_urls(name: Union[str, Sequence[str]]) -> List[str]:
     """
@@ -266,7 +233,7 @@ def _decode_video_from_bytes(blob: bytes, ele: dict,
 
 
 def _attach_media_from_sample(messages: list[dict], sample: dict,
-                               default_fps: float = 1.0,
+                               video_sample_fps: float = 1.0,
                                default_max_frames: int = 768) -> list[dict] | None:
     """
     Replace each content item containing 'wds_field' with actual media payload.
@@ -275,7 +242,7 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
     For videos: decode in-memory to list[PIL.Image] and set c["video"],
                 c["sample_fps"], and c["raw_fps"].
 
-    *default_fps* and *default_max_frames* are applied as fallbacks when the
+    *video_sample_fps* and *default_max_frames* are applied as fallbacks when the
     JSON content item does not specify per-sample ``fps`` / ``max_frames``.
 
     Returns None if any video decode fails (caller should skip the sample).
@@ -307,7 +274,7 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
         elif kind == "video":
             # Ensure defaults so smart_nframes / calculate_video_frame_range
             # see the same keys that qwen_vl_utils._read_video_decord would.
-            c.setdefault("fps", default_fps)
+            c.setdefault("fps", video_sample_fps)
             c.setdefault("max_frames", default_max_frames)
 
             try:
@@ -353,12 +320,12 @@ class CustomWebDatasetDataset(Dataset):
         self.cosmos_config = config
 
         webdataset_root_paths = [
-            # "/workspace/simonz/data/vlm-data-debug/laion_recaption_filter_train_shuf_3m",
-            # "/workspace/simonz/data/vlm-data-debug/infinitmm_stage1_qwenvl_filter_clip_id_shuf_5m",
-            # "/workspace/simonz/data/vlm-data-debug/synthdog-en-chat-sample-250k-stage1",
-            # "/workspace/simonz/data/vlm-data-debug/synthdog-zh-chat-sample-250k-stage1",
-            # "/workspace/simonz/data/vlm-data-debug/unsplash_filter_001_800k_grounding_caption_chat_stage1_train",
-            "/workspace/simonz/data/vlm-data-debug/webvid_caption_openai_format_1M_stage1_train",
+            "/workspace/simonz/data/vlm-data-debug/laion_recaption_filter_train_shuf_3m",
+            "/workspace/simonz/data/vlm-data-debug/infinitmm_stage1_qwenvl_filter_clip_id_shuf_5m",
+            "/workspace/simonz/data/vlm-data-debug/synthdog-en-chat-sample-250k-stage1",
+            "/workspace/simonz/data/vlm-data-debug/synthdog-zh-chat-sample-250k-stage1",
+            "/workspace/simonz/data/vlm-data-debug/unsplash_filter_001_800k_grounding_caption_chat_stage1_train",
+            # "/workspace/simonz/data/vlm-data-debug/webvid_caption_openai_format_1M_stage1_train",
         ]
 
         total_items = 0
@@ -387,6 +354,7 @@ class CustomWebDatasetDataset(Dataset):
         # Controls (put these in config.custom if you want)
         custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
         self.include_video = bool(custom.get("include_video", False))
+        self.video_sample_fps = float(config.custom.get("video_sample_fps", 1.0))
         self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
 
         self.setup_wds_dataset()
@@ -482,13 +450,14 @@ class CustomWebDatasetDataset(Dataset):
         # Attach actual media payloads (PIL for images; decoded frames for videos)
         messages = _attach_media_from_sample(
             messages, sample,
-            default_fps=1.0,  # matches modify_messages' hardcoded fps=1
+            video_sample_fps=self.video_sample_fps,
             default_max_frames=self.max_video_frames,
         )
         if messages is None:
             return None
 
-        # Apply your existing mutations (max_pixels, fps, max_frames, etc.)
+        # Apply your existing mutations (max_pixels, total_pixels, etc.)
+        # `fps`, `max_frames` are handled during video decoding in _attach_media_from_sample to ensure qwen_vl_utils sees the same values.
         messages = modify_messages(messages, self.max_pixels, self.max_video_frames)
         assert isinstance(messages, list), "messages should be a list of dicts"
         return messages
@@ -587,13 +556,13 @@ if __name__ == "__main__":
     # Do some monkey patching to support Nemotron-3-Nano Vision-Language Model parallelization.
     import cosmos_rl
     # Override the parallelize_fn to support EP parallelization.
-    # cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+    cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
     # # Override the convert_weight_from_hf to support EP weight sharding during initialization
-    # cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
+    cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
     # # Override the step_hook to enable aux-free load balancing update bias after each step update.
-    # cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
+    cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
     # # Map the weight name from custom DeepEP convention back to HF convention for safetensor saving.
-    # cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
     
     # Launch the worker
     cosmos_rl.launcher.worker_entry.main(
