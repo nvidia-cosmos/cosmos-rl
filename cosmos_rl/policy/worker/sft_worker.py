@@ -17,7 +17,6 @@
 import inspect
 import os
 import torch
-import torch.distributed as dist
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -684,27 +683,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_total_loss += val_score
             val_total_samples += batch_samples
 
-        if (
-            self.parallel_dims.dp_replicate_enabled
-            or self.parallel_dims.dp_shard_enabled
-        ):
-            val_samples_tensor = torch.tensor(
-                [val_total_samples], device=self.device, dtype=torch.float32
-            )
-            dist.all_reduce(
-                val_samples_tensor,
-                op=dist.ReduceOp.SUM,
-                group=self.parallel_dims.mesh["dp"].get_group(),
-            )
-            global_samples = val_samples_tensor.item()
-
-            val_avg_loss = (
-                val_total_loss / global_samples if global_samples > 0 else 0.0
-            )
-        else:
-            val_avg_loss = (
-                val_total_loss / val_total_samples if val_total_samples > 0 else 0.0
-            )
+        # len(self.val_data_loader.dataset) gives the total number of samples
+        # across all ranks, so no all_reduce is needed for sample counts.
+        # val_total_loss is already globally synchronized from trainer's
+        # dist_mean * dp_size in step_validation().
+        total_dataset_samples = len(self.val_data_loader.dataset)
+        val_avg_loss = (
+            val_total_loss / total_dataset_samples if total_dataset_samples > 0 else 0.0
+        )
 
         # Call post_validation_hook
         if self.post_validation_hook is not None:

@@ -550,7 +550,7 @@ class SFTTrainer(LLMTrainer):
         # Log per-rank local loss BEFORE dist_mean synchronization
         local_loss_value = val_loss.item() if hasattr(val_loss, "item") else val_loss
         batch_size = val_inputs.size(0)
-        logger.info(
+        logger.debug(
             f"[Validation] Rank {dist.get_rank() if dist.is_initialized() else 0}: "
             f"local_loss={local_loss_value:.6f}, batch_size={batch_size}, "
             f"local_total={local_loss_value * batch_size:.6f}"
