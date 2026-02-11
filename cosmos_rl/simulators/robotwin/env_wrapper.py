@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import os
-import gym
+import gymnasium as gym
 import numpy as np
 from typing import Union, List, Any, Optional, Dict
 from dataclasses import dataclass

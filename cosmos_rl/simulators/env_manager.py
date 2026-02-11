@@ -219,7 +219,10 @@ class EnvManager:
             ),
         )
         self.process.start()
-        os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible_devices
+        if old_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible_devices
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
         # Wait for initialization
         result = self.result_queue.get()

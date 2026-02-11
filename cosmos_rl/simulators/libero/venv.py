@@ -22,7 +22,7 @@ import warnings
 from multiprocessing import connection
 from typing import Any, Callable, Optional, Union
 
-import gym
+import gymnasium as gym
 import numpy as np
 from libero.libero.envs import OffScreenRenderEnv
 
