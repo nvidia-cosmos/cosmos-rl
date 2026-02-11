@@ -14,8 +14,10 @@
 # limitations under the License.
 # Refer to https://github.com/NVlabs/DiffusionNFT/blob/main/scripts/train_nft_sd3.py
 
+import imageio
 import numpy as np
 import os
+import random
 import tempfile
 from functools import partial
 from PIL import Image
@@ -37,7 +39,7 @@ from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
-from cosmos_rl.utils.report.wandb_logger import log_wandb
+from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
 
 
@@ -220,40 +222,70 @@ class NFTTrainer(DiffusersTrainer):
 
     def report_mm_wandb(
         self,
-        mm_datas,
-        prompts,
-        rewards,
-        step: int,
+        mm_datas: torch.Tensor,
+        prompts: List[str],
+        rewards: torch.Tensor,
     ):
         """Log multimodal data to Weights & Biases (WandB) for visualization."""
 
         import wandb
 
-        # TODO(dinghaoy): support video data
-        images_to_log = mm_datas.cpu()
-        prompts_to_log = prompts
-        rewards_to_log = rewards.cpu()
+        mm_datas_cpu = mm_datas.detach().cpu()
+        num_to_log = min(15, len(mm_datas_cpu))
+        rewards_cpu = rewards.detach().cpu()
+
+        def _caption(prompt: str, reward_val: Any) -> str:
+            return f"{prompt[:100]} | avg: {float(reward_val):.2f}"
+
+        if self.model.is_video:
+            modality = "video"
+            sample_indices = random.sample(range(len(mm_datas_cpu)), num_to_log)
+            ext = "mp4"
+        else:
+            modality = "image"
+            sample_indices = list(range(num_to_log))  # log first N
+            ext = "jpg"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            num_to_log = min(15, len(images_to_log))
-            for idx in range(num_to_log):  # log first N
-                img_data = images_to_log[idx]
-                pil = Image.fromarray(
-                    (img_data.numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-                )
-                pil = pil.resize((self.width, self.height))
-                pil.save(os.path.join(tmpdir, f"{idx}.jpg"))
-
-            data = {
-                "images": [
-                    wandb.Image(
-                        os.path.join(tmpdir, f"{idx}.jpg"),
-                        caption=f"{prompts_to_log[idx]:.100} | avg: {rewards_to_log[idx]:.2f}",
+            paths: List[str] = []
+            for out_idx, sample_idx in enumerate(sample_indices):
+                out_path = os.path.join(tmpdir, f"{out_idx}.{ext}")
+                if modality == "video":
+                    video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
+                    frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
+                    imageio.mimsave(
+                        out_path,
+                        list(frames),
+                        fps=8,
+                        codec="libx264",
+                        format="FFMPEG",
                     )
-                    for idx in range(num_to_log)
-                ],
-            }
-            log_wandb(data, step)
+                else:
+                    img = mm_datas_cpu[sample_idx].numpy().transpose(1, 2, 0)
+                    pil = Image.fromarray((img * 255).astype(np.uint8))
+                    pil.resize((self.width, self.height)).save(out_path)
+                paths.append(out_path)
+
+            if modality == "video":
+                data = [
+                    wandb.Video(
+                        p,
+                        caption=_caption(prompts[i], rewards_cpu[i]),
+                        format="mp4",
+                        fps=8,
+                    )
+                    for p, i in zip(paths, sample_indices)
+                ]
+            else:
+                data = [
+                    wandb.Image(
+                        p,
+                        caption=_caption(prompts[i], rewards_cpu[i]),
+                    )
+                    for p, i in zip(paths, sample_indices)
+                ]
+
+        return modality, data
 
     def set_neg_prompt_embed(self):
         neg_text_embedding_dict = self.model.text_embedding(
@@ -545,8 +577,10 @@ class NFTTrainer(DiffusersTrainer):
                             ).mean()
 
                             kl_loss = (
-                                (forward_prediction - ref_forward_prediction) ** 2
-                            ).mean(dim=tuple(range(1, x0.ndim)))
+                                ((forward_prediction - ref_forward_prediction) ** 2)
+                                .mean(dim=tuple(range(1, x0.ndim)))
+                                .mean()
+                            )
 
                             loss = policy_loss + (
                                 self.config.train.train_policy.kl_beta * kl_loss
@@ -582,7 +616,6 @@ class NFTTrainer(DiffusersTrainer):
                             report_terms["old_deviation_max"] = (
                                 cur_old_deviation_max.detach()
                             )
-                            report_terms["kl"] = torch.mean(kl_loss).detach()
                             report_terms["old_kl"] = torch.mean(
                                 ((old_prediction - ref_forward_prediction) ** 2).mean(
                                     dim=tuple(range(1, x0.ndim))
@@ -713,6 +746,21 @@ class NFTTrainer(DiffusersTrainer):
                     if grad_norm_count > 0
                     else 0.0
                 )
+                if (
+                    self.config.logging.multi_modal_log_interval is not None
+                    and current_step % self.config.logging.multi_modal_log_interval == 0
+                ):
+                    if not is_wandb_available():
+                        logger.warning(
+                            "WandB is not available. Skipping multimodal logging."
+                        )
+                    else:
+                        modality, mm_report_data = self.report_mm_wandb(
+                            mm_datas=packed_train_batch["mm_datas"],
+                            prompts=packed_train_batch["prompts"],
+                            rewards=packed_train_batch["rewards"],
+                        )
+                        report_data[f"train/sample_{modality}s"] = mm_report_data
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):

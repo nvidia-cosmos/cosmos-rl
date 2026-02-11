@@ -47,6 +47,7 @@ n_generation = 12
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
+multi_modal_log_interval = 10
 
 [train]
 non_text = true

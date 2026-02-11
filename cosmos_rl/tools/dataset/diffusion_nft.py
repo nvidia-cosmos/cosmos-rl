@@ -123,12 +123,14 @@ class DiffusionNFTDataPacker(BaseDataPacker):
         # Only extra_info is needed for diffusion NFT
         for s in sample:
             s.extra_info["advantages"] = torch.tensor(s.advantage, device=device)
+            s.extra_info["rewards"] = torch.tensor(s.reward, device=device)
+            s.extra_info["prompts"] = s.prompt
 
         inputs_list = [rollout.extra_info for rollout in sample]
         collated_samples = {}
         for k in inputs_list[0].keys():
             if isinstance(inputs_list[0][k], str):
-                collated_samples[k] = inputs_list[0][k]
+                collated_samples[k] = [s[k] for s in inputs_list]
             elif isinstance(inputs_list[0][k], dict):
                 collated_samples[k] = {
                     sk: torch.stack([s[k][sk] for s in inputs_list], dim=0)
