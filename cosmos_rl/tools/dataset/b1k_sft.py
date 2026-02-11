@@ -512,13 +512,6 @@ class BehaviorSFTDataset(Dataset):
     def __init__(self, config: CosmosConfig):
         self.config = config
 
-        local_dir = config.train.train_policy.dataset.local_dir
-        if local_dir:
-            hf_cache_dir = os.path.join(local_dir, ".hf_cache")
-            os.makedirs(hf_cache_dir, exist_ok=True)
-            os.environ["HF_DATASETS_CACHE"] = hf_cache_dir
-            logger.info(f"HF datasets cache redirected to {hf_cache_dir}")
-
         # Load dataset
         self.dataset = BehaviorLeRobotDataset(
             repo_id=config.train.train_policy.dataset.name,
