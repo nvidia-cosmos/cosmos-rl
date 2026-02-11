@@ -32,7 +32,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
-from cosmos_rl.utils.wandb_logger import (
+from cosmos_rl.utils.report.wandb_logger import (
     init_wandb,
     is_wandb_available,
     log_wandb,

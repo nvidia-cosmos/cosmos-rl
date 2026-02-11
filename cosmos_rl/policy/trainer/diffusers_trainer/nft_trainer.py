@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any, List
 import torch
 
 import cosmos_rl.utils.distributed as dist_util
+import cosmos_rl.utils.report.metrics_collection as metrics_collection
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -36,7 +37,7 @@ from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
-from cosmos_rl.utils.wandb_logger import log_wandb
+from cosmos_rl.utils.report.wandb_logger import log_wandb
 from cosmos_rl.utils.logging import logger
 
 
@@ -333,28 +334,6 @@ class NFTTrainer(DiffusersTrainer):
 
         info_accumulated: Dict[str, List[torch.Tensor]] = {}
 
-        def _accumulate_report_terms(report_terms: Dict[str, torch.Tensor]) -> None:
-            for k, v in report_terms.items():
-                info_accumulated.setdefault(k, []).append(v)
-
-        def _sum_or_zero(key: str) -> torch.Tensor:
-            values = info_accumulated.get(key, [])
-            if not values:
-                return torch.tensor(0.0, device=self.device)
-            return torch.sum(torch.stack(values))
-
-        def _mean_or_zero(key: str) -> torch.Tensor:
-            values = info_accumulated.get(key, [])
-            if not values:
-                return torch.tensor(0.0, device=self.device)
-            return torch.mean(torch.stack(values))
-
-        def _max_or_zero(key: str) -> torch.Tensor:
-            values = info_accumulated.get(key, [])
-            if not values:
-                return torch.tensor(0.0, device=self.device)
-            return torch.max(torch.stack(values))
-
         # The cosmos-predict2.5 diffusers pipeline would set no_grad globally, so we need to re-enable it here
         with torch.enable_grad():
             for i_mu in range(self.mu_iterations):
@@ -610,7 +589,9 @@ class NFTTrainer(DiffusersTrainer):
                                 )
                             ).detach()
 
-                            _accumulate_report_terms(report_terms)
+                            metrics_collection.accumulate_report_terms(
+                                info_accumulated, report_terms
+                            )
 
                         local_mini_step += 1
                         if (
@@ -643,15 +624,35 @@ class NFTTrainer(DiffusersTrainer):
         end_event.record()
 
         # Calculate average losses and aggregate metrics for logging
-        loss = _sum_or_zero("loss_contrib")
-        kl_loss = _sum_or_zero("kl_loss_contrib")
-        policy_loss = _sum_or_zero("policy_loss_contrib")
-        unweighted_policy_loss = _sum_or_zero("unweighted_policy_loss_contrib")
+        loss = metrics_collection.mean_or_zero(
+            info_accumulated, "loss_contrib", self.device
+        )
+        kl_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "kl_loss_contrib", self.device
+        )
+        policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "policy_loss_contrib", self.device
+        )
+        unweighted_policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "unweighted_policy_loss_contrib", self.device
+        )
 
-        x0_norm = _mean_or_zero("x0_norm")
-        old_deviation = _mean_or_zero("old_deviation")
-        kl = _mean_or_zero("kl")
-        old_kl = _mean_or_zero("old_kl")
+        x0_norm = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm", self.device
+        )
+        x0_norm_max = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm_max", self.device
+        )
+        old_deviation = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation", self.device
+        )
+        old_deviation_max = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation_max", self.device
+        )
+        kl = metrics_collection.mean_or_zero(info_accumulated, "kl", self.device)
+        old_kl = metrics_collection.mean_or_zero(
+            info_accumulated, "old_kl", self.device
+        )
 
         dist_enabled = (
             self.parallel_dims.dp_replicate_enabled
@@ -668,14 +669,13 @@ class NFTTrainer(DiffusersTrainer):
             "old_kl": old_kl,
             "x0_norm": x0_norm,
             "old_deviation": old_deviation,
+            "x0_norm_max": x0_norm_max,
+            "old_deviation_max": old_deviation_max,
         }
         max_metrics = {
             "loss": loss,
             "policy_loss": policy_loss,
-            "kl": _max_or_zero("kl_max"),
-            "old_kl": _max_or_zero("old_kl_max"),
-            "x0_norm": _max_or_zero("x0_norm_max"),
-            "old_deviation": _max_or_zero("old_deviation_max"),
+            "unweighted_policy_loss": unweighted_policy_loss,
         }
         if self.config.train.train_policy.kl_beta != 0.0:
             avg_metrics["kl_loss"] = kl_loss

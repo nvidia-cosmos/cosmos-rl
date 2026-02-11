@@ -26,7 +26,7 @@ from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
 import cosmos_rl.dispatcher.command as command
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
-from cosmos_rl.utils.wandb_logger import (
+from cosmos_rl.utils.report.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )

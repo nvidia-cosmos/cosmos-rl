@@ -28,7 +28,7 @@ from typing import List, Dict, Tuple, Optional, Callable
 from cosmos_rl.dispatcher.replica import Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import (
+from cosmos_rl.utils.report.wandb_logger import (
     is_wandb_available,
     init_wandb,
 )

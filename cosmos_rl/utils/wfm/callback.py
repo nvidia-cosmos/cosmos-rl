@@ -45,7 +45,7 @@ import torchvision.transforms.functional as torchvision_F
 from torch.distributed import ProcessGroup
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import init_wandb
+from cosmos_rl.utils.report.wandb_logger import init_wandb
 from cosmos_rl.utils.s3_utils import is_s3_available
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.utils.wfm import distributed, utils
