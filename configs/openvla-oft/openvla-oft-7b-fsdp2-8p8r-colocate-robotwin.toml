@@ -1,9 +1,10 @@
 redis = "12800"
+mode = "colocated"
 
 [train]
 resume = false
 epoch = 1024
-output_dir = "./outputs/openvla-oft-7b-8p8r"
+output_dir = "./outputs/openvla-oft-7b-8p8r-colocate"
 epsilon = 1e-8
 optm_name = "AdamW"
 optm_lr = 5e-6
@@ -20,12 +21,11 @@ master_dtype = "float32"
 transfer_dtype = "float32"
 fsdp_offload = true
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 8
-sync_weight_interval = 1
+train_batch_per_replica = 128
 non_text = true
 
 [policy]
-model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
+model_name_or_path = "Haozhan72/robotwin2_beat_block_hammer_seed1k_sft_aloha_25chunks_10k"
 model_max_length = 4096
 model_gradient_checkpointing = true
 
@@ -38,8 +38,8 @@ experiment_name = "openvla-oft-7b-8p8r"
 type = "grpo"
 trainer_type = "grpo_vla"
 variant = "dapo"
-dataset.name = "libero"
-dataset.subset = "libero_10"
+dataset.name = "robotwin"
+dataset.subset = "beat_block_hammer"
 dataset.split = "train"
 dataset.test_size = 496
 enable_dataset_cache = false
@@ -53,9 +53,8 @@ epsilon_high = 0.28
 lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
-mini_batch = 2
+mini_batch = 16
 min_filter_prefix_tokens = 1
-allowed_outdated_steps = 0
 
 [train.ckpt]
 enable_checkpoint = true
@@ -76,7 +75,7 @@ enforce_eager = false
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 4
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
@@ -85,7 +84,7 @@ cp_rotate_method = "allgather"
 n_init_replicas = 1  # 4 rollout workers
 tp_size = 1
 cp_size = 1
-dp_shard_size = 4
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
 
@@ -98,14 +97,18 @@ top_k = 0
 enable = true
 freq = 16
 val_before_train = true
-batch_size = 8
-dataset.name = "libero"
-dataset.subset = "libero_10"
+batch_size = 128
+dataset.name = "robotwin"
+dataset.subset = "beat_block_hammer"
 dataset.split = "val"
 
 [vla]
 vla_type = "openvla-oft"
-use_proprio = false
-proprio_dim = 7
+use_proprio = true
+proprio_dim = 14
 num_images_in_input = 1
 training_chunk_size = 16
+num_envs = 16
+save_video = true
+continuous = false
+unnorm_key = "beat_block_hammer_1k"
