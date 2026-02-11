@@ -73,6 +73,7 @@ def normalize_proprio(proprio: np.ndarray, norm_stats: dict[str, Any]) -> np.nda
         ACTION_PROPRIO_NORMALIZATION_TYPE,
         NormalizationType,
     )
+
     if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
         mask = norm_stats.get("mask", np.ones_like(norm_stats["min"], dtype=bool))
         proprio_high, proprio_low = (
