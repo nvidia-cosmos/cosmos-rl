@@ -360,12 +360,12 @@ class SFTTrainer(LLMTrainer):
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
                         if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                            v = v / len(mini_batch_begin_idxs)
                             aux_loss_dict[k] = (
                                 v.detach()
                                 if k not in aux_loss_dict
                                 else aux_loss_dict[k] + v.detach()
                             )
-                            v = v / len(mini_batch_begin_idxs)
                             loss = loss + v
 
                 ce_loss = self.loss_fn(

@@ -131,7 +131,9 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type in ["qwen3_vl"]
+        self.use_qwen_vl_process = self.model_type in ["qwen3_vl"] or os.environ.get(
+            "USE_QWEN_VL_PROCESS", "0"
+        ) in ["1", "true", "True"]
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
