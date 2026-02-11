@@ -928,7 +928,7 @@ class CosmosVisionGenTrainer(ABC):
                     valid = is_tp_cp_pp_rank0()
                     if valid:
                         try:
-                            reward, bg_id = v.compute_reward(
+                            reward, bg_id, replica_id = v.compute_reward(
                                 data_batch,
                                 generated_samples,
                                 latents=sample,
@@ -940,14 +940,16 @@ class CosmosVisionGenTrainer(ABC):
                             )
                             valid = False
                     if not valid:
-                        reward, bg_id = (
+                        reward, bg_id, replica_id = (
                             torch.zeros((sample.shape[0],), device=sample.device),
+                            None,
                             None,
                         )
                     self.model.inference_infos.rewards[k] = {
                         "reward": reward,
                         "valid": valid,
                         "bg_id": bg_id,
+                        "replica_id": replica_id,
                     }
 
                 logger.info("[WFM RL] Finished computing rewards ...")
