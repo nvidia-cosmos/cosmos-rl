@@ -667,11 +667,11 @@ class WorldFoundationalModel(nn.Module):
         sync_rewards = {}
         for k, v in self.inference_infos.rewards.items():
             valid = v["valid"]
-            if valid and v["bg_id"] is not None:
+            if valid and v["bg_id"] is not None and v["replica_id"] is not None:
                 try:
                     reward = (
                         self.reward_models[k]
-                        .fetch_reward(v["bg_id"])
+                        .fetch_reward(v["bg_id"], v["replica_id"])
                         .to(v["reward"].device)
                     )
                 except Exception as e:

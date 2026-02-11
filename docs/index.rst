@@ -55,6 +55,7 @@ Main Features
    quickstart/dataflow
    quickstart/customization
    quickstart/hf_models_support
+   quickstart/load_balanced_batching
 
 .. toctree::
    :caption: Rollout

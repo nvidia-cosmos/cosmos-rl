@@ -142,6 +142,9 @@ class SFTTrainer(LLMTrainer):
             else None,
             cp_group=cp_group,
         )
+        self.enable_dp_load_balancing = (
+            self.config.train.train_policy.enable_dp_load_balancing
+        )
 
     def step_training(
         self,
@@ -163,13 +166,21 @@ class SFTTrainer(LLMTrainer):
         aux_loss_dict = OrderedDict()
 
         self.optimizers.zero_grad()
+
+        # When DP load balancing is enabled, each element in global_batch is already a batch of samples,
+        # so use mini_batch=1 to accumulate gradients correctly. Otherwise, use the configured mini_batch size.
+        mini_batch = (
+            self.config.train.train_policy.mini_batch
+            if not self.enable_dp_load_balancing
+            else 1
+        )
         global_batch_size = self.data_packer.batch_size(global_batch)
         # split global_batch into mini_batches
         mini_batch_begin_idxs = list(
             range(
                 0,
                 global_batch_size,
-                self.config.train.train_policy.mini_batch,
+                mini_batch,
             )
         )
 
@@ -184,14 +195,21 @@ class SFTTrainer(LLMTrainer):
                 and not self.parallel_dims.pp_dynamic_shape
                 else None
             )
-            raw_batch = self.data_packer.slice_batch(
-                global_batch, i, i + self.config.train.train_policy.mini_batch
+            raw_batch = (
+                self.data_packer.slice_batch(
+                    global_batch, i, i + self.config.train.train_policy.mini_batch
+                )
+                if not self.enable_dp_load_balancing
+                else global_batch[i]
             )
             if fixed_length is None:
                 max_len = min(
                     self.config.policy.model_max_length,
                     self.data_packer.sft_compute_max_len(raw_batch),
                 )
+                # logger.info(
+                #     f"max_len: {max_len}, mini_batch_size: {len(raw_batch)}"
+                # )
             else:
                 max_len = fixed_length
 
@@ -610,6 +628,7 @@ class SFTTrainer(LLMTrainer):
                         safetensors_identifier,
                     ),
                     trainable_only=False,
+                    is_final=is_last_step,
                     dtype=util.str2torch_dtype(self.config.train.param_dtype),
                 )
             # save checkpoint
@@ -730,6 +749,11 @@ class SFTTrainer(LLMTrainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
+        if self.config.train.train_policy.enable_dp_load_balancing:
+            loss_scaling_factor = (
+                1.0
+                / self.config.train.train_policy.load_balanced_batches_per_optimizer_step
+            )
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:

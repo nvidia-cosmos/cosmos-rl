@@ -316,10 +316,7 @@ class ControllerDataFetcher(DataFetcherBase):
                     logger.error(
                         f"[DataFetcher] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
-            if hasattr(self.dataset.train_set.dataset, "data_loader"):
-                # Use custom data loader if provided by dataset
-                self.train_dataloader = self.dataset.train_set.dataset.data_loader
-            elif self.batch_sampler is not None:
+            if self.batch_sampler is not None:
                 logger.info(
                     "[DataFetcher] Using custom batch Sampler that yields list of indices for training dataset."
                 )
@@ -382,10 +379,7 @@ class ControllerDataFetcher(DataFetcherBase):
                             drop_last=False,
                         )
 
-                if hasattr(self.val_dataset.val_set.dataset, "data_loader"):
-                    # Use custom data loader if provided by dataset
-                    self.val_dataloader = self.val_dataset.val_set.dataset.data_loader
-                elif self.val_batch_sampler is not None:
+                if self.val_batch_sampler is not None:
                     logger.info(
                         "[DataFetcher] Using custom batch Sampler that yields list of indices for validation dataset."
                     )

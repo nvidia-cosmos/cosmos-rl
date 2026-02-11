@@ -232,6 +232,15 @@ def apply_vla_fsdp(
             )
         fully_shard(llm.lm_head, **fsdp_config)
 
+    if (
+        hasattr(actual_model, "proprio_projector")
+        and actual_model.proprio_projector is not None
+    ):
+        fully_shard(
+            actual_model.proprio_projector,
+            **fsdp_config,
+        )
+
     fully_shard(
         actual_model.vision_backbone,
         **fsdp_config,

@@ -169,11 +169,68 @@ class SFTDataConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    enable_dp_load_balancing: bool = Field(
+        default=False,
+        description="Enable load-balanced dynamic batching to balance tokens across DP ranks.",
+    )
+
+    load_balanced_pool_size: int = Field(
+        default=32,
+        description="Size of the sample pool maintained by each DP rank for load-balanced batching.",
+    )
+
+    load_balanced_max_tokens_for_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum tokens per batch for load-balanced batching. ",
+    )
+
+    load_balanced_batching_strategy: str = Field(
+        default="prefer_closest",
+        description="Batching strategy: 'prefer_first' (FIFO) or 'prefer_closest' (minimize padding).",
+    )
+
+    load_balanced_max_steps: int = Field(
+        default=100,
+        description=(
+            "Maximum number of optimizer steps (training steps) for load-balanced batching. "
+            "This is the number of times optimizer.step() will be called. "
+            "Note: The actual number of batches processed will be "
+            "load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
+    )
+
+    load_balanced_batches_per_optimizer_step: int = Field(
+        default=1,
+        description=(
+            "Number of batches to accumulate per optimizer step for gradient accumulation. "
+            "Each DataLoader iteration will return this many batches, which are processed "
+            "before calling optimizer.step(). "
+            "The total number of batches processed = load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+        ),
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
+        if self.enable_dp_load_balancing:
+            if self.load_balanced_batching_strategy not in [
+                "prefer_first",
+                "prefer_closest",
+            ]:
+                raise ValueError(
+                    f"load_balanced_batching_strategy must be 'prefer_first' or 'prefer_closest', "
+                    f"got {self.load_balanced_batching_strategy}"
+                )
+            if self.load_balanced_max_steps <= 0:
+                raise ValueError(
+                    f"load_balanced_max_steps must be greater than 0, got {self.load_balanced_max_steps}"
+                )
+            if self.load_balanced_batches_per_optimizer_step <= 0:
+                raise ValueError(
+                    f"load_balanced_batches_per_optimizer_step must be greater than 0, got {self.load_balanced_batches_per_optimizer_step}"
+                )
         return self
 
 
@@ -485,6 +542,11 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
+    uncentralized_training: bool = Field(
+        default=False,
+        description="Whether to use uncentralized training. If set to True, the rollout results will be directly sent to the policy engine without going through the controller. This can reduce the communication overhead and speed up the training, only suitable for colocated mode.",
+    )
+
     outdated_rollout_fetch_batch_size: int = Field(
         default=0,
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
@@ -587,7 +649,12 @@ class GrpoConfig(BaseModel):
                 logger.warning(
                     "DAPO is enabled, so outdated_rollout_fetch_batch_size is set to 128 as a large value."
                 )
-
+        if self.uncentralized_training and self.variant != "grpo":
+            raise ValueError(
+                "Uncentralized training is only suitable for GRPO, but the current variant is {}. Please make sure this is intended.".format(
+                    self.variant
+                )
+            )
         return self
 
 
@@ -921,6 +988,10 @@ class LoraConfig(BaseModel):
     target_modules: Union[List[str], str] = Field(
         default=None,
         description="LoRA target modules, can be a list of strings or 'all-linear'",
+    )
+    primary_adapter: Optional[str] = Field(
+        default=None,
+        description="The primary adapter name to be used for inference and evaluation when multiple adapters are trained simultaneously. If not set, the first adapter in `lora_names` will be used as the primary adapter.",
     )
     use_rslora: bool = Field(
         default=False,
@@ -1426,6 +1497,11 @@ class VLAConfig(BaseModel):
     trace_verbosity: int = Field(
         default=1,
         description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all.",
+    )
+
+    unnorm_key: str = Field(
+        default="libero_10_no_noops",
+        description="The unnormalized key for the dataset.",
     )
 
     @model_validator(mode="after")

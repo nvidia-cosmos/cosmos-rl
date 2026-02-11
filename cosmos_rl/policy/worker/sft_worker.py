@@ -46,6 +46,7 @@ from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.cache as cache
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
+from cosmos_rl.dispatcher.data.load_balanced_dataset import LoadBalancedDataset
 
 
 class SFTDataset(Dataset):
@@ -270,6 +271,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         self.train_step = 0
         self.start_epoch = 0
+        self.enable_dp_load_balancing = (
+            self.config.train.train_policy.enable_dp_load_balancing
+        )
 
         # Track the last step where validation was performed to avoid duplicates
         self._last_validation_step = -1
@@ -368,7 +372,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
         )
         self.ckpt_total_steps, self.train_step = self.trainer.load_model()
-
+        # only for load-balanced batching
+        self.load_balanced_max_steps = (
+            self.config.train.train_policy.load_balanced_max_steps
+        )
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
@@ -389,8 +396,55 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             user_provided_val_dataset=val_dataset,
         )
+
+        # Apply load-balanced dynamic batching if enabled
+        if self.enable_dp_load_balancing:
+            logger.info("Enabling load-balanced dynamic batching for training dataset.")
+            # Determine max_tokens_for_batch if not specified
+            max_tokens_for_batch = (
+                self.config.train.train_policy.load_balanced_max_tokens_for_batch
+            )
+            if max_tokens_for_batch is None:
+                # Default: model_max_length
+                model_max_length = self.config.policy.model_max_length
+                max_tokens_for_batch = model_max_length
+                logger.info(
+                    f"max_tokens_for_batch not specified, using default: "
+                    f"{max_tokens_for_batch} = {model_max_length}"
+                )
+
+            accumulate_steps = (
+                self.config.train.train_policy.load_balanced_batches_per_optimizer_step
+            )
+            train_dataset = LoadBalancedDataset(
+                base_dataset=train_dataset,
+                pool_size=self.config.train.train_policy.load_balanced_pool_size,
+                max_tokens_for_batch=max_tokens_for_batch,
+                length_key="input_ids",
+                batching_strategy=self.config.train.train_policy.load_balanced_batching_strategy,
+                max_tokens_len=self.config.policy.model_max_length,
+                seq_packing_enabled=self.config.train.sequence_packing,
+                seed=self.config.train.train_policy.dataloader_seed,
+                dp_rank=self.dp_rank,
+                dp_world_size=self.dp_world_size,
+                accumulate_steps=accumulate_steps,
+            )
+            logger.info(
+                f"Wrapped training dataset with LoadBalancedDataset: "
+                f"pool_size={self.config.train.train_policy.load_balanced_pool_size}, "
+                f"max_tokens_for_batch={max_tokens_for_batch}, "
+                f"accumulate_steps={accumulate_steps}"
+            )
+
         # For sampler, we won't drop data for un-even distribution DP.
-        if sampler is not None:
+        # Note: If enable_dp_load_balancing, we don't need a sampler
+        # as the LoadBalancedDataset handles data distribution internally
+        if self.enable_dp_load_balancing:
+            train_sampler = None
+            logger.info(
+                "Skipping sampler setup for load-balanced batching (LoadBalancedDataset handles distribution)."
+            )
+        elif sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
             if isinstance(sampler, Callable):
                 train_sampler = sampler(
@@ -433,7 +487,17 @@ class SFTPolicyWorker(PolicyWorkerBase):
             sampler: Union[Sampler[int], Sampler[list[int]]],
             sampler_in_batch: Optional[Sampler[list[int]]] = None,
         ):
-            if sampler_in_batch is not None:
+            if self.enable_dp_load_balancing:
+                # For IterableDataset with load-balanced batching, batches are already formed
+                # We set batch_size=None and let the dataset yield batches directly
+                data_loader = DataLoader(
+                    train_dataset,
+                    batch_size=None,  # Batches are already formed by IterableDataset
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
+                    collate_fn=collate_fn,  # Still need collate_fn for final batch formatting
+                )
+            elif sampler_in_batch is not None:
                 logger.info(
                     "Using custom batch Sampler that yields list of indices for training dataset."
                 )
@@ -460,38 +524,71 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self.config.train.resume and self.train_step > 0:
             """
             Note: Here both shuffle and no shuffle samplers are supported for deterministic resuming.
+            Note: Resume logic for load-balanced batching is handled differently since IterableDataset
+            manages its own iteration state.
             """
-            # Resume training from the last checkpoint if needed
-            total_steps_per_epoch = len(
-                get_train_data_loader(self.train_sampler, batch_sampler)
-            )
-            data_loader_bias = self.train_step % total_steps_per_epoch
-            data_loader_bias *= self.config.train.train_batch_per_replica
-            logger.info(
-                f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
-            )
-            if hasattr(self.train_sampler, "set_epoch"):
-                self.train_sampler.set_epoch(self.train_step // total_steps_per_epoch)
-            self.train_sampler = SkippingSampler(
-                self.train_sampler,
-                skip_samples=data_loader_bias
-                // (
-                    len(list(islice(iter(self.train_sampler), 1))[0])
-                    if isinstance(list(islice(iter(self.train_sampler), 1))[0], list)
-                    else 1
-                ),
-            )
-            if batch_sampler is not None:
-                batch_sampler = SkippingSampler(
-                    batch_sampler,
-                    skip_samples=data_loader_bias
-                    // (
-                        len(list(islice(iter(batch_sampler), 1))[0])
-                        if isinstance(list(islice(iter(batch_sampler), 1))[0], list)
-                        else 1
-                    ),
+            if self.enable_dp_load_balancing:
+                # For load-balanced batching, training is step-based, not epoch-based.
+                # Since total_steps = load_balanced_max_steps, train_step is always < load_balanced_max_steps
+                # when resuming (otherwise training would have already completed).
+                # LoadBalancedDataset will automatically manage epoch increments when data loops.
+
+                # Set initial epoch to 0 for deterministic data ordering
+                # (epoch will be automatically incremented by LoadBalancedDataset when data loops)
+                initial_epoch = 0
+                # Skip batches equal to completed steps (use modulo for robustness)
+                batches_to_skip = self.train_step % self.load_balanced_max_steps
+
+                if hasattr(train_dataset, "set_epoch"):
+                    train_dataset.set_epoch(initial_epoch)
+                self.start_epoch = initial_epoch
+
+                # Skip batches that have already been processed
+                train_dataset.skip_batches(batches_to_skip)
+                logger.info(
+                    f"Resuming load-balanced training: initial_epoch={initial_epoch}, "
+                    f"skipping {batches_to_skip} batches "
+                    f"(train_step={self.train_step}, dp_rank={self.dp_rank})"
                 )
-            self.start_epoch = self.train_step // total_steps_per_epoch
+            else:
+                # Resume training from the last checkpoint if needed
+                total_steps_per_epoch = len(
+                    get_train_data_loader(self.train_sampler, batch_sampler)
+                )
+                data_loader_bias = self.train_step % total_steps_per_epoch
+                data_loader_bias *= self.config.train.train_batch_per_replica
+                logger.info(
+                    f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
+                )
+                if self.train_sampler is not None and hasattr(
+                    self.train_sampler, "set_epoch"
+                ):
+                    self.train_sampler.set_epoch(
+                        self.train_step // total_steps_per_epoch
+                    )
+                if self.train_sampler is not None:
+                    self.train_sampler = SkippingSampler(
+                        self.train_sampler,
+                        skip_samples=data_loader_bias
+                        // (
+                            len(list(islice(iter(self.train_sampler), 1))[0])
+                            if isinstance(
+                                list(islice(iter(self.train_sampler), 1))[0], list
+                            )
+                            else 1
+                        ),
+                    )
+                if batch_sampler is not None:
+                    batch_sampler = SkippingSampler(
+                        batch_sampler,
+                        skip_samples=data_loader_bias
+                        // (
+                            len(list(islice(iter(batch_sampler), 1))[0])
+                            if isinstance(list(islice(iter(batch_sampler), 1))[0], list)
+                            else 1
+                        ),
+                    )
+                self.start_epoch = self.train_step // total_steps_per_epoch
 
         if val_sampler is not None:
             logger.info("Using user-provided sampler for validation dataset.")
@@ -513,13 +610,17 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
-        if hasattr(train_dataset.dataset, "data_loader"):
+        if hasattr(train_dataset, "dataset") and hasattr(
+            train_dataset.dataset, "data_loader"
+        ):
             # Use custom data loader if provided by dataset
             self.train_data_loader = train_dataset.dataset.data_loader
+            self.custom_data_loader = True
         else:
             self.train_data_loader = get_train_data_loader(
                 self.train_sampler, batch_sampler
             )
+            self.custom_data_loader = False
 
         val_num_workers = (
             self.config.validation.dataloader_num_workers
@@ -531,9 +632,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
             if self.config.validation.dataloader_prefetch_factor is not None
             else self.config.train.train_policy.dataloader_prefetch_factor
         )
+        self.custom_val_data_loader = False
         if hasattr(val_dataset.dataset, "data_loader"):
             # Use custom data loader if provided by dataset
             self.val_data_loader = val_dataset.dataset.data_loader
+            self.custom_val_data_loader = True
         elif val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
@@ -583,6 +686,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
             self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
+
+        if self.enable_dp_load_balancing:
+            logger.info(
+                f"Total training steps set to load_balanced_max_steps={self.load_balanced_max_steps} for load-balanced dynamic batching"
+            )
+            self.total_steps = self.load_balanced_max_steps
 
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
@@ -647,7 +756,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_total_samples = 0
 
         for batch_index, val_global_batch in enumerate(
-            tqdm(self.val_data_loader, desc="Validation")
+            tqdm(
+                self.get_batch_from_dataloader(
+                    self.val_data_loader, self.custom_val_data_loader
+                ),
+                desc="Validation",
+            )
         ):
             # Call pre_per_step_validation_hook
             if self.pre_per_step_validation_hook is not None:
@@ -734,6 +848,29 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         return val_avg_loss
 
+    def get_batch_from_dataloader(self, data_loader, custom):
+        if custom:
+            assert (
+                self.config.train.train_batch_per_replica
+                % self.config.train.train_policy.mini_batch
+                == 0
+            ), "For custom data loader, `train_batch_per_replica` should be divisible by `train_policy.mini_batch`."
+            num_mini_batches = (
+                self.config.train.train_batch_per_replica
+                // self.config.train.train_policy.mini_batch
+            )
+            mini_batches = []
+            for batch in data_loader:
+                mini_batches.append(batch)
+                if len(mini_batches) == num_mini_batches:
+                    yield mini_batches
+                    mini_batches = []
+            if len(mini_batches) > 0:
+                yield mini_batches
+        else:
+            for batch in data_loader:
+                yield batch
+
     def main_loop(self):
         self.profiler.start()
         pp_last_stage = False
@@ -754,6 +891,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
             }
             self.pre_training_hook(self, report_data=pre_training_data)
 
+        if self.enable_dp_load_balancing:
+            logger.info(
+                f"Epoch set to {cur_epoch + 1} for load-balanced dynamic batching"
+            )
+            self.epoch = cur_epoch + 1
         stop_training = False
 
         # For pre-train validation
@@ -763,7 +905,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             # global_batch is a list of items from `datapacker.sft_process_sample()`
-            for global_batch in self.train_data_loader:
+            for global_batch in self.get_batch_from_dataloader(
+                self.train_data_loader, self.custom_data_loader
+            ):
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
                 if (
@@ -838,10 +982,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                                 f"[SFT] Error calling custom logger function: {e}"
                             )
 
-                if (
-                    self.config.train.max_num_steps is not None
-                    and self.train_step >= self.total_steps
-                ):
+                if self.train_step >= self.total_steps:
                     stop_training = True
                     break  # break outer epoch loop
 
@@ -907,6 +1048,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "final_val_loss": val_avg_loss,
             }
             self.post_training_hook(self, report_data=post_training_data)
+        if (
+            hasattr(self.trainer, "upload_thread")
+            and self.trainer.upload_thread is not None
+        ):
+            logger.info("[Policy] Waiting for upload thread to finish...")
+            self.trainer.upload_thread.join()
+            logger.info("[Policy] Upload thread finished.")
+            self.trainer.upload_thread = None
 
         self.unregister_from_controller()
 

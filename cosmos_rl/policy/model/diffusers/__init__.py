@@ -80,8 +80,8 @@ class DiffuserModel(BaseModel, ABC):
         for valid_model in self.valid_models:
             model_part = getattr(self.pipeline, valid_model)
             if isinstance(model_part, nn.Module) and valid_model != "transformer":
+                model_part.to(dtype=self.dtype)
                 # Offload all torch.nn.Modules to cpu except transformers
-                model_part.to(dtype=torch.bfloat16)
                 if self.offload:
                     model_part.to("cpu")
                     self.offloaded_models.append(model_part)
@@ -376,6 +376,10 @@ class DiffuserModel(BaseModel, ABC):
                     self.transformer.add_adapter(
                         peft_config=transformer_lora_config, adapter_name=lora_name
                     )
+        # If multiple adapters are added, set the primary adapter for training and inference
+        if len(lora_config.lora_names) > 0:
+            primary_adapter = lora_config.primary_adapter or lora_config.lora_names[0]
+            self.transformer.set_adapter(primary_adapter)
 
     @property
     def trained_model(self):

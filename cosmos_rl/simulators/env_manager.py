@@ -143,7 +143,7 @@ def set_process_numa_affinity(gpu_id: int) -> None:
             )
         except FileNotFoundError:
             pass  # numactl not available, that's ok
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     except Exception as e:
         print(f"Warning: Could not set NUMA affinity for GPU {gpu_id}: {e}")
@@ -203,6 +203,8 @@ class EnvManager:
         self.result_queue = self.context.Queue()
 
         # Start simulator process
+        old_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.rank)
         self.process = self.context.Process(
             target=_simulator_worker,
             args=(
@@ -217,6 +219,10 @@ class EnvManager:
             ),
         )
         self.process.start()
+        if old_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible_devices
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
         # Wait for initialization
         result = self.result_queue.get()
@@ -382,7 +388,6 @@ def _simulator_worker(
                             "error": f"Method '{method_name}' not found",
                         }
                     )
-
             except Exception as e:
                 result_queue.put({"status": "error", "error": str(e)})
 

@@ -348,6 +348,14 @@ class HFModel(BaseModel):
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         self.cosmos_config = cosmos_config
         # Named buffers will be reset during the load_hf_weights process
+        if getattr(self.hf_config, "tie_word_embeddings", False):
+            logger.info(
+                "[HFModel] Tying input and output embeddings as specified in the config."
+            )
+            output_embeddings = self.model.get_output_embeddings()
+            input_embeddings = self.model.get_input_embeddings()
+            if output_embeddings is not None and input_embeddings is not None:
+                output_embeddings.weight = input_embeddings.weight
         return
 
     @property

@@ -153,6 +153,7 @@ class LLMTrainer(Trainer):
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
+        self.upload_thread = None
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             # Constraint of FP8/FP4 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.
@@ -339,6 +340,7 @@ class LLMTrainer(Trainer):
         current_chunk_size = 0
         file_idx = 0
         manifest = {}  # Record the weight->file name mapping
+        cpu_chunks_to_save = []
 
         def create_file_name(save_lora_config, pp_rank, pp_size, file_idx):
             if save_lora_config:
@@ -364,11 +366,17 @@ class LLMTrainer(Trainer):
                 and self.parallel_dims.tp_coord[0] == 0
             ):
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                chunk_cpu = {}
                 for name, param in chunk.items():
                     manifest[name] = os.path.basename(file_path)
+                    chunk_cpu[name] = param.cpu()
                 total_chunk_size += chunk_size
-                save_file(chunk, file_path)
-                logger.info(f"Saved chunk {file_idx} to {os.path.basename(file_path)}")
+                cpu_chunks_to_save.append(
+                    (chunk_cpu, file_path)
+                )  # Save for CPU saving in upload handler
+                logger.info(
+                    f"Chunk {file_idx} to be saved at {os.path.basename(file_path)}"
+                )
 
         for name, param in self.model.named_parameters():
             # First map the key from local to hf naming convention
@@ -441,9 +449,43 @@ class LLMTrainer(Trainer):
         if not self.parallel_dims.dp_replicate_enabled:
             torch.distributed.barrier()
 
-        def upload_handler(config, is_final, path, rel_path, max_retries=3):
-            """Handle the upload of the model to huggingface and s3."""
+        def save_and_upload_handler(
+            chunks_to_save,
+            weight_index_json,
+            hf_config,
+            lora_config,
+            data_packer,
+            generation_config,
+            config,
+            is_final,
+            path,
+            rel_path,
+            max_retries=3,
+        ):
+            """Handle the save to local and the upload of the model to huggingface and s3."""
             # upload the final model to huggingface
+            for chunk_cpu, file_path in chunks_to_save:
+                save_file(chunk_cpu, file_path)
+            if weight_index_json is not None:
+                with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
+                    json.dump(
+                        weight_index_json,
+                        f,
+                        indent=4,
+                    )
+            # save hf_config
+            if hf_config is not None:
+                hf_config.save_pretrained(path)
+            if lora_config is not None:
+                # Save the LoRA config
+                with open(os.path.join(path, "adapter_config.json"), "w") as f:
+                    json.dump(lora_config, f, indent=4)
+            if data_packer is not None:
+                data_packer.save_state(path)
+            # save the generation config to get the generation aligned with HF.
+            if generation_config is not None:
+                generation_config.save_pretrained(path)
+
             if config.train.ckpt.upload_hf and is_final:
                 username = whoami()["name"]
                 repo_id = (
@@ -501,21 +543,21 @@ class LLMTrainer(Trainer):
 
         if self.global_rank == 0:
             if export_weight_index_json:
-                with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
-                    json.dump(
-                        {
-                            "metadata": {
-                                "total_size": total_tensor_size,
-                            },
-                            "weight_map": merged_manifest,
-                        },
-                        f,
-                        indent=4,
-                    )
+                weight_index_json = {
+                    "metadata": {
+                        "total_size": total_tensor_size,
+                    },
+                    "weight_map": merged_manifest,
+                }
+            else:
+                weight_index_json = None
 
             # save hf_config
             if save_hf_config:
-                self.hf_config.save_pretrained(path)
+                hf_config = self.hf_config
+            else:
+                hf_config = None
+
             if save_lora_config:
                 # Save the LoRA config
                 lora_config = self.config.policy.lora.model_dump(mode="json")
@@ -523,35 +565,40 @@ class LLMTrainer(Trainer):
                     self.config.policy.model_name_or_path
                 )
                 lora_config["peft_type"] = "LORA"
-                with open(os.path.join(path, "adapter_config.json"), "w") as f:
-                    json.dump(lora_config, f, indent=4)
-
-            self.data_packer.save_state(path)
+            else:
+                lora_config = None
 
             # save the generation config to get the generation aligned with HF.
+            generation_config = None
             try:
                 if save_generation_config:
                     generation_config = util.retry(GenerationConfig.from_pretrained)(
                         self.config.policy.model_name_or_path
                     )
-                    generation_config.save_pretrained(path)
             except Exception:
                 logger.warning("[Policy] No generation config found, do not save it.")
 
-            need_upload = (
-                self.config.train.ckpt.upload_hf and is_final
-            ) or self.config.train.ckpt.upload_s3
-            if need_upload:
-                # If the upload thread is already running, wait for it to finish
-                if self.upload_thread is not None:
-                    self.upload_thread.join()
-                self.upload_thread = threading.Thread(
-                    target=upload_handler,
-                    args=(self.config, is_final, path, rel_path),
-                    name="upload_safetensors",
-                    daemon=True,
-                )
-                self.upload_thread.start()
+            # If the upload thread is already running, wait for it to finish
+            if self.upload_thread is not None:
+                self.upload_thread.join()
+            self.upload_thread = threading.Thread(
+                target=save_and_upload_handler,
+                args=(
+                    cpu_chunks_to_save,
+                    weight_index_json,
+                    hf_config,
+                    lora_config,
+                    self.data_packer,
+                    generation_config,
+                    self.config,
+                    is_final,
+                    path,
+                    rel_path,
+                ),
+                name="save_and_upload_safetensors",
+                daemon=True,
+            )
+            self.upload_thread.start()
 
     def model_load_from_hf(self):
         start_time = time.time()

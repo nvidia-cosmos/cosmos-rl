@@ -15,7 +15,7 @@ dependencies = [
     "pybind11[global]",
     "torch>=2.6.0",
     "torchvision>=0.21.0",
-    "torchao>=0.10.0",
+    "torchao>=0.10.0,<0.16",
     "tensordict==0.7.2",
     "toml",
     "StrEnum",
@@ -36,6 +36,8 @@ dependencies = [
     "kernels",
     "diffusers", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
     "peft",
+    "zmq>=0.0.0",
+    "nvidia-ml-py>=13.590.48",
 ]
 
 [build-system]
@@ -93,7 +95,8 @@ vla = [
     "easydict",
     "einops",
     "future",
-    "gym",
+    "gym", # for legacy purpose, by libero/robomimic
+    "gymnasium",
     "hydra-core",
     "libero",
     "math-verify",
