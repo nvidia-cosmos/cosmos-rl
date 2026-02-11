@@ -137,13 +137,19 @@ class RemoteReward(BaseRewardModel):
         # Enqueue request (single call for entire batch)
         uuid, replica_id = self.enqueue_request(tensor, data)
         if is_async:
-            logger.info(f"Reward compute is async, returning uuid: {uuid}")
-            return torch.zeros((latents.shape[0],), device=latents.device), uuid
+            logger.info(
+                f"Reward compute is async, returning uuid: {uuid}, replica_id: {replica_id}"
+            )
+            return (
+                torch.zeros((latents.shape[0],), device=latents.device),
+                uuid,
+                replica_id,
+            )
 
         # Poll for reward
         reward = self.fetch_reward(uuid, replica_id)
 
-        return reward.to(latents.device), None
+        return reward.to(latents.device), None, None
 
     def enqueue_request(self, tensor, data):
         """Enqueue the request and return UUID."""
