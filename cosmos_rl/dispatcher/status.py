@@ -1039,6 +1039,7 @@ class PolicyStatusManager:
                         [
                             f"{k}: {v}"
                             for k, v in self.train_report_data[train_step].items()
+                            if k not in ["rollout_images", "rollout_videos"]
                         ]
                     )
                     logger.info(
@@ -1046,6 +1047,45 @@ class PolicyStatusManager:
                     )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
+                        # Convert multimodal data to wandb compatible format if needed
+                        import wandb
+
+                        for modality in ["rollout_images", "rollout_videos"]:
+                            if modality in self.train_report_data[train_step]:
+                                # We only support logging a list of images/videos for now, and the caption of each image/video is set as the prompt and reward of the rollout that generated this image/video.
+                                def _caption(prompt: str, reward_val: Any) -> str:
+                                    return (
+                                        f"{prompt[:100]} | avg: {float(reward_val):.2f}"
+                                    )
+
+                                raw_data = self.train_report_data[train_step][modality]
+                                if modality == "rollout_images":
+                                    wandb_mm_data = [
+                                        wandb.Image(
+                                            mm_result_sample["path"],
+                                            caption=_caption(
+                                                mm_result_sample["prompt"],
+                                                mm_result_sample["reward"],
+                                            ),
+                                        )
+                                        for mm_result_sample in raw_data
+                                    ]
+                                else:
+                                    wandb_mm_data = [
+                                        wandb.Video(
+                                            mm_result_sample["path"],
+                                            caption=_caption(
+                                                mm_result_sample["prompt"],
+                                                mm_result_sample["reward"],
+                                            ),
+                                            format="mp4",
+                                            fps=8,
+                                        )
+                                        for mm_result_sample in raw_data
+                                    ]
+                                self.train_report_data[train_step][modality] = (
+                                    wandb_mm_data
+                                )
                         log_wandb(
                             data=self.train_report_data[train_step],
                             step=train_step,
