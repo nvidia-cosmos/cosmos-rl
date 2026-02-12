@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 import threading
 import uuid
@@ -58,9 +59,8 @@ from cosmos_rl.utils.parallelism_map import (
     WeightSyncInstructionsGroup,
 )
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
-import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils import constant
+from cosmos_rl.utils import constant, network_util
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     ConversationType,
@@ -299,10 +299,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.quantized_weight_map,
         )
 
-        self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
+        self.all_rank_local_shard_infos = dist_utils.all_gather_object_cpu(
             local_shard_infos
         )
-        all_param_groups = dist_util.all_gather_object_cpu(param_groups)
+        all_param_groups = dist_utils.all_gather_object_cpu(param_groups)
         merged_groups = {}
         for r, param_groups in enumerate(all_param_groups):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) != 0:
@@ -312,7 +312,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 key = tuple(group)
                 if key not in merged_groups:
                     merged_groups[key] = group
-        sorted_params_all_rank = dist_util.all_gather_object_cpu(
+        sorted_params_all_rank = dist_utils.all_gather_object_cpu(
             [x[0] for x in self.recv_param_key_n_rank_list]
         )
         sorted_params_all_rank = [
@@ -937,6 +937,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             logger.info("[Rollout] Async rollout scheduler is already running")
             return
 
+        # find a free port for the rollout worker engine.
+        free_port = None
+        if self.global_rank == 0:
+            current_port = int(os.environ.get("MASTER_PORT"))
+            free_port = network_util.find_available_port(current_port +1)
+        free_port = dist_utils.broadcast_object_cpu(free_port)
+
         def init_engine_hook(rollout_engine: RolloutBase):
             """
             This hook function is used to initialize the rollout engine in the async rollout scheduler.
@@ -945,6 +952,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 quantization=self.quantization_type,
                 seed=self.config.rollout.seed,
                 load_format=load_format,
+                backend_port=free_port,
             )
             rollout_engine.post_init_engine_hook(
                 self.consume_command,

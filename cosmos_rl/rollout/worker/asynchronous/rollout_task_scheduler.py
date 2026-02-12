@@ -220,6 +220,7 @@ class RolloutTaskScheduler:
         # Track running state
         self._running = threading.Event()
         self._paused = threading.Event()
+        self._shutdown_called = threading.Event()  # Prevent duplicate shutdown calls
         self._worker_thread = (
             None  # Thread object when running in thread mode (start())
         )
@@ -379,7 +380,17 @@ class RolloutTaskScheduler:
     def _try_shutdown_rollout_engine(self):
         """
         Try to shutdown the rollout engine to release the resources.
+        
+        This method is thread-safe and idempotent - it can be called multiple times
+        but will only execute once.
         """
+        # Check if shutdown was already called (thread-safe check-and-set)
+        if self._shutdown_called.is_set():
+            logger.debug("[RolloutTaskScheduler] Rollout engine shutdown already called, skipping")
+            return
+        
+        # Mark shutdown as called (atomic operation)
+        self._shutdown_called.set()
 
         if not self.rollout_engine.is_engine_initialized():
             logger.warning(
@@ -388,7 +399,12 @@ class RolloutTaskScheduler:
             return
 
         # rollout engine in async mode usually has a child thread to run the generation, to avoid blocking the main thread exit, we need to call the shutdown method to release the resources.
-        self.rollout_engine.shutdown()
+        try:
+            self.rollout_engine.shutdown()
+        except Exception as e:
+            logger.error(f"[RolloutTaskScheduler] Failed to shutdown rollout engine: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _run_event_loop(self, init_engine_hook: Callable):
         """
@@ -434,7 +450,10 @@ class RolloutTaskScheduler:
                     f"[RolloutTaskScheduler] Error while cancelling pending tasks: {e}"
                 )
             finally:
+                # shutdown the rollout engine in the worker thread.
+                self._try_shutdown_rollout_engine()
                 self._loop.close()
+                logger.info("[RolloutTaskScheduler] Background worker stopped")
 
     def start(self, init_engine_hook: Callable, wait_initialized: bool = False):
         """
@@ -476,7 +495,7 @@ class RolloutTaskScheduler:
 
         logger.info("[RolloutTaskScheduler] Background worker started")
 
-    def stop(self, wait: bool = True):
+    def stop(self, wait: bool = True, timeout: float = 60.0):
         """
         Stop the background worker thread gracefully.
 
@@ -488,8 +507,11 @@ class RolloutTaskScheduler:
 
         Args:
             wait: Whether to wait for the worker thread to finish (default: True).
-                  If True, blocks until thread completes (with 10s timeout).
+                  If True, blocks until thread completes (with specified timeout).
                   If False, returns immediately without waiting.
+            timeout: Maximum time to wait for the worker thread to finish (default: 60s).
+                     Increased from 10s to allow sufficient time for vLLM engine shutdown
+                     and CUDA IPC handle cleanup.
 
         Thread Safety:
             Uses threading.Event.clear() for atomic state change visible to worker thread.
@@ -502,10 +524,15 @@ class RolloutTaskScheduler:
         self._running.clear()
 
         if wait and self._worker_thread:
-            self._worker_thread.join(timeout=10)
-
-        self._try_shutdown_rollout_engine()
-        logger.info("[RolloutTaskScheduler] Background worker stopped")
+            logger.info(f"[RolloutTaskScheduler] Waiting for worker thread to complete (timeout: {timeout}s)...")
+            self._worker_thread.join(timeout=timeout)
+            if self._worker_thread.is_alive():
+                logger.error(
+                    f"[RolloutTaskScheduler] Worker thread did not complete within {timeout}s timeout! "
+                    "This may indicate a deadlock or hung shutdown. Thread is still running."
+                )
+            else:
+                logger.info("[RolloutTaskScheduler] Worker thread completed successfully")
 
     async def start_async(self, init_engine_hook: Callable):
         """
@@ -565,7 +592,9 @@ class RolloutTaskScheduler:
         if wait and self._worker_task:
             await self._worker_task
 
+        # Shutdown the rollout engine to release CUDA IPC resources
         self._try_shutdown_rollout_engine()
+
         logger.info("[RolloutTaskScheduler] Background worker stopped")
 
     def get_event_loop(self) -> asyncio.AbstractEventLoop:
@@ -743,26 +772,6 @@ class RolloutTaskScheduler:
             except Exception:
                 break
         return results
-
-    async def draining_activate_tasks(self, timeout: Optional[float] = None):
-        """
-        Drain all active tasks from the active tasks set and block processing new tasks from task queue.
-
-        This is useful when we want to update the weights during training.
-
-        Args:
-            timeout: Maximum time in seconds to wait for active tasks (None means wait forever)
-
-        Raises:
-            TimeoutError: If timeout occurs before all active tasks are drained
-        """
-        start_time = time.time()
-        while len(self._active_tasks) > 0:
-            if timeout is not None and (time.time() - start_time) > timeout:
-                raise TimeoutError(
-                    f"[RolloutTaskScheduler] Timeout waiting for {len(self._active_tasks)} active tasks"
-                )
-            await asyncio.sleep(0.1)
 
     def is_idle(self) -> bool:
         """

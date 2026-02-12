@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
+import gc
 import asyncio
 import torch
 import copy
@@ -125,8 +128,17 @@ class vLLMRolloutAsync(vLLMRollout):
         quantization: Optional[str] = None,
         seed: int = 42,
         load_format: str = "dummy",
+        backend_port: int = None,
         **kwargs,
     ):
+        """
+        Initialize the rollout engine.
+        Args:
+            quantization: The quantization type to use for the rollout engine.
+            seed: The seed to use for the rollout engine.
+            load_format: The load format to use for the rollout engine.
+            backend_port: The port to use for the vllm backend worker process.
+        """
         # override the init_engine method in vLLMRollout
         if not self._engine_initialized.is_set():
             trust_remote_code = True  # set trust remote code default to True.
@@ -167,6 +179,7 @@ class vLLMRolloutAsync(vLLMRollout):
                 tensor_parallel_size=tp_size,
                 pipeline_parallel_size=pp_size,
                 enable_expert_parallel=enable_ep_parallelism,
+                # external_launcher is the only choice executor_backend to support TP + PP parallelism in vllm.
                 distributed_executor_backend="external_launcher",
                 worker_extension_cls="cosmos_rl.rollout.vllm_rollout.vllm_rollout_async.VLLMColocateWorkerExtension",
                 dtype="auto",
@@ -191,7 +204,15 @@ class vLLMRolloutAsync(vLLMRollout):
                 load_format=load_format,
             )
 
-            self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
+            # TODO(zjx): asyncllm may block when launch the engine in vllm GroupCoordinator to create a gloo process group.
+            # AsyncLLMEngine will call init_process_group() in the worker process, here we need to find a free port to avoid conflict.
+            try:
+                old_port = os.environ.get("MASTER_PORT", None)
+                os.environ["MASTER_PORT"] = str(backend_port)
+                self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
+            finally:
+                if old_port is not None:
+                    os.environ["MASTER_PORT"] = old_port
             self._engine_initialized.set()
             # record the event loop of the rollout engine thread.
             self._engine_event_loop = asyncio.get_event_loop()
@@ -223,7 +244,33 @@ class vLLMRolloutAsync(vLLMRollout):
     def shutdown(self):
         if self._engine_initialized.is_set():
             self._engine_initialized.clear()
-            self.rollout_engine.shutdown()
+
+            try:
+                self.rollout_engine.shutdown()
+                logger.debug("[Rollout] Rollout engine shutdown complete")
+            except Exception as e:
+                logger.error(f"[Rollout] Error during rollout engine shutdown: {e}")
+                import traceback
+                traceback.print_exc()
+
+            # Now that the worker process is stopped, we can safely clean up the shared memory
+            if self.underlying_model is not None:
+                try:
+                    self.underlying_model.cleanup()
+                    self.underlying_model = None
+                    logger.debug("[Rollout] Rollout engine CUDA IPC handles released successfully")
+                except Exception as e:
+                    logger.error(f"[Rollout] Error during underlying model cleanup: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Clear CUDA cache to ensure all GPU memory is released
+            torch.cuda.empty_cache()
+            
+            # Force Python garbage collection to ensure all references are cleaned up
+            gc.collect()
+            logger.info("[Rollout] Async vLLM rollout engine shutdown complete.")
+            
 
     def _get_request_id(self, prompt_idx: int, child_idx: int = 0):
         return str(f"req_{prompt_idx}_{child_idx}")

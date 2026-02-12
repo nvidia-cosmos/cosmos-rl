@@ -39,6 +39,8 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import async_utils
 from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
+from tests.utils.inproc_launcher import launch_inproc
+
 
 def override_environment(port: int = 29500) -> dict[str, str]:
     async_utils.unsafe_enable_nest_asyncio()
@@ -313,7 +315,8 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         if hasattr(LocalRewardCalculator, "_instance"):
             delattr(LocalRewardCalculator, "_instance")
 
-    def _wrapper_rollout_worker_cls(self, cosmos_config: CosmosConfig):
+    @staticmethod
+    def _wrapper_rollout_worker_cls(cosmos_config: CosmosConfig):
         from cosmos_rl.rollout.worker.rollout_control import (
             DisaggregatedRolloutControlWorker,
         )
@@ -334,7 +337,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
+        worker_cls = TestAsyncRolloutWorker._wrapper_rollout_worker_cls(cosmos_config)
 
         worker = worker_cls(cosmos_config, parallel_dims)
         worker.replica_name = str(uuid.uuid4())
@@ -384,7 +387,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
+        worker_cls = TestAsyncRolloutWorker._wrapper_rollout_worker_cls(cosmos_config)
 
         worker = worker_cls(cosmos_config, parallel_dims)
         worker.replica_name = str(uuid.uuid4())
@@ -406,6 +409,41 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             # clean the test environment
             worker.handle_shutdown()
 
+    @staticmethod
+    def _async_rollout_worker_helper(local_rank: int, world_size: int, cosmos_config: CosmosConfig, *args, **kwargs):
+        # This method will run in a new process, so we need to initialize the distributed environment here.
+        init_distributed()
+
+        parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
+        parallel_dims.build_mesh(device_type="cuda")
+
+        worker_cls = TestAsyncRolloutWorker._wrapper_rollout_worker_cls(cosmos_config)
+        worker = worker_cls(cosmos_config, parallel_dims)
+        worker.replica_name = str(uuid.uuid4())
+        worker.shutdown_signal = threading.Event()
+        worker.shutdown_mp_signal = threading.Event()
+        worker.heartbeat_thread = None
+        # Skip weight sync preparation in test since we don't need it
+        worker.state.set_weight_synced()
+
+        try:
+            worker.lazy_initialize_rollout_engine("auto")
+            worker.work()
+        finally:
+            # clean the test environment
+            worker.handle_shutdown()
+            destroy_distributed()
+
+    def test_async_rollout_worker_tp2(self):
+        """Test async rollout worker with 2 GPUs."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.dp_shard_size = 1
+        cosmos_config.rollout.parallelism.tp_size = 2
+        cosmos_config.rollout.parallelism.pp_size = 1
+        cosmos_config.rollout.batch_size = 4
+        
+        launch_inproc(TestAsyncRolloutWorker._async_rollout_worker_helper, world_size=2, fn_args=[cosmos_config], start_method="forkserver")
+
     def test_async_rollout_worker_validation(self):
         """Test async rollout worker validation."""
         cosmos_config = getMockConfig()
@@ -419,7 +457,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        worker_cls = self._wrapper_rollout_worker_cls(cosmos_config)
+        worker_cls = TestAsyncRolloutWorker._wrapper_rollout_worker_cls(cosmos_config)
         worker = worker_cls(cosmos_config, parallel_dims)
         worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()

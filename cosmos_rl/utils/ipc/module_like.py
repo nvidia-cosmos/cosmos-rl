@@ -119,6 +119,19 @@ class ModuleLike:
                     value.requires_grad = False
                     self._parameters[name] = value
 
+    def __del__(self) -> None:
+        """
+        Destructor called by Python garbage collector.
+        As a safety fallback, we call cleanup() here, but explicit cleanup() is preferred.
+        """
+        try:
+            # Only clean up if not already cleaned (check if dictionaries exist)
+            if hasattr(self, '_parameters') and len(self._parameters) > 0:
+                self.cleanup()
+        except Exception:
+            # Suppress exceptions in __del__ to avoid issues during interpreter shutdown
+            pass
+
     def __getitem__(self, idx: int | str) -> "ModuleLike":
         """
         Simulate the behavior like ModuleList. Return the sub-module.
@@ -166,6 +179,39 @@ class ModuleLike:
 
         # Set common attribute to the module.
         super().__setattr__(name, value)
+    
+    def cleanup(self) -> None:
+        """
+        Explicitly release all CUDA tensors and IPC handles to avoid memory leaks.
+        This should be called before the producer process terminates.
+
+        # TODO(zjx): fix the shared cuda memory leak issue in async rollout engine.
+        """
+        # Recursively clean up all sub-modules first
+        for name, sub_module in list(self._modules.items()):
+            if sub_module is not None and hasattr(sub_module, 'cleanup'):
+                sub_module.cleanup()
+            self._modules[name] = None
+
+        # Delete all parameters (which may hold CUDA IPC handles)
+        for name in list(self._parameters.keys()):
+            param = self._parameters[name]
+            if param is not None and isinstance(param, torch.Tensor):
+                # Explicitly delete the tensor to release IPC handle
+                del param
+            del self._parameters[name]
+
+        # Delete all non-parameter tensors
+        for name in list(self._not_parameter_tensors.keys()):
+            tensor = self._not_parameter_tensors[name]
+            if tensor is not None and isinstance(tensor, torch.Tensor):
+                del tensor
+            del self._not_parameter_tensors[name]
+
+        # Clear the dictionaries
+        self._parameters.clear()
+        self._not_parameter_tensors.clear()
+        self._modules.clear()
 
     def state_dict(self) -> Dict[str, torch.Tensor]:
         """
