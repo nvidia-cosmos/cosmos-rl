@@ -1087,6 +1087,10 @@ class DiffusersConfig(BaseModel):
         default=1.0,
         description="Fraction of timesteps to use during training. if set to less than 1.0, the model will be trained on a subset of the timesteps for each sample. this will speed up training but reduce the accuracy of policy gradient estimates.",
     )
+    nft_beta: float = Field(
+        default=1.0,
+        description="Beta for the DiffusionNFT positive and negative loss computation",
+    )
     weight_copy_decay_type: int = Field(
         default=0,
         description="Weight copy decay type for diffusers model in rl training",
