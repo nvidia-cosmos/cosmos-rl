@@ -565,15 +565,6 @@ class SFTTrainer(LLMTrainer):
 
                 val_loss = self.loss_fn(val_logits, val_labels)
 
-        # Log per-rank local loss BEFORE dist_mean synchronization
-        local_loss_value = val_loss.item() if hasattr(val_loss, "item") else val_loss
-        batch_size = val_inputs.size(0)
-        logger.debug(
-            f"[Validation] Rank {dist.get_rank() if dist.is_initialized() else 0}: "
-            f"local_loss={local_loss_value:.6f}, batch_size={batch_size}, "
-            f"local_total={local_loss_value * batch_size:.6f}"
-        )
-
         if (
             self.parallel_dims.dp_replicate_enabled
             or self.parallel_dims.dp_shard_enabled
@@ -643,7 +634,7 @@ class SFTTrainer(LLMTrainer):
                 ):
                     completed_epoch = (train_step - 1) // steps_per_epoch + 1
                     logger.debug(
-                        f"[DEBUG] Epoch-based checkpoint: train_step={train_step}, steps_per_epoch={steps_per_epoch}, completed_epoch={completed_epoch}"
+                        f"[SFT] Epoch-based checkpoint: train_step={train_step}, steps_per_epoch={steps_per_epoch}, completed_epoch={completed_epoch}"
                     )
 
                 self.ckpt_manager.save_checkpoint(

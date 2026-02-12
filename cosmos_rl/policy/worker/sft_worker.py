@@ -731,7 +731,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 if self.train_step in validation_steps:
                     should_validate = True
                     logger.info(
-                        f"[SFT Worker] Triggering epoch-based validation at step "
+                        f"[SFT] Triggering epoch-based validation at step "
                         f"{self.train_step} (end of epoch {current_epoch})"
                     )
             elif self.config.validation.freq > 0:
@@ -780,7 +780,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             avg_batch_loss = val_score / batch_samples if batch_samples > 0 else 0.0
 
             logger.debug(
-                f"[Validation] Batch {batch_index}: rank={self.global_rank}, "
+                f"[SFT] Validation batch {batch_index}: rank={self.global_rank}, "
                 f"loss={avg_batch_loss:.6f}, samples={batch_samples}"
             )
 
