@@ -237,8 +237,10 @@ class RemoteRewardCalculator:
             video_fps = payload.extra_info.get("video_fps", 16.0)
             # Encode video data
             latents = self.tokenizer.encode(mm_datas)
-            # Use float16 to reduce payload size over the network.
-            mm_tensor = latents.to(dtype=torch.float16).cpu().numpy()
+            # Convert latents from [0, 1] to [0, 255]
+            mm_tensor = (
+                (latents * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
+            )
             # Create video info for entire batch (assuming 16 FPS as default)
             video_infos = []
             for _ in range(latents.shape[0]):
@@ -248,7 +250,12 @@ class RemoteRewardCalculator:
         else:  # image
             data["media_type"] = "image"
             mm_tensor = (
-                mm_datas.to(dtype=torch.float16).cpu().numpy().transpose(0, 2, 3, 1)
+                (mm_datas.permute(0, 2, 3, 1) * 255)
+                .round()
+                .clamp(0, 255)
+                .to(torch.uint8)
+                .cpu()
+                .numpy()
             )  # B,C,H,W -> B,H,W,C
 
         logger.debug(
