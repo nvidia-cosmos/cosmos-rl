@@ -91,7 +91,7 @@ class NFTRollout(RolloutBase):
                 return_tensors="pt",
             ).input_ids.to(self.device)
 
-            self.model.transformer.set_adapter("ref")
+            self.model.transformer.set_adapter("old")
             # Create generators with random seeds for each generation to ensure diversity
             generators = [
                 torch.Generator(device=self.device).manual_seed(

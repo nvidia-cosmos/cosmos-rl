@@ -1311,7 +1311,13 @@ def aggregate_report_data(
     for k in all_keys:
         prefixed_k = f"{prefix}{k}" if prefix else k
         if prefixed_k not in report_data:
-            if k.endswith("_max"):
+            if k in ["rollout_images", "rollout_videos"]:
+                # Only the data from master rank contains the images/videos, so we can directly use it without aggregation.
+                for data in report_data_list:
+                    if k in data:
+                        report_data[prefixed_k] = data[k]
+                        break
+            elif k.endswith("_max"):
                 report_data[prefixed_k] = np.max(
                     [data.get(k, 0) for data in report_data_list]
                 )
