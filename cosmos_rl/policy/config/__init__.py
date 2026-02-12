@@ -1389,6 +1389,10 @@ class LoggingConfig(BaseModel):
         default=100,
         description="Log interval (in steps) for loss averaging.",
     )
+    multi_modal_log_interval: Optional[int] = Field(
+        default=None,
+        description="Log interval (in steps) for multi-modal logging such as images and videos.",
+    )
     project_name: str = Field(
         default="cosmos_rl",
         description="Wandb project name for logging. If set, the training will be logged to this project.",

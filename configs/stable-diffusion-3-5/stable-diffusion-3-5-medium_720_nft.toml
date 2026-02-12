@@ -7,7 +7,7 @@ is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.lora]
-lora_names = ["default", "ref"]
+lora_names = ["default", "old"]
 r = 32
 lora_alpha = 64
 init_lora_weights = "gaussian"
@@ -47,6 +47,7 @@ n_generation = 24
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
+multi_modal_log_interval = 10
 
 [train]
 non_text = true

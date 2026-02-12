@@ -16,7 +16,7 @@
 
 import numpy as np
 import os
-import tempfile
+import random
 from functools import partial
 from PIL import Image
 from typing import Optional, Dict, Any, List
@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any, List
 import torch
 
 import cosmos_rl.utils.distributed as dist_util
+import cosmos_rl.utils.report.metrics_collection as metrics_collection
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -36,8 +37,15 @@ from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
-from cosmos_rl.utils.wandb_logger import log_wandb
+from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
+
+try:
+    import imageio
+except ImportError:
+    logger.warning(
+        "imageio is not installed, video logging will not work. Install it with `pip install imageio` if needed."
+    )
 
 
 def get_weight_copy_decay(step, decay_type):
@@ -89,14 +97,14 @@ class NFTTrainer(DiffusersTrainer):
             self.config.policy.diffusers.weight_copy_decay_type
         )
         self.model.transformer.set_adapter("default")
-        # Create ref model for RL training
+        # Create old model for RL training
         self.trainable_params = self.model.trainable_params
-        self.model.transformer.set_adapter("ref")
-        self.ref_trainable_params = self.model.trainable_params
+        self.model.transformer.set_adapter("old")
+        self.old_trainable_params = self.model.trainable_params
         self.model.transformer.set_adapter("default")
         copy_weights_with_decay(
             src_params=self.trainable_params,
-            tgt_params=self.ref_trainable_params,
+            tgt_params=self.old_trainable_params,
         )
 
         # Create ema if needed
@@ -219,40 +227,67 @@ class NFTTrainer(DiffusersTrainer):
 
     def report_mm_wandb(
         self,
-        mm_datas,
-        prompts,
-        rewards,
-        step: int,
+        mm_datas: torch.Tensor,
+        prompts: List[str],
+        rewards: torch.Tensor,
+        current_step: int,
     ):
-        """Log multimodal data to Weights & Biases (WandB) for visualization."""
+        """Log multimodal data to Weights & Biases (Wandb) for visualization."""
 
-        import wandb
+        mm_datas_cpu = mm_datas.detach().cpu()
+        num_to_log = min(15, len(mm_datas_cpu))
+        rewards_cpu = rewards.detach().cpu()
 
-        # TODO(dinghaoy): support video data
-        images_to_log = mm_datas.cpu()
-        prompts_to_log = prompts
-        rewards_to_log = rewards.cpu()
+        if self.model.is_video:
+            modality = "video"
+            sample_indices = random.sample(range(len(mm_datas_cpu)), num_to_log)
+            ext = "mp4"
+        else:
+            modality = "image"
+            sample_indices = list(range(num_to_log))  # log first N
+            ext = "jpg"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            num_to_log = min(15, len(images_to_log))
-            for idx in range(num_to_log):  # log first N
-                img_data = images_to_log[idx]
-                pil = Image.fromarray(
-                    (img_data.numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+        paths: List[str] = []
+        mm_data_dir = os.path.join(self.config.train.output_dir, "mm_data")
+        if not os.path.exists(mm_data_dir):
+            os.makedirs(mm_data_dir, exist_ok=True)
+        for out_idx, sample_idx in enumerate(sample_indices):
+            out_path = os.path.join(mm_data_dir, f"{current_step}_{out_idx}.{ext}")
+            if modality == "video":
+                video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
+                frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
+                imageio.mimsave(
+                    out_path,
+                    list(frames),
+                    fps=8,
+                    codec="libx264",
+                    format="FFMPEG",
                 )
-                pil = pil.resize((self.width, self.height))
-                pil.save(os.path.join(tmpdir, f"{idx}.jpg"))
+            else:
+                img = mm_datas_cpu[sample_idx].numpy().transpose(1, 2, 0)
+                pil = Image.fromarray((img * 255).astype(np.uint8))
+                pil.resize((self.width, self.height)).save(out_path)
+            paths.append(out_path)
 
-            data = {
-                "images": [
-                    wandb.Image(
-                        os.path.join(tmpdir, f"{idx}.jpg"),
-                        caption=f"{prompts_to_log[idx]:.100} | avg: {rewards_to_log[idx]:.2f}",
-                    )
-                    for idx in range(num_to_log)
-                ],
-            }
-            log_wandb(data, step)
+        if modality == "video":
+            data = [
+                {
+                    "path": p,
+                    "prompt": prompts[i],
+                    "reward": float(rewards_cpu[i]),
+                }
+                for p, i in zip(paths, sample_indices)
+            ]
+        else:
+            data = [
+                {
+                    "path": p,
+                    "prompt": prompts[i],
+                    "reward": float(rewards_cpu[i]),
+                }
+                for p, i in zip(paths, sample_indices)
+            ]
+        return data, modality
 
     def set_neg_prompt_embed(self):
         neg_text_embedding_dict = self.model.text_embedding(
@@ -290,6 +325,9 @@ class NFTTrainer(DiffusersTrainer):
             A dictionary of training metrics used for logging and reporting.
         """
         logger.debug(f"Starting training step {current_step}/{total_steps}")
+        assert (
+            self.config.train.train_policy.kl_beta > 0.0
+        ), "KL beta must be greater than 0 for diffusion NFT training."
         if current_step == 1:
             self.set_neg_prompt_embed()
         # Pack the list of rollouts into a batch for training
@@ -325,11 +363,10 @@ class NFTTrainer(DiffusersTrainer):
                 for k, v in sample_batch.items()
             }
 
-        loss_sum = torch.tensor(0.0, device=self.device)
-        kl_loss_sum = torch.tensor(0.0, device=self.device)
         grad_norm_sum = torch.tensor(0.0, device=self.device)
-        loss_count = 0
         grad_norm_count = 0
+
+        info_accumulated: Dict[str, List[torch.Tensor]] = {}
 
         # The cosmos-predict2.5 diffusers pipeline would set no_grad globally, so we need to re-enable it here
         with torch.enable_grad():
@@ -374,9 +411,6 @@ class NFTTrainer(DiffusersTrainer):
                         if self.mini_batch is not None and self.mini_batch > 0
                         else optimize_batch_size
                     )
-
-                    optimize_loss = torch.tensor(0.0, device=self.device)
-                    optimize_kl_loss = torch.tensor(0.0, device=self.device)
 
                     step_interval_env = os.environ.get(
                         "COSMOS_NFT_STEP_INTERVAL",
@@ -438,7 +472,7 @@ class NFTTrainer(DiffusersTrainer):
                             noise = torch.randn_like(x0.float())
                             xt = (1 - t_expanded) * x0 + t_expanded * noise
 
-                            self.model.transformer.set_adapter("ref")
+                            self.model.transformer.set_adapter("old")
                             transformer_inputs = (
                                 self.model.nft_prepare_transformer_input(
                                     latents=xt,
@@ -453,7 +487,7 @@ class NFTTrainer(DiffusersTrainer):
                                 )
                             )
                             with torch.no_grad():
-                                ref_prediction = self.model.transformer(
+                                old_prediction = self.model.transformer(
                                     **transformer_inputs
                                 )[0].detach()
                             self.model.transformer.set_adapter("default")
@@ -461,34 +495,24 @@ class NFTTrainer(DiffusersTrainer):
                             forward_prediction = self.model.transformer(
                                 **transformer_inputs
                             )[0]
+                            # Use the base model (with adapter disabled) to a reference prediciton
                             with torch.no_grad():
-                                # For LoRA, disable adapter.
-                                if self.is_lora:
-                                    if hasattr(
-                                        self.model.transformer, "disable_adapters"
-                                    ):
-                                        self.model.transformer.disable_adapters()
+                                if hasattr(self.model.transformer, "disable_adapters"):
+                                    self.model.transformer.disable_adapters()
+                                    ref_forward_prediction = self.model.transformer(
+                                        **transformer_inputs
+                                    )[0]
+                                    self.model.transformer.enable_adapters()
+                                elif hasattr(self.model.transformer, "disable_adapter"):
+                                    with self.model.transformer.disable_adapter():
                                         ref_forward_prediction = self.model.transformer(
                                             **transformer_inputs
                                         )[0]
-                                        self.model.transformer.enable_adapters()
-                                    elif hasattr(
-                                        self.model.transformer, "disable_adapter"
-                                    ):
-                                        with self.model.transformer.disable_adapter():
-                                            ref_forward_prediction = (
-                                                self.model.transformer(
-                                                    **transformer_inputs
-                                                )[0]
-                                            )
-                                    else:
-                                        raise NotImplementedError(
-                                            "The transformer model does not support adapter disabling."
-                                        )
-                                    self.model.transformer.set_adapter("default")
                                 else:
-                                    # Full model - this requires a frozen copy of the model
-                                    assert False
+                                    raise NotImplementedError(
+                                        "The transformer model does not support adapter disabling."
+                                    )
+                                self.model.transformer.set_adapter("default")
 
                             advantages_clip = torch.clamp(
                                 mini_batch["advantages"],
@@ -505,11 +529,11 @@ class NFTTrainer(DiffusersTrainer):
                                 self.config.train.train_policy.kl_beta
                                 * forward_prediction
                                 + (1 - self.config.train.train_policy.kl_beta)
-                                * ref_prediction.detach()
+                                * old_prediction.detach()
                             )
                             implicit_negative_prediction = (
                                 (1.0 + self.config.train.train_policy.kl_beta)
-                                * ref_prediction.detach()
+                                * old_prediction.detach()
                                 - self.config.train.train_policy.kl_beta
                                 * forward_prediction
                             )
@@ -554,26 +578,54 @@ class NFTTrainer(DiffusersTrainer):
                                 * self.config.train.train_policy.advantage_high
                             ).mean()
 
-                            kl_div_loss = (
-                                (forward_prediction - ref_forward_prediction) ** 2
-                            ).mean(dim=tuple(range(1, x0.ndim)))
-                            kl_div_loss = torch.mean(kl_div_loss)
+                            kl_loss = (
+                                ((forward_prediction - ref_forward_prediction) ** 2)
+                                .mean(dim=tuple(range(1, x0.ndim)))
+                                .mean()
+                            )
 
                             loss = policy_loss + (
-                                self.config.train.train_policy.kl_beta * kl_div_loss
+                                self.config.train.train_policy.kl_beta * kl_loss
                             )
 
                             timestep_scaling = 1.0 / max(self.num_train_timesteps, 1)
-                            scaled_loss = loss * loss_scaling_factor * timestep_scaling
+                            scaled_factor = loss_scaling_factor * timestep_scaling
+                            scaled_loss = loss * scaled_factor
                             scaled_loss.backward()
 
-                            optimize_loss += (
-                                loss.detach() * loss_scaling_factor * timestep_scaling
+                            unweighted_policy_loss = ori_policy_loss.mean()
+
+                            report_terms: Dict[str, torch.Tensor] = {}
+                            # weighted contributions (so final loss/policy/kl are true averages)
+                            report_terms["loss_contrib"] = loss.detach()
+                            report_terms["policy_loss_contrib"] = policy_loss.detach()
+                            report_terms["unweighted_policy_loss_contrib"] = (
+                                unweighted_policy_loss.detach()
                             )
-                            optimize_kl_loss += (
-                                kl_div_loss.detach()
-                                * loss_scaling_factor
-                                * timestep_scaling
+                            report_terms["kl_loss_contrib"] = kl_loss.detach()
+
+                            x0_sq = x0**2
+                            cur_x0_norm = torch.mean(x0_sq)
+                            cur_x0_norm_max = torch.max(x0_sq)
+                            old_dev_sq = (forward_prediction - old_prediction) ** 2
+                            cur_old_deviation = torch.mean(old_dev_sq)
+                            cur_old_deviation_max = torch.max(old_dev_sq)
+
+                            # raw (unscaled) metrics for monitoring
+                            report_terms["x0_norm"] = cur_x0_norm.detach()
+                            report_terms["x0_norm_max"] = cur_x0_norm_max.detach()
+                            report_terms["old_deviation"] = cur_old_deviation.detach()
+                            report_terms["old_deviation_max"] = (
+                                cur_old_deviation_max.detach()
+                            )
+                            report_terms["old_kl"] = torch.mean(
+                                ((old_prediction - ref_forward_prediction) ** 2).mean(
+                                    dim=tuple(range(1, x0.ndim))
+                                )
+                            ).detach()
+
+                            metrics_collection.accumulate_report_terms(
+                                info_accumulated, report_terms
                             )
 
                         local_mini_step += 1
@@ -590,9 +642,6 @@ class NFTTrainer(DiffusersTrainer):
                         else:
                             all_reduced = False
 
-                    loss_sum += optimize_loss
-                    kl_loss_sum += optimize_kl_loss
-                    loss_count += 1
                     if not all_reduced:
                         grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                         grad_norm_count += 1
@@ -603,32 +652,80 @@ class NFTTrainer(DiffusersTrainer):
             decay = get_weight_copy_decay(current_step, self.weight_copy_decay_type)
             copy_weights_with_decay(
                 src_params=self.trainable_params,
-                tgt_params=self.ref_trainable_params,
+                tgt_params=self.old_trainable_params,
                 decay=decay,
             )
 
         end_event.record()
 
-        loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
-        kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
-        if (
+        # Calculate average losses and aggregate metrics for logging
+        loss = metrics_collection.mean_or_zero(
+            info_accumulated, "loss_contrib", self.device
+        )
+        kl_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "kl_loss_contrib", self.device
+        )
+        policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "policy_loss_contrib", self.device
+        )
+        unweighted_policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "unweighted_policy_loss_contrib", self.device
+        )
+
+        x0_norm = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm", self.device
+        )
+        x0_norm_max = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm_max", self.device
+        )
+        old_deviation = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation", self.device
+        )
+        old_deviation_max = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation_max", self.device
+        )
+        kl = metrics_collection.mean_or_zero(info_accumulated, "kl", self.device)
+        old_kl = metrics_collection.mean_or_zero(
+            info_accumulated, "old_kl", self.device
+        )
+
+        dist_enabled = (
             self.parallel_dims.dp_replicate_enabled
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
-        ):
-            global_avg_loss, global_max_loss = (  # noqa: F841
-                dist_util.dist_mean(loss, self.parallel_dims.mesh["dp_cp"]),
-                dist_util.dist_max(loss, self.parallel_dims.mesh["dp_cp"]),
-            )
-            if self.config.train.train_policy.kl_beta != 0.0:
-                global_avg_kl_loss, global_max_kl_loss = (  # noqa: F841
-                    dist_util.dist_mean(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                    dist_util.dist_max(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                )
+        )
+        mesh = self.parallel_dims.mesh["dp_cp"] if dist_enabled else None
+
+        avg_metrics = {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "unweighted_policy_loss": unweighted_policy_loss,
+            "kl": kl,
+            "old_kl": old_kl,
+            "x0_norm": x0_norm,
+            "old_deviation": old_deviation,
+            "x0_norm_max": x0_norm_max,
+            "old_deviation_max": old_deviation_max,
+        }
+        max_metrics = {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "unweighted_policy_loss": unweighted_policy_loss,
+        }
+        if self.config.train.train_policy.kl_beta != 0.0:
+            avg_metrics["kl_loss"] = kl_loss
+            max_metrics["kl_loss"] = kl_loss
+
+        if dist_enabled:
+            reduced_avg = {
+                k: dist_util.dist_mean(v, mesh) for k, v in avg_metrics.items()
+            }
+            reduced_max = {
+                k: dist_util.dist_max(v, mesh) for k, v in max_metrics.items()
+            }
         else:
-            global_avg_loss = global_max_loss = loss.item()  # noqa: F841
-            if self.config.train.train_policy.kl_beta != 0.0:
-                global_avg_kl_loss = global_max_kl_loss = kl_loss.item()  # noqa: F841
+            reduced_avg = {k: v.item() for k, v in avg_metrics.items()}
+            reduced_max = {k: v.item() for k, v in max_metrics.items()}
 
         report_data = {}
         if self.config.logging.logger:
@@ -640,16 +737,36 @@ class NFTTrainer(DiffusersTrainer):
                 # TODO(dinghaoy): support lr schedulers
                 report_data["train/learning_rate"] = self.config.train.optm_lr
                 report_data["train/iteration_time"] = iter_time
-                report_data["train/loss_avg"] = global_avg_loss
-                report_data["train/loss_max"] = global_max_loss
-                if self.config.train.train_policy.kl_beta != 0.0:
-                    report_data["train/kl_loss_avg"] = global_avg_kl_loss
-                    report_data["train/kl_loss_max"] = global_max_kl_loss
+
+                for k, v in reduced_avg.items():
+                    report_data[f"train/{k}_avg"] = v
+                for k, v in reduced_max.items():
+                    report_data[f"train/{k}_max"] = v
+
                 report_data["train/grad_norm"] = (
                     grad_norm_sum.item() / grad_norm_count
                     if grad_norm_count > 0
                     else 0.0
                 )
+                if self.config.logging.multi_modal_log_interval is not None and (
+                    current_step % self.config.logging.multi_modal_log_interval == 0
+                    or current_step == 1
+                ):
+                    if not is_wandb_available():
+                        logger.warning(
+                            "Wandb is not available. Skipping multimodal logging."
+                        )
+                    else:
+                        logger.info(
+                            f"Logging multimodal data to Wandb at step {current_step}..."
+                        )
+                        mm_report_data, modality = self.report_mm_wandb(
+                            mm_datas=packed_train_batch["completions"],
+                            prompts=packed_train_batch["prompts"],
+                            rewards=packed_train_batch["rewards"],
+                            current_step=current_step,
+                        )
+                        report_data[f"rollout_{modality}s"] = mm_report_data
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):
