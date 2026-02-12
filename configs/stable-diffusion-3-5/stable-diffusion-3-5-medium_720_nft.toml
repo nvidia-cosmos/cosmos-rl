@@ -29,6 +29,7 @@ offload = false
 max_prompt_length = 128
 inference_size = [512, 512]
 timestep_fraction = 0.99
+nft_beta = 1.0
 weight_copy_decay_type = 1
 
 [policy.diffusers.sample]

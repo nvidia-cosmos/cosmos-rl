@@ -526,15 +526,15 @@ class NFTTrainer(DiffusersTrainer):
                             r = torch.clamp(normalized_advantages_clip, 0, 1)
 
                             positive_prediction = (
-                                self.config.train.train_policy.kl_beta
+                                self.config.policy.diffusers.nft_beta
                                 * forward_prediction
-                                + (1 - self.config.train.train_policy.kl_beta)
+                                + (1 - self.config.policy.diffusers.nft_beta)
                                 * old_prediction.detach()
                             )
                             implicit_negative_prediction = (
-                                (1.0 + self.config.train.train_policy.kl_beta)
+                                (1.0 + self.config.policy.diffusers.nft_beta)
                                 * old_prediction.detach()
-                                - self.config.train.train_policy.kl_beta
+                                - self.config.policy.diffusers.nft_beta
                                 * forward_prediction
                             )
 
@@ -568,10 +568,10 @@ class NFTTrainer(DiffusersTrainer):
                             ori_policy_loss = (
                                 r
                                 * positive_loss
-                                / self.config.train.train_policy.kl_beta
+                                / self.config.policy.diffusers.nft_beta
                                 + (1.0 - r)
                                 * negative_loss
-                                / self.config.train.train_policy.kl_beta
+                                / self.config.policy.diffusers.nft_beta
                             )
                             policy_loss = (
                                 ori_policy_loss
