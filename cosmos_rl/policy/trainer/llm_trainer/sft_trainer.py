@@ -431,8 +431,8 @@ class SFTTrainer(LLMTrainer):
                 os.environ.get("COSMOS_LOSS_ALL_REDUCE_CPU", "0") == "1"
             )
             if use_cpu_for_reduce:
-                global_avg_loss = loss_flat.clone().cpu()
-                global_max_loss = loss_flat.clone().cpu()
+                global_avg_loss = loss_flat.cpu()
+                global_max_loss = loss_flat.cpu()
             else:
                 global_avg_loss = loss_flat.clone().to(self.device)
                 global_max_loss = loss_flat.clone().to(self.device)
