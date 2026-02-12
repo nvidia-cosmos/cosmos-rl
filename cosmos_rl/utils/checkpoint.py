@@ -781,11 +781,15 @@ class CheckpointMananger:
                         # Support both epoch and step based naming
                         if epoch is not None:
                             step_safetensors_path = os.path.join(
-                                self.config.train.output_dir, "safetensors", f"epoch_{epoch}"
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"epoch_{epoch}",
                             )
                         else:
                             step_safetensors_path = os.path.join(
-                                self.config.train.output_dir, "safetensors", f"step_{step}"
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"step_{step}",
                             )
                         if os.path.islink(best_safetensors_link):
                             os.unlink(best_safetensors_link)

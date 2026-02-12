@@ -903,7 +903,6 @@ class TrainingConfig(BaseModel):
         if (
             self.optm_warmup_epochs is not None and self.optm_warmup_steps != 20
         ):  # 20 is the default
-
             logger.warning(
                 f"Both optm_warmup_epochs ({self.optm_warmup_epochs}) and optm_warmup_steps ({self.optm_warmup_steps}) are set. "
                 f"optm_warmup_epochs will take priority and optm_warmup_steps will be ignored."
