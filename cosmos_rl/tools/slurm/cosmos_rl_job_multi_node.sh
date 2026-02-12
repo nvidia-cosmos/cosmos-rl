@@ -88,6 +88,7 @@ srun \
     -e ${OUTDIR}/%j/policy/%t.err \
     bash -c \
     '
+    export NCCL_DEBUG=INFO
     cd $(python -c "import logging;logging.disable(logging.CRITICAL);import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
     python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
