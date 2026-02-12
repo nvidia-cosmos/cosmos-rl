@@ -427,19 +427,39 @@ class SFTTrainer(LLMTrainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            global_avg_loss = loss_flat.clone().to(self.device)
-            global_max_loss = loss_flat.clone().to(self.device)
+            use_cpu_for_reduce = (
+                os.environ.get("COSMOS_LOSS_ALL_REDUCE_CPU", "0") == "1"
+            )
+            if use_cpu_for_reduce:
+                global_avg_loss = loss_flat.clone().cpu()
+                global_max_loss = loss_flat.clone().cpu()
+            else:
+                global_avg_loss = loss_flat.clone().to(self.device)
+                global_max_loss = loss_flat.clone().to(self.device)
+
             if self.parallel_dims.dp_shard_enabled or self.parallel_dims.cp_enabled:
-                torch.distributed.all_reduce(
-                    global_avg_loss,
-                    op=torch.distributed.ReduceOp.AVG,
-                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
-                )
-                torch.distributed.all_reduce(
-                    global_max_loss,
-                    op=torch.distributed.ReduceOp.MAX,
-                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
-                )
+                if use_cpu_for_reduce:
+                    global_avg_loss = dist_util.all_reduce_tensor_object_cpu(
+                        global_avg_loss,
+                        op=dist.ReduceOp.AVG,
+                        group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                    )
+                    global_max_loss = dist_util.all_reduce_tensor_object_cpu(
+                        global_max_loss,
+                        op=dist.ReduceOp.MAX,
+                        group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                    )
+                else:
+                    torch.distributed.all_reduce(
+                        global_avg_loss,
+                        op=torch.distributed.ReduceOp.AVG,
+                        group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                    )
+                    torch.distributed.all_reduce(
+                        global_max_loss,
+                        op=torch.distributed.ReduceOp.MAX,
+                        group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
+                    )
             if self.parallel_dims.dp_replicate_enabled:
                 if (
                     not (
@@ -447,16 +467,28 @@ class SFTTrainer(LLMTrainer):
                         or self.parallel_dims.cp_enabled
                     )
                 ) or self.parallel_dims.mesh["dp_shard_cp"].get_local_rank() == 0:
-                    torch.distributed.all_reduce(
-                        global_avg_loss,
-                        op=torch.distributed.ReduceOp.AVG,
-                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
-                    )
-                    torch.distributed.all_reduce(
-                        global_max_loss,
-                        op=torch.distributed.ReduceOp.MAX,
-                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
-                    )
+                    if use_cpu_for_reduce:
+                        global_avg_loss = dist_util.all_reduce_tensor_object_cpu(
+                            global_avg_loss,
+                            op=dist.ReduceOp.AVG,
+                            group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                        )
+                        global_max_loss = dist_util.all_reduce_tensor_object_cpu(
+                            global_max_loss,
+                            op=dist.ReduceOp.MAX,
+                            group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                        )
+                    else:
+                        torch.distributed.all_reduce(
+                            global_avg_loss,
+                            op=torch.distributed.ReduceOp.AVG,
+                            group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                        )
+                        torch.distributed.all_reduce(
+                            global_max_loss,
+                            op=torch.distributed.ReduceOp.MAX,
+                            group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                        )
             global_avg_loss = global_avg_loss.cpu()
             global_max_loss = global_max_loss.cpu()
 
