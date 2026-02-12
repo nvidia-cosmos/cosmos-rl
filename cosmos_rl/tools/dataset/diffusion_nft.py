@@ -122,18 +122,24 @@ class DiffusionNFTDataPacker(BaseDataPacker):
         # Batching the list of rollouts into a single input for the policy
         # Only extra_info is needed for diffusion NFT
         for s in sample:
-            s.extra_info["advantages"] = torch.tensor(s.advantage)
+            s.extra_info["advantages"] = torch.tensor(s.advantage, device=device)
+            s.extra_info["rewards"] = torch.tensor(s.reward, device=device)
+            s.extra_info["prompts"] = s.prompt
+            s.extra_info["completions"] = s.completion
 
         inputs_list = [rollout.extra_info for rollout in sample]
         collated_samples = {}
         for k in inputs_list[0].keys():
             if isinstance(inputs_list[0][k], str):
-                collated_samples[k] = inputs_list[0][k]
+                collated_samples[k] = [s[k] for s in inputs_list]
             elif isinstance(inputs_list[0][k], dict):
-                collated_samples[k] = {
-                    sk: torch.stack([s[k][sk] for s in inputs_list], dim=0)
-                    for sk in inputs_list[0][k]
-                }
+                if "prompt" in inputs_list[0][k].keys():
+                    collated_samples[k] = [s[k]["prompt"] for s in inputs_list]
+                else:  # metadata dict
+                    collated_samples[k] = {
+                        sk: torch.stack([s[k][sk] for s in inputs_list], dim=0)
+                        for sk in inputs_list[0][k]
+                    }
             elif inputs_list[0][k] is None:
                 collated_samples[k] = None
             else:

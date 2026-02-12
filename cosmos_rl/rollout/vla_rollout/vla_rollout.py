@@ -72,15 +72,17 @@ def get_simulator_type(config: Config) -> str:
     Returns:
         "b1k" or "libero"
     """
-    subset = config.validation.dataset.subset.lower()
-    if "b1k" in subset:
+    dataset = config.validation.dataset.name.lower()
+    if "b1k" in dataset:
         return "b1k"
-    elif "libero" in subset:
+    elif "libero" in dataset:
         return "libero"
+    elif "robotwin" in dataset:
+        return "robotwin"
     else:
         # Default to libero for backward compatibility
         logger.warning(
-            f"Unknown dataset subset '{subset}', defaulting to libero simulator"
+            f"Unknown dataset subset '{dataset}', defaulting to libero simulator"
         )
         return "libero"
 
@@ -111,6 +113,10 @@ def extract_simulator_config(config: Config):
 
         cfg.task_suite_name = config.validation.dataset.subset
         cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+    elif sim_type == "robotwin":
+        # Robotwin-specific config
+        cfg.task_suite_name = config.validation.dataset.subset
+        cfg.max_steps = 200
 
     return cfg
 
@@ -153,7 +159,6 @@ class OpenVLARollout(RolloutBase):
             # - "fork": causes segmentation fault (GPU contexts copied in bad state)
             # Solution: Run in-process
             use_subprocess = False
-            logger.info("Initializing B1K simulator in-process (no subprocess)")
         elif sim_type == "libero":
             from cosmos_rl.simulators.libero.env_wrapper import (
                 LiberoEnvWrapper as EnvWrapperCls,
@@ -161,7 +166,13 @@ class OpenVLARollout(RolloutBase):
 
             # Libero works fine in subprocess with spawn method
             use_subprocess = True
-            logger.info("Initializing LIBERO simulator in subprocess (spawn)")
+        elif sim_type == "robotwin":
+            from cosmos_rl.simulators.robotwin.env_wrapper import (
+                RoboTwinEnvWrapper as EnvWrapperCls,
+            )
+
+            # Robotwin works fine in subprocess with spawn method
+            use_subprocess = True
         else:
             raise ValueError(f"Invalid simulator type: {sim_type}")
 
@@ -270,6 +281,8 @@ class OpenVLARollout(RolloutBase):
                 enqueue_payload_list, available_env_ids, is_validation
             )
         for key in self.obs_keys:
+            if init_results[key] is None:
+                continue
             if sim_results[key] is None:
                 data_shape = (
                     self.num_envs,
@@ -297,6 +310,8 @@ class OpenVLARollout(RolloutBase):
                 wait_env_ids
             )
             for key in self.obs_keys:
+                if images_and_states.get(key) is None:
+                    continue
                 if sim_results[key] is None:
                     data_shape = (
                         self.num_envs,
@@ -367,6 +382,8 @@ class OpenVLARollout(RolloutBase):
                 active_env_ids = [active_env_ids[i] for i in active_indices]
                 finished_payloads += len(finished_env_ids)
                 for key in self.obs_keys:
+                    if step_results.get(key) is None:
+                        continue
                     data_shape = (
                         self.num_envs,
                         *step_results[key][active_indices].shape[1:],
@@ -434,7 +451,11 @@ class OpenVLARollout(RolloutBase):
 
             active_sim_results = {"task_descriptions": []}
             for k in self.obs_keys:
-                active_sim_results[k] = sim_results[k][active_env_ids]
+                active_sim_results[k] = (
+                    sim_results[k][active_env_ids]
+                    if sim_results[k] is not None
+                    else None
+                )
             for env_id in active_env_ids:
                 active_sim_results["task_descriptions"].append(
                     sim_results["task_descriptions"][env_id]
@@ -444,12 +465,14 @@ class OpenVLARollout(RolloutBase):
             with self.tracing_manager.trace(
                 "inference", env_ids=active_env_ids, batch_size=len(active_env_ids)
             ):
-                vla_input = self.model.process_input(active_sim_results)
+                vla_input = self.model.process_input(
+                    active_sim_results, self.config.vla.unnorm_key
+                )
                 vla_output = self.model.generate_action(
                     vla_input,
                     is_valid=is_validation,
                     temperature=self.config.rollout.sampling_config.temperature,
-                    unnorm_key="libero_10_no_noops",
+                    unnorm_key=self.config.vla.unnorm_key,
                 )
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]

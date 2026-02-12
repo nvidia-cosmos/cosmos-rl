@@ -393,6 +393,34 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
     return obj_lst
 
 
+def all_reduce_tensor_object_cpu(
+    tensor_obj: torch.Tensor,
+    op=dist.ReduceOp.SUM,
+    device=torch.device("cpu"),
+    group=None,
+) -> torch.Tensor:
+    """
+    Reduce an object from all processes to the source process.
+    The object is first converted to a list and then reduced.
+    """
+    obj = tensor_obj.flatten().tolist()
+    gathered_obj_lst = all_gather_object_cpu(obj, device=device, group=group)
+    data = torch.tensor(gathered_obj_lst)
+    if op == dist.ReduceOp.SUM:
+        tensor = data.sum(dim=0)
+    elif op == dist.ReduceOp.PRODUCT:
+        tensor = data.prod(dim=0)
+    elif op == dist.ReduceOp.MIN:
+        tensor = data.min(dim=0).values
+    elif op == dist.ReduceOp.MAX:
+        tensor = data.max(dim=0).values
+    elif op == dist.ReduceOp.AVG:
+        tensor = data.mean(dim=0)
+    else:
+        raise ValueError(f"Unsupported reduce operation: {op}")
+    return tensor.view(tensor_obj.shape)
+
+
 class HighAvailabilitylNccl:
     DESTROY_CMD = "destroy"
 

@@ -8,7 +8,7 @@ is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.lora]
-lora_names = ["default", "ref"]
+lora_names = ["default", "old"]
 r = 32
 lora_alpha = 64
 init_lora_weights = "gaussian"
@@ -41,17 +41,18 @@ deterministic_sampling = true
 
 [rollout]
 backend = "diffusion_nft_rollout"
-n_generation = 4
+n_generation = 12
 
 [logging]
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
+multi_modal_log_interval = 10
 
 [train]
 non_text = true
 resume = false
-train_batch_per_replica = 4
+train_batch_per_replica = 32  # 4*8
 epoch = 10
 output_dir = "./outputs/cosmos-predict2-5_2b-medium_720_nft"
 epsilon = 1e-8
@@ -71,6 +72,7 @@ compile = false
 type = "grpo"
 trainer_type = "diffusion_nft"
 use_remote_reward = true
+uncentralized_training = true
 dataset.name = "pickscore"
 dataset.split = "train"
 kl_beta = 1.0
@@ -96,13 +98,13 @@ dataset.split = "test"
 [rollout.parallelism]
 n_init_replicas = 1
 tp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1

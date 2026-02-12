@@ -1311,7 +1311,13 @@ def aggregate_report_data(
     for k in all_keys:
         prefixed_k = f"{prefix}{k}" if prefix else k
         if prefixed_k not in report_data:
-            if k.endswith("_max"):
+            if k in ["rollout_images", "rollout_videos"]:
+                # Only the data from master rank contains the images/videos, so we can directly use it without aggregation.
+                for data in report_data_list:
+                    if k in data:
+                        report_data[prefixed_k] = data[k]
+                        break
+            elif k.endswith("_max"):
                 report_data[prefixed_k] = np.max(
                     [data.get(k, 0) for data in report_data_list]
                 )
@@ -1337,9 +1343,12 @@ def aggregate_report_data(
     return report_data
 
 
-def copy_weights(src_params, tgt_params):
+def copy_weights_with_decay(src_params, tgt_params, decay=0.0):
     for src_param, tgt_param in zip(src_params, tgt_params, strict=True):
-        tgt_param.data.copy_(src_param.detach().data)
+        tgt_param.data.copy_(
+            tgt_param.detach().data * decay
+            + src_param.detach().clone().data * (1.0 - decay)
+        )
         assert src_param is not tgt_param
 
 

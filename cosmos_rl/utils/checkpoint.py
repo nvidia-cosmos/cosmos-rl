@@ -380,7 +380,7 @@ class CheckpointMananger:
     def load_extra_info(extra_info_path: str):
         if os.path.exists(extra_info_path):
             with open(extra_info_path, "rb") as f:
-                extra_info = torch.load(f, weights_only=False)
+                extra_info = torch.load(f, weights_only=False, map_location="cpu")
             return extra_info
         else:
             logger.warning(f"Extra info file {extra_info_path} does not exist.")
@@ -391,9 +391,11 @@ class CheckpointMananger:
         for key, value in state_dict.items():
             if isinstance(value, torch.Tensor):
                 state_dict_cpu[key] = value.cpu()
+            elif isinstance(value, dict):
+                state_dict_cpu[key] = self.offload_state_dict_cpu(value)
             else:
                 state_dict_cpu[key] = value
-        return state_dict
+        return state_dict_cpu
 
     def finalize(self) -> None:
         """Wait for any pending async checkpoint saves/uploads to finish.
@@ -624,20 +626,35 @@ class CheckpointMananger:
                             training_steps=extra_vars["total_steps"]
                         )
                         new_scheduler.load_state_dict(
-                            torch.load(scheduler_path, weights_only=False)
+                            torch.load(
+                                scheduler_path, weights_only=False, map_location="cpu"
+                            )
                         )
                     else:
                         scheduler.load_state_dict(
-                            torch.load(scheduler_path, weights_only=False)
+                            torch.load(
+                                scheduler_path, weights_only=False, map_location="cpu"
+                            )
                         )
                         new_scheduler = scheduler
 
                     model.load_state_dict(
-                        torch.load(model_path, weights_only=False), strict=strict
+                        torch.load(model_path, weights_only=False, map_location="cpu"),
+                        strict=strict,
                     )
                     optimizer.load_state_dict(
-                        torch.load(optimizer_path, weights_only=False)
+                        torch.load(
+                            optimizer_path, weights_only=False, map_location="cpu"
+                        )
                     )
+
+                    # Release CUDA cached memory to avoid fragmentation-induced
+                    # OOM during the first training step after resume.
+                    import gc
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )

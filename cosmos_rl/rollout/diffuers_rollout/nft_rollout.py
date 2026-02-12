@@ -67,6 +67,10 @@ class NFTRollout(RolloutBase):
         *args,
         **kwargs,
     ) -> List[RolloutResult]:
+        self.model.transformer.eval()  # set transformer to eval mode for rollout
+        self.model.transformer.set_adapter(
+            "default"
+        )  # ensure using the default adapter for rollout
         response = []
         for pl in payloads:
             prompts, metadatas = data_packer.get_rollout_input(
@@ -87,7 +91,7 @@ class NFTRollout(RolloutBase):
                 return_tensors="pt",
             ).input_ids.to(self.device)
 
-            self.model.transformer.set_adapter("ref")
+            self.model.transformer.set_adapter("old")
             # Create generators with random seeds for each generation to ensure diversity
             generators = [
                 torch.Generator(device=self.device).manual_seed(

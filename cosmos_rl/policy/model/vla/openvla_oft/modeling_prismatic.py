@@ -6,7 +6,6 @@ Inherits from the default `transformers.PretrainedModel`. Meant to be standalone
 but exactly replicate the logic in `prismatic.models.vlms.prismatic.py`.
 """
 
-import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
@@ -36,9 +35,6 @@ from .constants import (
 )
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
-
-# Set up logger
-logger = logging.getLogger(__name__)
 
 
 # === Utility Functions for Monkey-Patching ===
@@ -593,6 +589,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         )
 
         multimodal_attention_mask = None
+        multimodal_position_ids = None
         if attention_mask is not None:
             # Build 2D mask
             multimodal_attention_mask_2d = torch.cat(
@@ -604,12 +601,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 dim=1,
             )
 
-            # Convert to 4D bidirectional mask for OpenVLA-OFT compatibility
+            # Compute position IDs from 2D mask (matching RLinf implementation)
+            multimodal_position_ids = (
+                multimodal_attention_mask_2d.long().cumsum(-1) - 1
+            ).masked_fill(multimodal_attention_mask_2d == 0, 1)
+
+            # Convert to 4D bidirectional mask for standard transformers
             multimodal_attention_mask = self._convert_to_bidirectional_4d_mask(
                 multimodal_attention_mask_2d
             )
 
-        return multimodal_embeddings, multimodal_attention_mask
+        return multimodal_embeddings, multimodal_attention_mask, multimodal_position_ids
 
     def _build_multimodal_labels(self, labels, projected_patch_embeddings):
         """Build multimodal labels with IGNORE_INDEX for patch embeddings"""
@@ -922,7 +924,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         input_embeddings = input_embeddings * ~all_actions_mask
 
         # Build multimodal embeddings and attention mask
-        multimodal_embeddings, multimodal_attention_mask = (
+        multimodal_embeddings, multimodal_attention_mask, _ = (
             self._build_multimodal_attention(
                 input_embeddings, projected_patch_embeddings, attention_mask
             )
@@ -1437,10 +1439,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
             # Build multimodal embeddings and attention mask
             # Use the same function as generate_action to ensure train/inference consistency
-            multimodal_embeddings, multimodal_attention_mask = (
-                self._build_multimodal_attention(
-                    input_embeddings, projected_patch_embeddings, attention_mask
-                )
+            (
+                multimodal_embeddings,
+                multimodal_attention_mask,
+                _,
+            ) = self._build_multimodal_attention(
+                input_embeddings, projected_patch_embeddings, attention_mask
             )
 
             # Forward pass through language model
@@ -1640,10 +1644,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
 
             # Build multimodal embeddings and attention mask
-            multimodal_embeddings, multimodal_attention_mask = (
-                self._build_multimodal_attention(
-                    input_embeddings, projected_patch_embeddings, attention_mask
-                )
+            (
+                multimodal_embeddings,
+                multimodal_attention_mask,
+                _,
+            ) = self._build_multimodal_attention(
+                input_embeddings, projected_patch_embeddings, attention_mask
             )
 
             # Forward pass through language model
@@ -1700,7 +1706,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = input_embeddings * ~all_actions_mask
 
         # Build multimodal embeddings and attention mask
-        multimodal_embeddings, multimodal_attention_mask = (
+        multimodal_embeddings, multimodal_attention_mask, _ = (
             self._build_multimodal_attention(
                 input_embeddings, projected_patch_embeddings, attention_mask
             )
@@ -1781,7 +1787,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = input_embeddings * ~all_actions_mask
 
         # Build multimodal embeddings and attention mask
-        multimodal_embeddings, multimodal_attention_mask = (
+        multimodal_embeddings, multimodal_attention_mask, _ = (
             self._build_multimodal_attention(
                 input_embeddings, projected_patch_embeddings, attention_mask
             )
@@ -1878,8 +1884,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             # padding + only get last 256 token end
 
             predicted_action_token_ids = reponse_ids.cpu().numpy()
+            action_logits_last256 = response_last256
 
-            logprobs = None
+            logprobs = torch.zeros_like(response_last256, dtype=torch.float16)
         else:
             # assert temperature > 0
             # org
@@ -1893,6 +1900,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             action_logits = language_model_output.logits[
                 torch.arange(batch_size, device=device).unsqueeze(-1), seq_indices, :
             ]
+
             # padding
             # scaled_logits = action_logits / temperature
             # probs = torch.softmax(scaled_logits, dim=-1)
@@ -1921,7 +1929,6 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
 
             # padding + only get last 256 token end
-
             predicted_action_token_ids = reponse_ids.cpu().numpy()
 
         discretized_actions = self.vocab_size - predicted_action_token_ids

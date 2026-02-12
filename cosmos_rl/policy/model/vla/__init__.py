@@ -23,11 +23,9 @@ from transformers import AutoConfig
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
-
+import numpy as np
 from .processing_utils import (
-    normalize_gripper_action,
-    invert_gripper_action,
-    obs_to_vla_input,
+    normalize_proprio,
     center_crop_image,
 )
 
@@ -39,6 +37,20 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import resolve_model_path
+
+
+def _find_or_get_model_path_file(name_or_path: str, subpath: str):
+    local_model_path = resolve_model_path(name_or_path)
+    file_path = os.path.join(local_model_path, subpath)
+    if not os.path.exists(file_path):
+        from huggingface_hub import hf_hub_download
+
+        file_path = hf_hub_download(
+            repo_id=name_or_path,
+            filename=subpath,
+            repo_type="model",
+        )
+    return file_path
 
 
 @ModelRegistry.register(VLAWeightMapper)
@@ -186,13 +198,6 @@ class OpenVLA(BaseModel):
             Output with logits: (batch*steps, output_len, 256) if return_action_logits_only
                           else: (batch*steps, output_len, vocab_size)
         """
-        # if torch.distributed.get_rank() == 0:
-        #     logger.info(f"input_ids {input_ids.shape}, {input_ids.dtype}, {input_ids}")
-        #     logger.info(f"attention_mask {attention_mask.shape}, {attention_mask[0].dtype}, {attention_mask}")
-        #     logger.info(f"pixel_values {pixel_values.shape}, {pixel_values[0].dtype}, {pixel_values}")
-        #     logger.info(f"labels {labels.shape}, {labels[0].dtype}, {labels}")
-        #     logger.info(f"temperature {temperature}")
-
         # Use autocast to compute in bfloat16 (params are stored in float32 via master_dtype)
         outputs = self.forward(
             input_ids=input_ids,
@@ -221,9 +226,6 @@ class OpenVLA(BaseModel):
         logpy = torch.gather(logp, dim=-1, index=labels_remapped.unsqueeze(-1))
         logpy = logpy.squeeze(-1)
         entropy = -(probs * logp).sum(dim=-1)  # (batch, seq_len)
-
-        # if torch.distributed.get_rank() == 0:
-        #     logger.info(f"rollout_log_probs {logp.shape}, rollout_log_probs {logp}")
 
         outputs.logits = logits
         outputs.entropy = entropy
@@ -286,18 +288,9 @@ class OpenVLA(BaseModel):
 
         norm_stats = hf_config.norm_stats if hasattr(hf_config, "norm_stats") else None
         try:
-            local_model_path = resolve_model_path(name_or_path)
-            dataset_statistics_path = os.path.join(
-                local_model_path, "dataset_statistics.json"
+            dataset_statistics_path = _find_or_get_model_path_file(
+                name_or_path, "dataset_statistics.json"
             )
-            if not os.path.exists(dataset_statistics_path):
-                from huggingface_hub import hf_hub_download
-
-                dataset_statistics_path = hf_hub_download(
-                    repo_id=name_or_path,
-                    filename="dataset_statistics.json",
-                    repo_type="model",
-                )
             with open(dataset_statistics_path, "r") as f:
                 norm_stats = json.load(f)
         except Exception as e:
@@ -402,12 +395,12 @@ class OpenVLA(BaseModel):
             if isinstance(m, torch.distributed.fsdp.FSDPModule):
                 m.set_reshard_after_forward(reshard_after_forward)
 
-    def _replace_rope_modules_float32(self):
-        """Replace RoPE modules with fresh float32 versions.
+    def _replace_rope_modules(self, dtype: torch.dtype = torch.float32):
+        """Replace RoPE modules with fresh versions in the specified dtype.
 
-        After model.to(dtype=bfloat16), RoPE buffers are incorrectly converted to bfloat16.
-        This method simply replaces the entire RoPE module with a fresh one that has
-        correct float32 buffers. Much simpler than selective dtype conversion!
+        Args:
+            dtype: Target dtype for inv_freq buffers. Use torch.float32 for
+                   numerical precision, or torch.bfloat16 to match RLinf behavior.
         """
         try:
             from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
@@ -422,8 +415,10 @@ class OpenVLA(BaseModel):
             device = next(self.model.parameters()).device
             llm_config = self.model.language_model.model.config
 
-            # Create fresh RoPE module with float32 buffers
+            # Create fresh RoPE module (always initialized in fp32)
             new_rope = LlamaRotaryEmbedding(config=llm_config, device=device)
+            if dtype != torch.float32:
+                new_rope.inv_freq = new_rope.inv_freq.to(dtype)
 
             replaced_count = 0
 
@@ -432,7 +427,7 @@ class OpenVLA(BaseModel):
                 old_dtype = self.model.language_model.model.rotary_emb.inv_freq.dtype
                 self.model.language_model.model.rotary_emb = new_rope
                 logger.debug(
-                    f"Replaced top-level rotary_emb: {old_dtype} → {new_rope.inv_freq.dtype}"
+                    f"Replaced top-level rotary_emb: {old_dtype} -> {new_rope.inv_freq.dtype}"
                 )
                 replaced_count += 1
 
@@ -536,6 +531,30 @@ class OpenVLA(BaseModel):
                     raise FileNotFoundError(
                         f"No safetensors or pytorch_model.bin found in {model_path}"
                     )
+
+            # Load proprio_projector weights from separate checkpoint if available
+            # These are stored in a separate file (e.g., proprio_projector-10000_checkpoint.pt)
+            # and need to be merged into the main state_dict with the correct prefix
+            if getattr(self.hf_config, "use_proprio", False):
+                from cosmos_rl.policy.model.vla.openvla_oft.train_utils import (
+                    find_checkpoint_file,
+                    load_component_state_dict,
+                )
+
+                try:
+                    proprio_ckpt_path = find_checkpoint_file(
+                        str(model_path), "proprio_projector"
+                    )
+                    proprio_state_dict = load_component_state_dict(proprio_ckpt_path)
+                    # Prefix keys with "proprio_projector." to match model state dict
+                    for k, v in proprio_state_dict.items():
+                        state_dict[f"proprio_projector.{k}"] = v
+                    logger.info(
+                        f"Merged proprio_projector weights from {proprio_ckpt_path} "
+                        f"({len(proprio_state_dict)} params)"
+                    )
+                except (AssertionError, FileNotFoundError) as e:
+                    logger.warning(f"Could not load proprio_projector checkpoint: {e}")
 
             # Load state dict into model using FSDP-compatible method
             # Following HFModel's pattern: use weight converter to shard tensors
@@ -646,10 +665,6 @@ class OpenVLA(BaseModel):
                 logger.warning(f"⚠️  {len(unexpected_keys)} unexpected keys")
                 logger.warning(f"   First 10: {unexpected_keys[:10]}")
 
-        # Setup VLA-specific features (only needed for from_pretrained path)
-        # For direct state_dict loading, these features should already be in the checkpoint
-        # self._setup_vla_specific_features(model_name_or_path, hf_model)
-
         # Load processor
         try:
             self.processor = PrismaticProcessor.from_pretrained(
@@ -661,7 +676,7 @@ class OpenVLA(BaseModel):
 
         # Load normalization stats
         self._load_vla_norm_stats(model_name_or_path)
-        self._replace_rope_modules_float32()
+        self._replace_rope_modules()
 
     def _setup_vla_specific_features(self, model_name_or_path: str, hf_model):
         """Setup VLA-specific features after weight loading"""
@@ -669,19 +684,10 @@ class OpenVLA(BaseModel):
             # OFT-specific setup
             if self.hf_config.use_proprio:
                 if hasattr(hf_model, "load_proprio_projector_weights"):
-                    hf_model.load_proprio_projector_weights(model_name_or_path)
+                    hf_model.load_proprio_projector_weights(
+                        resolve_model_path(model_name_or_path)
+                    )
                     logger.info("Loaded pre-trained proprio projector weights")
-
-                if hasattr(hf_model, "vision_backbone") and hasattr(
-                    hf_model.vision_backbone, "set_num_images_in_input"
-                ):
-                    num_images = self.hf_config.num_images_in_input
-                    hf_model.vision_backbone.set_num_images_in_input(num_images)
-                    logger.info(f"Set num_images_in_input to {num_images}")
-
-            # Copy norm stats if available
-            if hasattr(hf_model, "norm_stats"):
-                self.norm_stats = hf_model.norm_stats
 
         except Exception as e:
             logger.warning(f"VLA-specific setup failed: {e}")
@@ -807,7 +813,9 @@ class OpenVLA(BaseModel):
         )
         return nparams, int(total_flops)
 
-    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def process_input(
+        self, inputs: Dict[str, Any], unnorm_key: str
+    ) -> Dict[str, torch.Tensor]:
         """
         Process inputs for VLA model (matching SimpleVLA-RL's process_input)
 
@@ -818,6 +826,7 @@ class OpenVLA(BaseModel):
         Returns:
             Processed batch data for VLA model
         """
+
         full_images = inputs["full_images"]
         wrist_images = inputs["wrist_images"]
         task_descriptions = inputs["task_descriptions"]
@@ -825,11 +834,12 @@ class OpenVLA(BaseModel):
         vla_type = self.hf_config.vla_type
 
         batchdata = {"input_ids": [], "attention_mask": [], "pixel_values": []}
+        if self.hf_config.use_proprio:
+            batchdata["proprio"] = []
 
         batch_size = full_images.shape[0]
         for i in range(batch_size):
-            full_image = obs_to_vla_input(full_images[i])
-            full_image = Image.fromarray(full_image).convert("RGB")
+            full_image = Image.fromarray(np.array(full_images[i])).convert("RGB")
             full_image = center_crop_image(full_image)
             desp = task_descriptions[i]
 
@@ -845,8 +855,7 @@ class OpenVLA(BaseModel):
                 hasattr(self.hf_config, "use_wrist_camera")
                 and self.hf_config.use_wrist_camera
             ):
-                wrist_image = obs_to_vla_input(wrist_images[i])
-                wrist_image = Image.fromarray(wrist_images[i]).convert("RGB")
+                wrist_image = Image.fromarray(np.array(wrist_images[i])).convert("RGB")
                 wrist_image = center_crop_image(wrist_image)
                 wrist_feature = self.processor(prompt, wrist_image)
                 pixel_values = torch.cat(
@@ -884,6 +893,14 @@ class OpenVLA(BaseModel):
             batchdata["input_ids"].append(input_ids)
             batchdata["attention_mask"].append(attention_mask)
             batchdata["pixel_values"].append(pixel_values)
+
+            # Process proprioception
+            if self.hf_config.use_proprio:
+                state = inputs["states"][i]
+                norm_proprio = normalize_proprio(
+                    state, self.norm_stats[unnorm_key]["proprio"]
+                )
+                batchdata["proprio"].append(torch.from_numpy(norm_proprio))
 
         # Device placement
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -925,7 +942,6 @@ class OpenVLA(BaseModel):
             batchdata["attention_mask"] = torch.gather(
                 batchdata["attention_mask"], 1, sorted_indices
             )
-
             batchdata["pixel_values"] = torch.cat(batchdata["pixel_values"], dim=0).to(
                 device
             )
@@ -933,6 +949,9 @@ class OpenVLA(BaseModel):
             # Standard batch processing
             for key in ["input_ids", "attention_mask", "pixel_values"]:
                 batchdata[key] = torch.cat(batchdata[key], dim=0).to(device)
+
+        if self.hf_config.use_proprio:
+            batchdata["proprio"] = torch.stack(batchdata["proprio"], dim=0).to(device)
         return batchdata
 
     def generate_action(
@@ -960,9 +979,6 @@ class OpenVLA(BaseModel):
                 unnorm_key=unnorm_key,
                 temperature=temperature,
             )
-
-            actions = normalize_gripper_action(actions)
-            actions = invert_gripper_action(actions)
 
             return {
                 "action": actions,

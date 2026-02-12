@@ -16,7 +16,7 @@
 
 import numpy as np
 import os
-import tempfile
+import random
 from functools import partial
 from PIL import Image
 from typing import Optional, Dict, Any, List
@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any, List
 import torch
 
 import cosmos_rl.utils.distributed as dist_util
+import cosmos_rl.utils.report.metrics_collection as metrics_collection
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -35,12 +36,19 @@ from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.util import copy_weights, is_master_rank
-from cosmos_rl.utils.wandb_logger import log_wandb
+from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
+from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
 
+try:
+    import imageio
+except ImportError:
+    logger.warning(
+        "imageio is not installed, video logging will not work. Install it with `pip install imageio` if needed."
+    )
 
-def weight_copy_decay(step, decay_type):
+
+def get_weight_copy_decay(step, decay_type):
     if decay_type == 0:
         flat = 0
         uprate = 0.0
@@ -89,14 +97,14 @@ class NFTTrainer(DiffusersTrainer):
             self.config.policy.diffusers.weight_copy_decay_type
         )
         self.model.transformer.set_adapter("default")
-        # Create ref model for RL training
+        # Create old model for RL training
         self.trainable_params = self.model.trainable_params
-        self.model.transformer.set_adapter("ref")
-        self.ref_trainable_params = self.model.trainable_params
+        self.model.transformer.set_adapter("old")
+        self.old_trainable_params = self.model.trainable_params
         self.model.transformer.set_adapter("default")
-        copy_weights(
+        copy_weights_with_decay(
             src_params=self.trainable_params,
-            tgt_params=self.ref_trainable_params,
+            tgt_params=self.old_trainable_params,
         )
 
         # Create ema if needed
@@ -108,8 +116,14 @@ class NFTTrainer(DiffusersTrainer):
                 device=self.device,
             )
 
+        self.grpo_config = self.config.train.train_policy
+
+        # For iteration control
+        self.mini_batch = self.grpo_config.mini_batch
+        self.batch_size_per_optimize = self.grpo_config.batch_size_per_optimize
+
         # For GRPO
-        self.mu_iterations = self.config.train.train_policy.mu_iterations
+        self.mu_iterations = self.grpo_config.mu_iterations
         self.num_train_timesteps = int(
             self.config.policy.diffusers.sample.num_steps
             * self.config.policy.diffusers.timesteps_fraction
@@ -189,27 +203,17 @@ class NFTTrainer(DiffusersTrainer):
         # Add nccl allreduce operations for all parameters and necessary states.
         """
         with torch.cuda.stream(self.train_stream):
-            for model_part in self.model_parts:
-                # Model part may use same physical mesh for different logical mesh,
-                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
-                # So we need to do allreduce for each model part
-                if model_part is not None:
-                    dist_util.gradient_reduce_across_dp_replicas_(
-                        [p for p in model_part.parameters()], inter_policy_nccl
-                    )
+            dist_util.gradient_reduce_across_dp_replicas_(
+                self.trainable_params, inter_policy_nccl
+            )
             """
             Compute the global grad norm on all parameters and then apply
             gradient clipping using the global grad norm.
             """
             # Must pass empty list even if model_part is None,
             # GradNorm across pp stages will fail if some rank does not join the barrier
-            all_params = [
-                p
-                for m in [model for model in self.model_parts if model is not None]
-                for p in m.parameters()
-            ]
             grad_norm = dist_util.gradient_norm_clipping(
-                all_params,
+                self.trainable_params,
                 self.config.train.optm_grad_norm_clip,
                 foreach=True,
                 pp_mesh=self.parallel_dims.mesh["pp"]
@@ -223,40 +227,67 @@ class NFTTrainer(DiffusersTrainer):
 
     def report_mm_wandb(
         self,
-        mm_datas,
-        prompts,
-        rewards,
-        step: int,
+        mm_datas: torch.Tensor,
+        prompts: List[str],
+        rewards: torch.Tensor,
+        current_step: int,
     ):
-        """Log multimodal data to Weights & Biases (WandB) for visualization."""
+        """Log multimodal data to Weights & Biases (Wandb) for visualization."""
 
-        import wandb
+        mm_datas_cpu = mm_datas.detach().cpu()
+        num_to_log = min(15, len(mm_datas_cpu))
+        rewards_cpu = rewards.detach().cpu()
 
-        # TODO(dinghaoy): support video data
-        images_to_log = mm_datas.cpu()
-        prompts_to_log = prompts
-        rewards_to_log = rewards.cpu()
+        if self.model.is_video:
+            modality = "video"
+            sample_indices = random.sample(range(len(mm_datas_cpu)), num_to_log)
+            ext = "mp4"
+        else:
+            modality = "image"
+            sample_indices = list(range(num_to_log))  # log first N
+            ext = "jpg"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            num_to_log = min(15, len(images_to_log))
-            for idx in range(num_to_log):  # log first N
-                img_data = images_to_log[idx]
-                pil = Image.fromarray(
-                    (img_data.numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+        paths: List[str] = []
+        mm_data_dir = os.path.join(self.config.train.output_dir, "mm_data")
+        if not os.path.exists(mm_data_dir):
+            os.makedirs(mm_data_dir, exist_ok=True)
+        for out_idx, sample_idx in enumerate(sample_indices):
+            out_path = os.path.join(mm_data_dir, f"{current_step}_{out_idx}.{ext}")
+            if modality == "video":
+                video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
+                frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
+                imageio.mimsave(
+                    out_path,
+                    list(frames),
+                    fps=8,
+                    codec="libx264",
+                    format="FFMPEG",
                 )
-                pil = pil.resize((self.width, self.height))
-                pil.save(os.path.join(tmpdir, f"{idx}.jpg"))
+            else:
+                img = mm_datas_cpu[sample_idx].numpy().transpose(1, 2, 0)
+                pil = Image.fromarray((img * 255).astype(np.uint8))
+                pil.resize((self.width, self.height)).save(out_path)
+            paths.append(out_path)
 
-            data = {
-                "images": [
-                    wandb.Image(
-                        os.path.join(tmpdir, f"{idx}.jpg"),
-                        caption=f"{prompts_to_log[idx]:.100} | avg: {rewards_to_log[idx]:.2f}",
-                    )
-                    for idx in range(num_to_log)
-                ],
-            }
-            log_wandb(data, step)
+        if modality == "video":
+            data = [
+                {
+                    "path": p,
+                    "prompt": prompts[i],
+                    "reward": float(rewards_cpu[i]),
+                }
+                for p, i in zip(paths, sample_indices)
+            ]
+        else:
+            data = [
+                {
+                    "path": p,
+                    "prompt": prompts[i],
+                    "reward": float(rewards_cpu[i]),
+                }
+                for p, i in zip(paths, sample_indices)
+            ]
+        return data, modality
 
     def set_neg_prompt_embed(self):
         neg_text_embedding_dict = self.model.text_embedding(
@@ -294,12 +325,9 @@ class NFTTrainer(DiffusersTrainer):
             A dictionary of training metrics used for logging and reporting.
         """
         logger.debug(f"Starting training step {current_step}/{total_steps}")
-        loss_sum = torch.tensor(0.0, device=self.device)
-        kl_loss_sum = torch.tensor(0.0, device=self.device)
-        grad_norm_sum = torch.tensor(0.0, device=self.device)
-        loss_count = 0
-        grad_norm_count = 0
-
+        assert (
+            self.config.train.train_policy.kl_beta > 0.0
+        ), "KL beta must be greater than 0 for diffusion NFT training."
         if current_step == 1:
             self.set_neg_prompt_embed()
         # Pack the list of rollouts into a batch for training
@@ -311,6 +339,35 @@ class NFTTrainer(DiffusersTrainer):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
+
+        batch_size, num_timesteps = packed_train_batch["timesteps"].shape
+        per_optimize_batch_size = (
+            min(self.batch_size_per_optimize, batch_size)
+            if self.batch_size_per_optimize is not None
+            and self.batch_size_per_optimize > 0
+            else batch_size
+        )
+
+        def _slice_sample_batch(sample_batch: Dict[str, Any], index):
+            """Slice per-sample tensors in a packed batch dict.
+
+            Only tensors whose 0th dim matches the current batch size are sliced.
+            """
+
+            return {
+                k: (
+                    v[index]
+                    if isinstance(v, torch.Tensor) and v.shape[0] == batch_size
+                    else v
+                )
+                for k, v in sample_batch.items()
+            }
+
+        grad_norm_sum = torch.tensor(0.0, device=self.device)
+        grad_norm_count = 0
+
+        info_accumulated: Dict[str, List[torch.Tensor]] = {}
+
         # The cosmos-predict2.5 diffusers pipeline would set no_grad globally, so we need to re-enable it here
         with torch.enable_grad():
             for i_mu in range(self.mu_iterations):
@@ -319,17 +376,9 @@ class NFTTrainer(DiffusersTrainer):
                     if self.mu_iterations > 1
                     else f"Training step: {current_step}/{total_steps}"
                 )
-                # TODO(dinghaoy): support micro batching if needed
-                batch_size, num_timesteps = packed_train_batch["timesteps"].shape
 
                 # shuffle within the batch for better training stability
                 perm = torch.randperm(batch_size, device=self.device)
-
-                # TODO(dinghaoy): need better parallelism for diffusers pipeline (e.g., VAE, text encoder), need reduce D2D copies
-                for k, v in packed_train_batch.items():
-                    if isinstance(v, torch.Tensor) and v.device != self.device:
-                        logger.debug(f"Moving tensor {k} to device {self.device}")
-                        packed_train_batch[k] = v.to(self.device)
 
                 train_sample_batch = {
                     k: v[perm]
@@ -348,217 +397,335 @@ class NFTTrainer(DiffusersTrainer):
                     torch.arange(batch_size, device=self.device)[:, None], perms_time
                 ]
 
-                if self.config.policy.diffusers.sample.guidance_scale > 1.0:
-                    embeds = torch.cat(
-                        [
-                            self.neg_prompt_embed.repeat(batch_size, 1, 1),
-                            train_sample_batch["prompt_embeds"],
-                        ]
+                for i_opt in range(0, batch_size, per_optimize_batch_size):
+                    opt_end = min(i_opt + per_optimize_batch_size, batch_size)
+                    optimize_batch = _slice_sample_batch(
+                        train_sample_batch, slice(i_opt, opt_end)
                     )
-                    if self.neg_pooled_prompt_embed is not None:
-                        pooled_embeds = torch.cat(
-                            [
-                                self.neg_pooled_prompt_embed.repeat(batch_size, 1),
-                                train_sample_batch["pooled_prompt_embeds"],
-                            ]
+                    optimize_batch_size = opt_end - i_opt
+                    if optimize_batch_size <= 0:
+                        continue
+
+                    mini_batch_size = (
+                        min(self.mini_batch, optimize_batch_size)
+                        if self.mini_batch is not None and self.mini_batch > 0
+                        else optimize_batch_size
+                    )
+
+                    step_interval_env = os.environ.get(
+                        "COSMOS_NFT_STEP_INTERVAL",
+                        os.environ.get("COSMOS_GRPO_STEP_INTERVAL", None),
+                    )
+                    step_interval = (
+                        int(step_interval_env) if step_interval_env is not None else 0
+                    )
+                    local_mini_step = 0
+                    all_reduced = False
+
+                    for i_mini in range(0, optimize_batch_size, mini_batch_size):
+                        logger.debug(
+                            f"Mini batch {i_mini // mini_batch_size + 1}/{(optimize_batch_size + mini_batch_size - 1) // mini_batch_size} for optimize batch {i_opt // per_optimize_batch_size + 1}/{(batch_size + per_optimize_batch_size - 1) // per_optimize_batch_size}"
                         )
-                else:
-                    embeds = train_sample_batch["prompt_embeds"]
-                    pooled_embeds = train_sample_batch["pooled_prompt_embeds"]
+                        mini_end = min(i_mini + mini_batch_size, optimize_batch_size)
+                        mini_batch = {
+                            k: (
+                                v[slice(i_mini, mini_end)]
+                                if isinstance(v, torch.Tensor)
+                                and v.shape[0] == optimize_batch_size
+                                else v
+                            )
+                            for k, v in optimize_batch.items()
+                        }
+                        cur_mini_size = mini_end - i_mini
+                        loss_scaling_factor = cur_mini_size / optimize_batch_size
 
-                # Loop over timesteps for this micro-batch
-                for j_idx, j_timestep_orig_idx in enumerate(
-                    range(self.num_train_timesteps)
-                ):
-                    assert j_idx == j_timestep_orig_idx
-                    x0 = train_sample_batch["latents_clean"]
+                        if self.config.policy.diffusers.sample.guidance_scale > 1.0:
+                            embeds = torch.cat(
+                                [
+                                    self.neg_prompt_embed.repeat(cur_mini_size, 1, 1),
+                                    mini_batch["prompt_embeds"],
+                                ]
+                            )
+                            if self.neg_pooled_prompt_embed is not None:
+                                pooled_embeds = torch.cat(
+                                    [
+                                        self.neg_pooled_prompt_embed.repeat(
+                                            cur_mini_size, 1
+                                        ),
+                                        mini_batch["pooled_prompt_embeds"],
+                                    ]
+                                )
+                            else:
+                                pooled_embeds = None
+                        else:
+                            embeds = mini_batch["prompt_embeds"]
+                            pooled_embeds = mini_batch["pooled_prompt_embeds"]
 
-                    t = train_sample_batch["timesteps"][:, j_idx] / 1000.0
+                        for j_idx, j_timestep_orig_idx in enumerate(
+                            range(self.num_train_timesteps)
+                        ):
+                            assert j_idx == j_timestep_orig_idx
 
-                    t_expanded = t.view(-1, *([1] * (len(x0.shape) - 1)))
+                            x0 = mini_batch["latents_clean"]
+                            t = mini_batch["timesteps"][:, j_idx] / 1000.0
+                            t_expanded = t.view(-1, *([1] * (len(x0.shape) - 1)))
+                            noise = torch.randn_like(x0.float())
+                            xt = (1 - t_expanded) * x0 + t_expanded * noise
 
-                    noise = torch.randn_like(x0.float())
-
-                    xt = (1 - t_expanded) * x0 + t_expanded * noise
-
-                    self.model.transformer.set_adapter("ref")
-                    transformer_inputs = self.model.nft_prepare_transformer_input(
-                        latents=xt,
-                        prompt_embeds=embeds,
-                        pooled_prompt_embeds=pooled_embeds
-                        if pooled_embeds is not None
-                        else None,
-                        timestep=train_sample_batch["timesteps"][:, j_idx],
-                        num_frames=self.num_frames,
-                        height=self.height,
-                        width=self.width,
-                    )
-                    with torch.no_grad():
-                        # prediction v
-                        ref_prediction = self.model.transformer(**transformer_inputs)[
-                            0
-                        ].detach()
-                    self.model.transformer.set_adapter("default")
-
-                    forward_prediction = self.model.transformer(**transformer_inputs)[0]
-                    with torch.no_grad():  # Reference model part
-                        # For LoRA, disable adapter.
-                        if self.is_lora:
-                            if hasattr(self.model.transformer, "disable_adapters"):
-                                self.model.transformer.disable_adapters()
-                                ref_forward_prediction = self.model.transformer(
+                            self.model.transformer.set_adapter("old")
+                            transformer_inputs = (
+                                self.model.nft_prepare_transformer_input(
+                                    latents=xt,
+                                    prompt_embeds=embeds,
+                                    pooled_prompt_embeds=pooled_embeds
+                                    if pooled_embeds is not None
+                                    else None,
+                                    timestep=mini_batch["timesteps"][:, j_idx],
+                                    num_frames=self.num_frames,
+                                    height=self.height,
+                                    width=self.width,
+                                )
+                            )
+                            with torch.no_grad():
+                                old_prediction = self.model.transformer(
                                     **transformer_inputs
-                                )[0]
-                                self.model.transformer.enable_adapters()
-                            elif hasattr(self.model.transformer, "disable_adapter"):
-                                with self.model.transformer.disable_adapter():
+                                )[0].detach()
+                            self.model.transformer.set_adapter("default")
+
+                            forward_prediction = self.model.transformer(
+                                **transformer_inputs
+                            )[0]
+                            # Use the base model (with adapter disabled) to a reference prediciton
+                            with torch.no_grad():
+                                if hasattr(self.model.transformer, "disable_adapters"):
+                                    self.model.transformer.disable_adapters()
                                     ref_forward_prediction = self.model.transformer(
                                         **transformer_inputs
                                     )[0]
-                            else:
-                                raise NotImplementedError(
-                                    "The transformer model does not support adapter disabling."
+                                    self.model.transformer.enable_adapters()
+                                elif hasattr(self.model.transformer, "disable_adapter"):
+                                    with self.model.transformer.disable_adapter():
+                                        ref_forward_prediction = self.model.transformer(
+                                            **transformer_inputs
+                                        )[0]
+                                else:
+                                    raise NotImplementedError(
+                                        "The transformer model does not support adapter disabling."
+                                    )
+                                self.model.transformer.set_adapter("default")
+
+                            advantages_clip = torch.clamp(
+                                mini_batch["advantages"],
+                                self.config.train.train_policy.advantage_low,
+                                self.config.train.train_policy.advantage_high,
+                            )
+                            normalized_advantages_clip = (
+                                advantages_clip
+                                / self.config.train.train_policy.advantage_high
+                            ) / 2.0 + 0.5
+                            r = torch.clamp(normalized_advantages_clip, 0, 1)
+
+                            positive_prediction = (
+                                self.config.train.train_policy.kl_beta
+                                * forward_prediction
+                                + (1 - self.config.train.train_policy.kl_beta)
+                                * old_prediction.detach()
+                            )
+                            implicit_negative_prediction = (
+                                (1.0 + self.config.train.train_policy.kl_beta)
+                                * old_prediction.detach()
+                                - self.config.train.train_policy.kl_beta
+                                * forward_prediction
+                            )
+
+                            x0_prediction = xt - t_expanded * positive_prediction
+                            with torch.no_grad():
+                                weight_factor = (
+                                    torch.abs(x0_prediction.double() - x0.double())
+                                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
+                                    .clip(min=0.00001)
                                 )
-                            self.model.transformer.set_adapter("default")
-                        else:  # Full model - this requires a frozen copy of the model
-                            assert False
-                    loss_terms = {}
-                    # Policy Gradient Loss
-                    advantages_clip = torch.clamp(
-                        train_sample_batch["advantages"],
-                        self.config.train.train_policy.advantage_low,
-                        self.config.train.train_policy.advantage_high,
-                    )
+                            positive_loss = (
+                                (x0_prediction - x0) ** 2 / weight_factor
+                            ).mean(dim=tuple(range(1, x0.ndim)))
 
-                    # normalize advantage
-                    normalized_advantages_clip = (
-                        advantages_clip / self.config.train.train_policy.advantage_high
-                    ) / 2.0 + 0.5
-                    r = torch.clamp(normalized_advantages_clip, 0, 1)
-                    loss_terms["x0_norm"] = torch.mean(x0**2).detach()
-                    loss_terms["x0_norm_max"] = torch.max(x0**2).detach()
-                    loss_terms["ref_deviate"] = torch.mean(
-                        (forward_prediction - ref_prediction) ** 2
-                    ).detach()
-                    loss_terms["ref_deviate_max"] = torch.max(
-                        (forward_prediction - ref_prediction) ** 2
-                    ).detach()
-                    positive_prediction = (
-                        self.config.train.train_policy.kl_beta * forward_prediction
-                        + (1 - self.config.train.train_policy.kl_beta)
-                        * ref_prediction.detach()
-                    )
-                    implicit_negative_prediction = (
-                        (1.0 + self.config.train.train_policy.kl_beta)
-                        * ref_prediction.detach()
-                        - self.config.train.train_policy.kl_beta * forward_prediction
-                    )
+                            negative_x0_prediction = (
+                                xt - t_expanded * implicit_negative_prediction
+                            )
+                            with torch.no_grad():
+                                negative_weight_factor = (
+                                    torch.abs(
+                                        negative_x0_prediction.double() - x0.double()
+                                    )
+                                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
+                                    .clip(min=0.00001)
+                                )
+                            negative_loss = (
+                                (negative_x0_prediction - x0) ** 2
+                                / negative_weight_factor
+                            ).mean(dim=tuple(range(1, x0.ndim)))
 
-                    # adaptive weighting
-                    x0_prediction = xt - t_expanded * positive_prediction
-                    with torch.no_grad():
-                        weight_factor = (
-                            torch.abs(x0_prediction.double() - x0.double())
-                            .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
-                            .clip(min=0.00001)
-                        )
-                    positive_loss = ((x0_prediction - x0) ** 2 / weight_factor).mean(
-                        dim=tuple(range(1, x0.ndim))
-                    )
-                    negative_x0_prediction = (
-                        xt - t_expanded * implicit_negative_prediction
-                    )
-                    with torch.no_grad():
-                        negative_weight_factor = (
-                            torch.abs(negative_x0_prediction.double() - x0.double())
-                            .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
-                            .clip(min=0.00001)
-                        )
-                    negative_loss = (
-                        (negative_x0_prediction - x0) ** 2 / negative_weight_factor
-                    ).mean(dim=tuple(range(1, x0.ndim)))
+                            ori_policy_loss = (
+                                r
+                                * positive_loss
+                                / self.config.train.train_policy.kl_beta
+                                + (1.0 - r)
+                                * negative_loss
+                                / self.config.train.train_policy.kl_beta
+                            )
+                            policy_loss = (
+                                ori_policy_loss
+                                * self.config.train.train_policy.advantage_high
+                            ).mean()
 
-                    ori_policy_loss = (
-                        r * positive_loss / self.config.train.train_policy.kl_beta
-                        + (1.0 - r)
-                        * negative_loss
-                        / self.config.train.train_policy.kl_beta
-                    )
-                    policy_loss = (
-                        ori_policy_loss * self.config.train.train_policy.advantage_high
-                    ).mean()
+                            kl_loss = (
+                                ((forward_prediction - ref_forward_prediction) ** 2)
+                                .mean(dim=tuple(range(1, x0.ndim)))
+                                .mean()
+                            )
 
-                    loss = policy_loss
-                    loss_terms["policy_loss"] = policy_loss.detach()
-                    loss_terms["unweighted_policy_loss"] = (
-                        ori_policy_loss.mean().detach()
-                    )
+                            loss = policy_loss + (
+                                self.config.train.train_policy.kl_beta * kl_loss
+                            )
 
-                    kl_div_loss = (
-                        (forward_prediction - ref_forward_prediction) ** 2
-                    ).mean(dim=tuple(range(1, x0.ndim)))
+                            timestep_scaling = 1.0 / max(self.num_train_timesteps, 1)
+                            scaled_factor = loss_scaling_factor * timestep_scaling
+                            scaled_loss = loss * scaled_factor
+                            scaled_loss.backward()
 
-                    loss += self.config.train.train_policy.kl_beta * torch.mean(
-                        kl_div_loss
-                    )
-                    kl_div_loss = torch.mean(kl_div_loss)
-                    loss_terms["kl_div_loss"] = torch.mean(kl_div_loss).detach()
-                    loss_terms["kl_div"] = torch.mean(
-                        ((forward_prediction - ref_forward_prediction) ** 2).mean(
-                            dim=tuple(range(1, x0.ndim))
-                        )
-                    ).detach()
-                    loss_terms["ref_kl_div"] = torch.mean(
-                        ((ref_prediction - ref_forward_prediction) ** 2).mean(
-                            dim=tuple(range(1, x0.ndim))
-                        )
-                    ).detach()
+                            unweighted_policy_loss = ori_policy_loss.mean()
 
-                    loss_terms["total_loss"] = loss.detach()
+                            report_terms: Dict[str, torch.Tensor] = {}
+                            # weighted contributions (so final loss/policy/kl are true averages)
+                            report_terms["loss_contrib"] = loss.detach()
+                            report_terms["policy_loss_contrib"] = policy_loss.detach()
+                            report_terms["unweighted_policy_loss_contrib"] = (
+                                unweighted_policy_loss.detach()
+                            )
+                            report_terms["kl_loss_contrib"] = kl_loss.detach()
 
-                    loss.backward()
-                    loss_sum += loss
-                    kl_loss_sum += kl_div_loss
-                    loss_count += 1
+                            x0_sq = x0**2
+                            cur_x0_norm = torch.mean(x0_sq)
+                            cur_x0_norm_max = torch.max(x0_sq)
+                            old_dev_sq = (forward_prediction - old_prediction) ** 2
+                            cur_old_deviation = torch.mean(old_dev_sq)
+                            cur_old_deviation_max = torch.max(old_dev_sq)
 
-                    if os.environ.get("COSMOS_GRPO_STEP_INTERVAL", None) is not None:
+                            # raw (unscaled) metrics for monitoring
+                            report_terms["x0_norm"] = cur_x0_norm.detach()
+                            report_terms["x0_norm_max"] = cur_x0_norm_max.detach()
+                            report_terms["old_deviation"] = cur_old_deviation.detach()
+                            report_terms["old_deviation_max"] = (
+                                cur_old_deviation_max.detach()
+                            )
+                            report_terms["old_kl"] = torch.mean(
+                                ((old_prediction - ref_forward_prediction) ** 2).mean(
+                                    dim=tuple(range(1, x0.ndim))
+                                )
+                            ).detach()
+
+                            metrics_collection.accumulate_report_terms(
+                                info_accumulated, report_terms
+                            )
+
+                        local_mini_step += 1
+                        if (
+                            step_interval > 0
+                            and local_mini_step % step_interval == 0
+                            and mini_end < optimize_batch_size
+                        ):
+                            all_reduced = True
+                            grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
+                            grad_norm_count += 1
+                            if self.config.train.ema_enable and self.ema is not None:
+                                self.ema.step(self.trainable_params, current_step)
+                        else:
+                            all_reduced = False
+
+                    if not all_reduced:
                         grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                         grad_norm_count += 1
-
-                if self.config.train.ema_enable and self.ema is not None:
-                    self.ema.step(self.trainable_params, current_step)
+                        if self.config.train.ema_enable and self.ema is not None:
+                            self.ema.step(self.trainable_params, current_step)
 
         with torch.no_grad():
-            decay = weight_copy_decay(current_step, self.weight_copy_decay_type)
-            for src_param, tgt_param in zip(
-                self.trainable_params, self.ref_trainable_params, strict=True
-            ):
-                tgt_param.data.copy_(
-                    tgt_param.detach().data * decay
-                    + src_param.detach().clone().data * (1.0 - decay)
-                )
+            decay = get_weight_copy_decay(current_step, self.weight_copy_decay_type)
+            copy_weights_with_decay(
+                src_params=self.trainable_params,
+                tgt_params=self.old_trainable_params,
+                decay=decay,
+            )
+
         end_event.record()
 
-        loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
-        kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
-        if (
+        # Calculate average losses and aggregate metrics for logging
+        loss = metrics_collection.mean_or_zero(
+            info_accumulated, "loss_contrib", self.device
+        )
+        kl_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "kl_loss_contrib", self.device
+        )
+        policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "policy_loss_contrib", self.device
+        )
+        unweighted_policy_loss = metrics_collection.mean_or_zero(
+            info_accumulated, "unweighted_policy_loss_contrib", self.device
+        )
+
+        x0_norm = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm", self.device
+        )
+        x0_norm_max = metrics_collection.mean_or_zero(
+            info_accumulated, "x0_norm_max", self.device
+        )
+        old_deviation = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation", self.device
+        )
+        old_deviation_max = metrics_collection.mean_or_zero(
+            info_accumulated, "old_deviation_max", self.device
+        )
+        kl = metrics_collection.mean_or_zero(info_accumulated, "kl", self.device)
+        old_kl = metrics_collection.mean_or_zero(
+            info_accumulated, "old_kl", self.device
+        )
+
+        dist_enabled = (
             self.parallel_dims.dp_replicate_enabled
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
-        ):
-            global_avg_loss, global_max_loss = (  # noqa: F841
-                dist_util.dist_mean(loss, self.parallel_dims.mesh["dp_cp"]),
-                dist_util.dist_max(loss, self.parallel_dims.mesh["dp_cp"]),
-            )
-            if self.config.train.train_policy.kl_beta != 0.0:
-                global_avg_kl_loss, global_max_kl_loss = (  # noqa: F841
-                    dist_util.dist_mean(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                    dist_util.dist_max(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                )
+        )
+        mesh = self.parallel_dims.mesh["dp_cp"] if dist_enabled else None
+
+        avg_metrics = {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "unweighted_policy_loss": unweighted_policy_loss,
+            "kl": kl,
+            "old_kl": old_kl,
+            "x0_norm": x0_norm,
+            "old_deviation": old_deviation,
+            "x0_norm_max": x0_norm_max,
+            "old_deviation_max": old_deviation_max,
+        }
+        max_metrics = {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "unweighted_policy_loss": unweighted_policy_loss,
+        }
+        if self.config.train.train_policy.kl_beta != 0.0:
+            avg_metrics["kl_loss"] = kl_loss
+            max_metrics["kl_loss"] = kl_loss
+
+        if dist_enabled:
+            reduced_avg = {
+                k: dist_util.dist_mean(v, mesh) for k, v in avg_metrics.items()
+            }
+            reduced_max = {
+                k: dist_util.dist_max(v, mesh) for k, v in max_metrics.items()
+            }
         else:
-            global_avg_loss = global_max_loss = loss.item()  # noqa: F841
-            if self.config.train.train_policy.kl_beta != 0.0:
-                global_avg_kl_loss = global_max_kl_loss = kl_loss.item()  # noqa: F841
+            reduced_avg = {k: v.item() for k, v in avg_metrics.items()}
+            reduced_max = {k: v.item() for k, v in max_metrics.items()}
 
         report_data = {}
         if self.config.logging.logger:
@@ -570,16 +737,36 @@ class NFTTrainer(DiffusersTrainer):
                 # TODO(dinghaoy): support lr schedulers
                 report_data["train/learning_rate"] = self.config.train.optm_lr
                 report_data["train/iteration_time"] = iter_time
-                report_data["train/loss_avg"] = global_avg_loss
-                report_data["train/loss_max"] = global_max_loss
-                if self.config.train.train_policy.kl_beta != 0.0:
-                    report_data["train/kl_loss_avg"] = global_avg_kl_loss
-                    report_data["train/kl_loss_max"] = global_max_kl_loss
+
+                for k, v in reduced_avg.items():
+                    report_data[f"train/{k}_avg"] = v
+                for k, v in reduced_max.items():
+                    report_data[f"train/{k}_max"] = v
+
                 report_data["train/grad_norm"] = (
                     grad_norm_sum.item() / grad_norm_count
                     if grad_norm_count > 0
                     else 0.0
                 )
+                if self.config.logging.multi_modal_log_interval is not None and (
+                    current_step % self.config.logging.multi_modal_log_interval == 0
+                    or current_step == 1
+                ):
+                    if not is_wandb_available():
+                        logger.warning(
+                            "Wandb is not available. Skipping multimodal logging."
+                        )
+                    else:
+                        logger.info(
+                            f"Logging multimodal data to Wandb at step {current_step}..."
+                        )
+                        mm_report_data, modality = self.report_mm_wandb(
+                            mm_datas=packed_train_batch["completions"],
+                            prompts=packed_train_batch["prompts"],
+                            rewards=packed_train_batch["rewards"],
+                            current_step=current_step,
+                        )
+                        report_data[f"rollout_{modality}s"] = mm_report_data
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):
