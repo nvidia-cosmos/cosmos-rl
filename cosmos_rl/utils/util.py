@@ -1416,3 +1416,22 @@ def extract_padding_mask(input_ids, pad_token_id):
     padding_mask = has_pad.unsqueeze(1) & (pos >= first_pad.unsqueeze(1))
     padding_mask &= is_pad  # safety: ensure only PAD positions are True
     return padding_mask
+
+
+def recursive_check_equal(item, item_ref):
+    if isinstance(item, list):
+        if not isinstance(item_ref, list) or len(item) != len(item_ref):
+            return False
+        return all(recursive_check_equal(x, y) for x, y in zip(item, item_ref))
+    elif isinstance(item, dict):
+        if not isinstance(item_ref, dict) or set(item.keys()) != set(item_ref.keys()):
+            return False
+        return all(
+            recursive_check_equal(v, item_ref[k]) for k, v in sorted(item.items())
+        )
+    elif isinstance(item, torch.Tensor):
+        return torch.equal(item, item_ref)
+    elif isinstance(item, (int, float, str)) or item is None:
+        return item == item_ref
+    else:
+        raise ValueError(f"Unsupported item type for equality check: {type(item)}")
