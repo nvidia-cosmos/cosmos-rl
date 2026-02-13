@@ -212,3 +212,9 @@ The key to customization is the registry system:
 
 This design allows you to experiment with novel RL algorithms while maintaining compatibility with the distributed training infrastructure.
 
+## Custom Logger Functions and Training Hooks
+
+For custom logging and monitoring integration (including TAO status logging), see the documentation in:
+- `cosmos_rl/tools/custom_hooks/README.md` - Custom logger and hooks guide
+- `cosmos_rl/tools/custom_hooks/custom_loggers_and_hooks.py` - Implementation details
+- `cosmos_rl/tools/custom_hooks/tao_sft_example.py` - TAO-compatible SFT example

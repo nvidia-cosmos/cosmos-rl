@@ -3,28 +3,38 @@ from typing import Dict, Tuple
 import torch
 from torch.nn import Parameter
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils import w8a8_utils
-
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 
 """
 This file is used to patch the vllm model to use rowwise fp8 linear.
+
+NOTE: All vLLM imports are deferred (inside functions) to avoid triggering
+GPU enumeration via pynvml at module-import time. Eagerly importing
+vllm.model_executor.layers.quantization.utils.w8a8_utils causes
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported() to run, which calls
+pynvml.nvmlDeviceGetHandleByIndex() and crashes in subprocesses that
+don't need FP8 support.
 """
+
+_dispatch_patched = False
 
 
 def apply_patch_to_dispatch():
-    # ensure that fp8 linear kernel is dispatched to torch._scaled_mm per-token/rowwise
+    """Ensure fp8 linear kernel is dispatched to torch._scaled_mm per-token/rowwise.
+
+    This is idempotent - subsequent calls are no-ops.
+    """
+    global _dispatch_patched
+    if _dispatch_patched:
+        return
+    from vllm.model_executor.layers.quantization.utils import w8a8_utils
+
     def dispatch_fp8_linear_kernel_to_torch_scaled_mm(*args, **kwargs):
         return w8a8_utils.torch_per_token_w8a8_scaled_mm
 
     w8a8_utils.dispatch_w8a8_scaled_mm = dispatch_fp8_linear_kernel_to_torch_scaled_mm
-
-
-apply_patch_to_dispatch()
+    _dispatch_patched = True
 
 
 def simplify_process_weights_after_loading():
@@ -34,6 +44,8 @@ def simplify_process_weights_after_loading():
     Refer to the method `process_weights_after_loading`:
     https://github.com/vllm-project/vllm/blob/1a4f35e2eaa3ebdecb8ef9ff8302b01e289305c9/vllm/model_executor/layers/quantization/fp8.py#L319
     """
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Warning: this is only for rowwise fp8 linear.
@@ -54,6 +66,12 @@ def simplify_process_weights_after_loading():
 
 # patch the Linear layer.
 def apply_fp8_linear_patch(model: torch.nn.Module):
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    # Ensure dispatch is patched before creating Fp8LinearOp instances.
+    apply_patch_to_dispatch()
+
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if quant_method is None:
@@ -100,6 +118,8 @@ def cache_weight_of_quantized_module(
     parallel_dims: ParallelDims,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Get the weight from the quantized module."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
     original_weight_map = {}
     hp_weight_map = {}
     for name, module in vllm_model.named_modules():
