@@ -684,7 +684,6 @@ class NFTTrainer(DiffusersTrainer):
         old_deviation_max = metrics_collection.mean_or_zero(
             info_accumulated, "old_deviation_max", self.device
         )
-        kl = metrics_collection.mean_or_zero(info_accumulated, "kl", self.device)
         old_kl = metrics_collection.mean_or_zero(
             info_accumulated, "old_kl", self.device
         )
@@ -700,7 +699,6 @@ class NFTTrainer(DiffusersTrainer):
             "loss": loss,
             "policy_loss": policy_loss,
             "unweighted_policy_loss": unweighted_policy_loss,
-            "kl": kl,
             "old_kl": old_kl,
             "x0_norm": x0_norm,
             "old_deviation": old_deviation,
