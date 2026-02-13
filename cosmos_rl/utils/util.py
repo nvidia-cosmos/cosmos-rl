@@ -610,6 +610,8 @@ def fix_data_type_size(obj):
         return [fix_data_type_size(x) for x in obj]
     elif isinstance(obj, dict):
         return {fix_data_type_size(k): fix_data_type_size(v) for k, v in obj.items()}
+    elif isinstance(obj, bool):
+        return obj
     elif isinstance(obj, int):
         return ctypes.c_int64(obj)
     else:
