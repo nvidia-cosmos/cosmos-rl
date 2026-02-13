@@ -85,6 +85,7 @@ class CosmosPredict2_5Model(DiffuserModel):
                     model_tuple[1].to("cpu")
         return {
             "encoder_hidden_states": prompt_embeds,
+            "encoder_attention_mask": None,
             "pooled_projections": None,
         }
 
@@ -145,7 +146,7 @@ class CosmosPredict2_5Model(DiffuserModel):
         )
         return noised_latent, noise, timesteps
 
-    def _sde_step_with_logprob(
+    def sde_step_with_logprob(
         self,
         model_output: torch.FloatTensor,
         timestep: Union[float, torch.FloatTensor],
@@ -418,7 +419,7 @@ class CosmosPredict2_5Model(DiffuserModel):
                         noise_pred - noise_pred_neg
                     )
 
-                latents, log_prob, _, _ = self._sde_step_with_logprob(
+                latents, log_prob, _, _ = self.sde_step_with_logprob(
                     noise_pred.float(),
                     t.unsqueeze(0),
                     latents.float(),
@@ -455,6 +456,7 @@ class CosmosPredict2_5Model(DiffuserModel):
         self,
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
         pooled_prompt_embeds: torch.Tensor,
         timestep: torch.Tensor,
         num_frames: int,
@@ -468,6 +470,7 @@ class CosmosPredict2_5Model(DiffuserModel):
         Args:
             latents: Noised latent tensor
             prompt_embeds: Text embedding tensor
+            prompt_attention_mask: Attention mask for text embedding
             pooled_prompt_embeds: Pooled text embedding tensor
             timestep: Timestep tensor
             num_frames: Number of frames to be generated
