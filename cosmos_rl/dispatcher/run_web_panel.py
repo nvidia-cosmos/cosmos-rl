@@ -538,12 +538,12 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     dataloader: Optional[Callable[[CosmosConfig], Iterable]] = None,
-    data_packer: Optional[BaseDataPacker] = None,
+    data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
-    val_data_packer: Optional[BaseDataPacker] = None,
+    val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     hook_fns: Optional[Dict[str, Callable]] = None,
     sampler: Optional[Callable] = None,
@@ -644,9 +644,9 @@ def main(
                 )
 
         if data_packer is not None:
-            assert isinstance(
-                data_packer, BaseDataPacker
-            ), "data_packer should be a BaseDataPacker instance"
+            assert isinstance(data_packer, BaseDataPacker) or callable(
+                data_packer
+            ), "data_packer should be a BaseDataPacker instance or a Callable"
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,
