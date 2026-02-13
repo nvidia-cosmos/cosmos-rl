@@ -92,7 +92,7 @@ def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_
 
 ########################################################
 
-def modify_messages(messages, max_pixels=None, max_video_frames=None):
+def modify_messages(messages, max_pixels=None):
     for message in messages:
         if isinstance(message['content'], str):
             message['content'] = [{'type': 'text', 'text': message['content']}]
@@ -319,14 +319,12 @@ class CustomWebDatasetDataset(Dataset):
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.cosmos_config = config
 
-        webdataset_root_paths = [
-            "/workspace/simonz/data/vlm-data-debug/laion_recaption_filter_train_shuf_3m",
-            "/workspace/simonz/data/vlm-data-debug/infinitmm_stage1_qwenvl_filter_clip_id_shuf_5m",
-            "/workspace/simonz/data/vlm-data-debug/synthdog-en-chat-sample-250k-stage1",
-            "/workspace/simonz/data/vlm-data-debug/synthdog-zh-chat-sample-250k-stage1",
-            "/workspace/simonz/data/vlm-data-debug/unsplash_filter_001_800k_grounding_caption_chat_stage1_train",
-            # "/workspace/simonz/data/vlm-data-debug/webvid_caption_openai_format_1M_stage1_train",
-        ]
+        # Controls (put these in config.custom)
+        custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
+
+        webdataset_root_paths = custom["webdataset_root_paths"]
+        if isinstance(webdataset_root_paths, str):
+            webdataset_root_paths = [webdataset_root_paths]
 
         total_items = 0
         # Check `meta.json` inside each path
@@ -351,10 +349,8 @@ class CustomWebDatasetDataset(Dataset):
         max_vf = max(4, int(config.policy.model_max_length * 0.5 / 128))
         self.max_video_frames = max_vf // 2 * 2  # align to FRAME_FACTOR
 
-        # Controls (put these in config.custom if you want)
-        custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
         self.include_video = bool(custom.get("include_video", False))
-        self.video_sample_fps = float(config.custom.get("video_sample_fps", 1.0))
+        self.video_sample_fps = float(custom.get("video_sample_fps", 1.0))
         self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
 
         self.setup_wds_dataset()
@@ -404,10 +400,16 @@ class CustomWebDatasetDataset(Dataset):
             try:
                 return next(self._wds_iter)
             except StopIteration:
+                retries += 1
                 # Normally with resampled=True this should not happen,
                 # but it CAN happen if upstream filters drop everything temporarily,
                 # or if the pipeline got exhausted for some reason.
                 # Recreate the iterator and keep going.
+                if retries >= max_retries:
+                    raise RuntimeError(
+                        f"Pipeline exhausted {max_retries} consecutive times. "
+                        f"Check that dataset shards are non-empty and filters are not dropping all samples."
+                    )
                 self._wds_iter = iter(self.ds)
             except Exception as e:
                 retries += 1
@@ -456,9 +458,9 @@ class CustomWebDatasetDataset(Dataset):
         if messages is None:
             return None
 
-        # Apply your existing mutations (max_pixels, total_pixels, etc.)
-        # `fps`, `max_frames` are handled during video decoding in _attach_media_from_sample to ensure qwen_vl_utils sees the same values.
-        messages = modify_messages(messages, self.max_pixels, self.max_video_frames)
+        # Apply pixel budget mutations (max_pixels for images, total_pixels for videos).
+        # Video frame limiting (fps, max_frames) is handled during decoding in _attach_media_from_sample.
+        messages = modify_messages(messages, self.max_pixels)
         assert isinstance(messages, list), "messages should be a list of dicts"
         return messages
 

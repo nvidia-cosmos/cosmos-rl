@@ -250,4 +250,7 @@ cosmos_rl/_version.py
 reward_service/cosmos_rl_reward/_version.py
 */run_wds.sh
 */kill_all.sh
-./nemotron_vl/config_qwen3_vl_ty_deepstack.toml
+nemotron_vl/config_qwen3_vl_ty_deepstack.toml
+nemotron_vl/config_q3vit_n3llm.toml
+nemotron_vl/debug.sh
+
