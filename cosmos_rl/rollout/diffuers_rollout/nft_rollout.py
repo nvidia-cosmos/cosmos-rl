@@ -55,6 +55,9 @@ class NFTRollout(RolloutBase):
             max_sequence_length=self.diffusers_config.max_prompt_length,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_prompt_attention_mask = neg_text_embedding_dict[
+            "encoder_attention_mask"
+        ]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def rollout_generation(
@@ -82,6 +85,7 @@ class NFTRollout(RolloutBase):
                 max_sequence_length=self.diffusers_config.max_prompt_length,
             )
             prompt_embeds = text_embedding_dict["encoder_hidden_states"]
+            prompt_attention_mask = text_embedding_dict["encoder_attention_mask"]
             pooled_prompt_embeds = text_embedding_dict["pooled_projections"]
             prompt_ids = self.model.tokenizers[0](
                 prompts,
@@ -121,14 +125,20 @@ class NFTRollout(RolloutBase):
 
                 if pooled_prompt_embeds is not None:
                     call_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
-
+                if prompt_attention_mask is not None:
+                    call_kwargs["prompt_attention_mask"] = prompt_attention_mask
                 if self.neg_pooled_prompt_embed is not None:
                     call_kwargs["negative_pooled_prompt_embeds"] = (
                         self.neg_pooled_prompt_embed.repeat(
                             self.config.rollout.n_generation, 1
                         )
                     )
-
+                if self.neg_prompt_attention_mask is not None:
+                    call_kwargs["negative_prompt_attention_mask"] = (
+                        self.neg_prompt_attention_mask.repeat(
+                            self.config.rollout.n_generation, 1
+                        )
+                    )
                 mm_datas, latents, _ = self.model.pipeline_with_logprob(**call_kwargs)
                 latents = torch.stack(latents, dim=1)
                 timesteps = self.model.pipeline.scheduler.timesteps.repeat(
@@ -146,6 +156,7 @@ class NFTRollout(RolloutBase):
                         "prompt_ids": prompt_ids,
                         "prompt_metadatas": metadatas,
                         "prompt_embeds": prompt_embeds,
+                        "prompt_attention_mask": prompt_attention_mask,
                         "pooled_prompt_embeds": pooled_prompt_embeds,
                         "timesteps": timesteps,
                         "latents_clean": latents[:, -1],
