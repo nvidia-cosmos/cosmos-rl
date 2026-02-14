@@ -148,6 +148,11 @@ def convert_weight_from_hf(
         else:
             raise ValueError(f"Unsupported weight: {name}")
     else:
+        # When vision_replicate is enabled, vision and projector weights are
+        # replicated (not FSDP-sharded), so load them in full on every rank.
+        if getattr(hf_config, '_vision_replicate', False) and _is_vision_or_projector_weight(name):
+            return name, tensor.contiguous()
+
         dp_group_names = ["dp_shard"]
         if parallel_dims.cp_enabled:
             dp_group_names.append("cp")
@@ -163,4 +168,18 @@ def convert_weight_from_hf(
             dp_shard_rank = 0
             dp_shard_size = 1
         return name, fsdp_sharding(tensor.contiguous(), dp_shard_rank, dp_shard_size)
+
+
+# Known vision model and multi-modal projector weight name prefixes across VLM architectures.
+_VISION_REPLICATE_PREFIXES = (
+    "model.visual.",                  # NemotronH_Nano_VL
+    "model.vision_model.",            # Generic VLMs
+    "model.vision_tower.",            # LLaVA-style
+    "model.multi_modal_projector.",   # Generic projector
+    "model.mlp1.",                    # InternVL projector
+    "visual.",                        # Without model. prefix
+)
+
+def _is_vision_or_projector_weight(name: str) -> bool:
+    return any(name.startswith(p) for p in _VISION_REPLICATE_PREFIXES)
 

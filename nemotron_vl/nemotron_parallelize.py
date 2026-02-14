@@ -160,6 +160,18 @@ def parallelize(
 
     # apply_compile(model, fullgraph=True)
 
+    vision_replicate = config.custom.get("vision_replicate", False)
+
+    # Communicate vision_replicate to the weight converter via hf_config so it
+    # knows to skip FSDP sharding for vision/projector weights.
+    if vision_replicate and hasattr(model, 'hf_config'):
+        model.hf_config._vision_replicate = True
+
+    # Ensure ViT uses flash_attention_2 when not replicated (preserves original behavior
+    # since the hardcoded override in the modeling file was removed).
+    if not vision_replicate and model.vision_model is not None:
+        model.vision_model.config._attn_implementation = "flash_attention_2"
+
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
         dp_group_names = ["dp_shard"]
@@ -194,6 +206,7 @@ def parallelize(
             pp_enabled=False,
             cpu_offload=config.train.fsdp_offload,
             reshard_after_forward_policy=config.train.fsdp_reshard_after_forward,
+            vision_replicate=vision_replicate,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -235,6 +248,30 @@ def parallelize(
 
     return None, None
 
+def _apply_vision_replicate(model: nn.Module, replicate_mesh: DeviceMesh):
+    """Apply DDP (replicate) to the vision model and multi-modal projector.
+
+    Uses composable replicate() for gradient allreduce instead of FSDP shard/unshard.
+    More efficient for small vision models (~400MB ViT). Casts ViT to fp32 and uses
+    eager attention (flash attention only supports fp16/bf16).
+    """
+    if replicate_mesh.ndim > 1:
+        replicate_mesh = replicate_mesh._flatten("dp_replicate_vision")
+
+    if model.vision_model is not None:
+        # Cast ViT to fp32 for better training quality and use eager attention
+        # (flash attention does not support fp32)
+        model.vision_model.to(dtype=torch.float32)
+        model.vision_model.config._attn_implementation = "eager"
+        replicate(model.vision_model, device_mesh=replicate_mesh, bucket_cap_mb=100)
+        logger.info("Applied DDP (replicate) to the visual model in fp32 with eager attention (vision_replicate=True)")
+
+    if model.multi_modal_projector is not None:
+        model.multi_modal_projector.to(dtype=torch.float32)
+        replicate(model.multi_modal_projector, device_mesh=replicate_mesh, bucket_cap_mb=100)
+        logger.info("Applied DDP (replicate) to the multi-modal projector in fp32 (vision_replicate=True)")
+
+
 def apply_compile(model: nn.Module, fullgraph: bool = True):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
@@ -255,6 +292,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    vision_replicate: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -271,34 +309,46 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
+        vision_replicate (bool, optional): Whether to use DDP (replicate) for the vision
+            model and multi-modal projector instead of FSDP. Recommended when the ViT is
+            small (~400MB) to avoid FSDP shard/unshard overhead. Defaults to False.
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config_no_moe = {"mesh": fsdp_mesh_no_moe, "mp_policy": mp_policy}
     fsdp_config_moe = {"mesh": fsdp_mesh_moe, "mp_policy": mp_policy}
-    
+
     if cpu_offload:
         fsdp_config_no_moe["offload_policy"] = CPUOffloadPolicy()
         fsdp_config_moe["offload_policy"] = CPUOffloadPolicy()
 
-    # Shard the vision model
-    if model.vision_model is not None:
-        logger.info("Applying FSDP to the visual model")
-        for layer_id, transformer_block in enumerate(model.vision_layers):
-            if reshard_after_forward_policy == "always":
-                reshard_after_forward = True
-            elif reshard_after_forward_policy == "never":
-                reshard_after_forward = False
-            elif reshard_after_forward_policy == "default":
-                reshard_after_forward = int(layer_id) < model.n_vision_layers - 1
-            else:
-                raise ValueError(
-                    f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+    if vision_replicate:
+        _apply_vision_replicate(model, fsdp_mesh_no_moe)
+    else:
+        # Shard the vision model with FSDP
+        if model.vision_model is not None:
+            logger.info("Applying FSDP to the visual model")
+            for layer_id, transformer_block in enumerate(model.vision_layers):
+                if reshard_after_forward_policy == "always":
+                    reshard_after_forward = True
+                elif reshard_after_forward_policy == "never":
+                    reshard_after_forward = False
+                elif reshard_after_forward_policy == "default":
+                    reshard_after_forward = int(layer_id) < model.n_vision_layers - 1
+                else:
+                    raise ValueError(
+                        f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+                    )
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config_no_moe,
+                    reshard_after_forward=reshard_after_forward,
                 )
+
             fully_shard(
-                transformer_block,
+                model.vision_model,
                 **fsdp_config_no_moe,
-                reshard_after_forward=reshard_after_forward,
+                reshard_after_forward=True,
             )
 
         # Shard the multi-modal projector, 
@@ -309,12 +359,6 @@ def apply_fsdp(
                 **fsdp_config_no_moe,
                 reshard_after_forward=True,
             )
-        
-        fully_shard(
-            model.vision_model,
-            **fsdp_config_no_moe,
-            reshard_after_forward=True,
-        )
 
     # Shard the language model
     for layer_id, transformer_block in enumerate(model.lm_layers):
@@ -348,6 +392,7 @@ def apply_fsdp(
     if embed_tokens is not None:
         logger.info("Applying FSDP to the language model embeddings")
         fully_shard(embed_tokens, **fsdp_config_no_moe, reshard_after_forward=True)
+
     fully_shard(model.model, **fsdp_config_no_moe, reshard_after_forward=True)
 
 def apply_ddp(

@@ -1251,8 +1251,7 @@ class Qwen3VLVisionAttention(nn.Module):
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
 
-        #attention_interface: Callable = eager_attention_forward
-        self.config._attn_implementation = "flash_attention_2"
+        attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
