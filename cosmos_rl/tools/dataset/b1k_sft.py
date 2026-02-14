@@ -500,6 +500,19 @@ class B1kInputsTransform:
         return inputs
 
 
+def parse_episodes_index(episodes: Any) -> list[int]:
+    if not isinstance(episodes, list) or not all(isinstance(i, int) for i in episodes):
+        raise ValueError("`episodes_index` must be a list of integers.")
+
+    if len(episodes) == 2:
+        start, end = episodes
+        if end < start:
+            raise ValueError(f"`episodes_index` has invalid interval: end({end}) < start({start}).")
+        return list(range(start, end))
+
+    return episodes
+
+
 class BehaviorSFTDataset(Dataset):
     """
     Thin wrapper around `BehaviorLeRobotDataset` used for SFT.
@@ -523,7 +536,7 @@ class BehaviorSFTDataset(Dataset):
                 key: [t / 30.0 for t in range(config.custom["action_horizon"])]
                 for key in config.custom["action_sequence_keys"]
             },
-            episodes=config.custom["episodes_index"],
+            episodes=parse_episodes_index(config.custom["episodes_index"]),
             chunk_streaming_using_keyframe=True,
             shuffle=True,
         )
