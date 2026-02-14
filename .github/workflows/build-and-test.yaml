@@ -103,6 +103,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_custom_args.py
           ${DOCKER_RUN} python tests/test_colocated_separated.py
           ${DOCKER_RUN} python tests/test_load_balanced_dataset.py
+          ${DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
 
       - name: Cleanup
         if: always()

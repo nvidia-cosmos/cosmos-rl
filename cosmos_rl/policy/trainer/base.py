@@ -58,7 +58,7 @@ def wrap_to_cuda_tensor(device, key, obj, in_place=False):
             )
         if isinstance(obj, tuple):
             obj = tuple([x.tolist() if isinstance(x, np.ndarray) else x for x in obj])
-            obj = fix_data_type_size(obj)
+        obj = fix_data_type_size(obj)
         bytes = msgpack.packb(obj, default=msgpack_c_long)
         obj = torch.frombuffer(bytes, dtype=torch.uint8).to(device)
         return obj

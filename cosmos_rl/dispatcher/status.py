@@ -162,6 +162,16 @@ class PolicyStatusManager:
         self.data_fetcher = data_fetcher
 
         self.recompute_total_steps()
+        # For resume case to activate dataloader and validation if needed
+        if (
+            self.config.train.resume
+            and self.config.validation.enable
+            and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            )
+        ):
+            self.data_fetcher.validation_activate_dataloader(self.current_step)
 
     def n_atoms_per_replica(self) -> int:
         """

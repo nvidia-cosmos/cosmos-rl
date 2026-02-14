@@ -32,6 +32,8 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
+import cosmos_rl.utils.distributed as dist_utils
+import torch.distributed as dist
 from cosmos_rl.utils.report.wandb_logger import (
     init_wandb,
     is_wandb_available,
@@ -655,7 +657,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_total_loss = 0.0
 
         for batch_index, val_global_batch in enumerate(
-            tqdm(self.val_data_loader, desc="Validation")
+            tqdm(
+                self.get_batch_from_dataloader(self.val_data_loader), desc="Validation"
+            )
         ):
             # Call pre_per_step_validation_hook
             if self.pre_per_step_validation_hook is not None:
@@ -716,6 +720,113 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         return val_avg_loss
 
+    def collect_broadcast_info(self, item):
+        if isinstance(item, list):
+            return [self.collect_broadcast_info(x) for x in item]
+        elif isinstance(item, dict):
+            return {k: self.collect_broadcast_info(v) for k, v in item.items()}
+        elif isinstance(item, torch.Tensor):
+            return {"tensor_to_be_recv": (item.shape, item.dtype, item.device)}
+        elif isinstance(item, (int, float, str)) or item is None:
+            return item
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def recv_tensor_from_info(self, item):
+        if isinstance(item, list):
+            return [self.recv_tensor_from_info(x) for x in item]
+        elif isinstance(item, dict):
+            if (
+                "tensor_to_be_recv" in item
+                and len(item) == 1
+                and isinstance(item["tensor_to_be_recv"], tuple)
+                and len(item["tensor_to_be_recv"]) == 3
+            ):
+                placeholder = torch.empty(
+                    *item["tensor_to_be_recv"][0],
+                    dtype=item["tensor_to_be_recv"][1],
+                    device=self.device,
+                )
+                dist.broadcast(
+                    placeholder,
+                    group_src=0,
+                    group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                )
+                return placeholder.to(item["tensor_to_be_recv"][2])
+            return {k: self.recv_tensor_from_info(v) for k, v in sorted(item.items())}
+        elif isinstance(item, (int, float, str)) or item is None:
+            return item
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def send_tensor_from_info(self, item):
+        if isinstance(item, list):
+            for x in item:
+                self.send_tensor_from_info(x)
+        elif isinstance(item, dict):
+            for _, v in sorted(item.items()):
+                self.send_tensor_from_info(v)
+        elif isinstance(item, torch.Tensor):
+            dist.broadcast(
+                item.to(self.device),
+                group_src=0,
+                group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+            )
+        elif isinstance(item, (int, float, str)) or item is None:
+            pass
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def get_batch_from_dataloader(self, data_loader):
+        # self.iter = iter(self.train_data_loader)
+        if self.config.train.train_policy.dataloader_broadcast and (
+            self.parallel_dims.pp_enabled
+            or self.parallel_dims.cp_enabled
+            or self.parallel_dims.tp_enabled
+        ):
+            # Only the first rank of the pp/cp/tp mesh will read from the dataloader and broadcast to other ranks, to avoid redundant dataloader workers and potential data mismatches across ranks.
+            if self.parallel_dims.mesh["pp_cp_tp"].get_local_rank() == 0:
+                for batch in data_loader:
+                    info = self.collect_broadcast_info(batch)
+                    dist_utils.broadcast_object_cpu(
+                        info,
+                        group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                        group_src=0,
+                    )
+                    self.send_tensor_from_info(batch)
+                    yield batch
+                dist_utils.broadcast_object_cpu(
+                    "end",
+                    group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                    group_src=0,
+                )
+            else:
+                while True:
+                    info = dist_utils.broadcast_object_cpu(
+                        None,
+                        group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                        group_src=0,
+                    )
+                    if info == "end":
+                        break
+                    batch = self.recv_tensor_from_info(info)
+                    # Do check to verify that the broadcast batch matches the dataloader batch for non-zero ranks, to ensure correctness of broadcasting logic.
+                    # ref = next(self.iter)
+                    # assert util.recursive_check_equal(
+                    #     batch, ref
+                    # ), f"Broadcast batch does not match dataloader batch for non-zero rank {batch} {ref}"
+                    yield batch
+        else:
+            # If dataloader_broadcast is enabled but no relevant parallelism is enabled, just yield batches without broadcasting
+            for batch in data_loader:
+                yield batch
+
     def main_loop(self):
         self.profiler.start()
         pp_last_stage = False
@@ -739,7 +850,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             # global_batch is a list of items from `datapacker.sft_process_sample()`
-            for global_batch in self.train_data_loader:
+            for global_batch in self.get_batch_from_dataloader(self.train_data_loader):
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
                 if (

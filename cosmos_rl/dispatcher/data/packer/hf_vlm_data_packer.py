@@ -360,7 +360,7 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            if self.use_qwen_vl_process:
+            if self.use_qwen_vl_process and isinstance(conversation, list):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     conversation,
                     image_patch_size=16,
