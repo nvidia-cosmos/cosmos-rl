@@ -188,11 +188,6 @@ class SFTTrainer(LLMTrainer):
                 mini_batch,
             )
         )
-        # Pre train barrier
-        torch.distributed.barrier()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
         for i in mini_batch_begin_idxs:
             fixed_length = (
