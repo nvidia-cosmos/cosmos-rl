@@ -301,20 +301,20 @@ def apply_fsdp(
                 reshard_after_forward=reshard_after_forward,
             )
 
-    # Shard the multi-modal projector, 
-    # If module is inside vision_model, apply fsdp before shard whole vision_model
-    if model.multi_modal_projector is not None:
+        # Shard the multi-modal projector, 
+        # If module is inside vision_model, apply fsdp before shard whole vision_model
+        if model.multi_modal_projector is not None:
+            fully_shard(
+                model.multi_modal_projector,
+                **fsdp_config_no_moe,
+                reshard_after_forward=True,
+            )
+        
         fully_shard(
-            model.multi_modal_projector,
+            model.vision_model,
             **fsdp_config_no_moe,
             reshard_after_forward=True,
         )
-    
-    fully_shard(
-        model.vision_model,
-        **fsdp_config_no_moe,
-        reshard_after_forward=True,
-    )
 
     # Shard the language model
     for layer_id, transformer_block in enumerate(model.lm_layers):
