@@ -95,7 +95,10 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 # Group the parameters by device mesh to do optimizer fusion.
                 parameters_by_mesh = collections.defaultdict(list)
                 for name, p in model.named_parameters():
-                    if p.requires_grad:
+                    if p.requires_grad and hasattr(p, "cosmos_optim_reached"):
+                        logger.info(f"{name} Already set by previous optimizer")
+                    elif p.requires_grad and not hasattr(p, "cosmos_optim_reached"):
+                        setattr(p, "cosmos_optim_reached", True)
                         all_trainable_params.append(name)
                         device_mesh = (
                             p.device_mesh if hasattr(p, "device_mesh") else "default"

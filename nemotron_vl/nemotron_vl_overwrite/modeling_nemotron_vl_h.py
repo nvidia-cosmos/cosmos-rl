@@ -2118,6 +2118,15 @@ class NemotronVLModel(NemotronVLPreTrainedModel):
 
         if not skip_visual_embedding:
             image_embeds, video_embeds, deepstack_image_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
+        elif skip_visual_embedding and self.training:
+            # Add a fake run for text_only minibatch
+            dummy_height = 16
+            dummy_width = 16
+            final_pixel_value = torch.zeros(dummy_height * dummy_width, self.visual.config.temporal_patch_size * self.visual.config.patch_size ** 2 * 3).cuda()
+            final_thw = torch.tensor([[1, dummy_height, dummy_width]]).cuda()
+            num_image = 1
+            image_embeds, video_embeds, deepstack_image_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
+            image_embeds = [image_embed[0:0] for image_embed in image_embeds]
         else:
             image_embeds = None
             video_embeds = None
@@ -2262,6 +2271,10 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
     @property
     def visual(self):
         return self.model.visual
+
+    @property
+    def multi_modal_projector(self):
+        return self.model.visual.merger
 
     def prepare_inputs_for_generation(
         self,

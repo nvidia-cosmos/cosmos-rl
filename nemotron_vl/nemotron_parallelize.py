@@ -212,7 +212,7 @@ def parallelize(
             enable_compile=False,
             enable_compiled_autograd=False,
         )
-
+    
     train_layers = config.custom.get("train_layers", None)
     if train_layers is not None:
         logger.info(f"All trainable layers: {train_layers}")
@@ -220,8 +220,17 @@ def parallelize(
             parameters.requires_grad = False
 
         for _, module in model.named_modules():
-            if type(module).__name__ in train_layers:
+            # module might be warpped with FSDP, it will change class name to f"FSDP{original_module_name}"
+            if type(module).__name__.replace('FSDP', '') in train_layers:
                 for name, parameters in module.named_parameters():
+                    # e_correction_bias always be not trainable
+                    if 'e_correction_bias' not in name:
+                        parameters.requires_grad = True
+        
+        # make lm_head trainable
+        if 'lm_head' in train_layers:
+            if model.lm_head is not None:
+                for name, parameters in model.lm_head.named_parameters():
                     parameters.requires_grad = True
 
     return None, None
@@ -292,19 +301,20 @@ def apply_fsdp(
                 reshard_after_forward=reshard_after_forward,
             )
 
-        fully_shard(
-            model.vision_model,
-            **fsdp_config_no_moe,
-            reshard_after_forward=True,
-        )
-
-    # Shard the multi-modal projector
+    # Shard the multi-modal projector, 
+    # If module is inside vision_model, apply fsdp before shard whole vision_model
     if model.multi_modal_projector is not None:
         fully_shard(
             model.multi_modal_projector,
             **fsdp_config_no_moe,
             reshard_after_forward=True,
         )
+    
+    fully_shard(
+        model.vision_model,
+        **fsdp_config_no_moe,
+        reshard_after_forward=True,
+    )
 
     # Shard the language model
     for layer_id, transformer_block in enumerate(model.lm_layers):

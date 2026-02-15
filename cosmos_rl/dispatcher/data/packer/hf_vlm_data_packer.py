@@ -339,12 +339,15 @@ class HFVLMDataPacker(DataPacker):
                                 f"Unsupported content type: {type(content)}"
                             )
                         x["content"] = pad_token * pad_run_length
-
-            text = self.hf_processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=add_generation_prompt,
-            )
+            try:
+                text = self.hf_processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            except Exception as e:
+                print(messages)
+                raise e
             video_kwargs = {}
             image_inputs = []
             video_inputs = []
@@ -754,3 +757,4 @@ class HFVLMDataPacker(DataPacker):
                     ] = ignore_label_id
 
         return model_inputs
+

@@ -319,6 +319,15 @@ class HFModel(BaseModel):
         return vision_model
 
     @property
+    def lm_head(self):
+        if getattr(self.language_model, "lm_head", None) is not None:
+            return self.language_model.lm_head
+        elif getattr(self.model, "lm_head", None) is not None:
+            return self.model.lm_head
+        else:
+            return None
+
+    @property
     def multi_modal_projector(self):
         multi_modal_projector = None
         if self.is_vlm:
