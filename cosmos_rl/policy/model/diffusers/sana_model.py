@@ -408,7 +408,6 @@ class SanaModel(DiffuserModel):
         extra_step_kwargs = self.pipeline.prepare_extra_step_kwargs(generator, eta)  # noqa: F841
 
         all_latents = [latents]
-        all_log_probs = []
 
         # 7. Denoising loop
         num_warmup_steps = max(
@@ -454,15 +453,12 @@ class SanaModel(DiffuserModel):
                 if self.transformer.config.out_channels // 2 == latent_channels:
                     noise_pred = noise_pred.chunk(2, dim=1)[0]
 
-                latents, log_prob, _, _ = self.sde_step_with_logprob(
-                    noise_pred.float(),
-                    t.unsqueeze(0),
-                    latents.float(),
-                    noise_level=noise_level,
-                )
+                # compute previous image: x_t -> x_t-1
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
 
                 all_latents.append(latents)
-                all_log_probs.append(log_prob)
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or (
@@ -491,7 +487,7 @@ class SanaModel(DiffuserModel):
         # Offload all models
         self.pipeline.maybe_free_model_hooks()
 
-        return image, all_latents, all_log_probs
+        return image, all_latents, None
 
     def nft_prepare_transformer_input(
         self,

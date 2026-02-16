@@ -35,7 +35,7 @@ weight_copy_decay_type = 1
 [policy.diffusers.sample]
 num_steps = 10
 eval_num_steps = 40
-guidance_scale = 4.5
+guidance_scale = 1.0
 noise_level = 1
 solver = "euler"
 deterministic_sampling = true
@@ -48,7 +48,7 @@ n_generation = 24
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
-multi_modal_log_interval = 10
+multi_modal_log_interval = 1
 
 [train]
 non_text = true
