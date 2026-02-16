@@ -694,7 +694,6 @@ class SFTTrainer(LLMTrainer):
                         f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                     )
                     self.lr_schedulers = None
-                    self.build_optimizers()
                     self.model.load_hf_weights(
                         self.config.policy.model_safetensor_path
                         or self.config.policy.model_name_or_path,

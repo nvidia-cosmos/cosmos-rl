@@ -90,16 +90,27 @@ class SFTDataset(Dataset):
             if cache_obj is not None:
                 return cache_obj
 
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if not self.is_user_dataset and self.column_name
-            else self.dataset[idx]
-        )
+        max_retries = 50
+        for attempt in range(max_retries):
+            raw_item = (
+                self.dataset[idx][self.column_name]
+                if not self.is_user_dataset and self.column_name
+                else self.dataset[idx]
+            )
 
-        if isinstance(idx, list):  # a batch of items
-            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
-        else:
-            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+            try:
+                if isinstance(idx, list):  # a batch of items
+                    item = [self.data_packer.sft_process_sample(x) for x in raw_item]
+                else:
+                    item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+                break
+            except Exception as e:
+                if attempt >= max_retries - 1:
+                    raise
+                print(
+                    f"WARNING: sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                continue
 
         if self.cache is not None:
             self.cache.set(idx, item)

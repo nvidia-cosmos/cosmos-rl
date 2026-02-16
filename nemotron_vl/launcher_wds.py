@@ -22,6 +22,7 @@ os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
 import webdataset as wds
 from torch.utils.data import IterableDataset
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombWarning for large images
 import io
 from typing import Any, Iterator, Union, List, Optional, Sequence
 import glob
@@ -93,17 +94,182 @@ def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_
 
 ########################################################
 
-def modify_messages(messages, max_pixels=None):
+def _sanitize_wds_filename(fname: str) -> str:
+    """Replace dots in the __key__ portion of a tar entry filename.
+
+    WebDataset's ``base_plus_ext`` splits at the *first* dot to obtain
+    (key, extension).  If the original sample id contains dots (e.g.
+    ``sharegpt4v(llava)_processed_new.json16311``), every sample from
+    that source ends up with the same key prefix and they all get merged
+    into one giant sample.  We fix this by replacing every dot in the
+    key portion (everything before the last dot) with an underscore.
+    """
+    last_dot = fname.rfind(".")
+    if last_dot <= 0:
+        return fname
+    key_part = fname[:last_dot]
+    ext_part = fname[last_dot:]           # includes the leading dot
+    return key_part.replace(".", "_") + ext_part
+
+
+# ---------------------------------------------------------------------------
+# Tolerant tarfile_to_samples: handles both dots-in-key and duplicate IDs
+# without losing samples.
+# ---------------------------------------------------------------------------
+from webdataset.tariterators import (
+    base_plus_ext as _wds_base_plus_ext,
+    valid_sample as _wds_valid_sample,
+    url_opener as _wds_url_opener,
+    tar_file_expander as _wds_tar_file_expander,
+)
+
+
+def _group_by_keys_tolerant(data, keys=_wds_base_plus_ext, lcase=True,
+                            suffixes=None, handler=None):
+    """Like ``webdataset.tariterators.group_by_keys`` but duplicate-tolerant.
+
+    When a duplicate suffix is encountered for the current sample (e.g. two
+    files with the same key and extension), the current sample is yielded and
+    a *new* sample is started instead of raising ``ValueError``.  This keeps
+    both copies of a duplicated sample instead of losing one.
+    """
+    current_sample = None
+    for filesample in data:
+        try:
+            assert isinstance(filesample, dict)
+            if filesample == {}:
+                if _wds_valid_sample(current_sample):
+                    yield current_sample
+                current_sample = None
+                continue
+            fname, value = filesample["fname"], filesample["data"]
+            prefix, suffix = keys(fname)
+            if prefix is None:
+                continue
+            if lcase:
+                suffix = suffix.lower()
+            if current_sample is None or prefix != current_sample["__key__"]:
+                if _wds_valid_sample(current_sample):
+                    yield current_sample
+                current_sample = dict(__key__=prefix, __url__=filesample["__url__"])
+            if suffix in current_sample:
+                # Duplicate suffix -- yield the current (complete) sample and
+                # start a fresh one so both copies survive.
+                if _wds_valid_sample(current_sample):
+                    yield current_sample
+                current_sample = dict(__key__=prefix, __url__=filesample["__url__"])
+            if suffixes is None or suffix in suffixes:
+                current_sample[suffix] = value
+            local_path = filesample.get("__local_path__")
+            if local_path is not None:
+                current_sample["__local_path__"] = local_path
+        except Exception as exn:
+            exn.args = exn.args + (filesample.get("stream"), filesample.get("url"))
+            if handler and handler(exn):
+                continue
+            else:
+                break
+    if _wds_valid_sample(current_sample):
+        yield current_sample
+
+
+def _tarfile_samples_tolerant(src, handler=wds.reraise_exception,
+                              select_files=None, rename_files=None):
+    """Drop-in replacement for ``wds.tarfile_samples`` that uses
+    ``_group_by_keys_tolerant`` to survive duplicate sample IDs."""
+    streams = _wds_url_opener(src, handler=handler)
+    files = _wds_tar_file_expander(streams, handler=handler,
+                                   select_files=select_files,
+                                   rename_files=rename_files)
+    samples = _group_by_keys_tolerant(files, handler=handler)
+    return samples
+
+
+_tarfile_to_samples_tolerant = wds.filters.pipelinefilter(
+    _tarfile_samples_tolerant
+)
+
+
+# Per-image pixel cap: at most ~1960 vision tokens per image.
+# 1960 * (patch_size * merge_size)^2 = 1960 * 32 * 32
+IMAGE_MAX_PIXELS = 1960 * 32 * 32
+
+
+def approx_max_pixels(messages, max_seq_len):
+    """Estimate the available pixel budget for vision content.
+
+    Approximates text token count from the JSON byte length, then converts
+    the remaining token budget to pixels using (patch_size * merge_size)^2 = 1024.
+    Returns None when the text alone nearly fills the context (< 128 tokens
+    worth of vision capacity), signalling the caller to skip the sample.
+    """
+    # Estimate text length by summing only the serialisable text portions.
+    # messages may already contain PIL Images / video frames after
+    # _attach_media_from_sample, so json.dumps(messages) would fail.
+    text_bytes = 0
+    for msg in messages:
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            text_bytes += len(content)
+        elif isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    text_bytes += len(c.get("text", ""))
+    text_token_length = int(text_bytes / 3.0)
+    max_pixels = (max_seq_len - text_token_length) * 0.9 * 32 * 32
+    if max_pixels < 128 * 32 * 32:
+        return None
+    return max_pixels
+
+
+def modify_messages(messages, max_seq_len=None):
+    """Set per-content pixel budgets and normalise content format.
+
+    * Computes a *per-sample* pixel budget from the remaining token capacity
+      so that vision tokens + text tokens ≤ model_max_length.
+    * Divides the budget across all vision items (images + videos) in the
+      sample, and additionally caps each image at IMAGE_MAX_PIXELS.
+    * Returns **None** when the sample cannot fit any vision content,
+      signalling the caller to drop it.
+    """
+    max_pixels = None
+    if max_seq_len is not None:
+        max_pixels = approx_max_pixels(messages, max_seq_len)
+        if max_pixels is None:
+            return None  # text alone already fills the context
+
+    # Count total vision items so we can split the budget fairly.
+    n_vision_items = 0
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get('type') in ('image', 'video'):
+                    n_vision_items += 1
+
+    # Per-item pixel share of the total budget.
+    per_item_pixels = None
+    if max_pixels is not None and n_vision_items > 0:
+        per_item_pixels = int(max_pixels / n_vision_items)
+
     for message in messages:
         if isinstance(message['content'], str):
+            # Only normalize user messages to list format; system/assistant
+            # messages must remain strings for the Jinja chat template.
+            if message.get('role') in ('system', 'assistant'):
+                continue
             message['content'] = [{'type': 'text', 'text': message['content']}]
+        if not isinstance(message['content'], list):
+            continue
         for content in message['content']:
             if content['type'] == 'image':
-                if max_pixels is not None:
-                    content['max_pixels'] = max_pixels
+                pixel_cap = IMAGE_MAX_PIXELS
+                if per_item_pixels is not None:
+                    pixel_cap = min(pixel_cap, per_item_pixels)
+                content['max_pixels'] = pixel_cap
             elif content['type'] == 'video':
-                if max_pixels is not None:
-                    content['total_pixels'] = max_pixels
+                if per_item_pixels is not None:
+                    content['total_pixels'] = per_item_pixels
     return messages
 
 def _expand_wds_urls(name: Union[str, Sequence[str]]) -> List[str]:
@@ -176,9 +342,14 @@ def _iter_media_items(messages: list[dict]):
     for msg in messages:
         content = msg.get("content", [])
         if isinstance(content, str):
-            # normalize (same as your jsonl loader did)
-            msg["content"] = [{"type": "text", "text": content}]
-            content = msg["content"]
+            # Only normalize user messages to list format; system/assistant
+            # messages must stay as strings so the chat template can
+            # concatenate them (Jinja does ``str + system_message``).
+            if msg.get("role") == "user":
+                msg["content"] = [{"type": "text", "text": content}]
+                content = msg["content"]
+            else:
+                continue
         if not isinstance(content, list):
             continue
         for c in content:
@@ -341,8 +512,9 @@ class CustomWebDatasetDataset(Dataset):
         self._length_hint = total_items
         self.urls = _expand_wds_urls(webdataset_root_paths)
 
-        # Keep your existing max_pixels heuristic
-        self.max_pixels = config.policy.model_max_length * 0.9 * ((16 * 2) ** 2)
+        # Per-sample pixel budget is computed dynamically in modify_messages()
+        # using approx_max_pixels(), so we only store max_seq_len here.
+        self.max_seq_len = config.policy.model_max_length
 
         # Cap video frames so tokens fit in model_max_length.
         # Each frame produces at least VIDEO_MIN_TOKEN_NUM=128 tokens in qwen_vl_utils.
@@ -375,7 +547,10 @@ class CustomWebDatasetDataset(Dataset):
             nodesplitter,          # shard-level split across ranks
             # Split stream by workers, since iterable dataset is not randomly accessible, each worker should see different samples
             workersplitter,        # shard-level split across dataloader workers
-            wds.tarfile_to_samples(),
+            _tarfile_to_samples_tolerant(
+                handler=wds.warn_and_continue,
+                rename_files=_sanitize_wds_filename,
+            ),
             # Shuffle samples inside a buffer/pool of size `shuffle_buf`
             wds.shuffle(self.shuffle_buf),   # sample-level shuffle buffer
             # Do preprocessing to attach the media payloads (PIL for images; bytes/path for videos)
@@ -435,6 +610,17 @@ class CustomWebDatasetDataset(Dataset):
         if not isinstance(messages, list):
             return None
 
+        # Normalize system/assistant content from list→string.
+        # Some datasets store content as [{"type":"text","text":"..."}] even for
+        # non-user messages. The Jinja chat template does string concatenation on
+        # system_message (line 44) and requires it to be a string.
+        for msg in messages:
+            if msg.get("role") in ("system", "assistant"):
+                content = msg.get("content")
+                if isinstance(content, list):
+                    texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+                    msg["content"] = "".join(texts)
+
         # Optional filter: skip samples containing videos if include_video=False
         if not self.include_video:
             has_video = False
@@ -459,9 +645,12 @@ class CustomWebDatasetDataset(Dataset):
         if messages is None:
             return None
 
-        # Apply pixel budget mutations (max_pixels for images, total_pixels for videos).
+        # Apply per-sample pixel budget (max_pixels for images, total_pixels for videos).
         # Video frame limiting (fps, max_frames) is handled during decoding in _attach_media_from_sample.
-        messages = modify_messages(messages, self.max_pixels)
+        # modify_messages returns None when the text alone fills the context → skip.
+        messages = modify_messages(messages, self.max_seq_len)
+        if messages is None:
+            return None
         assert isinstance(messages, list), "messages should be a list of dicts"
         return messages
 

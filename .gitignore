@@ -254,4 +254,5 @@ nemotron_vl/*.toml
 nemotron_vl/*.md
 nemotron_vl/launcher_wds_v1.py
 nemotron_vl/debug.sh
+*/nohup.out
 

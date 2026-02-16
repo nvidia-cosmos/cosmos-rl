@@ -726,7 +726,20 @@ class HFVLMDataPacker(DataPacker):
         """
         Accepts either raw text or conversation format.
         """
-        return self.get_policy_input(sample, add_generation_prompt=False)
+        result = self.get_policy_input(sample, add_generation_prompt=False)
+
+        # Safety check: if the sequence still exceeds model_max_length after
+        # upstream pixel-budget control, raise so the caller can skip and retry
+        # with the next sample rather than hitting a token/feature mismatch
+        # inside the model forward pass.
+        max_len = getattr(self.config.policy, "model_max_length", None)
+        if max_len is not None and len(result["input_ids"]) > max_len:
+            raise ValueError(
+                f"Sample exceeds model_max_length after tokenization "
+                f"({len(result['input_ids'])} > {max_len}), skipping."
+            )
+
+        return result
 
     def sft_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
         """
