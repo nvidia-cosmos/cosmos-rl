@@ -203,9 +203,18 @@ def build_optimizers(
     if isinstance(lr, float):
         lr = [lr] * len(model_parts)
     elif isinstance(lr, list):
-        assert len(lr) == len(
-            model_parts
-        ), "The length of lr and model_parts must be the same"
+        if len(lr) != len(model_parts):
+            # List the model part names for better debugging
+            model_part_names = []
+            for model_part in model_parts:
+                if model_part is None:
+                    model_part_names.append("None")
+                else:
+                    model_part_names.append(type(model_part).__name__)
+            raise ValueError(
+                f"The length of lr ({len(lr)}) and model_parts ({len(model_parts)}) must be the same. "
+                f"Model parts: {model_part_names}"
+            )
     else:
         raise ValueError(f"Invalid lr: {lr}")
 
