@@ -87,9 +87,9 @@ def compute_nodes(
 
     node_launch_metadata = []
     if n_gpu_per_replica >= n_gpu_per_node:
-        assert (
-            n_gpu_per_replica % n_gpu_per_node == 0
-        ), f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
+        assert n_gpu_per_replica % n_gpu_per_node == 0, (
+            f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
+        )
         n_policy_nodes = n_replicas * (n_gpu_per_replica // n_gpu_per_node)
 
         rendezvous_node = 0
@@ -116,9 +116,9 @@ def compute_nodes(
             if n_gpu_per_node % divisor == 0:
                 possible_gpu_per_replica.append(divisor)
 
-        assert (
-            n_gpu_per_replica in possible_gpu_per_replica
-        ), f"Number of GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
+        assert n_gpu_per_replica in possible_gpu_per_replica, (
+            f"Number of GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
+        )
         n_policy_nodes = math.ceil(n_replicas * n_gpu_per_replica / n_gpu_per_node)
 
         replica_counter = 0
@@ -206,7 +206,10 @@ def main():
         help="Extra #SBATCH arguments",
     )
     parser.add_argument(
-        "--slurm-job-time", type=str, default="04:00:00", help="SLURM job time, default is 4 hours"
+        "--slurm-job-time",
+        type=str,
+        default="04:00:00",
+        help="SLURM job time, default is 4 hours",
     )
     parser.add_argument(
         "launcher",
