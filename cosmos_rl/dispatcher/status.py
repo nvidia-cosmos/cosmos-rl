@@ -166,6 +166,7 @@ class PolicyStatusManager:
         if (
             self.config.train.resume
             and self.config.validation.enable
+            and self.current_step > 0
             and (
                 self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
