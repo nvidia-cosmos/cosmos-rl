@@ -42,10 +42,6 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 )
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
-)
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
@@ -324,6 +320,10 @@ class vLLMRollout(RolloutBase):
             # patch the vllm model to use rowwise fp8
             if self.quantization == "fp8":
                 from vllm.config import set_current_vllm_config
+                from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                    apply_fp8_linear_patch,
+                    simplify_process_weights_after_loading,
+                )
 
                 vllm_config = self.rollout_engine.llm_engine.vllm_config
                 with set_current_vllm_config(vllm_config):

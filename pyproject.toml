@@ -7,7 +7,7 @@ dynamic = ["version"]
 dependencies = [
     "fastapi",
     "uvicorn",
-    "transformers>=4.51.1,!=4.52.*,!=4.53.*,<5.0.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+    "transformers>=4.57.0,<5.0.0",  # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
     "datasets>=4.4.1",
     "pydantic",
     "math_verify",
@@ -21,7 +21,7 @@ dependencies = [
     "StrEnum",
     "redis",
     "msgpack",
-    "qwen_vl_utils",
+    "qwen-vl-utils",
     "pynvml",
     "boto3",
     "modelscope",

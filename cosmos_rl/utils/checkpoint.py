@@ -448,7 +448,14 @@ class CheckpointMananger:
                     )
 
         is_final = kwargs.get("is_final", False)
-        cur_step_ckpt_dir = os.path.join(f"step_{step}", "policy")
+        # Use epoch-based naming if epoch is provided (e.g., save_freq_in_epoch > 0)
+        # Otherwise fall back to step-based naming
+        epoch = kwargs.get("epoch")
+        if epoch is not None:
+            ckpt_identifier = f"epoch_{epoch}"
+        else:
+            ckpt_identifier = f"step_{step}"
+        cur_step_ckpt_dir = os.path.join(ckpt_identifier, "policy")
         os.makedirs(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
         )
@@ -702,7 +709,15 @@ class CheckpointMananger:
 
     def save_check(self, step: int, **kwargs):
         if self._is_master_rank():
-            step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
+            # Use epoch-based naming if epoch is provided, otherwise step-based
+            epoch = kwargs.get("epoch")
+            if epoch is not None:
+                ckpt_identifier = f"epoch_{epoch}"
+                step_ckpt_path = os.path.join(self.ckpt_output_dir, ckpt_identifier)
+            else:
+                ckpt_identifier = f"step_{step}"
+                step_ckpt_path = os.path.join(self.ckpt_output_dir, ckpt_identifier)
+
             self.saved_ckpt_step_dirs.append(step_ckpt_path)
             # remove the old checkpoints
             # expected behavior:
@@ -752,24 +767,34 @@ class CheckpointMananger:
 
                     # Create symlink for checkpoint at root/best/checkpoints
                     best_ckpt_link = os.path.join(best_dir, "checkpoints")
-                    # assume the best checkpoint is at self.ckpt_output_dir/step_<step>
+                    # assume the best checkpoint is at self.ckpt_output_dir/step_<step> or epoch_<epoch>
                     if os.path.islink(best_ckpt_link):
                         os.unlink(best_ckpt_link)
                     os.symlink(step_ckpt_path, best_ckpt_link)
                     logger.info(
-                        f"Best checkpoint updated to step_{step} with score: {val_score}"
+                        f"Best checkpoint updated to {ckpt_identifier} with score: {val_score}"
                     )
 
                     # Create symlink for safetensors at root/best/safetensors
                     if self.config.train.ckpt.export_safetensors:
                         best_safetensors_link = os.path.join(best_dir, "safetensors")
-                        step_safetensors_path = os.path.join(
-                            self.config.train.output_dir, "safetensors", f"step_{step}"
-                        )
+                        # Support both epoch and step based naming
+                        if epoch is not None:
+                            step_safetensors_path = os.path.join(
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"epoch_{epoch}",
+                            )
+                        else:
+                            step_safetensors_path = os.path.join(
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"step_{step}",
+                            )
                         if os.path.islink(best_safetensors_link):
                             os.unlink(best_safetensors_link)
                         os.symlink(step_safetensors_path, best_safetensors_link)
-                        logger.info(f"Best safetensors updated to step_{step}")
+                        logger.info(f"Best safetensors updated to {ckpt_identifier}")
 
                     # Save best score to file for persistence across resumes
                     self._save_best_score(val_score, step_ckpt_path)

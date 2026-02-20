@@ -370,14 +370,44 @@ def build_lr_schedulers(
     Args:
         optimizers (OptimizersContainer): The corresponding optimizers for the
             lr_schedulers.
+        config (CosmosConfig): Configuration object containing training parameters.
+        training_steps (int): Total number of training steps.
     """
-    if (
-        isinstance(config.train.optm_warmup_steps, float)
-        and config.train.optm_warmup_steps <= 1.0
-    ):
-        warmup_steps = int(config.train.optm_warmup_steps * training_steps)
+    # Priority: optm_warmup_epochs > optm_warmup_steps
+    if config.train.optm_warmup_epochs is not None:
+        # Calculate warmup steps from epochs
+        # We need to calculate steps per epoch: training_steps / total_epochs
+        total_epochs = config.train.epoch
+        steps_per_epoch = (
+            training_steps // total_epochs if total_epochs > 0 else training_steps
+        )
+
+        if (
+            isinstance(config.train.optm_warmup_epochs, float)
+            and config.train.optm_warmup_epochs <= 1.0
+        ):
+            # If warmup_epochs is a fraction, multiply by total epochs
+            warmup_steps = int(
+                config.train.optm_warmup_epochs * total_epochs * steps_per_epoch
+            )
+        else:
+            # If warmup_epochs is an absolute number
+            warmup_steps = int(config.train.optm_warmup_epochs * steps_per_epoch)
+
+        logger.info(
+            f"Using optm_warmup_epochs={config.train.optm_warmup_epochs}, "
+            f"converted to {warmup_steps} warmup steps "
+            f"(steps_per_epoch={steps_per_epoch}, total_epochs={total_epochs})"
+        )
     else:
-        warmup_steps = int(config.train.optm_warmup_steps)
+        # Fall back to optm_warmup_steps
+        if (
+            isinstance(config.train.optm_warmup_steps, float)
+            and config.train.optm_warmup_steps <= 1.0
+        ):
+            warmup_steps = int(config.train.optm_warmup_steps * training_steps)
+        else:
+            warmup_steps = int(config.train.optm_warmup_steps)
 
     if warmup_steps > training_steps:
         logger.warning(
