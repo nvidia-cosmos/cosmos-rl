@@ -234,7 +234,8 @@ def parallelize(
 
         for _, module in model.named_modules():
             # module might be warpped with FSDP, it will change class name to f"FSDP{original_module_name}"
-            if type(module).__name__.replace('FSDP', '') in train_layers:
+            module_class_name = type(module).__name__
+            if any(layer_substring in module_class_name for layer_substring in train_layers):
                 for name, parameters in module.named_parameters():
                     # e_correction_bias always be not trainable
                     if 'e_correction_bias' not in name:
@@ -342,15 +343,6 @@ def apply_fsdp(
 
             fully_shard(
                 model.vision_model,
-                **fsdp_config_no_moe,
-                reshard_after_forward=True,
-            )
-
-        # Shard the multi-modal projector, 
-        # If module is inside vision_model, apply fsdp before shard whole vision_model
-        if model.multi_modal_projector is not None:
-            fully_shard(
-                model.multi_modal_projector,
                 **fsdp_config_no_moe,
                 reshard_after_forward=True,
             )
