@@ -1,7 +1,7 @@
 redis = "12800"
 
 [train]
-resume = true
+resume = false
 epoch = 1
 output_dir = "./outputs/nemotron-3-nano-vl-alignment"
 epsilon = 1e-6
@@ -28,6 +28,14 @@ enable_validation = false
 enable_moe_load_balancing_training = true
 n_step_per_workload_report = 10
 train_layers = ["Qwen3VLVisionPatchMerger"]
+webdataset_root_paths = [
+    "/workspace/simonz/data/vlm-data-debug/laion_recaption_filter_train_shuf_3m",
+    # "/workspace/simonz/data/vlm-data-debug/infinitmm_stage1_qwenvl_filter_clip_id_shuf_5m",
+    # "/workspace/simonz/data/vlm-data-debug/synthdog-en-chat-sample-250k-stage1",
+    # "/workspace/simonz/data/vlm-data-debug/synthdog-zh-chat-sample-250k-stage1",
+    # "/workspace/simonz/data/vlm-data-debug/unsplash_filter_001_800k_grounding_caption_chat_stage1_train",
+    # "/workspace/simonz/data/vlm-data-debug/webvid_caption_openai_format_1M_stage1_train",
+]
 
 [policy]
 model_name_or_path = "/workspace/nemotron-vlm/NVIDIA-Nemotron-3-Nano-VL-30B-A3B-BF16"
@@ -49,7 +57,7 @@ enable_dataset_cache = false
 dataloader_num_workers = 4
 dataloader_prefetch_factor = 4
 conversation_column_name = ""
-mini_batch = 8
+mini_batch = 2
 
 [train.ckpt]
 enable_checkpoint = true

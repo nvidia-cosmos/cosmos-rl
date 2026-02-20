@@ -16,6 +16,7 @@
 import json
 from typing import Optional
 import os, sys
+os.environ["USE_QWEN_VL_PROCESS"] = "1"
 # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
 os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
 import webdataset as wds

@@ -266,11 +266,6 @@ def _apply_vision_replicate(model: nn.Module, replicate_mesh: DeviceMesh):
         replicate(model.vision_model, device_mesh=replicate_mesh, bucket_cap_mb=100)
         logger.info("Applied DDP (replicate) to the visual model in fp32 with eager attention (vision_replicate=True)")
 
-    if model.multi_modal_projector is not None:
-        model.multi_modal_projector.to(dtype=torch.float32)
-        replicate(model.multi_modal_projector, device_mesh=replicate_mesh, bucket_cap_mb=100)
-        logger.info("Applied DDP (replicate) to the multi-modal projector in fp32 (vision_replicate=True)")
-
 
 def apply_compile(model: nn.Module, fullgraph: bool = True):
     """
