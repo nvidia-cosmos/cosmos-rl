@@ -1,0 +1,69 @@
+redis = "12800"
+
+[train]
+resume = false
+epoch = 1
+output_dir = "./outputs/qwen2-5-7b-sft-pp2-cp2-sft"
+epsilon = 1e-6
+optm_name = "AdamW"
+optm_lr = 1e-6
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_betas = [ 0.9, 0.999,]
+optm_warmup_steps = 20
+optm_grad_norm_clip = 1.0
+async_tp_enabled = false
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 2
+
+[policy]
+model_name_or_path = "liang1225/qwen3_vl_bridge"
+#model_name_or_path = "nemotron-vl"
+model_max_length = 16384
+model_gradient_checkpointing = true
+trainable_pattern = ['^model\.visual\.merger\..*']
+
+[logging]
+logger = ['console', 'wandb']
+project_name = "cosmos_rl"
+experiment_name = "None"
+
+[train.train_policy]
+type = "sft"
+#dataset.name = "HuggingFaceH4/llava-instruct-mix-vsft"
+dataset.name = "lmms-lab/LLaVA-Video-178K"
+dataset.subset = "0_30_s_academic_v0_1"
+dataset.split = "caption"
+dataset.test_size = 100
+conversation_column_name = "messages"
+mini_batch = 2
+dataloader_shuffle = false
+
+
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 10000
+save_mode = "async"
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 8
+pp_size = 1
+dp_replicate_size = 1
+
+[validation]
+enable = false
+freq = 30
+batch_size = 8
+
+[custom]
+use_i4 = true
+#i4_data_source = "i4_data_utils.data_weight_default"
+i4_data_source = "projects.cosmos3.vlm.datasets.data_sources_joint.data_weight.reason2_release.data_weight_joint"
