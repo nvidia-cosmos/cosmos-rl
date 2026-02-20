@@ -609,21 +609,36 @@ class HFModel(BaseModel):
         return position_ids, inputs, seq_dim_idx
 
     def separate_model_parts(self) -> List[nn.Module]:
-        if self.is_vlm:
-            model_parts = [self.language_model, self.vision_model]
-            if self.multi_modal_projector is not None:
-                logger.info("Adding multi_modal_projector to model parts")
-                model_parts.append(self.multi_modal_projector)
-            # Handle cases where lm_head exists at model level rather than language_model level
-            if (
-                getattr(self.language_model, "lm_head", None) is None
-                and getattr(self.model, "lm_head", None) is not None
-            ):
-                logger.info("Adding lm_head to model parts")
-                model_parts.append(self.model.lm_head)
-            return model_parts
-        else:
-            return [self.language_model]
+        if not self.is_vlm:
+            return [self.model]
+
+        parts: List[nn.Module] = [self.language_model, self.vision_model]
+        all_params = set()
+        for part in parts:
+            all_params.update(set(part.parameters()))
+
+        # Ensure there is not any modules that are ignored in the above two parts
+        modules_to_check = list(self.model.children())
+        while modules_to_check:
+            module = modules_to_check.pop(0)
+            # 1. if module === any part, skip
+            if any(module is part for part in parts):
+                continue
+            # 2. if no part is submodule of module, add this module to parts
+            elif not any(part in module.modules() for part in parts):
+                # in case of some tied that have already been added to parts, e.g., lm_head in `Qwen/Qwen3-VL-2B-Instruct`
+                module_params = set(module.parameters())
+                if module_params & all_params == module_params:
+                    logger.warning(
+                        f"All parameters of {module} are shared with other parts, skip adding it to parts to avoid duplication."
+                    )
+                else:
+                    all_params.update(module_params)
+                    parts.append(module)
+            # 3. else, this module is a parent module of some part, check its children
+            else:
+                modules_to_check.extend(module.children())
+        return parts
 
     @cached_property
     def _get_nparams_and_flops_fn(
