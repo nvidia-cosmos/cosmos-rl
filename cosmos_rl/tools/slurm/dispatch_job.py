@@ -206,6 +206,12 @@ def main():
         help="Extra #SBATCH arguments",
     )
     parser.add_argument(
+        "--slurm-job-time",
+        type=str,
+        default="04:00:00",
+        help="SLURM job time, default is 4 hours",
+    )
+    parser.add_argument(
         "launcher",
         nargs="?",  # “?” means 0 or 1 occurrences
         default="cosmos_rl.dispatcher.run_web_panel",
@@ -272,6 +278,7 @@ def main():
         "SLURM_PARTITION": args.slurm_partition,
         "SLURM_ACCOUNT": args.slurm_account,
         "SLURM_JOB_NAME": args.job_name,
+        "SLURM_JOB_TIME": args.slurm_job_time,
         "CONFIG_PATH": config_tmpfile,
         "LAUNCHER": args.launcher,
         "LAUNCHER_ARGS": launcher_args,

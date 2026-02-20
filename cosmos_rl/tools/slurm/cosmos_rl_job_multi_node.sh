@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A [[SLURM_ACCOUNT]] 
 #SBATCH -J [[SLURM_JOB_NAME]]
-#SBATCH -t 04:00:00 
+#SBATCH -t [[SLURM_JOB_TIME]]
 #SBATCH --nodes=[[TOTAL_NODES]]
 #SBATCH --mem=0 
 #SBATCH --dependency=singleton
