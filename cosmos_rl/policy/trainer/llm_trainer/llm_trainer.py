@@ -133,6 +133,14 @@ class LLMTrainer(Trainer):
 
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
+            self.model_modpath = [None for _ in range(len(self.model_parts))]
+            # for loop to find the model_parts path for each mdoel_part
+            for name, module in model.named_modules():
+                if module in self.model_parts:
+                    idx = self.model_parts.index(module)
+                    self.model_modpath[idx] = name
+                    if all([modpath is not None for modpath in self.model_modpath]):
+                        break
             self.model = model
             # util.add_nan_checks(model)
         except Exception as e:
@@ -168,7 +176,9 @@ class LLMTrainer(Trainer):
 
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
-        self.optimizers = build_optimizers(self.model_parts, self.config)
+        self.optimizers = build_optimizers(
+            self.model_parts, self.config, model_modpath=self.model_modpath
+        )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
                 lambda *args, **kwargs: self.model_converter.post_optimizer_hook(

@@ -621,7 +621,16 @@ class HFModel(BaseModel):
         if not self.is_vlm:
             return [self.model]
 
-        parts: List[nn.Module] = [self.language_model, self.vision_model]
+        # Optimizer Order:
+        # 1. language_model
+        # 2. multi_modal_projector (if exists)
+        # 3. vision_model
+        # 4. other modules that are not included in above 3 parts, e.g., lm_head in some models like Qwen/Qwen3-VL-2B-Instruct, which is not a submodule of language_model.
+        parts: List[nn.Module] = (
+            [self.language_model, self.vision_model]
+            if self.multi_modal_projector is None
+            else [self.language_model, self.multi_modal_projector, self.vision_model]
+        )
         all_params = set()
         for part in parts:
             all_params.update(set(part.parameters()))

@@ -96,7 +96,9 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 parameters_by_mesh = collections.defaultdict(list)
                 for name, p in model.named_parameters():
                     if p.requires_grad and hasattr(p, "cosmos_optim_reached"):
-                        logger.info(f"{name} Already set by previous optimizer")
+                        logger.warning(
+                            f"{name} is already set by previous optimizer, will be skipped in current optimizer."
+                        )
                     elif p.requires_grad and not hasattr(p, "cosmos_optim_reached"):
                         setattr(p, "cosmos_optim_reached", True)
                         all_trainable_params.append(name)
@@ -182,9 +184,62 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
+def _print_optimizer_table(optimizer_cls, optimizer_kwargs_list, model_modpath=None):
+    if not optimizer_kwargs_list:
+        logger.info("No optimizer configs to display.")
+        return
+
+    # Collect all unique keys (preserve order of first appearance)
+    seen_keys = []
+    for kw in optimizer_kwargs_list:
+        for k in kw.keys():
+            if k not in seen_keys:
+                seen_keys.append(k)
+
+    columns = ["model_part", "class name"] + seen_keys
+
+    # Default model part names
+    if model_modpath is None:
+        model_modpath = [f"part_{i}" for i in range(len(optimizer_kwargs_list))]
+
+    # Build rows
+    rows = []
+    for idx, kw in enumerate(optimizer_kwargs_list):
+        row = [model_modpath[idx], optimizer_cls.__name__]
+        for k in seen_keys:
+            row.append(kw.get(k, ""))
+        rows.append(row)
+
+    # Convert everything to string
+    str_rows = [[str(x) for x in row] for row in rows]
+    str_columns = [str(c) for c in columns]
+
+    # Compute column widths
+    widths = []
+    for col_idx in range(len(columns)):
+        max_width = len(str_columns[col_idx])
+        for row in str_rows:
+            max_width = max(max_width, len(row[col_idx]))
+        widths.append(max_width)
+
+    # Helper to format a row
+    def format_row(row):
+        return " | ".join(row[i].ljust(widths[i]) for i in range(len(row)))
+
+    # Print table
+    header = format_row(str_columns)
+    separator = "-+-".join("-" * w for w in widths)
+
+    logger.info(header)
+    logger.info(separator)
+    for row in str_rows:
+        logger.info(format_row(row))
+
+
 def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
+    model_modpath: List[str] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -201,6 +256,7 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        model_modpath (List[str], optional): List of model part paths. Defaults to None.
     """
     lr = config.train.optm_lr
     if isinstance(lr, float):
@@ -215,12 +271,15 @@ def build_optimizers(
                 lr = lr[: len(model_parts)]
             else:
                 # List the model part names for better debugging
-                model_part_names = []
-                for model_part in model_parts:
-                    if model_part is None:
-                        model_part_names.append("None")
-                    else:
-                        model_part_names.append(type(model_part).__name__)
+                if model_modpath is not None:
+                    model_part_names = model_modpath
+                else:
+                    model_part_names = []
+                    for model_part in model_parts:
+                        if model_part is None:
+                            model_part_names.append("None")
+                        else:
+                            model_part_names.append(type(model_part).__name__)
                 raise ValueError(
                     f"The length of lr ({len(lr)}) and model_parts ({len(model_parts)}) must be the same. "
                     f"Model parts: {model_part_names}"
@@ -290,6 +349,12 @@ def build_optimizers(
         if unused_kwargs:
             logger.warning(f"Unused kwargs in optimizer-{name}: {unused_kwargs}")
         filtered_optimizer_kwargs.append(optimizer_kwargs_i)
+
+    _print_optimizer_table(
+        optimizer_cls,
+        filtered_optimizer_kwargs,
+        model_modpath=model_modpath,
+    )
     return OptimizersContainer(optimizer_cls, model_parts, filtered_optimizer_kwargs)
 
 
