@@ -551,9 +551,21 @@ class SFTTrainer(LLMTrainer):
                     "train/iteration_time": fwd_bwd_time_mean,
                     "train/batch_arrival_time_mean": batch_arrival_time_mean,
                     "train/batch_arrival_time_max": batch_arrival_time_max,
-                    "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
+                learning_rates_metric = {
+                    "optimizer/grad_norm": grad_norm if grad_norm is not None else -1,
+                }
+                for idx in range(len(self.model_parts)):
+                    try:
+                        learning_rates_metric[
+                            f"optimizer/lr_{self.model_modpath[idx]}"
+                        ] = self.lr_schedulers.get_last_lr(idx)[0]
+                    except Exception:
+                        # Maybe this model part is frozen, so no optimizer/scheduler for it, just skip.
+                        # learning_rates_metric[f"optimizer/lr_{self.model_modpath[idx]}"] = -1.0
+                        pass
+                loss_metrics.update(learning_rates_metric)
+
                 for idx, name in enumerate(loss_flat_keys):
                     loss_metrics[f"train/{name}_avg"] = global_avg_loss[idx]
                     loss_metrics[f"train/{name}_max"] = global_max_loss[idx]

@@ -77,13 +77,16 @@ class OptimizersContainer(Optimizer, Generic[T]):
         optimizer_cls: type[T],
         model_parts: List[nn.Module],
         optimizer_kwargs: List[Dict[str, Any]],
+        model_modpath: List[str] = None,
     ) -> None:
         all_params = []
         self.model_parts = model_parts
+        self.model_modpath = model_modpath
         self.optimizers = [[] for _ in self.model_parts]
         # Compute total number of parameters
         total_trainable_params = 0
         all_trainable_params = []
+        param_set = set()
         for model_id, (model, optimizer_kwargs_i) in enumerate(
             zip(self.model_parts, optimizer_kwargs)
         ):
@@ -95,12 +98,12 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 # Group the parameters by device mesh to do optimizer fusion.
                 parameters_by_mesh = collections.defaultdict(list)
                 for name, p in model.named_parameters():
-                    if p.requires_grad and hasattr(p, "cosmos_optim_reached"):
+                    if p.requires_grad and p in param_set:
                         logger.warning(
                             f"{name} is already set by previous optimizer, will be skipped in current optimizer."
                         )
-                    elif p.requires_grad and not hasattr(p, "cosmos_optim_reached"):
-                        setattr(p, "cosmos_optim_reached", True)
+                    elif p.requires_grad and p not in param_set:
+                        param_set.add(p)
                         all_trainable_params.append(name)
                         device_mesh = (
                             p.device_mesh if hasattr(p, "device_mesh") else "default"
@@ -121,6 +124,12 @@ class OptimizersContainer(Optimizer, Generic[T]):
                         all_trainable_params.append(name)
         logger.info(f"Total number of trainable parameters: {total_trainable_params}")
         logger.debug(f"Trainable parameters: {all_trainable_params}")
+        _print_optimizer_table(
+            optimizer_cls,
+            optimizer_kwargs,
+            optimizer_count=[len(opt_list) for opt_list in self.optimizers],
+            model_modpath=model_modpath,
+        )
 
         self._post_init(all_params, optimizer_kwargs)
 
@@ -184,7 +193,12 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
-def _print_optimizer_table(optimizer_cls, optimizer_kwargs_list, model_modpath=None):
+def _print_optimizer_table(
+    optimizer_cls,
+    optimizer_kwargs_list,
+    optimizer_count: list[int],
+    model_modpath=None,
+):
     if not optimizer_kwargs_list:
         logger.info("No optimizer configs to display.")
         return
@@ -202,12 +216,25 @@ def _print_optimizer_table(optimizer_cls, optimizer_kwargs_list, model_modpath=N
     if model_modpath is None:
         model_modpath = [f"part_{i}" for i in range(len(optimizer_kwargs_list))]
 
+    # Keys that count as "learning rate"
+    lr_keys = {"lr", "learning_rate", "learning-rate", "learning rate"}
+
     # Build rows
     rows = []
     for idx, kw in enumerate(optimizer_kwargs_list):
+        optm_cnt = optimizer_count[idx] if idx < len(optimizer_count) else None
         row = [model_modpath[idx], optimizer_cls.__name__]
+
         for k in seen_keys:
-            row.append(kw.get(k, ""))
+            v = kw.get(k, "")
+            v_str = str(v)
+
+            # Strikethrough LR text when optimizer count is 0 for this model part
+            if optm_cnt == 0 and str(k).strip().lower() in lr_keys:
+                v_str = f"{v_str} (FROZEN)"
+
+            row.append(v_str)
+
         rows.append(row)
 
     # Convert everything to string
@@ -350,12 +377,12 @@ def build_optimizers(
             logger.warning(f"Unused kwargs in optimizer-{name}: {unused_kwargs}")
         filtered_optimizer_kwargs.append(optimizer_kwargs_i)
 
-    _print_optimizer_table(
+    return OptimizersContainer(
         optimizer_cls,
+        model_parts,
         filtered_optimizer_kwargs,
         model_modpath=model_modpath,
     )
-    return OptimizersContainer(optimizer_cls, model_parts, filtered_optimizer_kwargs)
 
 
 class LRSchedulersContainer(Stateful):
@@ -389,35 +416,51 @@ class LRSchedulersContainer(Stateful):
             len(optimizers) > 0
         ), "Must have at least one optimizer to create LRScheduler"
 
-        self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
+        # [[scheduler1_for_optm1, scheduler2_for_optm1], [scheduler1_for_optm2, scheduler2_for_optm2], ...]
+        self.schedulers = [[] for _ in optimizers.model_parts]
+        for model_id, optm_list in enumerate(optimizers.optimizers):
+            for optm in optm_list:
+                scheduler = LambdaLR(optm, lr_lambda=lr_lambda)
+                self.schedulers[model_id].append(scheduler)
 
     def __iter__(self) -> LRScheduler:
-        return iter(self.schedulers)
+        return iter(itertools.chain(*self.schedulers))
 
     def __len__(self) -> int:
         return len(self.schedulers)
 
     def step(self) -> None:
-        for scheduler in self.schedulers:
+        for scheduler in itertools.chain(*self.schedulers):
             scheduler.step()
 
-    def get_last_lr(self) -> float:
-        return self.schedulers[0].get_last_lr()
+    def get_last_lr(self, model_part_idx: int = 0) -> float:
+        return self.schedulers[model_part_idx][0].get_last_lr()
 
     def state_dict(self) -> Dict[str, Any]:
-        # While there may be multiple schedulers, we only save the first one because
-        # the state_dict is the same for all. See the limitations section in the
-        # docstring.
-        return self.schedulers[0].state_dict()
+        state_dict = {}
+        for idx, scheduler_list in enumerate(self.schedulers):
+            # each schduler state is same inside the same model part, so we just save the first one to avoid redundancy
+            if len(scheduler_list) == 0:
+                continue
+            scheduler = scheduler_list[0]
+            sd = scheduler.state_dict()
+            for k, v in sd.items():
+                if f"idx-{idx}-{k}" in state_dict:
+                    raise ValueError(f"Duplicated scheduler key is deteced! Key = {k}")
+                state_dict[f"idx-{idx}-{k}"] = v
+        return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # Load the same state_dict for all schedulers. The key value we're concerned
-        # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
-        # in ``job_config`` remain unchanged when resuming from a checkpoint, this
-        # approach is safe. We call ``copy()`` here to ensure extra safety.
-        for scheduler in self.schedulers:
-            scheduler.load_state_dict(copy.deepcopy(state_dict))
+        for idx, scheduler_list in enumerate(self.schedulers):
+            if len(scheduler_list) == 0:
+                continue
+            current_state_dict = {
+                k.replace(f"idx-{idx}-", ""): v
+                for k, v in state_dict.items()
+                if k.startswith(f"idx-{idx}-")
+            }
+            for scheduler in scheduler_list:
+                scheduler.load_state_dict(copy.deepcopy(current_state_dict))
 
 
 def build_lr_schedulers(

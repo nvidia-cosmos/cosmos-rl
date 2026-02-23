@@ -891,9 +891,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             step=self.train_step,
                         )
                     if "console" in self.config.logging.logger:
-                        logger.info(
-                            f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
-                        )
+                        log_info = f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['optimizer/grad_norm']:.5f}, Iteration time: {report_data['train/iteration_time']:.2f}s"
+                        # Append learning rate of each optimizer to log_info
+                        for key in report_data:
+                            if key.startswith("optimizer/lr_"):
+                                log_info += f", {key}: {report_data[key]:.5e}"
+
+                        logger.info(log_info)
 
                     for custom_logger_fn in self.custom_logger_fns:
                         try:

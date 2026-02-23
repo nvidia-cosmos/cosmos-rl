@@ -141,6 +141,10 @@ class LLMTrainer(Trainer):
                     self.model_modpath[idx] = name
                     if all([modpath is not None for modpath in self.model_modpath]):
                         break
+
+            for i in range(len(self.model_modpath)):
+                if self.model_modpath[i] is None:
+                    self.model_modpath[i] = f"model_part_{i}"
             self.model = model
             # util.add_nan_checks(model)
         except Exception as e:
