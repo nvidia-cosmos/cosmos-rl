@@ -146,6 +146,9 @@ class CheckpointMananger:
         """
         # Check cosmos_config exists
         if not os.path.exists(os.path.join(ckpt_path, "cosmos_config")):
+            logger.warning(
+                f"Checkpoint config not found at {ckpt_path}. Marking checkpoint as incomplete."
+            )
             return False
 
         # Calculate expected number of saving ranks based on parallel_dims
@@ -154,6 +157,9 @@ class CheckpointMananger:
         # Check complete markers for all expected ranks (0 to num_saving_ranks-1)
         for rank in range(num_saving_ranks):
             if not os.path.exists(os.path.join(ckpt_path, f".rank_{rank}_complete")):
+                logger.warning(
+                    f"Checkpoint complete marker for rank {rank} not found at {ckpt_path}. Marking checkpoint as incomplete."
+                )
                 return False
         return True
 

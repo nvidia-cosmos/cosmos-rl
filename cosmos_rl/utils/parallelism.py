@@ -235,6 +235,8 @@ class ParallelDims:
         dp_shard_cp_mesh_dim_names = []
         # Mesh useful for TP-merged FSDP
         dp_cp_tp_mesh_dim_names = []
+        # weight loading mesh, which is used for loading weights in single replica
+        weight_loading_mesh_dim_names = []
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
         # Mesh for model parallel
@@ -252,15 +254,18 @@ class ParallelDims:
             dp_shard_cp_mesh_dim_names.append("dp_shard")
             dp_cp_tp_mesh_dim_names.append("dp_shard")
             dp_cp_mesh_dim_names.append("dp_shard")
+            weight_loading_mesh_dim_names.append("dp_shard")
         if self.cp_enabled:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_tp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
             pp_cp_tp_mesh_dim_names.append("cp")
+            weight_loading_mesh_dim_names.append("cp")
         if self.tp_enabled:
             dp_cp_tp_mesh_dim_names.append("tp")
             mp_mesh_dim_names.append("tp")
             pp_cp_tp_mesh_dim_names.append("tp")
+            weight_loading_mesh_dim_names.append("tp")
             if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
                 dp_mesh_dim_names.append("tp")
                 dp_cp_mesh_dim_names.append("tp")
@@ -269,6 +274,7 @@ class ParallelDims:
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
             pp_cp_tp_mesh_dim_names.append("pp")
+            weight_loading_mesh_dim_names.append("pp")
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
@@ -280,6 +286,11 @@ class ParallelDims:
             mesh[tuple(dp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp")
         if dp_cp_mesh_dim_names != []:
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+
+        if weight_loading_mesh_dim_names != []:
+            mesh[tuple(weight_loading_mesh_dim_names)]._flatten(
+                mesh_dim_name="weight_loading"
+            )
 
         if mp_mesh_dim_names != []:
             mesh[tuple(mp_mesh_dim_names)]._flatten(mesh_dim_name="mp")
