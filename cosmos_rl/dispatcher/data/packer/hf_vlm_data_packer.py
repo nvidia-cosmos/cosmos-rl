@@ -755,4 +755,3 @@ class HFVLMDataPacker(DataPacker):
                     ] = ignore_label_id
 
         return model_inputs
-
