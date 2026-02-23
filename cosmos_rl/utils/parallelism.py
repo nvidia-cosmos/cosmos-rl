@@ -274,7 +274,6 @@ class ParallelDims:
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
             pp_cp_tp_mesh_dim_names.append("pp")
-            weight_loading_mesh_dim_names.append("pp")
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
