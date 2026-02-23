@@ -319,6 +319,15 @@ class HFModel(BaseModel):
         return vision_model
 
     @property
+    def lm_head(self):
+        if getattr(self.language_model, "lm_head", None) is not None:
+            return self.language_model.lm_head
+        elif getattr(self.model, "lm_head", None) is not None:
+            return self.model.lm_head
+        else:
+            return None
+
+    @property
     def multi_modal_projector(self):
         multi_modal_projector = None
         if self.is_vlm:
@@ -612,7 +621,16 @@ class HFModel(BaseModel):
         if not self.is_vlm:
             return [self.model]
 
-        parts: List[nn.Module] = [self.language_model, self.vision_model]
+        # Optimizer Order:
+        # 1. language_model
+        # 2. multi_modal_projector (if exists)
+        # 3. vision_model
+        # 4. other modules that are not included in above 3 parts, e.g., lm_head in some models like Qwen/Qwen3-VL-2B-Instruct, which is not a submodule of language_model.
+        parts: List[nn.Module] = (
+            [self.language_model, self.vision_model]
+            if self.multi_modal_projector is None
+            else [self.language_model, self.multi_modal_projector, self.vision_model]
+        )
         all_params = set()
         for part in parts:
             all_params.update(set(part.parameters()))

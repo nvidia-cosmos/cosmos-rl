@@ -153,6 +153,7 @@ class SFTTrainer(LLMTrainer):
         train_step: int,
         save_freq: int,
         inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
+        data_arrival_event: Optional[torch.cuda.Event] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
@@ -164,6 +165,10 @@ class SFTTrainer(LLMTrainer):
             )
 
         aux_loss_dict = OrderedDict()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
 
         self.optimizers.zero_grad()
 
@@ -183,10 +188,6 @@ class SFTTrainer(LLMTrainer):
                 mini_batch,
             )
         )
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
         for i in mini_batch_begin_idxs:
             fixed_length = (
@@ -359,12 +360,12 @@ class SFTTrainer(LLMTrainer):
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
                         if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                            v = v / len(mini_batch_begin_idxs)
                             aux_loss_dict[k] = (
                                 v.detach()
                                 if k not in aux_loss_dict
                                 else aux_loss_dict[k] + v.detach()
                             )
-                            v = v / len(mini_batch_begin_idxs)
                             loss = loss + v
 
                 ce_loss = self.loss_fn(
@@ -511,16 +512,60 @@ class SFTTrainer(LLMTrainer):
             global_avg_loss = global_max_loss = loss_flat.cpu()
 
         if self.config.logging.logger:
-            if util.is_master_rank(self.parallel_dims, self.global_rank):
-                # Calculate last iteration time
-                assert end_event.query()
-                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            assert end_event.query()
+            fwd_bwd_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            batch_arrival_time = data_arrival_event.elapsed_time(start_event) / 1000.0
+            if (
+                self.parallel_dims.dp_replicate_enabled
+                or self.parallel_dims.dp_shard_enabled
+                or self.parallel_dims.cp_enabled
+            ):
+                time_metric_tensor_mean = torch.tensor(
+                    [fwd_bwd_time, batch_arrival_time],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                time_metric_tensor_max = time_metric_tensor_mean.clone()
+                torch.distributed.all_reduce(
+                    time_metric_tensor_mean,
+                    op=torch.distributed.ReduceOp.AVG,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                torch.distributed.all_reduce(
+                    time_metric_tensor_max,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                time_metric_tensor_mean_cpu = time_metric_tensor_mean.cpu()
+                fwd_bwd_time_mean = time_metric_tensor_mean_cpu[0].item()
+                batch_arrival_time_mean = time_metric_tensor_mean_cpu[1].item()
+                # fwd_bwd_time_max = time_metric_tensor_max.cpu()[0].item()
+                batch_arrival_time_max = time_metric_tensor_max.cpu()[1].item()
+            else:
+                # fwd_bwd_time_mean = fwd_bwd_time_max = fwd_bwd_time
+                fwd_bwd_time_mean = fwd_bwd_time
+                batch_arrival_time_mean = batch_arrival_time_max = batch_arrival_time
 
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
                 loss_metrics = {
-                    "train/iteration_time": iter_time,
-                    "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                    "train/iteration_time": fwd_bwd_time_mean,
+                    "train/batch_arrival_time_mean": batch_arrival_time_mean,
+                    "train/batch_arrival_time_max": batch_arrival_time_max,
                 }
+                learning_rates_metric = {
+                    "optimizer/grad_norm": grad_norm if grad_norm is not None else -1,
+                }
+                for idx in range(len(self.model_parts)):
+                    try:
+                        learning_rates_metric[
+                            f"optimizer/lr_{self.model_modpath[idx]}"
+                        ] = self.lr_schedulers.get_last_lr(idx)[0]
+                    except Exception:
+                        # Maybe this model part is frozen, so no optimizer/scheduler for it, just skip.
+                        # learning_rates_metric[f"optimizer/lr_{self.model_modpath[idx]}"] = -1.0
+                        pass
+                loss_metrics.update(learning_rates_metric)
+
                 for idx, name in enumerate(loss_flat_keys):
                     loss_metrics[f"train/{name}_avg"] = global_avg_loss[idx]
                     loss_metrics[f"train/{name}_max"] = global_max_loss[idx]
@@ -535,7 +580,7 @@ class SFTTrainer(LLMTrainer):
                     mfu = util.compute_mfu(
                         model=self.model,
                         n_tokens=np.prod(input_ids.shape),
-                        iter_time=iter_time,
+                        iter_time=fwd_bwd_time_mean,
                         num_gpus=self.world_size,
                         dtype=self.config.train.param_dtype,
                     )
@@ -650,48 +695,47 @@ class SFTTrainer(LLMTrainer):
         do_save: bool = False,
         **kwargs,
     ):
-        if (
-            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
-        ) and self.parallel_dims.dp_replicate_coord[0] == 0:
-            # save safetensors
-            # TODO(dinghaoy): support export safetensors asynchronously.
-            if is_last_step or (
-                self.config.train.ckpt.export_safetensors
-                and self.config.train.ckpt.enable_checkpoint
-            ):
-                logger.info(
-                    f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
-                )
-                self.export_safetensors(
-                    output_dir=self.config.train.output_dir,
-                    rel_path=os.path.join(
-                        "safetensors",
-                        f"step_{train_step}",
-                    ),
-                    trainable_only=False,
-                    is_final=is_last_step,
-                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
-                )
-            # save checkpoint
-            if self.config.train.ckpt.enable_checkpoint:
-                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
-                self.ckpt_manager.save_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
-                    step=train_step,
-                    total_steps=total_steps,
-                    is_final=is_last_step,
-                    **kwargs,
-                )
-                self.ckpt_manager.save_check(
-                    step=train_step,
-                    val_score=val_score,
-                    pp_enabled=self.parallel_dims.pp_enabled,
-                    pp_last_stage=pp_last_stage,
-                    pp_master_rank=self.parallel_dims.world_size
-                    - self.parallel_dims.world_size / self.parallel_dims.pp,
-                )
+        if is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0):
+            if self.parallel_dims.dp_replicate_coord[0] == 0:
+                # save safetensors
+                # TODO(dinghaoy): support export safetensors asynchronously.
+                if is_last_step or (
+                    self.config.train.ckpt.export_safetensors
+                    and self.config.train.ckpt.enable_checkpoint
+                ):
+                    logger.info(
+                        f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
+                    )
+                    self.export_safetensors(
+                        output_dir=self.config.train.output_dir,
+                        rel_path=os.path.join(
+                            "safetensors",
+                            f"step_{train_step}",
+                        ),
+                        trainable_only=False,
+                        dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                    )
+                # save checkpoint
+                if self.config.train.ckpt.enable_checkpoint:
+                    logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                    self.ckpt_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.optimizers,
+                        scheduler=self.lr_schedulers,
+                        step=train_step,
+                        total_steps=total_steps,
+                        is_final=is_last_step,
+                        **kwargs,
+                    )
+                    self.ckpt_manager.save_check(
+                        step=train_step,
+                        val_score=val_score,
+                        pp_enabled=self.parallel_dims.pp_enabled,
+                        pp_last_stage=pp_last_stage,
+                        pp_master_rank=self.parallel_dims.world_size
+                        - self.parallel_dims.world_size / self.parallel_dims.pp,
+                    )
+            torch.distributed.barrier()
 
     def load_model(self):
         """Load model weights from checkpoint if available."""

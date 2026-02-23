@@ -131,7 +131,9 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type in ["qwen3_vl"]
+        self.use_qwen_vl_process = self.model_type in ["qwen3_vl"] or os.environ.get(
+            "USE_QWEN_VL_PROCESS", "0"
+        ) in ["1", "true", "True"]
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -343,17 +345,11 @@ class HFVLMDataPacker(DataPacker):
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
+
             video_kwargs = {}
             image_inputs = []
             video_inputs = []
             video_metadatas = None
-
-            # For dataset with PIL image objects
-            if "images" in conversation:
-                image_inputs = conversation["images"]
-            else:
-                image_inputs, video_inputs = process_vision_info(conversation)
-                image_inputs = decode_base64_to_image(image_inputs)
 
             kwarg = {
                 "return_tensors": "pt",
@@ -363,7 +359,7 @@ class HFVLMDataPacker(DataPacker):
             if self.use_qwen_vl_process and isinstance(conversation, list):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     conversation,
-                    image_patch_size=16,
+                    image_patch_size=16,  # TODO: hardcode
                     return_video_kwargs=True,
                     return_video_metadata=True,
                 )
