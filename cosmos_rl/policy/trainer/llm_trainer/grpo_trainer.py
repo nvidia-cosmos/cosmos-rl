@@ -1921,8 +1921,18 @@ class GRPOTrainer(LLMTrainer):
                 if self.config.train.train_policy.reset_optimizer_with_reference:
                     logger.info("[Policy] Resetting optimizer.")
                     self.build_optimizers()
-                    for lr in self.lr_schedulers.schedulers:
-                        lr.optimizer = self.optimizers
+
+                    # Re-pair the new optimizers with the lr schedulers since the optimizer instances have been renewed
+                    for new_optimizer_list, new_lr_scheduler_list in zip(
+                        self.optimizers.optimizers, self.lr_schedulers.schedulers
+                    ):
+                        assert (
+                            len(new_optimizer_list) == len(new_lr_scheduler_list)
+                        ), "The number of new optimizers and new lr schedulers must be the same"
+                        for new_optimizer, new_lr_scheduler in zip(
+                            new_optimizer_list, new_lr_scheduler_list
+                        ):
+                            new_lr_scheduler.optimizer = new_optimizer
 
     @torch.no_grad()
     def _swap_model_state_dict(self):
