@@ -237,6 +237,8 @@ class ParallelDims:
         dp_cp_tp_mesh_dim_names = []
         # weight loading mesh, which is used for loading weights in single replica
         weight_loading_mesh_dim_names = []
+        # Mesh for loss reduce in single replica
+        loss_parallel_mesh_dim_names = []
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
         # Mesh for model parallel
@@ -253,12 +255,14 @@ class ParallelDims:
             dp_cp_tp_mesh_dim_names.append("dp_shard")
             dp_cp_mesh_dim_names.append("dp_shard")
             weight_loading_mesh_dim_names.append("dp_shard")
+            loss_parallel_mesh_dim_names.append("dp_shard")
         if self.cp_enabled:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_tp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
             pp_cp_tp_mesh_dim_names.append("cp")
             weight_loading_mesh_dim_names.append("cp")
+            loss_parallel_mesh_dim_names.append("cp")
         if self.tp_enabled:
             dp_cp_tp_mesh_dim_names.append("tp")
             mp_mesh_dim_names.append("tp")
@@ -267,7 +271,7 @@ class ParallelDims:
             if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
                 dp_mesh_dim_names.append("tp")
                 dp_cp_mesh_dim_names.append("tp")
-                dp_shard_cp_mesh_dim_names.append("tp")
+                loss_parallel_mesh_dim_names.append("tp")
 
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
@@ -278,6 +282,10 @@ class ParallelDims:
         if dp_shard_cp_mesh_dim_names != []:
             mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
                 mesh_dim_name="dp_shard_cp"
+            )
+        if loss_parallel_mesh_dim_names != []:
+            mesh[tuple(loss_parallel_mesh_dim_names)]._flatten(
+                mesh_dim_name="loss_parallel"
             )
         if dp_cp_tp_mesh_dim_names != []:
             mesh[tuple(dp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp")
