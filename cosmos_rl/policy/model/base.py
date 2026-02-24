@@ -675,6 +675,7 @@ class ModelRegistry:
                 model_name_or_path,
                 max_position_embeddings=config.policy.model_max_length,
             )
+
             return _apply_model_post_processing(model, config)
 
         def _get_init_context_for_model_build(hf_config):

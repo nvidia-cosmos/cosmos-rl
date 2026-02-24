@@ -84,7 +84,6 @@ class LLMTrainer(Trainer):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-
         model = ModelRegistry.build_model(config)
 
         # FP8 settings

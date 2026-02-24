@@ -51,6 +51,8 @@ from .configuration_nemotron_h import NemotronHConfig, NemotronVLConfig
 from transformers.modeling_rope_utils import dynamic_rope_update, ROPE_INIT_FUNCTIONS
 from typing import Callable
 
+from .mamba_context_parallel import MambaContextParallel
+
 logger = logging.get_logger(__name__)
 
 # Copied from transformers.models.mamba.modeling_mamba2.modeling_mamba2.py with MAMBA2->NEMOTRONH,Mamba2->NemotronH
@@ -375,10 +377,11 @@ class NemotronHMamba2Mixer(nn.Module):
                 " is None. Falling back to the naive implementation. To install follow https://github.com/state-spaces/mamba/#installation and"
                 " https://github.com/Dao-AILab/causal-conv1d"
             )
+        self.cp_init_done = False
 
     def cuda_kernels_forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor, # [B, S, H]
         past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -386,7 +389,6 @@ class NemotronHMamba2Mixer(nn.Module):
         # 1. Gated MLP's linear projection
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
         projected_states = self.in_proj(hidden_states)
-
         # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -404,6 +406,9 @@ class NemotronHMamba2Mixer(nn.Module):
             and cache_position[0] > 0
             and hidden_states.shape[1] == 1   # <-- critical
         ):
+            if self.cp.cp_size > 1:
+                raise NotImplementedError("Context parallel only supported for training.")
+
             # projected_states: (B, S, proj)
             if projected_states.dim() == 3:
                 projected_step = projected_states[:, -1, :]   # (B, proj)  <-- FORCE ONE TOKEN
@@ -431,7 +436,7 @@ class NemotronHMamba2Mixer(nn.Module):
             )
 
             # 3. SSM transformation
-            A = -torch.exp(self.A_log.float())  # (nheads,)
+            A = -torch.exp(self.A_log().float()) # (nheads,)
             A = A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
@@ -459,33 +464,39 @@ class NemotronHMamba2Mixer(nn.Module):
 
         # Fused calculations or step by step if no initialized cache is found
         else:
-            A = -torch.exp(self.A_log.float())  # (num_heads) or (intermediate_size, state_size)
+            A = -torch.exp(self.cp.get_A_log().float())  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = {} if self.time_step_limit == (0.0, float("inf")) else {"dt_limit": self.time_step_limit}
 
-            # 2-4. Fused kernel for conv1d, SSM, and the final projection
             if self.training and past_key_values is None:
-                out = mamba_split_conv1d_scan_combined(
+                # Pre-conv-ssm
+                projected_states = self.cp.pre_conv_ssm(projected_states)
+                # From [B, S / cp_size, projection_size] to [B, S, projection_size // cp_size]
+
+                out_0 = mamba_split_conv1d_scan_combined(
                     projected_states,
-                    self.conv1d.weight.squeeze(1),
-                    self.conv1d.bias,
-                    self.dt_bias,
+                    self.cp.get_conv1d_weight().squeeze(),
+                    self.cp.get_conv1d_bias(),
+                    self.cp.get_dt_bias().float(),
                     A,
-                    D=self.D,
+                    D=self.cp.get_D(), # Note: Now we always use D_has_hdim=False
                     chunk_size=self.chunk_size,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
-                    rmsnorm_weight=self.norm.weight,
-                    rmsnorm_eps=self.norm.variance_epsilon,
-                    outproj_weight=self.out_proj.weight,
-                    outproj_bias=self.out_proj.bias,
                     headdim=self.head_dim,
-                    ngroups=self.n_groups,
+                    ngroups=self.cp.ngroups_local_tpcp,
                     norm_before_gate=False,
                     return_final_states=False,
                     **dt_limit_kwargs,
-                )
+                ) # [B, S, hidden_size // cp_size]
+                out_1 = self.cp.post_conv_ssm(out_0)
 
+                out_norm = self.norm(out_1) # Because norm_before_gate is always false, we don't need to pass gate in.
+
+                out = self.out_proj(out_norm)
             else:
+                if self.cp.cp_size > 1:
+                    raise NotImplementedError("Context parallel is only supported for training.")
+
                 _, _, gate, hidden_states_B_C, dt = projected_states.split(
                     [d_mlp, d_mlp, self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
                 )
@@ -548,16 +559,17 @@ class NemotronHMamba2Mixer(nn.Module):
 
                 # 4. Final linear projection
                 out = self.out_proj(scan_output)
+        
         return out
 
     # fmt: off
     def torch_forward(self, input_states, past_key_values: Optional[HybridMambaAttentionDynamicCache]=None, cache_position:Optional[torch.LongTensor]=None, attention_mask: Optional[torch.Tensor]=None):
-        batch_size, seq_len, _ = input_states.shape
+        batch_size, seq_len, _ = input_states.shape # [batch_size, seq_len, hidden_size]
         dtype = input_states.dtype
 
         # 1. Gated MLP's linear projection
         input_states = apply_mask_to_padding_states(input_states, attention_mask)
-        projected_states = self.in_proj(input_states)
+        projected_states = self.in_proj(input_states) # [batch_size, seq_len, projection_size]
         d_mlp = (projected_states.shape[-1] - 2 * self.intermediate_size - 2 * self.n_groups * self.ssm_state_size-self.num_heads) // 2
         _, _, gate, hidden_states_B_C, dt = projected_states.split(
                 [d_mlp, d_mlp, self.intermediate_size,  self.conv_dim, self.num_heads], dim=-1
@@ -588,11 +600,15 @@ class NemotronHMamba2Mixer(nn.Module):
             hidden_states_B_C = self.act(self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2))
 
         hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
+        # hidden_states_B_C: [batch_size, seq_len, conv_dim]
         hidden_states, B, C = torch.split(
             hidden_states_B_C,
             [self.intermediate_size, self.n_groups * self.ssm_state_size, self.n_groups * self.ssm_state_size],
             dim=-1
         )
+        # hidden_states: [batch_size, seq_len, intermediate_size]
+        # B: [batch_size, seq_len, n_groups * ssm_state_size]
+        # C: [batch_size, seq_len, n_groups * ssm_state_size]
 
         # 3. SSM transformation
         A = -torch.exp(self.A_log.float())                            # [num_heads]
@@ -656,7 +672,7 @@ class NemotronHMamba2Mixer(nn.Module):
             y = y.reshape(batch_size, -1)[:, None, ...]
         else:
             # begin ssd naive implementation without einsums
-            dt = nn.functional.softplus(dt + self.dt_bias)
+            dt = nn.functional.softplus(dt + self.dt_bias) # [bsz, seq_len, num_heads]
             dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
             hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
             B = B.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
@@ -664,7 +680,6 @@ class NemotronHMamba2Mixer(nn.Module):
             B = B.repeat_interleave(self.num_heads // self.n_groups, dim=2, output_size=self.num_heads)
             C = C.repeat_interleave(self.num_heads // self.n_groups, dim=2, output_size=self.num_heads)
             pad_size = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
-
             D_residual = self.D[..., None] * pad_tensor_by_size(hidden_states, pad_size)
 
             # Discretize x and A
@@ -673,7 +688,6 @@ class NemotronHMamba2Mixer(nn.Module):
 
             # Rearrange into blocks/chunks
             hidden_states, A, B, C = [reshape_into_chunks(t, pad_size, self.chunk_size) for t in (hidden_states, A, B, C)]
-
             # [bsz, -1, chunk_size, num_heads] -> [bsz, num_heads, -1, chunk_size]
             A = A.permute(0, 3, 1, 2)
             A_cumsum = torch.cumsum(A, dim=-1)
@@ -732,8 +746,7 @@ class NemotronHMamba2Mixer(nn.Module):
             # Init cache
             if ssm_state is not None and past_key_values is not None:
                 past_key_values.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
-
-        scan_output = self.norm(y, gate)
+        scan_output = self.norm(y, gate) # [batch_size, seq_len, intermediate_size]
 
         # end ssd naive
 
@@ -749,8 +762,28 @@ class NemotronHMamba2Mixer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
+        if not self.cp_init_done:
+            # Lazy init of CP because of meta device.
+            self.cp = MambaContextParallel(
+            cp_group=self.cp_group if hasattr(self, "cp_group") else None,
+            d_inner_local_tp=self.intermediate_size,
+            nheads_local_tp=self.num_heads,
+            ngroups_local_tp=self.n_groups,
+            d_state=self.ssm_state_size,
+            conv1d_cp1=self.conv1d,
+            dt_bias_cp1=self.dt_bias,
+            A_log_cp1=self.A_log,
+            D_cp1=self.D,
+            D_has_hdim=False, # Always False for now.
+        )
+            self.cp_init_done = True
+
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
             return self.cuda_kernels_forward(hidden_states, past_key_values, cache_position, attention_mask)
+
+        if self.cp.cp_size > 1:
+            raise NotImplementedError("Context parallel is only supported for training in CUDA fast path.")
+
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66

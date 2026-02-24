@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from typing import Callable, Optional
+import types
 import os
 import torch
 import torch.nn as nn
@@ -32,6 +33,15 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.parallelism import ParallelDims 
 from cosmos_rl.policy.config import Config as CosmosConfig
 
+from cosmos_rl.utils.ulysses import (
+    transformer_ulysses_attn_func,
+    swizzle_cp_forward,
+)
+
+# import for patching
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from nemotron_vl_overwrite.modeling_nemotron_vl_h import HybridMambaAttentionDynamicCache,apply_rotary_pos_emb_partial,eager_attention_forward
+from typing import Any, Tuple
 
 class _ExpertParallel(ParallelStyle):
     """
@@ -57,6 +67,124 @@ class _ExpertParallel(ParallelStyle):
             self._partition_fn,
         )
 
+def patch_transformer_attention_backends(model: nn.Module, parallel_dims: ParallelDims):
+    # Only patch the text model.
+    # Transformers attention backend will have the first argument as the model instance.
+    for _, transformer_block in enumerate(model.lm_layers):
+        if transformer_block.block_type == "attention":
+            # patch the layer forward
+            def new_forward(
+                self,
+                hidden_states: torch.Tensor,
+                position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                past_key_value: Optional[HybridMambaAttentionDynamicCache] = None,
+                **kwargs: Any,
+            ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+                input_shape = hidden_states.shape[:-1]
+                hidden_shape = (*input_shape, -1, self.head_dim)
+
+                query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+                if position_embeddings is not None:
+                    cos, sin = position_embeddings
+                    query_states, key_states = apply_rotary_pos_emb_partial(query_states, key_states, cos, sin)
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    cache_kwargs = {"sin": sin, "cos": cos} if position_embeddings is not None else None
+                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+                attention_interface: Callable = eager_attention_forward
+                if self.config._attn_implementation != "eager":
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+                # CP patching starts
+                attention_interface = transformer_ulysses_attn_func(attention_interface, parallel_dims.mesh["cp"])
+                # CP patching ends
+
+                attn_output, attn_weights = attention_interface(
+                    self,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    scaling=self.scaling,
+                    sliding_window=self.sliding_window,  # main diff with Llama
+                    **kwargs,
+                )
+
+                attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+                attn_output = self.o_proj(attn_output)
+                return attn_output, attn_weights
+            
+            transformer_block.mixer.forward = types.MethodType(new_forward, transformer_block.mixer)
+
+    # FIXME: not support varlen attention version now.
+
+def patch_text_model_forward(model: nn.Module, parallel_dims: ParallelDims):
+    # model is HFModel that holds NemotronVLForConditionCausalLM
+    text_model = model.language_model
+    original_forward = text_model.forward
+    # indicate that the text model is using context parallel
+    setattr(text_model, "cp_group", parallel_dims.mesh["cp"].get_group())
+    def cp_forward(*args, **kwargs):
+        if hasattr(text_model, "cp_group"):
+            # In context parallel, we should slice the input embeds for text model.
+            from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+            position_ids = kwargs.get("position_ids", None)
+            inputs_embeds = kwargs.get("inputs_embeds", None)
+            padding_mask = kwargs.get("padding_mask", None)
+            attention_mask = kwargs.get("attention_mask", None)
+            if position_ids is not None:
+                position_ids, = slice_inputs_for_ulysses(
+                    [position_ids],
+                    parallel_dims.mesh["cp"],
+                    seq_dims=[2],
+                )
+                kwargs["position_ids"] = position_ids
+
+            if padding_mask is not None:
+                padding_mask, = slice_inputs_for_ulysses(
+                    [padding_mask],
+                    parallel_dims.mesh["cp"],
+                    seq_dims=[1],
+                )
+                kwargs["padding_mask"] = padding_mask
+            if attention_mask is not None:
+                attention_mask, = slice_inputs_for_ulysses(
+                    [attention_mask],
+                    parallel_dims.mesh["cp"],
+                    seq_dims=[1],
+                )
+                kwargs["attention_mask"] = attention_mask
+            inputs_embeds, = slice_inputs_for_ulysses(
+                [inputs_embeds],
+                parallel_dims.mesh["cp"],
+                seq_dims=[1],
+            )
+            kwargs["inputs_embeds"] = inputs_embeds
+            return original_forward(*args, **kwargs)
+        else:
+            return original_forward(*args, **kwargs)
+    text_model.forward = cp_forward
+
+
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
+    # patch text model forward
+    patch_text_model_forward(model, parallel_dims)
+    # Attention layer.
+    patch_transformer_attention_backends(model, parallel_dims)
+    # Mamaba layer cp group set.
+    for _, transformer_block in enumerate(model.lm_layers):
+        if transformer_block.block_type == "mamba":
+            setattr(transformer_block.mixer, "cp_group", parallel_dims.mesh["cp"].get_group())
+
+    swizzle_cp_forward(model, parallel_dims)
+
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -73,9 +201,6 @@ def parallelize(
     world_mesh = parallel_dims.mesh
     _, pp_size = parallel_dims.pp_coord
 
-    assert (
-        not parallel_dims.cp_enabled
-    ), "Context parallelism is not supported for HFModel"
     assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
 
     if parallel_dims.tp_enabled:
@@ -164,6 +289,11 @@ def parallelize(
     # since the hardcoded override in the modeling file was removed).
     if model.vision_model is not None:
         model.vision_model.config._attn_implementation = "flash_attention_2"
+
+    # apply context parallel
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims)
+        logger.info("Applied Context Parallel to the model")
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:

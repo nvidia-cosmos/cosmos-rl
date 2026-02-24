@@ -67,7 +67,6 @@ def async_safe_ce(
         target = target[target_packing_mask].contiguous().view(-1)
     else:
         target = target[:, 1:].contiguous().view(-1)
-
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
         loss = (
