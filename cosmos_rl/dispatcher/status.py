@@ -114,7 +114,6 @@ class PolicyStatusManager:
 
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
-        self.consumed_samples_num = 0
         self.samples_on_the_fly = 0
 
         self.status = {}
@@ -773,7 +772,6 @@ class PolicyStatusManager:
                 )
             n_samples += 1
             self.put_rollout(rollout)
-            self.consumed_samples_num += 1
             if self.config.train.train_policy.on_policy:
                 if self.total_pending_rollouts() == 0:
                     self.on_policy_rollout_completed = True
