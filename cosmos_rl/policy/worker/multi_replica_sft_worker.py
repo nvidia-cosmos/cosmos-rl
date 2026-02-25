@@ -107,8 +107,13 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         return ret
 
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        self.loaded_total_steps, self.loaded_train_step = self.trainer.load_model()
+        self.loaded_total_steps, self.loaded_train_step, ckpt_extra_info = (
+            self.trainer.load_model()
+        )
         logger.info("[SFT] Weight resume command executed, model weights loaded.")
+        if self.config.train.resume:
+            self.api_client.post_resume_info(ckpt_extra_info)
+            logger.info("[SFT] Posted resume info to controller after weight resume.")
         return False
 
     def prepare_shard_infos_for_weight_sync_insts(self):
