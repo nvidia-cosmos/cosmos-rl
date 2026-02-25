@@ -257,6 +257,23 @@ class DeepseekV3MoEModel(BaseModel):
             )
         )
 
+        # Remap weight names from BF16 checkpoint format where non-layer
+        # components (embed_tokens, norm, lm_head) and multi-token prediction
+        # (MTP) weights are packed under a pseudo-layer at index n_layers.
+        mtp_layer_prefix = f"model.layers.{self.config.n_layers}."
+
+        def _remap_bf16_name(name: str) -> Optional[str]:
+            if not name.startswith(mtp_layer_prefix):
+                return name
+            suffix = name[len(mtp_layer_prefix):]
+            if suffix == "embed_tokens.weight":
+                return "model.embed_tokens.weight"
+            if suffix == "shared_head.head.weight":
+                return "lm_head.weight"
+            if suffix == "shared_head.norm.weight":
+                return "model.norm.weight"
+            return None
+
         # Step 3: Process each tensor
         reserved = {}
         for name, tensor in loader.iterate_tensors(
@@ -266,6 +283,10 @@ class DeepseekV3MoEModel(BaseModel):
             rank_tensor_metadata,
             device,
         ):
+            name = _remap_bf16_name(name)
+            if name is None:
+                continue
+
             # Save embed_tokens tensor for weight tying if needed
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
@@ -276,12 +297,10 @@ class DeepseekV3MoEModel(BaseModel):
                 model_type,
                 parallel_dims,
                 n_experts=self.config.n_routed_experts,
+                ignore_unknown_weights=True,
             )
 
             if dest_name is None:
-                continue
-
-            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
                 continue
 
             slice_range = None
@@ -291,6 +310,9 @@ class DeepseekV3MoEModel(BaseModel):
             elif ".experts.up_proj" in dest_name:
                 dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
                 slice_range = slice(self.config.moe_inter_dim, None)
+
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                continue
 
             target_tensor = self_state_dict[dest_name]
             if isinstance(target_tensor, torch.distributed.tensor.DTensor):

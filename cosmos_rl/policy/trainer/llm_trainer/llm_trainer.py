@@ -98,7 +98,9 @@ class LLMTrainer(Trainer):
                 self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
-        if config.train.fsdp_offload:
+        pp_enabled = parallel_dims.pp_enabled
+
+        if config.train.fsdp_offload and not pp_enabled:
             model._apply(
                 lambda t: torch.empty_like(t, device="cpu")
                 if t.device.type == "meta"
@@ -114,23 +116,26 @@ class LLMTrainer(Trainer):
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
-            if not config.train.fsdp_offload:
+
+            materialize_device = "cpu" if config.train.fsdp_offload else self.device
+            if pp_enabled:
+                # When PP is enabled, model_parts are deep copies with FSDP
+                # applied. Only materialize them — the original model still
+                # holds all layers unsharded and must NOT be materialized.
+                for model_part in model.model_parts:
+                    model_part._apply(
+                        lambda t: torch.empty_like(t, device=materialize_device)
+                        if t.device.type == "meta"
+                        else t.to(materialize_device),
+                        recurse=True,
+                    )
+            elif not config.train.fsdp_offload:
                 model._apply(
                     lambda t: torch.empty_like(t, device=self.device)
                     if t.device.type == "meta"
                     else t.to("cuda"),
                     recurse=True,
                 )
-                # When PP is enabled, model_parts are deep copies and need
-                # to be separately materialized from meta to device.
-                if hasattr(model, "model_parts"):
-                    for model_part in model.model_parts:
-                        model_part._apply(
-                            lambda t: torch.empty_like(t, device=self.device)
-                            if t.device.type == "meta"
-                            else t.to("cuda"),
-                            recurse=True,
-                        )
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params

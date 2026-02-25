@@ -132,8 +132,10 @@ def _apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims
             block.self_attn.attn_func = attn_func_with_cp
 
         if _model.lm_head is not None:
-            # Apply CP to the lm_head to get the logits for all tokens.
-            swizzle_cp_forward(_model.lm_head, parallel_dims)
+            # Register the CP gather hook on the outer model so the hook
+            # receives CosmosModelOutput (with .logits), not a plain Tensor
+            # from nn.Linear.
+            swizzle_cp_forward(model, parallel_dims)
 
 
 class _ExpertParallel(ParallelStyle):
