@@ -64,6 +64,7 @@ class SFTTrainer(DiffusersTrainer):
     def load_model(self):
         ckpt_total_steps = 0
         train_step = 0
+        ckpt_extra_vars = {}
         if (
             not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
@@ -89,7 +90,7 @@ class SFTTrainer(DiffusersTrainer):
                 self.model_load_from_hf()
 
             # TODO (yy) support multi-replica
-        return ckpt_total_steps, train_step
+        return ckpt_total_steps, train_step, ckpt_extra_vars
 
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(

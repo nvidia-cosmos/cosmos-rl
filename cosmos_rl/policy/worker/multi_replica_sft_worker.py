@@ -107,8 +107,13 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         return ret
 
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        self.loaded_total_steps, self.loaded_train_step = self.trainer.load_model()
+        self.loaded_total_steps, self.loaded_train_step, ckpt_extra_info = (
+            self.trainer.load_model()
+        )
         logger.info("[SFT] Weight resume command executed, model weights loaded.")
+        if self.config.train.resume:
+            self.api_client.post_resume_info(ckpt_extra_info)
+            logger.info("[SFT] Posted resume info to controller after weight resume.")
         return False
 
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -398,6 +403,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
 
+        data_arrival_event = torch.cuda.Event(enable_timing=True)
+        data_arrival_event.record()
         while True:
             self.broadcast_command()
             while len(self.command_buffer.queue) > 0:
@@ -472,6 +479,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     train_step=self.train_step,
                     save_freq=self._save_freq,
                     inter_policy_nccl=self.inter_policy_nccl,
+                    data_arrival_event=data_arrival_event,
                 )
 
                 self.train_step += 1
@@ -490,6 +498,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         self.profiler.check_finished(),
                         report_data,
                     )
+                data_arrival_event = torch.cuda.Event(enable_timing=True)
+                data_arrival_event.record()
 
             if self.train_step >= self.total_steps or is_end:
                 logger.info(

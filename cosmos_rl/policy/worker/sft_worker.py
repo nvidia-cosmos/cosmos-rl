@@ -307,7 +307,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
         )
-        self.ckpt_total_steps, self.train_step = self.trainer.load_model()
+        self.ckpt_total_steps, self.train_step, _ = self.trainer.load_model()
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)

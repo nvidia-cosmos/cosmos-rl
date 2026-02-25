@@ -2018,10 +2018,11 @@ class GRPOTrainer(LLMTrainer):
             for key, value in state_dict.items():
                 self.reference_state_dict[key] = value.detach().cpu()
 
+        ckpt_extra_info = {}
         if self.config.train.resume:
             try:
                 # Need to reload again from checkpoint to make sure the model is in the correct state
-                self.model_resume_from_checkpoint()
+                ckpt_extra_info = self.model_resume_from_checkpoint()
                 model_loaded = True
                 logger.info("[Policy] Model loaded from checkpoint.")
             except Exception as e:
@@ -2050,7 +2051,7 @@ class GRPOTrainer(LLMTrainer):
 
         self.model.train()
 
-        return False
+        return ckpt_extra_info
 
     def build_lr_schedulers(self):
         return common_build_lr_schedulers(self.optimizers, self.config, 1e6)

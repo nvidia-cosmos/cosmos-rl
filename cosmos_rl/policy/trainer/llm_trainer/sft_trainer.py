@@ -679,6 +679,7 @@ class SFTTrainer(LLMTrainer):
         """Load model weights from checkpoint if available."""
         ckpt_total_steps = 0
         train_step = 0
+        ckpt_extra_vars = {}
         if (
             not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
@@ -746,7 +747,7 @@ class SFTTrainer(LLMTrainer):
             )
 
         self.model.train()
-        return ckpt_total_steps, train_step
+        return ckpt_total_steps, train_step, ckpt_extra_vars
 
     @property
     def pp_loss_fn(self):
