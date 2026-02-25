@@ -189,23 +189,13 @@ class SFTDataConfig(BaseModel):
         description="Batching strategy: 'prefer_first' (FIFO) or 'prefer_closest' (minimize padding).",
     )
 
-    load_balanced_max_steps: int = Field(
-        default=100,
-        description=(
-            "Maximum number of optimizer steps (training steps) for load-balanced batching. "
-            "This is the number of times optimizer.step() will be called. "
-            "Note: The actual number of batches processed will be "
-            "load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
-        ),
-    )
-
     load_balanced_batches_per_optimizer_step: int = Field(
         default=1,
         description=(
             "Number of batches to accumulate per optimizer step for gradient accumulation. "
             "Each DataLoader iteration will return this many batches, which are processed "
             "before calling optimizer.step(). "
-            "The total number of batches processed = load_balanced_max_steps * load_balanced_batches_per_optimizer_step."
+            "The total number of batches processed = max_num_steps * load_balanced_batches_per_optimizer_step."
         ),
     )
 
@@ -227,10 +217,6 @@ class SFTDataConfig(BaseModel):
                 raise ValueError(
                     f"load_balanced_batching_strategy must be 'prefer_first' or 'prefer_closest', "
                     f"got {self.load_balanced_batching_strategy}"
-                )
-            if self.load_balanced_max_steps <= 0:
-                raise ValueError(
-                    f"load_balanced_max_steps must be greater than 0, got {self.load_balanced_max_steps}"
                 )
             if self.load_balanced_batches_per_optimizer_step <= 0:
                 raise ValueError(
@@ -899,6 +885,11 @@ class TrainingConfig(BaseModel):
             )
         if self.max_num_steps is not None and self.max_num_steps <= 0:
             raise ValueError("max_num_steps must be positive if specified")
+        if getattr(self.train_policy, "enable_dp_load_balancing", False):
+            if self.max_num_steps is None:
+                raise ValueError(
+                    "max_num_steps must be set when enable_dp_load_balancing is true"
+                )
 
         if isinstance(self.train_policy, GrpoConfig):
             if self.train_policy.on_policy:

@@ -308,10 +308,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
         )
         self.ckpt_total_steps, self.train_step = self.trainer.load_model()
-        # only for load-balanced batching
-        self.load_balanced_max_steps = (
-            self.config.train.train_policy.load_balanced_max_steps
-        )
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
@@ -465,7 +461,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             """
             if self.enable_dp_load_balancing:
                 # For load-balanced batching, training is step-based, not epoch-based.
-                # Since total_steps = load_balanced_max_steps, train_step is always < load_balanced_max_steps
+                # Since total_steps = max_num_steps, train_step is always < max_num_steps
                 # when resuming (otherwise training would have already completed).
                 # LoadBalancedDataset will automatically manage epoch increments when data loops.
 
@@ -473,7 +469,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 # (epoch will be automatically incremented by LoadBalancedDataset when data loops)
                 initial_epoch = 0
                 # Skip batches equal to completed steps (use modulo for robustness)
-                batches_to_skip = self.train_step % self.load_balanced_max_steps
+                batches_to_skip = self.train_step % self.config.train.max_num_steps
 
                 if hasattr(train_dataset, "set_epoch"):
                     train_dataset.set_epoch(initial_epoch)
@@ -604,16 +600,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
             else len(self.train_data_loader) * self.epoch
         )
 
-        if self.config.train.max_num_steps is not None:
+        if self.enable_dp_load_balancing:
+            self.total_steps = self.config.train.max_num_steps
+            logger.info(
+                f"Total training steps set to max_num_steps={self.config.train.max_num_steps} for load-balanced dynamic batching"
+            )
+        elif self.config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
-
-        if self.enable_dp_load_balancing:
-            logger.info(
-                f"Total training steps set to load_balanced_max_steps={self.load_balanced_max_steps} for load-balanced dynamic batching"
-            )
-            self.total_steps = self.load_balanced_max_steps
 
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
