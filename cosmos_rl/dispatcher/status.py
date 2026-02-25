@@ -853,7 +853,7 @@ class PolicyStatusManager:
                     )
                 else:
                     logger.info(
-                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['optimizer/grad_norm']:.5f}, Iteration time: {report_data['train/iteration_time']:.2f}s."
                     )
             for custom_logger_fn in self.custom_logger_fns:
                 # We add a separate try-except block to handle the error of custom logger function.

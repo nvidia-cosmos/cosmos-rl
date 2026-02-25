@@ -403,6 +403,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
 
+        data_arrival_event = torch.cuda.Event(enable_timing=True)
+        data_arrival_event.record()
         while True:
             self.broadcast_command()
             while len(self.command_buffer.queue) > 0:
@@ -477,6 +479,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     train_step=self.train_step,
                     save_freq=self._save_freq,
                     inter_policy_nccl=self.inter_policy_nccl,
+                    data_arrival_event=data_arrival_event,
                 )
 
                 self.train_step += 1
@@ -495,6 +498,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         self.profiler.check_finished(),
                         report_data,
                     )
+                data_arrival_event = torch.cuda.Event(enable_timing=True)
+                data_arrival_event.record()
 
             if self.train_step >= self.total_steps or is_end:
                 logger.info(
