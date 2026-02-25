@@ -1063,3 +1063,7 @@ class Qwen3VLMoeModel(BaseModel):
             raise ValueError(
                 f"Model is not compatible with tp/ep parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} or llm_n_kv_heads={llm_n_kv_heads} or llm_n_experts={llm_n_experts} is not satisified by tp size({tp_size})"
             )
+        assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+            "1",
+            "true",
+        ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 1 for Qwen3-VL-MoE"

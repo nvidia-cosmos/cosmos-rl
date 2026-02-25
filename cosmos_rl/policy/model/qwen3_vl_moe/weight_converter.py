@@ -47,13 +47,13 @@ def qwen3_moe_lm_weight_from_hf(
     parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
-    tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
+    _, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
     load_weight_test = not hasattr(parallel_dims, "mesh")
     if not load_weight_test:
-        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
-        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+        dp_shard_rank = parallel_dims.mesh["dp_cp_tp"].get_local_rank()
+        dp_shard_size = parallel_dims.mesh["dp_cp_tp"].size()
     else:
         dp_shard_rank = 0
         dp_shard_size = 1
@@ -66,11 +66,11 @@ def qwen3_moe_lm_weight_from_hf(
     dest_name = map_key_from_hf(name, src_model_type)
 
     if "lm_head.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif "lm_head.bias" == dest_name:
         shard = tensor
     elif "embed_tokens.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif dest_name in ["norm.weight", "norm.bias"]:
         shard = tensor
     elif (
@@ -90,16 +90,13 @@ def qwen3_moe_lm_weight_from_hf(
             dest_name,
         )
     ) is not None:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(
             r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
         )
     ) is not None:
-        if dest_name.endswith(".bias"):
-            shard = tensor
-        else:
-            shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
