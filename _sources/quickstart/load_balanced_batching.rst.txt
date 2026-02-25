@@ -11,7 +11,7 @@ Key Features
 
 - **Dynamic Batch Formation**: Batches are created on-the-fly based on sample lengths, maximizing batch size while staying within token limits
 - **Load Balancing**: Balances the number of tokens across different data parallel ranks, reducing padding waste
-- **Step-Based Training**: Training is controlled by optimizer steps (``load_balanced_max_steps``), not epochs. User-provided epoch configuration is ignored
+- **Step-Based Training**: Training is controlled by optimizer steps (``max_num_steps`` in ``[train]``), not epochs. User-provided epoch configuration is ignored
 - **Automatic Data Looping**: When ``infinite_loop = true`` (default), data automatically restarts when exhausted, with epoch incremented for new data ordering
 - **Gradient Accumulation Support**: Built-in support for accumulating multiple batches per optimizer step
 - **Resume Support**: Properly handles training resumption with deterministic data ordering based on train_step
@@ -26,7 +26,7 @@ The load-balanced batching system consists of two main components:
 
 **Training Mode**:
 - When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based
-- Training duration is controlled by ``load_balanced_max_steps`` (number of optimizer steps)
+- Training duration is controlled by ``max_num_steps`` in ``[train]`` (number of optimizer steps)
 - User-provided ``epoch`` configuration parameter is **ignored**
 - Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
 - When ``infinite_loop = true`` (default), data automatically restarts when exhausted, with epoch incremented
@@ -60,16 +60,16 @@ Load-balanced batching is configured through the training policy configuration:
 
 .. code-block:: toml
 
+   [train]
+   max_num_steps = 100  # Required when enable_dp_load_balancing is true
+   sequence_packing = false  # Set to true to enable sequence packing
+
    [train.train_policy]
    enable_dp_load_balancing = true
    load_balanced_pool_size = 32
    load_balanced_max_tokens_for_batch = 32768
    load_balanced_batching_strategy = "prefer_closest"  # or "prefer_first"
-   load_balanced_max_steps = 100
    load_balanced_batches_per_optimizer_step = 1  # Also known as load_balanced_accumulate_steps
-
-   [train]
-   sequence_packing = false  # Set to true to enable sequence packing
 
 Configuration Parameters
 ------------------------
@@ -93,17 +93,17 @@ load_balanced_batching_strategy
    - ``prefer_closest``: Minimizes padding by selecting samples with similar lengths
    - ``prefer_first``: FIFO selection, faster but may have more padding
 
-load_balanced_max_steps
-   Maximum number of optimizer steps (training steps) for load-balanced batching (default: 100)
+max_num_steps (in ``[train]``)
+   Maximum number of optimizer steps (training steps). **Required** when ``enable_dp_load_balancing = true``.
    
-   This defines the number of times ``optimizer.step()`` will be called. The actual number of batches processed will be ``load_balanced_max_steps * load_balanced_batches_per_optimizer_step``.
+   This defines the number of times ``optimizer.step()`` will be called. The actual number of batches processed will be ``max_num_steps * load_balanced_batches_per_optimizer_step``.
    
-   **Important**: When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based. The user-provided ``epoch`` configuration parameter is ignored. The system uses ``load_balanced_max_steps`` to determine when training should stop.
+   **Important**: When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based. The user-provided ``epoch`` configuration parameter is ignored. The system uses ``max_num_steps`` (in ``[train]`` section) to determine when training should stop.
 
 load_balanced_batches_per_optimizer_step
    Number of batches to accumulate per optimizer step for gradient accumulation (default: 1)
    
-   Each DataLoader iteration will return this many batches, which are processed before calling ``optimizer.step()``. The total number of batches processed = ``load_balanced_max_steps * load_balanced_batches_per_optimizer_step``.
+   Each DataLoader iteration will return this many batches, which are processed before calling ``optimizer.step()``. The total number of batches processed = ``max_num_steps`` (in ``[train]``) * ``load_balanced_batches_per_optimizer_step``.
 
 sequence_packing
    Enable sequence packing for training (default: false)
@@ -125,12 +125,14 @@ Here's a complete configuration example:
 
 .. code-block:: toml
 
+   [train]
+   max_num_steps = 1000
+
    [train.train_policy]
    enable_dp_load_balancing = true
    load_balanced_pool_size = 64
    load_balanced_max_tokens_for_batch = 65536
    load_balanced_batching_strategy = "prefer_closest"
-   load_balanced_max_steps = 1000
    load_balanced_batches_per_optimizer_step = 4
    dataloader_seed = 42
 
@@ -149,12 +151,12 @@ Example with Sequence Packing
 
    [train]
    sequence_packing = true
+   max_num_steps = 1000
 
    [train.train_policy]
    enable_dp_load_balancing = true
    load_balanced_pool_size = 64
    load_balanced_max_tokens_for_batch = 65536
-   load_balanced_max_steps = 1000
    load_balanced_batches_per_optimizer_step = 4
    dataloader_seed = 42
 
@@ -184,32 +186,32 @@ When ``enable_dp_load_balancing = true``, the system uses an ``infinite_loop`` p
 - When ``infinite_loop = true``: Data automatically restarts when exhausted
   - Epoch is automatically incremented each time data restarts
   - Different epochs use different random seeds for data shuffling (deterministic but varied ordering)
-  - This ensures training can reach ``load_balanced_max_steps`` even if data is exhausted
+  - This ensures training can reach ``max_num_steps`` even if data is exhausted
   - Recommended for step-based training where you want to train for a fixed number of optimizer steps
 
 - When ``infinite_loop = false``: Data stops when exhausted
   - Training stops when all data has been processed
-  - Not recommended for step-based training as training may stop before reaching ``load_balanced_max_steps``
+  - Not recommended for step-based training as training may stop before reaching ``max_num_steps``
 
 **Epoch Management**:
 - Epoch is **managed internally** and is used only for deterministic data ordering
 - User-provided ``epoch`` configuration parameter is **ignored** when ``enable_dp_load_balancing = true``
-- Epoch does not control training duration (training is step-based, controlled by ``load_balanced_max_steps``)
+- Epoch does not control training duration (training is step-based, controlled by ``max_num_steps``)
 - When data restarts (``infinite_loop = true``), epoch is automatically incremented to ensure different data ordering
 - Initial epoch is set to 0 when resuming training
 
 **Why Infinite Loop?**:
 - In dynamic batching, different ranks consume data at different rates
-- Some ranks may exhaust their data shard before reaching ``load_balanced_max_steps``
+- Some ranks may exhaust their data shard before reaching ``max_num_steps``
 - With ``infinite_loop = true``, data automatically restarts, ensuring all ranks can continue training
-- Training stops when ``train_step >= total_steps`` (where ``total_steps = load_balanced_max_steps``), not when data is exhausted
+- Training stops when ``train_step >= total_steps`` (where ``total_steps = max_num_steps``), not when data is exhausted
 
 Resume Support
 --------------
 
 Load-balanced batching properly handles training resumption:
 
-1. **Step-Based Training**: Training is based on optimizer steps (``load_balanced_max_steps``), not epochs
+1. **Step-Based Training**: Training is based on optimizer steps (``max_num_steps``), not epochs
 2. **Automatic Epoch Management**: Epoch is automatically managed internally for deterministic data ordering
    - Initial epoch is set to 0 when resuming
    - Epoch is automatically incremented when data loops (if ``infinite_loop = true``)
@@ -255,7 +257,7 @@ The ``LoadBalancedDataset`` class:
 **Epoch Management**:
 - Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
 - When ``infinite_loop = true``, epoch is automatically incremented each time data restarts
-- Epoch does not control training duration (training is step-based, controlled by ``load_balanced_max_steps``)
+- Epoch does not control training duration (training is step-based, controlled by ``max_num_steps``)
 
 Best-Fit Algorithm
 ~~~~~~~~~~~~~~~~~~
@@ -311,8 +313,8 @@ Best Practices
 4. **Sequence Packing**: Enable sequence packing if your model supports it for better token utilization. Check model compatibility before enabling
 5. **Gradient Accumulation**: Use ``load_balanced_batches_per_optimizer_step`` to control effective batch size
 6. **Seed**: Set ``dataloader_seed`` for reproducibility
-7. **Step-Based Training**: Remember that when ``enable_dp_load_balancing = true``, training is step-based. Set ``load_balanced_max_steps`` to control training duration, not ``epoch``
-8. **Infinite Loop**: Keep ``infinite_loop = true`` (default) for step-based training. Data will automatically restart when exhausted, ensuring training can reach ``load_balanced_max_steps``
+7. **Step-Based Training**: Remember that when ``enable_dp_load_balancing = true``, training is step-based. Set ``max_num_steps`` (in ``[train]``) to control training duration, not ``epoch``
+8. **Infinite Loop**: Keep ``infinite_loop = true`` (default) for step-based training. Data will automatically restart when exhausted, ensuring training can reach ``max_num_steps``
 
 When to Use Sequence Packing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -342,14 +344,14 @@ Troubleshooting
    - Reduce ``load_balanced_batches_per_optimizer_step``
 
 **Issue**: Resume doesn't work correctly
-   - Ensure ``load_balanced_max_steps`` matches the original training configuration
+   - Ensure ``max_num_steps`` (in ``[train]``) matches the original training configuration
    - Check that checkpoint contains correct ``train_step`` information
    - Verify ``dataloader_seed`` is the same as original training
    - Note: User-provided ``epoch`` parameter is ignored when ``enable_dp_load_balancing = true``. Epoch is managed internally
 
 **Issue**: Data keeps looping indefinitely
    - This is expected behavior when ``infinite_loop = true`` (default)
-   - Training stops based on ``load_balanced_max_steps``, not data exhaustion
+   - Training stops based on ``max_num_steps``, not data exhaustion
    - Set ``infinite_loop = false`` if you want data to stop when exhausted (not recommended for step-based training)
 
 **Issue**: Sequence packing not working

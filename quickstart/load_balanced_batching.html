@@ -155,7 +155,7 @@
 <ul class="simple">
 <li><p><strong>Dynamic Batch Formation</strong>: Batches are created on-the-fly based on sample lengths, maximizing batch size while staying within token limits</p></li>
 <li><p><strong>Load Balancing</strong>: Balances the number of tokens across different data parallel ranks, reducing padding waste</p></li>
-<li><p><strong>Step-Based Training</strong>: Training is controlled by optimizer steps (<code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>), not epochs. User-provided epoch configuration is ignored</p></li>
+<li><p><strong>Step-Based Training</strong>: Training is controlled by optimizer steps (<code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> in <code class="docutils literal notranslate"><span class="pre">[train]</span></code>), not epochs. User-provided epoch configuration is ignored</p></li>
 <li><p><strong>Automatic Data Looping</strong>: When <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code> (default), data automatically restarts when exhausted, with epoch incremented for new data ordering</p></li>
 <li><p><strong>Gradient Accumulation Support</strong>: Built-in support for accumulating multiple batches per optimizer step</p></li>
 <li><p><strong>Resume Support</strong>: Properly handles training resumption with deterministic data ordering based on train_step</p></li>
@@ -170,7 +170,7 @@
 </ol>
 <p><strong>Training Mode</strong>:
 - When <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>, training is <strong>step-based</strong>, not epoch-based
-- Training duration is controlled by <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code> (number of optimizer steps)
+- Training duration is controlled by <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> in <code class="docutils literal notranslate"><span class="pre">[train]</span></code> (number of optimizer steps)
 - User-provided <code class="docutils literal notranslate"><span class="pre">epoch</span></code> configuration parameter is <strong>ignored</strong>
 - Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
 - When <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code> (default), data automatically restarts when exhausted, with epoch incremented
@@ -203,16 +203,16 @@
 <section id="configuration">
 <h2>Configuration<a class="headerlink" href="#configuration" title="Link to this heading"></a></h2>
 <p>Load-balanced batching is configured through the training policy configuration:</p>
-<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train.train_policy]</span>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train]</span>
+<span class="n">max_num_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w">  </span><span class="c1"># Required when enable_dp_load_balancing is true</span>
+<span class="n">sequence_packing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">  </span><span class="c1"># Set to true to enable sequence packing</span>
+
+<span class="k">[train.train_policy]</span>
 <span class="n">enable_dp_load_balancing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <span class="n">load_balanced_pool_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">32</span>
 <span class="n">load_balanced_max_tokens_for_batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">32768</span>
 <span class="n">load_balanced_batching_strategy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;prefer_closest&quot;</span><span class="w">  </span><span class="c1"># or &quot;prefer_first&quot;</span>
-<span class="n">load_balanced_max_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span>
 <span class="n">load_balanced_batches_per_optimizer_step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w">  </span><span class="c1"># Also known as load_balanced_accumulate_steps</span>
-
-<span class="k">[train]</span>
-<span class="n">sequence_packing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">  </span><span class="c1"># Set to true to enable sequence packing</span>
 </pre></div>
 </div>
 </section>
@@ -233,12 +233,12 @@
 <li><p><code class="docutils literal notranslate"><span class="pre">prefer_first</span></code>: FIFO selection, faster but may have more padding</p></li>
 </ul>
 </dd>
-<dt>load_balanced_max_steps</dt><dd><p>Maximum number of optimizer steps (training steps) for load-balanced batching (default: 100)</p>
-<p>This defines the number of times <code class="docutils literal notranslate"><span class="pre">optimizer.step()</span></code> will be called. The actual number of batches processed will be <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span> <span class="pre">*</span> <span class="pre">load_balanced_batches_per_optimizer_step</span></code>.</p>
-<p><strong>Important</strong>: When <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>, training is <strong>step-based</strong>, not epoch-based. The user-provided <code class="docutils literal notranslate"><span class="pre">epoch</span></code> configuration parameter is ignored. The system uses <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code> to determine when training should stop.</p>
+<dt>max_num_steps (in <code class="docutils literal notranslate"><span class="pre">[train]</span></code>)</dt><dd><p>Maximum number of optimizer steps (training steps). <strong>Required</strong> when <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>.</p>
+<p>This defines the number of times <code class="docutils literal notranslate"><span class="pre">optimizer.step()</span></code> will be called. The actual number of batches processed will be <code class="docutils literal notranslate"><span class="pre">max_num_steps</span> <span class="pre">*</span> <span class="pre">load_balanced_batches_per_optimizer_step</span></code>.</p>
+<p><strong>Important</strong>: When <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>, training is <strong>step-based</strong>, not epoch-based. The user-provided <code class="docutils literal notranslate"><span class="pre">epoch</span></code> configuration parameter is ignored. The system uses <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> (in <code class="docutils literal notranslate"><span class="pre">[train]</span></code> section) to determine when training should stop.</p>
 </dd>
 <dt>load_balanced_batches_per_optimizer_step</dt><dd><p>Number of batches to accumulate per optimizer step for gradient accumulation (default: 1)</p>
-<p>Each DataLoader iteration will return this many batches, which are processed before calling <code class="docutils literal notranslate"><span class="pre">optimizer.step()</span></code>. The total number of batches processed = <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span> <span class="pre">*</span> <span class="pre">load_balanced_batches_per_optimizer_step</span></code>.</p>
+<p>Each DataLoader iteration will return this many batches, which are processed before calling <code class="docutils literal notranslate"><span class="pre">optimizer.step()</span></code>. The total number of batches processed = <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> (in <code class="docutils literal notranslate"><span class="pre">[train]</span></code>) * <code class="docutils literal notranslate"><span class="pre">load_balanced_batches_per_optimizer_step</span></code>.</p>
 </dd>
 <dt>sequence_packing</dt><dd><p>Enable sequence packing for training (default: false)</p>
 <p>When enabled, multiple sequences are packed into a single tensor without padding, maximizing token utilization. The batch formation strategy changes from maximizing <code class="docutils literal notranslate"><span class="pre">batch_size</span> <span class="pre">*</span> <span class="pre">max_input_len</span></code> to maximizing <code class="docutils literal notranslate"><span class="pre">sum(sequence_lengths)</span></code> within the token limit.</p>
@@ -254,12 +254,14 @@
 <section id="usage-example">
 <h2>Usage Example<a class="headerlink" href="#usage-example" title="Link to this heading"></a></h2>
 <p>Here’s a complete configuration example:</p>
-<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train.train_policy]</span>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train]</span>
+<span class="n">max_num_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span>
+
+<span class="k">[train.train_policy]</span>
 <span class="n">enable_dp_load_balancing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <span class="n">load_balanced_pool_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span>
 <span class="n">load_balanced_max_tokens_for_batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">65536</span>
 <span class="n">load_balanced_batching_strategy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;prefer_closest&quot;</span>
-<span class="n">load_balanced_max_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span>
 <span class="n">load_balanced_batches_per_optimizer_step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span>
 <span class="n">dataloader_seed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span>
 </pre></div>
@@ -275,12 +277,12 @@
 <h3>Example with Sequence Packing<a class="headerlink" href="#example-with-sequence-packing" title="Link to this heading"></a></h3>
 <div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train]</span>
 <span class="n">sequence_packing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">max_num_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span>
 
 <span class="k">[train.train_policy]</span>
 <span class="n">enable_dp_load_balancing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <span class="n">load_balanced_pool_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span>
 <span class="n">load_balanced_max_tokens_for_batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">65536</span>
-<span class="n">load_balanced_max_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span>
 <span class="n">load_balanced_batches_per_optimizer_step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span>
 <span class="n">dataloader_seed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span>
 </pre></div>
@@ -311,32 +313,32 @@
 <div><ul class="simple">
 <li><p>Epoch is automatically incremented each time data restarts</p></li>
 <li><p>Different epochs use different random seeds for data shuffling (deterministic but varied ordering)</p></li>
-<li><p>This ensures training can reach <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code> even if data is exhausted</p></li>
+<li><p>This ensures training can reach <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> even if data is exhausted</p></li>
 <li><p>Recommended for step-based training where you want to train for a fixed number of optimizer steps</p></li>
 </ul>
 </div></blockquote>
 <ul class="simple">
 <li><p>When <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">false</span></code>: Data stops when exhausted
 - Training stops when all data has been processed
-- Not recommended for step-based training as training may stop before reaching <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code></p></li>
+- Not recommended for step-based training as training may stop before reaching <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code></p></li>
 </ul>
 <p><strong>Epoch Management</strong>:
 - Epoch is <strong>managed internally</strong> and is used only for deterministic data ordering
 - User-provided <code class="docutils literal notranslate"><span class="pre">epoch</span></code> configuration parameter is <strong>ignored</strong> when <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>
-- Epoch does not control training duration (training is step-based, controlled by <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>)
+- Epoch does not control training duration (training is step-based, controlled by <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code>)
 - When data restarts (<code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code>), epoch is automatically incremented to ensure different data ordering
 - Initial epoch is set to 0 when resuming training</p>
 <p><strong>Why Infinite Loop?</strong>:
 - In dynamic batching, different ranks consume data at different rates
-- Some ranks may exhaust their data shard before reaching <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>
+- Some ranks may exhaust their data shard before reaching <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code>
 - With <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code>, data automatically restarts, ensuring all ranks can continue training
-- Training stops when <code class="docutils literal notranslate"><span class="pre">train_step</span> <span class="pre">&gt;=</span> <span class="pre">total_steps</span></code> (where <code class="docutils literal notranslate"><span class="pre">total_steps</span> <span class="pre">=</span> <span class="pre">load_balanced_max_steps</span></code>), not when data is exhausted</p>
+- Training stops when <code class="docutils literal notranslate"><span class="pre">train_step</span> <span class="pre">&gt;=</span> <span class="pre">total_steps</span></code> (where <code class="docutils literal notranslate"><span class="pre">total_steps</span> <span class="pre">=</span> <span class="pre">max_num_steps</span></code>), not when data is exhausted</p>
 </section>
 <section id="resume-support">
 <h2>Resume Support<a class="headerlink" href="#resume-support" title="Link to this heading"></a></h2>
 <p>Load-balanced batching properly handles training resumption:</p>
 <ol class="arabic simple">
-<li><p><strong>Step-Based Training</strong>: Training is based on optimizer steps (<code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>), not epochs</p></li>
+<li><p><strong>Step-Based Training</strong>: Training is based on optimizer steps (<code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code>), not epochs</p></li>
 <li><p><strong>Automatic Epoch Management</strong>: Epoch is automatically managed internally for deterministic data ordering
 - Initial epoch is set to 0 when resuming
 - Epoch is automatically incremented when data loops (if <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code>)
@@ -379,7 +381,7 @@
 <p><strong>Epoch Management</strong>:
 - Epoch is managed internally for deterministic data ordering (different epoch = different shuffle)
 - When <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code>, epoch is automatically incremented each time data restarts
-- Epoch does not control training duration (training is step-based, controlled by <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>)</p>
+- Epoch does not control training duration (training is step-based, controlled by <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code>)</p>
 </section>
 <section id="best-fit-algorithm">
 <h3>Best-Fit Algorithm<a class="headerlink" href="#best-fit-algorithm" title="Link to this heading"></a></h3>
@@ -436,8 +438,8 @@
 <li><p><strong>Sequence Packing</strong>: Enable sequence packing if your model supports it for better token utilization. Check model compatibility before enabling</p></li>
 <li><p><strong>Gradient Accumulation</strong>: Use <code class="docutils literal notranslate"><span class="pre">load_balanced_batches_per_optimizer_step</span></code> to control effective batch size</p></li>
 <li><p><strong>Seed</strong>: Set <code class="docutils literal notranslate"><span class="pre">dataloader_seed</span></code> for reproducibility</p></li>
-<li><p><strong>Step-Based Training</strong>: Remember that when <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>, training is step-based. Set <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code> to control training duration, not <code class="docutils literal notranslate"><span class="pre">epoch</span></code></p></li>
-<li><p><strong>Infinite Loop</strong>: Keep <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code> (default) for step-based training. Data will automatically restart when exhausted, ensuring training can reach <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code></p></li>
+<li><p><strong>Step-Based Training</strong>: Remember that when <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>, training is step-based. Set <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> (in <code class="docutils literal notranslate"><span class="pre">[train]</span></code>) to control training duration, not <code class="docutils literal notranslate"><span class="pre">epoch</span></code></p></li>
+<li><p><strong>Infinite Loop</strong>: Keep <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code> (default) for step-based training. Data will automatically restart when exhausted, ensuring training can reach <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code></p></li>
 </ol>
 <section id="when-to-use-sequence-packing">
 <h3>When to Use Sequence Packing<a class="headerlink" href="#when-to-use-sequence-packing" title="Link to this heading"></a></h3>
@@ -468,7 +470,7 @@
 </ul>
 </dd>
 <dt><strong>Issue</strong>: Resume doesn’t work correctly</dt><dd><ul class="simple">
-<li><p>Ensure <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code> matches the original training configuration</p></li>
+<li><p>Ensure <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code> (in <code class="docutils literal notranslate"><span class="pre">[train]</span></code>) matches the original training configuration</p></li>
 <li><p>Check that checkpoint contains correct <code class="docutils literal notranslate"><span class="pre">train_step</span></code> information</p></li>
 <li><p>Verify <code class="docutils literal notranslate"><span class="pre">dataloader_seed</span></code> is the same as original training</p></li>
 <li><p>Note: User-provided <code class="docutils literal notranslate"><span class="pre">epoch</span></code> parameter is ignored when <code class="docutils literal notranslate"><span class="pre">enable_dp_load_balancing</span> <span class="pre">=</span> <span class="pre">true</span></code>. Epoch is managed internally</p></li>
@@ -476,7 +478,7 @@
 </dd>
 <dt><strong>Issue</strong>: Data keeps looping indefinitely</dt><dd><ul class="simple">
 <li><p>This is expected behavior when <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">true</span></code> (default)</p></li>
-<li><p>Training stops based on <code class="docutils literal notranslate"><span class="pre">load_balanced_max_steps</span></code>, not data exhaustion</p></li>
+<li><p>Training stops based on <code class="docutils literal notranslate"><span class="pre">max_num_steps</span></code>, not data exhaustion</p></li>
 <li><p>Set <code class="docutils literal notranslate"><span class="pre">infinite_loop</span> <span class="pre">=</span> <span class="pre">false</span></code> if you want data to stop when exhausted (not recommended for step-based training)</p></li>
 </ul>
 </dd>
