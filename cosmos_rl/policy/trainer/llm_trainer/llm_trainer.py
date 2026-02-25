@@ -98,7 +98,9 @@ class LLMTrainer(Trainer):
                 self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
-        if config.train.fsdp_offload:
+        pp_enabled = parallel_dims.pp_enabled
+
+        if config.train.fsdp_offload and not pp_enabled:
             model._apply(
                 lambda t: torch.empty_like(t, device="cpu")
                 if t.device.type == "meta"
@@ -114,7 +116,20 @@ class LLMTrainer(Trainer):
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
-            if not config.train.fsdp_offload:
+
+            materialize_device = "cpu" if config.train.fsdp_offload else self.device
+            if pp_enabled:
+                # When PP is enabled, model_parts are deep copies with FSDP
+                # applied. Only materialize them — the original model still
+                # holds all layers unsharded and must NOT be materialized.
+                for model_part in model.model_parts:
+                    model_part._apply(
+                        lambda t: torch.empty_like(t, device=materialize_device)
+                        if t.device.type == "meta"
+                        else t.to(materialize_device),
+                        recurse=True,
+                    )
+            elif not config.train.fsdp_offload:
                 model._apply(
                     lambda t: torch.empty_like(t, device=self.device)
                     if t.device.type == "meta"
@@ -208,8 +223,10 @@ class LLMTrainer(Trainer):
             len_params (int): The number of parameters synced.
         """
         len_params = 0
-        # It's a HFModel, we need to sync the named buffers
-        state_dict = self.model.state_dict()
+        # Collect state dict from all model parts (PP splits model into separate parts)
+        state_dict = {}
+        for model_part in self.model_parts:
+            state_dict.update(model_part.state_dict())
         model_state_dict = [state_dict]
 
         if has_reference_model:
@@ -222,7 +239,8 @@ class LLMTrainer(Trainer):
                         value, device="cpu"
                     )
             model_state_dict.append(self.reference_state_dict)
-        model_state_dict[0].update(dict(self.model.named_buffers()))
+        for model_part in self.model_parts:
+            model_state_dict[0].update(dict(model_part.named_buffers()))
 
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
@@ -392,50 +410,51 @@ class LLMTrainer(Trainer):
                     f"Chunk {file_idx} to be saved at {os.path.basename(file_path)}"
                 )
 
-        for name, param in self.model.named_parameters():
-            # First map the key from local to hf naming convention
-            name = self.model.weight_mapper.policy_map_local_key_to_hf_key(name)
-            if trainable_only and not param.requires_grad:
-                continue
-            is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
-            param = param.full_tensor() if is_dtensor else param
-            param = param.detach().data
-
-            pp_rank, pp_size = self.parallel_dims.pp_coord
-
-            for (
-                _name,
-                _param,
-            ) in self.model.weight_mapper.policy_map_local_key_for_export_tensor(
-                name, param
-            ):
-                if _param is None:
-                    logger.debug(
-                        f"[Policy] Skipping None parameter for {name} in safetensors export."
-                    )
+        for model_part in self.model_parts:
+            for name, param in model_part.named_parameters():
+                # First map the key from local to hf naming convention
+                name = model_part.weight_mapper.policy_map_local_key_to_hf_key(name)
+                if trainable_only and not param.requires_grad:
                     continue
-                elif save_lora_config and not _name.startswith("base_model"):
-                    # LoRA model needs to add a prefix to the weight name to be consistent with the HF naming convention
-                    _name = f"base_model.model.{_name}"
+                is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
+                param = param.full_tensor() if is_dtensor else param
+                param = param.detach().data
 
-                _param = _param.to(dtype=dtype) if dtype is not None else _param
-                tensor_size = get_tensor_size(_param)
-                # If adding the current tensor exceeds the size limit, save the current chunk
-                if current_chunk_size + tensor_size > max_size_bytes:
-                    # Save the current chunk as a safetensor file
-                    file_name = create_file_name(
-                        save_lora_config, pp_rank, pp_size, file_idx
-                    )
-                    save_chunked_tensors(current_chunk, current_chunk_size, file_name)
+                pp_rank, pp_size = self.parallel_dims.pp_coord
 
-                    # Reset for the next chunk
-                    current_chunk = {_name: _param}
-                    current_chunk_size = tensor_size
-                    file_idx += 1
-                else:
-                    # Add tensor to the current chunk
-                    current_chunk[_name] = _param
-                    current_chunk_size += tensor_size
+                for (
+                    _name,
+                    _param,
+                ) in model_part.weight_mapper.policy_map_local_key_for_export_tensor(
+                    name, param
+                ):
+                    if _param is None:
+                        logger.debug(
+                            f"[Policy] Skipping None parameter for {name} in safetensors export."
+                        )
+                        continue
+                    elif save_lora_config and not _name.startswith("base_model"):
+                        # LoRA model needs to add a prefix to the weight name to be consistent with the HF naming convention
+                        _name = f"base_model.model.{_name}"
+
+                    _param = _param.to(dtype=dtype) if dtype is not None else _param
+                    tensor_size = get_tensor_size(_param)
+                    # If adding the current tensor exceeds the size limit, save the current chunk
+                    if current_chunk_size + tensor_size > max_size_bytes:
+                        # Save the current chunk as a safetensor file
+                        file_name = create_file_name(
+                            save_lora_config, pp_rank, pp_size, file_idx
+                        )
+                        save_chunked_tensors(current_chunk, current_chunk_size, file_name)
+
+                        # Reset for the next chunk
+                        current_chunk = {_name: _param}
+                        current_chunk_size = tensor_size
+                        file_idx += 1
+                    else:
+                        # Add tensor to the current chunk
+                        current_chunk[_name] = _param
+                        current_chunk_size += tensor_size
 
         # Save any remaining tensors in the last chunk
         if current_chunk:
@@ -616,13 +635,14 @@ class LLMTrainer(Trainer):
 
     def model_load_from_hf(self):
         start_time = time.time()
-        self.model.load_hf_weights(
-            self.config.policy.model_safetensor_path
-            or self.config.policy.model_name_or_path,
-            self.parallel_dims,
-            self.device,
-            revision=self.config.policy.model_revision,
-        )
+        for model_part in self.model_parts:
+            model_part.load_hf_weights(
+                self.config.policy.model_safetensor_path
+                or self.config.policy.model_name_or_path,
+                self.parallel_dims,
+                self.device,
+                revision=self.config.policy.model_revision,
+            )
         end_time = time.time()
         logger.info(
             f"Time taken to load model from HF: {end_time - start_time:.2f} seconds"

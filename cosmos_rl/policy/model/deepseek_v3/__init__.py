@@ -134,15 +134,22 @@ class DeepseekV3MoEModel(BaseModel):
         initial_aux_loss: Optional[torch.Tensor] = None,
         **data_batch: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        logger.debug(
-            f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
-        )
+        if input_ids is not None and isinstance(input_ids, torch.Tensor):
+            logger.debug(
+                f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
+            )
 
         logits, aux_loss = self.model(
             tokens=input_ids,
             position_ids=position_ids,
             padding_mask=data_batch.get("padding_mask", None),
         )
+
+        # When running under pipeline parallelism, the pipeline stage infrastructure
+        # expects plain tensors (with .shape) as outputs, not CosmosModelOutput.
+        # Return just the logits tensor so it can be passed between stages.
+        if getattr(self, "_pp_enabled", False):
+            return logits
 
         if self.config.aux_loss_coeff > 0:
             if initial_aux_loss is not None and aux_loss is not None:
@@ -163,15 +170,15 @@ class DeepseekV3MoEModel(BaseModel):
 
     @property
     def parallelize_fn(self):
-        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize_model
+        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize
 
-        return parallelize_model, self
+        return parallelize, self
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         return
 
     def separate_model_parts(self) -> List[nn.Module]:
-        return [self]
+        return getattr(self, "model_parts", [self])
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1
@@ -250,6 +257,23 @@ class DeepseekV3MoEModel(BaseModel):
             )
         )
 
+        # Remap weight names from BF16 checkpoint format where non-layer
+        # components (embed_tokens, norm, lm_head) and multi-token prediction
+        # (MTP) weights are packed under a pseudo-layer at index n_layers.
+        mtp_layer_prefix = f"model.layers.{self.config.n_layers}."
+
+        def _remap_bf16_name(name: str) -> Optional[str]:
+            if not name.startswith(mtp_layer_prefix):
+                return name
+            suffix = name[len(mtp_layer_prefix):]
+            if suffix == "embed_tokens.weight":
+                return "model.embed_tokens.weight"
+            if suffix == "shared_head.head.weight":
+                return "lm_head.weight"
+            if suffix == "shared_head.norm.weight":
+                return "model.norm.weight"
+            return None
+
         # Step 3: Process each tensor
         reserved = {}
         for name, tensor in loader.iterate_tensors(
@@ -259,6 +283,10 @@ class DeepseekV3MoEModel(BaseModel):
             rank_tensor_metadata,
             device,
         ):
+            name = _remap_bf16_name(name)
+            if name is None:
+                continue
+
             # Save embed_tokens tensor for weight tying if needed
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
@@ -269,12 +297,10 @@ class DeepseekV3MoEModel(BaseModel):
                 model_type,
                 parallel_dims,
                 n_experts=self.config.n_routed_experts,
+                ignore_unknown_weights=True,
             )
 
             if dest_name is None:
-                continue
-
-            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
                 continue
 
             slice_range = None
@@ -284,6 +310,9 @@ class DeepseekV3MoEModel(BaseModel):
             elif ".experts.up_proj" in dest_name:
                 dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
                 slice_range = slice(self.config.moe_inter_dim, None)
+
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                continue
 
             target_tensor = self_state_dict[dest_name]
             if isinstance(target_tensor, torch.distributed.tensor.DTensor):

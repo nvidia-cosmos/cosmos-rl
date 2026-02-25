@@ -228,9 +228,11 @@ class SFTTrainer(LLMTrainer):
                     logger.debug(
                         "[Policy] Packing sequence is disabled due to incompatible dimensions."
                     )
+                # model_parts[0]: model-level methods/attrs are identical across all PP stages.
+                # In the non-PP case, model_parts = [self.model], so [0] is just the model itself.
                 elif (
-                    hasattr(self.model, "check_sequence_packing_compatible")
-                    and not self.model.check_sequence_packing_compatible()
+                    hasattr(self.model_parts[0], "check_sequence_packing_compatible")
+                    and not self.model_parts[0].check_sequence_packing_compatible()
                 ):
                     packing_seq = False
                     logger.debug(
@@ -242,13 +244,15 @@ class SFTTrainer(LLMTrainer):
                 computed_max_len=max_len,
                 ignore_label_id=-100,
             )
-            self.model.train()
+            for model_part in self.model_parts:
+                model_part.train()
             for k, v in batch.items():
                 batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 
             labels = batch.pop("label_ids")
 
-            position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(**batch)
+            # model_parts[0]: see above — model-level methods are shared across PP stages.
+            position_ids, input_ids, pos_seq_dim = self.model_parts[0].get_position_ids(**batch)
 
             batch["position_ids"] = position_ids
             padding_mask = batch.get("padding_mask", None)
@@ -269,7 +273,8 @@ class SFTTrainer(LLMTrainer):
                 )
                 batch.update(packed_args)
             # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
-            delay_cp_slice_inputs = getattr(self.model, "delay_cp_slice_inputs", False)
+            # model_parts[0]: model-level attrs are shared across PP stages.
+            delay_cp_slice_inputs = getattr(self.model_parts[0], "delay_cp_slice_inputs", False)
             if (
                 self.parallel_dims.cp_enabled
                 and not packing_seq
@@ -292,27 +297,31 @@ class SFTTrainer(LLMTrainer):
 
             if self.parallel_dims.pp_enabled:
                 pp_last_stage = (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                    self.parallel_dims.pp_coord[0]
+                    == self.parallel_dims.pp_coord[1] - 1
                 )
                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                # Pipeline Parallel forward / backward inside step() call
-                targets, losses = (labels, []) if pp_last_stage else (None, None)
+                # PP case: pp_scheduler.step() handles forward/backward across all pipeline stages.
+                # It internally manages all model_parts and coordinates communication between stages.
+                # - First stage receives input_ids and starts the pipeline
+                # - Last stage computes loss and initiates backward pass
+                # - Intermediate stages only receive activations from previous stage
+                targets, losses = (
+                    (labels, []) if pp_last_stage else (None, None)
+                )
+
+                pp_data_batch_args = []
                 if pp_first_stage:
-                    self.pp_scheduler.step(
-                        **batch,
-                        pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                        seq_len_multiple=self.seq_len_multiple,
-                    )
-                else:
-                    # FWD + BWD if it is 1F1B-like scheduler
-                    self.pp_scheduler.step(
-                        position_ids=batch["position_ids"],
-                        target=targets,
-                        losses=losses,
-                        pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                        seq_len_multiple=self.seq_len_multiple,
-                    )
+                    pp_data_batch_args.append(input_ids)
+                self.pp_scheduler.step(
+                    *pp_data_batch_args,
+                    position_ids=batch["position_ids"],
+                    target=targets,
+                    losses=losses,
+                    pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                    seq_len_multiple=self.seq_len_multiple,
+                )
                 ce_loss = (
                     torch.mean(torch.stack(losses)).to(self.device)
                     if pp_last_stage
@@ -355,7 +364,8 @@ class SFTTrainer(LLMTrainer):
 
                 loss = 0.0
                 with self.act_offloading_ctx_manager:
-                    output = self.model(**batch)
+                    # model_parts[0]: non-PP forward uses the first (only) model part.
+                    output = self.model_parts[0](**batch)
                     logits = output.logits
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
@@ -418,8 +428,11 @@ class SFTTrainer(LLMTrainer):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        step_hook_report_data = self.model.step_hook(train_step)
-        report_data = step_hook_report_data if step_hook_report_data is not None else {}
+        report_data = {}
+        for model_part in self.model_parts:
+            step_hook_report_data = model_part.step_hook(train_step)
+            if step_hook_report_data is not None:
+                report_data.update(step_hook_report_data)
 
         end_event.record()
 
@@ -530,7 +543,8 @@ class SFTTrainer(LLMTrainer):
         if not self.config.validation.enable:
             return
 
-        self.model.eval()
+        for model_part in self.model_parts:
+            model_part.eval()
         with torch.no_grad():
             fixed_length = (
                 self.config.policy.model_max_length
@@ -561,14 +575,16 @@ class SFTTrainer(LLMTrainer):
                 val_batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
             val_inputs = val_batch["input_ids"]
             val_labels = val_batch.pop("label_ids")
-            val_position_ids, _, val_pos_seq_dim = self.model.get_position_ids(
+            # model_parts[0]: model-level methods are shared across PP stages.
+            val_position_ids, _, val_pos_seq_dim = self.model_parts[0].get_position_ids(
                 **val_batch
             )
 
             val_batch["position_ids"] = val_position_ids
             val_padding_mask = val_batch.get("padding_mask", None)
 
-            delay_cp_slice_inputs = getattr(self.model, "delay_cp_slice_inputs", False)
+            # model_parts[0]: model-level attrs are shared across PP stages.
+            delay_cp_slice_inputs = getattr(self.model_parts[0], "delay_cp_slice_inputs", False)
             if self.parallel_dims.cp_enabled and not delay_cp_slice_inputs:
                 [val_inputs, val_position_ids, val_padding_mask] = (
                     slice_inputs_for_ulysses(
@@ -607,7 +623,8 @@ class SFTTrainer(LLMTrainer):
                 else:
                     val_loss = torch.tensor([-1.0], device=self.device)
             else:
-                val_logits = self.model(**val_batch).logits
+                # model_parts[0]: non-PP forward uses the first (only) model part.
+                val_logits = self.model_parts[0](**val_batch).logits
 
                 val_loss = self.loss_fn(val_logits, val_labels)
         if (
@@ -694,13 +711,14 @@ class SFTTrainer(LLMTrainer):
                     )
                     self.lr_schedulers = None
                     self.build_optimizers()
-                    self.model.load_hf_weights(
-                        self.config.policy.model_safetensor_path
-                        or self.config.policy.model_name_or_path,
-                        self.parallel_dims,
-                        self.device,
-                        revision=self.config.policy.model_revision,
-                    )
+                    for model_part in self.model_parts:
+                        model_part.load_hf_weights(
+                            self.config.policy.model_safetensor_path
+                            or self.config.policy.model_name_or_path,
+                            self.parallel_dims,
+                            self.device,
+                            revision=self.config.policy.model_revision,
+                        )
             else:
                 self.model_load_from_hf()
 
@@ -745,7 +763,8 @@ class SFTTrainer(LLMTrainer):
                 f"Synchronized {len_params} parameters across data parallel replicas."
             )
 
-        self.model.train()
+        for model_part in self.model_parts:
+            model_part.train()
         return ckpt_total_steps, train_step
 
     @property

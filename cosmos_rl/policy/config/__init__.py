@@ -818,7 +818,13 @@ class TrainingConfig(BaseModel):
 
     train_batch_per_replica: int = Field(
         default=8,
-        description="The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
+        description=(
+            "The batch size for training per iteration in one replica. "
+            "Must satisfy: (1) train_batch_per_replica >= mini_batch, "
+            "(2) train_batch_per_replica % mini_batch == 0, "
+            "(3) when PP is enabled: train_batch_per_replica % pp_micro_batch_size == 0, "
+            "and (train_batch_per_replica / pp_micro_batch_size) % pp_size == 0."
+        ),
     )
 
     # --------- Engineering ---------
@@ -938,12 +944,40 @@ class ParallelismConfig(BaseModel):
     )
     pp_micro_batch_size: int = Field(
         default=1,
-        description="Pipeline parallelism micro batch size, `n_micro_batch = batch_size / pp_micro_batch_size`, which must be divisible by `pp` stages",
+        description=(
+            "Pipeline parallelism micro batch size. "
+            "n_microbatches = train_batch_per_replica / pp_micro_batch_size. "
+            "Constraints: train_batch_per_replica % pp_micro_batch_size == 0, "
+            "and n_microbatches % pp_size == 0 (for single-stage schedules). "
+            "Smaller values reduce memory but increase pipeline bubbles."
+        ),
     )
     dp_replicate_size: int = Field(
         default=1,
         description="Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
         choices=[1],
+    )
+    pp_schedule: str = Field(
+        default="Interleaved1F1B",
+        description=(
+            "Pipeline parallelism schedule. "
+            "Single-stage (1 stage per rank): '1F1B', 'GPipe'. "
+            "Multi-stage (>=2 virtual stages per rank): 'Interleaved1F1B', 'LoopedBFS', "
+            "'InterleavedZeroBubble', 'ZBVZeroBubble'. "
+            "1F1B releases activations earlier than GPipe, reducing peak memory. "
+            "Multi-stage schedules reduce pipeline bubbles but use more memory."
+        ),
+        choices=["1F1B", "GPipe", "Interleaved1F1B", "LoopedBFS", "InterleavedZeroBubble", "ZBVZeroBubble"],
+    )
+    pp_layers_per_stage: int = Field(
+        default=2,
+        description=(
+            "Number of effective layers per PP stage. "
+            "Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. "
+            "Only used for multi-stage schedules (Interleaved1F1B, etc.); "
+            "ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. "
+            "Lower values = more virtual stages per rank = less pipeline bubbles but more memory."
+        ),
     )
 
     @property
@@ -1685,27 +1719,40 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def check_params_value(self):
         if self.policy.parallelism.pp_size > 1:
-            assert (
-                self.policy.parallelism.pp_micro_batch_size > 0
-            ), "pp_micro_batch_size must be greater than 0"
-            assert (
-                self.train.train_batch_per_replica
-                % self.policy.parallelism.pp_micro_batch_size
-                == 0
-            ), "train_batch must be divisible by pp_micro_batch_size"
+            pp = self.policy.parallelism
+            batch = self.train.train_batch_per_replica
+            mbs = pp.pp_micro_batch_size
 
-            # Here we assume that PP uses `Single-stage per rank` which is true for:
-            #   - GPipe
-            #   - 1F1B
-            # But not correct for those `InterleavedXXX` style schedule
-            assert (
-                (
-                    self.train.train_batch_per_replica
-                    // self.policy.parallelism.pp_micro_batch_size
+            assert mbs > 0, "pp_micro_batch_size must be greater than 0"
+
+            assert batch % mbs == 0, (
+                f"train_batch_per_replica ({batch}) must be divisible by "
+                f"pp_micro_batch_size ({mbs}). "
+                f"Try setting pp_micro_batch_size to a factor of {batch}."
+            )
+
+            n_microbatches = batch // mbs
+
+            # For single-stage schedules (GPipe, 1F1B), n_microbatches must be
+            # divisible by pp_size. For multi-stage (Interleaved1F1B, etc.),
+            # this constraint is relaxed.
+            single_stage_schedules = {"GPipe", "1F1B"}
+            if pp.pp_schedule in single_stage_schedules:
+                assert n_microbatches % pp.pp_size == 0, (
+                    f"For {pp.pp_schedule} schedule: n_microbatches "
+                    f"(train_batch_per_replica / pp_micro_batch_size = "
+                    f"{batch} / {mbs} = {n_microbatches}) must be divisible "
+                    f"by pp_size ({pp.pp_size}). "
+                    f"Try adjusting train_batch_per_replica or pp_micro_batch_size."
                 )
-                % self.policy.parallelism.pp_size
-                == 0
-            ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+
+            # Validate mini_batch <= train_batch_per_replica for SFT
+            if hasattr(self.train.train_policy, "mini_batch"):
+                mb = self.train.train_policy.mini_batch
+                assert batch % mb == 0, (
+                    f"train_batch_per_replica ({batch}) must be divisible by "
+                    f"mini_batch ({mb}). Set mini_batch <= train_batch_per_replica."
+                )
 
         # Validate constraints for GRPO with LoRA
         if (
