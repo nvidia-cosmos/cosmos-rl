@@ -869,7 +869,12 @@ class TrainingConfig(BaseModel):
 
     max_num_steps: Optional[int] = Field(
         default=None,
-        description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
+        description=(
+            "Optional upper bound on total training steps. "
+            "General case: If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests. "
+            "Load-balanced batching: When enable_dp_load_balancing=true, this is **required** and controls the number of optimizer steps (times optimizer.step() is called). "
+            "The actual number of batches processed = max_num_steps * load_balanced_batches_per_optimizer_step."
+        ),
     )
 
     sequence_packing: bool = Field(
