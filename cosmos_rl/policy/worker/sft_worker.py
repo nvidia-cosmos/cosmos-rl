@@ -16,6 +16,7 @@
 
 import inspect
 import os
+import atexit
 import torch
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
@@ -244,6 +245,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             dataset=dataset,
             val_dataset=val_dataset,
         )
+
+        # Register the exit function to be called when the program exits
+        atexit.register(self.handle_shutdown)
 
     def setup(
         self,
@@ -937,6 +941,29 @@ class SFTPolicyWorker(PolicyWorkerBase):
             pp_last_stage=pp_last_stage,
             val_score=val_avg_loss,
         )
+
+    def handle_shutdown(self):
+        # handle the ckpt saving
+        if self.signal_handler is not None and any(
+            self.signal_handler.signals_received()
+        ):
+            pp_last_stage = False
+
+            if self.parallel_dims.pp_enabled:
+                pp_last_stage = (
+                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                )
+            self.trainer.checkpointing(
+                total_steps=self.total_steps,
+                train_step=self.train_step,
+                save_freq=self._save_freq,
+                is_last_step=False,  # For ckpt saving at Signal exit, we always set this to False
+                pp_last_stage=pp_last_stage,
+                val_score=None,
+                do_save=True,
+            )
+            # release the signal handler
+            self.signal_handler.release()
 
         if (
             hasattr(self.trainer, "upload_thread")
