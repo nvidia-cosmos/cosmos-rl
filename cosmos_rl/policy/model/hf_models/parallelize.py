@@ -161,7 +161,17 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    # Shard the vision model
+
+    # 1. First shard the multi-modal projector
+    # Since it could be a submodule of the vision model, we shard it before sharding the vision model to avoid redundant FSDP wrapping and potential FSDP assertion error.
+    if model.multi_modal_projector is not None:
+        fully_shard(
+            model.multi_modal_projector,
+            **fsdp_config,
+            reshard_after_forward=True,
+        )
+
+    # 2. Shard the vision model
     if model.vision_model is not None:
         logger.info("Applying FSDP to the visual model")
         for layer_id, transformer_block in enumerate(model.vision_layers):
@@ -187,15 +197,7 @@ def apply_fsdp(
             reshard_after_forward=True,
         )
 
-    # Shard the multi-modal projector
-    if model.multi_modal_projector is not None:
-        fully_shard(
-            model.multi_modal_projector,
-            **fsdp_config,
-            reshard_after_forward=True,
-        )
-
-    # Shard the language model
+    # 3. Shard the language model
     for layer_id, transformer_block in enumerate(model.lm_layers):
         if reshard_after_forward_policy == "always":
             reshard_after_forward = True

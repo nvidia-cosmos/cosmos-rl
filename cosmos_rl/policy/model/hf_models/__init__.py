@@ -336,6 +336,9 @@ class HFModel(BaseModel):
             elif hasattr(self.model, "mlp1"):
                 # Handle InternVL architecture's multi-modal projector naming
                 multi_modal_projector = self.model.mlp1
+            elif hasattr(self.vision_model, "merger"):
+                # Handle Qwen-VL architecture where the multi-modal projector is named "merger" and is a submodule of the vision model
+                multi_modal_projector = self.vision_model.merger
 
         return multi_modal_projector
 
