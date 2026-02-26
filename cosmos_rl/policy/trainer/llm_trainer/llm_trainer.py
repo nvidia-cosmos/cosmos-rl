@@ -148,18 +148,21 @@ class LLMTrainer(Trainer):
 
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
-            self.model_modpath = [None for _ in range(len(self.model_parts))]
-            # for loop to find the model_parts path for each mdoel_part
+            # Dotted module path for each pipeline stage within the full model
+            # (e.g. ["model.layers_block_0", "model.layers_block_1"]).
+            # Used to map between per-stage state dicts and the full model's
+            # key namespace for checkpointing, optimizer construction, and LR logging.
+            self.model_module_path = [None for _ in range(len(self.model_parts))]
             for name, module in model.named_modules():
                 if module in self.model_parts:
                     idx = self.model_parts.index(module)
-                    self.model_modpath[idx] = name
-                    if all([modpath is not None for modpath in self.model_modpath]):
+                    self.model_module_path[idx] = name
+                    if all([modpath is not None for modpath in self.model_module_path]):
                         break
 
-            for i in range(len(self.model_modpath)):
-                if self.model_modpath[i] is None:
-                    self.model_modpath[i] = f"model_part_{i}"
+            for i in range(len(self.model_module_path)):
+                if self.model_module_path[i] is None:
+                    self.model_module_path[i] = f"model_part_{i}"
             self.model = model
             # util.add_nan_checks(model)
         except Exception as e:
@@ -196,7 +199,7 @@ class LLMTrainer(Trainer):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(
-            self.model_parts, self.config, model_modpath=self.model_modpath
+            self.model_parts, self.config, model_module_path=self.model_module_path
         )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
@@ -649,12 +652,18 @@ class LLMTrainer(Trainer):
         )
 
     def model_resume_from_checkpoint(self):
+        pp_kwargs = {}
+        if self.parallel_dims.pp_enabled:
+            pp_kwargs["pp_model_parts"] = self.model_parts
+            pp_kwargs["pp_model_module_paths"] = self.model_module_path
+            pp_kwargs["strict"] = False
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model,
             optimizer=self.optimizers,
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
+            **pp_kwargs,
         )
         return ckpt_extra_vars
 

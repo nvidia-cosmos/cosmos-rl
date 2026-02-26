@@ -77,11 +77,11 @@ class OptimizersContainer(Optimizer, Generic[T]):
         optimizer_cls: type[T],
         model_parts: List[nn.Module],
         optimizer_kwargs: List[Dict[str, Any]],
-        model_modpath: List[str] = None,
+        model_module_path: List[str] = None,
     ) -> None:
         all_params = []
         self.model_parts = model_parts
-        self.model_modpath = model_modpath
+        self.model_module_path = model_module_path
         self.optimizers = [[] for _ in self.model_parts]
         # Compute total number of parameters
         total_trainable_params = 0
@@ -128,7 +128,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
             optimizer_cls,
             optimizer_kwargs,
             optimizer_count=[len(opt_list) for opt_list in self.optimizers],
-            model_modpath=model_modpath,
+            model_module_path=model_module_path,
         )
 
         self._post_init(all_params, optimizer_kwargs)
@@ -197,7 +197,7 @@ def _print_optimizer_table(
     optimizer_cls,
     optimizer_kwargs_list,
     optimizer_count: list[int],
-    model_modpath=None,
+    model_module_path=None,
 ):
     if not optimizer_kwargs_list:
         logger.info("No optimizer configs to display.")
@@ -213,8 +213,8 @@ def _print_optimizer_table(
     columns = ["model_part", "class name"] + seen_keys
 
     # Default model part names
-    if model_modpath is None:
-        model_modpath = [f"part_{i}" for i in range(len(optimizer_kwargs_list))]
+    if model_module_path is None:
+        model_module_path = [f"part_{i}" for i in range(len(optimizer_kwargs_list))]
 
     # Keys that count as "learning rate"
     lr_keys = {"lr", "learning_rate", "learning-rate", "learning rate"}
@@ -223,7 +223,7 @@ def _print_optimizer_table(
     rows = []
     for idx, kw in enumerate(optimizer_kwargs_list):
         optm_cnt = optimizer_count[idx] if idx < len(optimizer_count) else None
-        row = [model_modpath[idx], optimizer_cls.__name__]
+        row = [model_module_path[idx], optimizer_cls.__name__]
 
         for k in seen_keys:
             v = kw.get(k, "")
@@ -266,7 +266,7 @@ def _print_optimizer_table(
 def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
-    model_modpath: List[str] = None,
+    model_module_path: List[str] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -283,7 +283,7 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        model_modpath (List[str], optional): List of model part paths. Defaults to None.
+        model_module_path (List[str], optional): List of model part paths. Defaults to None.
     """
     lr = config.train.optm_lr
     if isinstance(lr, float):
@@ -298,8 +298,8 @@ def build_optimizers(
                 lr = lr[: len(model_parts)]
             else:
                 # List the model part names for better debugging
-                if model_modpath is not None:
-                    model_part_names = model_modpath
+                if model_module_path is not None:
+                    model_part_names = model_module_path
                 else:
                     model_part_names = []
                     for model_part in model_parts:
@@ -381,7 +381,7 @@ def build_optimizers(
         optimizer_cls,
         model_parts,
         filtered_optimizer_kwargs,
-        model_modpath=model_modpath,
+        model_module_path=model_module_path,
     )
 
 

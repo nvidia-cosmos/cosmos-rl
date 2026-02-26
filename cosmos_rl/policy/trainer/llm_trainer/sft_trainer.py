@@ -509,11 +509,11 @@ class SFTTrainer(LLMTrainer):
                 for idx in range(len(self.model_parts)):
                     try:
                         learning_rates_metric[
-                            f"optimizer/lr_{self.model_modpath[idx]}"
+                            f"optimizer/lr_{self.model_module_path[idx]}"
                         ] = self.lr_schedulers.get_last_lr(idx)[0]
                     except Exception:
                         # Maybe this model part is frozen, so no optimizer/scheduler for it, just skip.
-                        # learning_rates_metric[f"optimizer/lr_{self.model_modpath[idx]}"] = -1.0
+                        # learning_rates_metric[f"optimizer/lr_{self.model_module_path[idx]}"] = -1.0
                         pass
                 loss_metrics.update(learning_rates_metric)
 
@@ -673,8 +673,18 @@ class SFTTrainer(LLMTrainer):
                 # save checkpoint
                 if self.config.train.ckpt.enable_checkpoint:
                     logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                    if self.parallel_dims.pp_enabled:
+                        pp_state_dict = {}
+                        for i, mp in enumerate(self.model_parts):
+                            prefix = self.model_module_path[i]
+                            for k, v in mp.state_dict().items():
+                                full_key = f"{prefix}.{k}" if prefix else k
+                                pp_state_dict[full_key] = v
+                        model_to_save = pp_state_dict
+                    else:
+                        model_to_save = self.model
                     self.ckpt_manager.save_checkpoint(
-                        model=self.model,
+                        model=model_to_save,
                         optimizer=self.optimizers,
                         scheduler=self.lr_schedulers,
                         step=train_step,

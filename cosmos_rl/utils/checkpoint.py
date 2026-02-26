@@ -396,6 +396,8 @@ class CheckpointMananger:
         state_dict_cpu = {}
         for key, value in state_dict.items():
             if isinstance(value, torch.Tensor):
+                if value.is_meta:
+                    continue
                 state_dict_cpu[key] = value.cpu()
             elif isinstance(value, dict):
                 state_dict_cpu[key] = self.offload_state_dict_cpu(value)
@@ -596,6 +598,8 @@ class CheckpointMananger:
         model_name_or_path: str,
         revision: Optional[str] = None,
         strict: bool = True,
+        pp_model_parts: Optional[List] = None,
+        pp_model_module_paths: Optional[List[str]] = None,  # dotted module paths for each PP stage
     ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
         extra_vars = {}
         base_paths: List[str] = self.get_latest_ckpt_paths()
@@ -644,10 +648,19 @@ class CheckpointMananger:
                         )
                         new_scheduler = scheduler
 
-                    model.load_state_dict(
-                        torch.load(model_path, weights_only=False, map_location="cpu"),
-                        strict=strict,
+                    saved_state = torch.load(
+                        model_path, weights_only=False, map_location="cpu"
                     )
+                    if pp_model_parts is not None and pp_model_module_paths is not None:
+                        for mp, prefix in zip(pp_model_parts, pp_model_module_paths):
+                            mp_state = {}
+                            prefix_dot = f"{prefix}." if prefix else ""
+                            for k, v in saved_state.items():
+                                if k.startswith(prefix_dot):
+                                    mp_state[k[len(prefix_dot):]] = v
+                            mp.load_state_dict(mp_state, strict=False)
+                    else:
+                        model.load_state_dict(saved_state, strict=strict)
                     optimizer.load_state_dict(
                         torch.load(
                             optimizer_path, weights_only=False, map_location="cpu"
