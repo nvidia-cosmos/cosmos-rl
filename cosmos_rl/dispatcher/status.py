@@ -630,8 +630,10 @@ class PolicyStatusManager:
             len(x) for x in self.val_report_data[validation_step]
         )
 
-        validation_finished = n_items_of_this_step == (
-            self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader)
+        validation_finished = (
+            n_items_of_this_step
+            == (self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader))
+            * self.config.validation.n_generation
         )
 
         if self.data_fetcher.activated_val_tqdm:
