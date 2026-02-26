@@ -41,6 +41,7 @@ from cosmos_rl.policy.kernel.megatron_moe.moe_utils import (
 from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
+    MoEAlltoAllTokenDispatcher
 )
 from transformers.activations import ACT2FN
 
@@ -87,6 +88,7 @@ class MoEArgs:
     enable_router_bias: bool = False
     enable_glu: bool = True
     act_fn: Optional[str] = None
+    moe_enable_deepep: bool = True
 
     def __post_init__(self):
         if self.shared_inter_dim is None:
@@ -357,13 +359,21 @@ class GroupedExpertsDeepEP(nn.Module):
         local_expert_indices = [
             local_expert_indices_offset + i for i in range(num_local_experts)
         ]
-
-        self.token_dispatcher = MoEFlexTokenDispatcher(
-            num_local_experts=num_local_experts,
-            local_expert_indices=local_expert_indices,
-            config=config,
-            ep_group=ep_mesh.get_group(),
-        )
+        self.using_deepep = self.args.moe_enable_deepep
+        if self.using_deepep:
+            self.token_dispatcher = MoEFlexTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
+        else:
+            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
 
     def forward(
         self,
@@ -389,8 +399,9 @@ class GroupedExpertsDeepEP(nn.Module):
                 Shape is [num_tokens, model_dim]
         """
         assert not isinstance(x, DTensor)
-
-        indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
+        if self.using_deepep:
+            # This a feature for deepep, it can filter out padding token for dispatching
+            indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(

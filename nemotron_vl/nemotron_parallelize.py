@@ -235,6 +235,7 @@ def parallelize(
         # TODO(jiaxinc): to be compatible with both pure text and vision-language models.
         language_model_config = model.hf_config.text_config if 'text_config' in model.hf_config else model.hf_config
         gate_training_enabled = config.custom.get("enable_moe_load_balancing_training", True)
+        enable_deepep = config.custom.get("enable_deepep", True)
         moe_args = MoEArgs(
             n_routed_experts=language_model_config.n_routed_experts,
             n_shared_experts=language_model_config.n_shared_experts,
@@ -252,7 +253,8 @@ def parallelize(
             norm_topk_prob=language_model_config.norm_topk_prob,
             enable_router_bias=True,
             enable_glu=False,
-            act_fn=language_model_config.mlp_hidden_act
+            act_fn=language_model_config.mlp_hidden_act,
+            moe_enable_deepep=enable_deepep,
         )
 
         cosmos_default_dtype = util.str2torch_dtype(
