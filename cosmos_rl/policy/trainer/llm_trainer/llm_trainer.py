@@ -149,24 +149,22 @@ class LLMTrainer(Trainer):
 
             torch.cuda.empty_cache()
 
-            # If learning rate is list of `Union[float, List[float]]`,
-            #  it means the learning rates are in order of pre-defined `model.separate_model_parts()`.
-            # else, learning rate must be of type `Dict[str, float]`, where the key is the module path of the model part defined in `model.separate_model_parts()`, and the value is the learning rate for that model part.
-
             if isinstance(config.train.optm_lr, (float, list)):
                 self.model_parts = model.separate_model_parts()
-                self.model_modpath = [None for _ in range(len(self.model_parts))]
-                # `named_modules()` recursively iterates over all modules in the model, and returns both the name and the module itself. We can use it to find the module path for each model part, which will be used in optimizer construction to get the parameters of each model part.
-                # `named_children()` only iterates over the immediate children modules, which is not enough for us to find the module path for each model part since the model part can be nested in the model.
+                # Dotted module path for each pipeline stage within the full model
+                # (e.g. ["model.layers_block_0", "model.layers_block_1"]).
+                # Used to map between per-stage state dicts and the full model's
+                # key namespace for checkpointing, optimizer construction, and LR logging.
+                self.model_module_path = [None for _ in range(len(self.model_parts))]
                 for name, module in model.named_modules():
                     if module in self.model_parts:
                         idx = self.model_parts.index(module)
-                        self.model_modpath[idx] = name
-                        if all([modpath is not None for modpath in self.model_modpath]):
+                        self.model_module_path[idx] = name
+                        if all([modpath is not None for modpath in self.model_module_path]):
                             break
-                for i in range(len(self.model_modpath)):
-                    if self.model_modpath[i] is None:
-                        self.model_modpath[i] = f"model_part_{i}"
+                for i in range(len(self.model_module_path)):
+                    if self.model_module_path[i] is None:
+                        self.model_module_path[i] = f"model_part_{i}"
             else:
                 assert isinstance(config.train.optm_lr, dict), (
                     "Learning rate must be either a float, a list of floats, or a dict of {model_part: lr}."
@@ -177,7 +175,6 @@ class LLMTrainer(Trainer):
                 _num_re = re.compile(r"(\d+)")
 
                 def natural_key(s: str) -> Tuple[Union[int, str], ...]:
-                    # makes 'layers.2' < 'layers.10'
                     parts = _num_re.split(s)
                     out = []
                     for p in parts:
@@ -189,7 +186,6 @@ class LLMTrainer(Trainer):
                 ) -> List[str]:
                     def key(p: str):
                         depth = 0 if not p else p.count(sep) + 1
-                        # primary: deeper first; secondary: natural lexicographic for stable sibling ordering
                         return (-depth, natural_key(p))
 
                     return sorted(paths, key=key)
@@ -198,7 +194,6 @@ class LLMTrainer(Trainer):
                 module_paths = []
                 learning_rates = []
 
-                # check for global learning rate if exists
                 global_lr = config.train.optm_lr.get("global", None)
                 if global_lr is not None:
                     del config.train.optm_lr["global"]
@@ -206,7 +201,6 @@ class LLMTrainer(Trainer):
                         f"Global learning rate must be a positive float if specified, but got {global_lr}."
                     )
 
-                # Check existence of the module paths specified in the learning rate dict
                 module_paths = sort_module_paths_deep_to_root(
                     config.train.optm_lr.keys()
                 )
@@ -227,15 +221,11 @@ class LLMTrainer(Trainer):
 
                 if global_lr is not None:
                     model_parts.append(model)
-                    # empty string is used to represent the global learning rate for the whole model, which does not correspond to any module path.
                     module_paths.append("[ALL_OTHER]")
                     learning_rates.append(global_lr)
 
                 self.model_parts = model_parts
-                self.model_modpath = module_paths
-                # reset the learning rate in config to be the list of learning rates for each model part, which will be used in optimizer construction.
-                # because modules have to be in specific order during optimizer building,
-                # either a list or an ordered dict is needed to ensure the order of the model parts and the learning rates.
+                self.model_module_path = module_paths
                 self.config.train.optm_lr = learning_rates
 
             self.model = model
@@ -277,7 +267,7 @@ class LLMTrainer(Trainer):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(
-            self.model_parts, self.config, model_modpath=self.model_modpath
+            self.model_parts, self.config, model_module_path=self.model_module_path
         )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
@@ -773,12 +763,18 @@ class LLMTrainer(Trainer):
         )
 
     def model_resume_from_checkpoint(self):
+        pp_kwargs = {}
+        if self.parallel_dims.pp_enabled:
+            pp_kwargs["pp_model_parts"] = self.model_parts
+            pp_kwargs["pp_model_module_paths"] = self.model_module_path
+            pp_kwargs["strict"] = False
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model,
             optimizer=self.optimizers,
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
+            **pp_kwargs,
         )
         return ckpt_extra_vars
 
