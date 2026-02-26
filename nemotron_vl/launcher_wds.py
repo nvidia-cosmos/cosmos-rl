@@ -491,6 +491,30 @@ class CustomWebDatasetDataset(Dataset):
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.cosmos_config = config
 
+        self.n_shards_to_skip = 0
+        self.n_samples_to_skip_in_shard = 0
+        resume_path = config.train.resume
+        if resume_path and isinstance(resume_path, str) and os.path.exists(resume_path):
+            # Check the current step from the resume checkpoint to determine 
+            # how much shards to skip and how much samples to skip in the current shard.
+            rank_0_state_path = os.path.join(resume_path, "extra_info_rank_0.pth")
+            if os.path.exists(rank_0_state_path):
+                extra_info = torch.load(rank_0_state_path, map_location="cpu", weights_only=False)
+                resume_step = extra_info.get("step", 0)
+
+                # TODO(jiaxinc): 50000 is a rough number for all tar files.
+                # Get worker number, the more workers, the more steps per shard
+                num_workers = self.cosmos_config.train.train_policy.dataloader_num_workers or 1
+                n_steps_per_shard = 50000 * num_workers // self.cosmos_config.train.train_batch_per_replica
+                self.n_shards_to_skip = resume_step // n_steps_per_shard
+                self.n_samples_to_skip_in_shard = (resume_step % n_steps_per_shard) * self.cosmos_config.train.train_batch_per_replica // num_workers
+
+        # Fake the resume logic by skipping a certain number of shards and samples in the current shard.
+        # self.n_shards_to_skip = 5
+        # self.n_samples_to_skip_in_shard = 100
+        if self.n_shards_to_skip > 0 or self.n_samples_to_skip_in_shard > 0:
+            print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
+
         # Controls (put these in config.custom)
         custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
 
@@ -535,11 +559,28 @@ class CustomWebDatasetDataset(Dataset):
         nodesplitter = getattr(wds, "split_by_node", None) or wds.shardlists.split_by_node
         workersplitter = getattr(wds, "split_by_worker", None) or wds.shardlists.split_by_worker
         ResampledShards = getattr(wds, "ResampledShards", None) or wds.shardlists.ResampledShards
+        wds_pool_shuffle_seed = self.cosmos_config.custom.get("wds_pool_shuffle_seed", 42)
+        wds_sharding_seed = self.cosmos_config.custom.get("wds_sharding_seed", 12345)
 
+        def skip_first_n_shards(n: int):
+            def _skip(src):
+                it = iter(src)
+                for _ in range(n):
+                    next(it, None)   # discard shard url/path
+                yield from it
+            return _skip
 
-        pipeline = wds.DataPipeline(
+        def skip_first_samples(n: int):
+            def _skip(src):
+                it = iter(src)
+                for _ in range(n):
+                    next(it, None)   # discard decoded sample dict
+                yield from it
+            return _skip
+
+        sharding_pipe = [
             # Sample shards with replacement
-            ResampledShards(self.urls),
+            ResampledShards(self.urls, deterministic=True, seed=wds_sharding_seed),
             # NB: if `resampled=True`, and even if we split by node and worker, we still expect to see potential duplicates between nodes and workers.
             # This is expected and hopefully could be uniformly distributed.
             #
@@ -547,12 +588,20 @@ class CustomWebDatasetDataset(Dataset):
             nodesplitter,          # shard-level split across ranks
             # Split stream by workers, since iterable dataset is not randomly accessible, each worker should see different samples
             workersplitter,        # shard-level split across dataloader workers
-            _tarfile_to_samples_tolerant(
-                handler=wds.warn_and_continue,
-                rename_files=_sanitize_wds_filename,
-            ),
+        ]
+
+        if self.n_shards_to_skip > 0:
+            sharding_pipe.append(skip_first_n_shards(self.n_shards_to_skip))
+        
+        sharding_pipe.append(_tarfile_to_samples_tolerant(handler=wds.warn_and_continue,rename_files=_sanitize_wds_filename))
+
+        if self.n_samples_to_skip_in_shard > 0:
+            sharding_pipe.append(skip_first_samples(self.n_samples_to_skip_in_shard))
+
+        pipeline = wds.DataPipeline(
+            *sharding_pipe,
             # Shuffle samples inside a buffer/pool of size `shuffle_buf`
-            wds.shuffle(self.shuffle_buf),   # sample-level shuffle buffer
+            wds.detshuffle(self.shuffle_buf, seed=wds_pool_shuffle_seed),   # sample-level shuffle buffer
             # Do preprocessing to attach the media payloads (PIL for images; bytes/path for videos)
             wds.map(self.preprocess_sample),
             # Filter out samples that are None(i.e. failed to preprocess)
@@ -598,6 +647,11 @@ class CustomWebDatasetDataset(Dataset):
                 continue
 
     def preprocess_sample(self, sample: dict) -> dict:
+        # shard = sample.get("__url__", "<no __url__>")
+        # key = sample.get("__key__", "<no __key__>")
+
+        # print(f"[WDS] shard={shard} key={key} on worker={torch.utils.data.get_worker_info() if torch.utils.data.get_worker_info() else 'main'}")
+
         # Parse JSON
         js = sample.get("json", None)
         if js is None:
