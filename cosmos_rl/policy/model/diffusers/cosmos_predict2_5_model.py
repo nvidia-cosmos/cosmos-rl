@@ -447,7 +447,6 @@ class CosmosPredict2_5Model(DiffuserModel):
         video = self.pipeline.video_processor.postprocess_video(
             video, output_type=output_type
         )  # (B, T, C, H, W)
-        video = video.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
         self.pipeline.maybe_free_model_hooks()
 
         return video, all_latents, all_log_probs

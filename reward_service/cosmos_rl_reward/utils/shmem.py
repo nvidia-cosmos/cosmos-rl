@@ -284,8 +284,12 @@ class CrossProcessHandler:
             self.status[0] == CrossProcessStatus.DECODE.value
         ), f"Expected status {CrossProcessStatus.DECODE.value}, but got {self.status[0]}."
         if tensor.numel() * tensor.element_size() > self.cuda_maxbytes:
+            needed = tensor.numel() * tensor.element_size()
             raise ValueError(
-                f"Tensor size {tensor.numel() * tensor.element_size()} exceeds shared memory size {self.cuda_maxbytes}."
+                "Tensor size "
+                f"{needed} exceeds shared CUDA buffer size {self.cuda_maxbytes}. "
+                "Increase the shared buffer and restart the reward service, e.g. set "
+                "COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES (bytes)."
             )
         self.set_cuda_tensor(tensor)
         self.set_cpu_info(info)

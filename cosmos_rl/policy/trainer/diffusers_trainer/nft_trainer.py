@@ -254,7 +254,9 @@ class NFTTrainer(DiffusersTrainer):
         for out_idx, sample_idx in enumerate(sample_indices):
             out_path = os.path.join(mm_data_dir, f"{current_step}_{out_idx}.{ext}")
             if modality == "video":
-                video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
+                video = (
+                    mm_datas_cpu[sample_idx].to(torch.float16).numpy()
+                )  # [T, C, H, W]
                 frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
                 imageio.mimsave(
                     out_path,

@@ -282,6 +282,21 @@ def main():
     redis_url = f"http://localhost:{port}"
     info = {"reward": {}}
     controllers: Dict[str, RewardProcessHandler] = {}
+
+    # Shared memory sizing
+    # - CUDA buffer holds decoded tensors (can be large for video batches)
+    # - CPU shared memory holds metadata (msgpack)
+    shmem_cuda_maxbytes = int(
+        os.environ.get("COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES", 1024 * 1024 * 1024)
+    )
+    shmem_cpu_maxbytes = int(
+        os.environ.get("COSMOS_RL_REWARD_SHMEM_CPU_MAXBYTES", 1024 * 1024)
+    )
+    logger.info(
+        "[reward_serve] Shared memory config: "
+        f"COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES={shmem_cuda_maxbytes}, "
+        f"COSMOS_RL_REWARD_SHMEM_CPU_MAXBYTES={shmem_cpu_maxbytes}"
+    )
     # Filter only enabled rewards
     enabled_reward_args = [
         reward_arg for reward_arg in loaded_config.reward_args if getattr(reward_arg, "enable", True)
@@ -297,7 +312,11 @@ def main():
             download_path=reward_arg.download_path,
         )
         RewardRegistry.register_reward_venv(key, reward_arg.venv_python)
-        controllers[key].init_process(envs={"REDIS_URL": redis_url})
+        controllers[key].init_process(
+            cuda_maxbytes=shmem_cuda_maxbytes,
+            cpu_maxbytes=shmem_cpu_maxbytes,
+            envs={"REDIS_URL": redis_url},
+        )
         info["reward"][key] = controllers[key].process_handler.shm_cpu.name
 
     # Instantiate the DecodeHandler singleton

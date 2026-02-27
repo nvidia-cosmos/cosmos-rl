@@ -23,6 +23,10 @@ from diffusers.pipelines.sana.pipeline_sana import (
     ASPECT_RATIO_512_BIN,
     retrieve_timesteps,
 )
+from diffusers.pipelines.sana_video.pipeline_sana_video import (
+    ASPECT_RATIO_480_BIN,
+    ASPECT_RATIO_720_BIN,
+)
 from diffusers.utils.torch_utils import randn_tensor
 from typing import Any, Dict, List, Optional, Union
 
@@ -277,9 +281,10 @@ class SanaModel(DiffuserModel):
         timesteps: List[int] = None,
         sigmas: List[float] = None,
         guidance_scale: float = 4.5,
-        num_images_per_prompt: Optional[int] = 1,
+        num_mm_datas_per_prompt: Optional[int] = 1,
         height: int = 1024,
         width: int = 1024,
+        frames: int = 81,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
@@ -294,34 +299,58 @@ class SanaModel(DiffuserModel):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 300,
         noise_level: float = 0.7,
-        complex_human_instruction: List[str] = [
-            "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
-            "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
-            "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
-            "Here are examples of how to transform or refine prompts:",
-            "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers.",
-            "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers.",
-            "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
-            "User Prompt: ",
-        ],
+        complex_human_instruction: List[str] = [],
         **kwargs,
     ):
         # 1. Check inputs. Raise error if not correct
-        if use_resolution_binning:
-            if self.transformer.config.sample_size == 128:
-                aspect_ratio_bin = ASPECT_RATIO_4096_BIN
-            elif self.transformer.config.sample_size == 64:
-                aspect_ratio_bin = ASPECT_RATIO_2048_BIN
-            elif self.transformer.config.sample_size == 32:
-                aspect_ratio_bin = ASPECT_RATIO_1024_BIN
-            elif self.transformer.config.sample_size == 16:
-                aspect_ratio_bin = ASPECT_RATIO_512_BIN
-            else:
-                raise ValueError("Invalid sample size")
-            orig_height, orig_width = height, width
-            height, width = self.pipeline.image_processor.classify_height_width_bin(
-                height, width, ratios=aspect_ratio_bin
-            )
+        if self.is_video:
+            complex_human_instruction = [
+                "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for video generation. Evaluate the level of detail in the user prompt:",
+                "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, motion, and temporal relationships to create vivid and dynamic scenes.",
+                "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
+                "Here are examples of how to transform or refine prompts:",
+                "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat slowly settling into a curled position, peacefully falling asleep on a warm sunny windowsill, with gentle sunlight filtering through surrounding pots of blooming red flowers.",
+                "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps gradually lighting up, a diverse crowd of people in colorful clothing walking past, and a double-decker bus smoothly passing by towering glass skyscrapers.",
+                "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
+                "User Prompt: ",
+            ]
+            if use_resolution_binning:
+                if self.transformer.config.sample_size == 30:
+                    aspect_ratio_bin = ASPECT_RATIO_480_BIN
+                elif self.transformer.config.sample_size == 22:
+                    aspect_ratio_bin = ASPECT_RATIO_720_BIN
+                else:
+                    raise ValueError("Invalid sample size")
+                orig_height, orig_width = height, width
+                height, width = self.pipeline.video_processor.classify_height_width_bin(
+                    height, width, ratios=aspect_ratio_bin
+                )
+        else:
+            complex_human_instruction = [
+                "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
+                "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
+                "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
+                "Here are examples of how to transform or refine prompts:",
+                "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers.",
+                "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers.",
+                "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
+                "User Prompt: ",
+            ]
+            if use_resolution_binning:
+                if self.transformer.config.sample_size == 128:
+                    aspect_ratio_bin = ASPECT_RATIO_4096_BIN
+                elif self.transformer.config.sample_size == 64:
+                    aspect_ratio_bin = ASPECT_RATIO_2048_BIN
+                elif self.transformer.config.sample_size == 32:
+                    aspect_ratio_bin = ASPECT_RATIO_1024_BIN
+                elif self.transformer.config.sample_size == 16:
+                    aspect_ratio_bin = ASPECT_RATIO_512_BIN
+                else:
+                    raise ValueError("Invalid sample size")
+                orig_height, orig_width = height, width
+                height, width = self.pipeline.image_processor.classify_height_width_bin(
+                    height, width, ratios=aspect_ratio_bin
+                )
 
         self.pipeline.check_inputs(
             prompt,
@@ -355,26 +384,29 @@ class SanaModel(DiffuserModel):
         )
 
         # 3. Encode input prompt
+        encode_prompt_input = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "device": device,
+            "prompt_embeds": prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
+            "prompt_attention_mask": prompt_attention_mask,
+            "negative_prompt_attention_mask": negative_prompt_attention_mask,
+            "clean_caption": clean_caption,
+            "max_sequence_length": max_sequence_length,
+            "complex_human_instruction": complex_human_instruction,
+            "lora_scale": lora_scale,
+        }
+        if self.is_video:
+            encode_prompt_input["num_videos_per_prompt"] = num_mm_datas_per_prompt
+        else:
+            encode_prompt_input["num_images_per_prompt"] = num_mm_datas_per_prompt
         (
             prompt_embeds,
             prompt_attention_mask,
             negative_prompt_embeds,
             negative_prompt_attention_mask,
-        ) = self.pipeline.encode_prompt(
-            prompt,
-            self.pipeline.do_classifier_free_guidance,
-            negative_prompt=negative_prompt,
-            num_images_per_prompt=num_images_per_prompt,
-            device=device,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            prompt_attention_mask=prompt_attention_mask,
-            negative_prompt_attention_mask=negative_prompt_attention_mask,
-            clean_caption=clean_caption,
-            max_sequence_length=max_sequence_length,
-            complex_human_instruction=complex_human_instruction,
-            lora_scale=lora_scale,
-        )
+        ) = self.pipeline.encode_prompt(**encode_prompt_input)
         if self.pipeline.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             prompt_attention_mask = torch.cat(
@@ -393,16 +425,19 @@ class SanaModel(DiffuserModel):
 
         # 5. Prepare latents.
         latent_channels = self.transformer.config.in_channels
-        latents = self.pipeline.prepare_latents(
-            batch_size * num_images_per_prompt,
-            latent_channels,
-            height,
-            width,
-            torch.float32,
-            device,
-            generator,
-            latents,
-        )
+        prepare_latents_input = {
+            "batch_size": batch_size * num_mm_datas_per_prompt,
+            "num_channels_latents": latent_channels,
+            "height": height,
+            "width": width,
+            "dtype": torch.float32,
+            "device": device,
+            "generator": generator,
+            "latents": latents,
+        }
+        if self.is_video:
+            prepare_latents_input["num_frames"] = frames
+        latents = self.pipeline.prepare_latents(**prepare_latents_input)
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.pipeline.prepare_extra_step_kwargs(generator, eta)  # noqa: F841
@@ -429,7 +464,9 @@ class SanaModel(DiffuserModel):
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-                timestep = timestep * self.transformer.config.timestep_scale
+                # only sana image has timestep scaling, sana video doesn't have
+                if not self.is_video:
+                    timestep = timestep * self.transformer.config.timestep_scale
 
                 # predict noise model_output
                 noise_pred = self.transformer(
@@ -468,26 +505,47 @@ class SanaModel(DiffuserModel):
                     progress_bar.update()
 
         if output_type == "latent":
-            image = latents
+            mm_datas = latents
         else:
             latents = latents.to(self.vae.dtype)
-            image = self.vae.decode(
-                latents / self.vae.config.scaling_factor, return_dict=False
-            )[0]
-            if use_resolution_binning:
-                image = self.pipeline.image_processor.resize_and_crop_tensor(
-                    image, orig_width, orig_height
+            if self.is_video:
+                latents_mean = (
+                    torch.tensor(self.vae.config.latents_mean)
+                    .view(1, self.vae.config.z_dim, 1, 1, 1)
+                    .to(latents.device, latents.dtype)
                 )
+                latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
+                    1, self.vae.config.z_dim, 1, 1, 1
+                ).to(latents.device, latents.dtype)
+                latents = latents / latents_std + latents_mean
+                video = self.vae.decode(latents, return_dict=False)[0]
 
-        if not output_type == "latent":
-            image = self.pipeline.image_processor.postprocess(
-                image, output_type=output_type
-            )
+                if use_resolution_binning:
+                    video = self.pipeline.video_processor.resize_and_crop_tensor(
+                        video, orig_width, orig_height
+                    )
+
+                video = self.pipeline.video_processor.postprocess_video(
+                    video, output_type=output_type
+                )  # (B, T, C, H, W)
+                mm_datas = video
+            else:
+                image = self.vae.decode(
+                    latents / self.vae.config.scaling_factor, return_dict=False
+                )[0]
+                if use_resolution_binning:
+                    image = self.pipeline.image_processor.resize_and_crop_tensor(
+                        image, orig_width, orig_height
+                    )
+                image = self.pipeline.image_processor.postprocess(
+                    image, output_type=output_type
+                )
+                mm_datas = image
 
         # Offload all models
         self.pipeline.maybe_free_model_hooks()
 
-        return image, all_latents, None
+        return mm_datas, all_latents, None
 
     def nft_prepare_transformer_input(
         self,

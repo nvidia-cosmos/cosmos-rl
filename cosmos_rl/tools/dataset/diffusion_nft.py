@@ -43,6 +43,10 @@ DIFFUSION_NFT_DATASET_URL = {
         "train": "https://raw.githubusercontent.com/NVlabs/DiffusionNFT/refs/heads/main/dataset/geneval/train_metadata.jsonl",
         "test": "https://raw.githubusercontent.com/NVlabs/DiffusionNFT/refs/heads/main/dataset/geneval/test_metadata.jsonl",
     },
+    "dance_grpo_t2v": {
+        "train": "https://raw.githubusercontent.com/XueZeyue/DanceGRPO/refs/heads/main/assets/video_prompts.txt",
+        "test": "https://raw.githubusercontent.com/XueZeyue/DanceGRPO/refs/heads/main/assets/video_prompts.txt",  # No test set for dance_grpo_t2v dataset, using the same file as train
+    },
 }
 
 
@@ -155,6 +159,7 @@ def get_dataset(dataset_config: DatasetConfig) -> Dataset:
         "pickscore",
         "ocr",
         "geneval",
+        "dance_grpo_t2v",
     ], f"Unknown dataset name: {dataset_config.name}"
     dataset_dir = os.path.join(CACHE_DIR, "diffusion_nft", dataset_config.name)
     os.makedirs(dataset_dir, exist_ok=True)

@@ -95,6 +95,7 @@ save_freq = 5
 save_mode = "async"
 
 [validation]
+enable = true
 dataset.name = "pickscore"
 dataset.split = "test"
 

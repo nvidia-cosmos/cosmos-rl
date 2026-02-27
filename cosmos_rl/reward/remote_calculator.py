@@ -235,15 +235,18 @@ class RemoteRewardCalculator:
         if modality == "video":
             # Acquire fps info from extra_info
             video_fps = payload.extra_info.get("video_fps", 16.0)
-            # Encode video data
-            latents = self.tokenizer.encode(mm_datas)
-            # Convert latents from [0, 1] to [0, 255]
-            mm_tensor = (
-                (latents * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
-            )
+            # Encode video data, convert shape to (B, C, T, H, W) and normalize to [-1, 1]
+            latents = self.tokenizer.encode(
+                (mm_datas.permute(0, 2, 1, 3, 4) - 0.5) * 2
+            )  # (B, T, C, H, W) -> (B, C, T, H, W)
+            batch_size = latents.shape[0]
+            mm_tensor = latents.to(torch.float16).detach().cpu().numpy()
+            # Free large intermediates early
+            del latents
+
             # Create video info for entire batch (assuming 16 FPS as default)
             video_infos = []
-            for _ in range(latents.shape[0]):
+            for _ in range(batch_size):
                 video_infos.append({"video_fps": video_fps})
             data["video_infos"] = video_infos
             data["media_type"] = "video"
