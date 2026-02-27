@@ -108,6 +108,7 @@ class DecodeHandler:
             device (str): The device to run the tokenizer on.
         """
         from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+
         self.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=chunk_duration,
             load_mean_std=load_mean_std,
@@ -116,22 +117,48 @@ class DecodeHandler:
             device=device,
         )
 
+    def set_latent_decoder_wan2pt2(
+        self,
+        model_path="",
+        device="cuda",
+        credential_path="",
+        **kwargs,
+    ):
+        """
+        Initialize the Wan2pt2 (4x16x16) VAE decoder for Cosmos3 latents.
+        Args:
+            model_path (str): Local or S3 path to the Wan2pt2 VAE checkpoint (.pth).
+            device (str): The device to run the tokenizer on.
+            credential_path (str): Path to S3 credentials JSON (only needed for s3:// paths).
+        """
+        from cosmos_rl.policy.model.wfm.tokenizer.wan2pt2 import WanVAE
+
+        self.latent_decoder_wan2pt2 = WanVAE(
+            z_dim=48,
+            vae_pth=model_path,
+            device=device,
+            dtype=torch.bfloat16,
+            temporal_window=4,
+        )
+        logger.info(f"[{self.name}] Wan2pt2 latent decoder initialized from {model_path}")
+
     def decode_video(self, latents: torch.Tensor):
         """
-        Decode the video latents to videos using the latent decoder.
+        Decode the video latents to videos using the appropriate decoder.
+        Auto-detects Wan2pt1 (16ch) vs Wan2pt2 (48ch) based on latent channel dim.
         Args:
             latents (torch.Tensor): The video latents to decode.
         Returns:
             torch.Tensor: The decoded videos in (batch_size, C, frame, H, W) format.
         """
-
-        # Decode the latents
         logger.debug("\n--- DECODING ---")
-        reconstructed_video = self.latent_decoder.decode_latents(latents)
+        if latents.shape[1] == 48 and hasattr(self, "latent_decoder_wan2pt2"):
+            reconstructed_video = self.latent_decoder_wan2pt2.decode(latents)
+        else:
+            reconstructed_video = self.latent_decoder.decode_latents(latents)
         logger.debug(
             f"Reconstructed video range: [{reconstructed_video.min():.3f}, {reconstructed_video.max():.3f}]"
         )
-        # save the first video and reconstructed video
         video = ((1 + reconstructed_video[0].clamp(-1, 1)) / 2).unsqueeze(
             0
         ).float() * 255
@@ -210,6 +237,13 @@ class DecodeHandler:
         controller = cls.get_instance()
         if requires_latent_decode and not hasattr(controller, "latent_decoder"):
             controller.set_latent_decoder(**kwargs)
+        wan2pt2_model_path = kwargs.get("wan2pt2_model_path", "")
+        if wan2pt2_model_path and not hasattr(controller, "latent_decoder_wan2pt2"):
+            controller.set_latent_decoder_wan2pt2(
+                model_path=wan2pt2_model_path,
+                device=kwargs.get("device", "cuda"),
+                credential_path=kwargs.get("wan2pt2_credential_path", ""),
+            )
         controller.set_info(info)
         logger.info(f"[{cls.name}] Set up complete.")
 
@@ -276,8 +310,49 @@ class DecodeHandler:
             is_image_payload = (
                 media_type is not None and str(media_type).lower() == "image"
             )
+            is_video_payload = (
+                media_type is not None and str(media_type).lower() == "video"
+            )
 
-            if is_image_payload:
+            if is_video_payload:
+                try:
+                    buffer = io.BytesIO(file)
+                    npy = np.load(buffer, allow_pickle=False)
+                except Exception:
+                    buffer = io.BytesIO(file)
+                    npy = (
+                        torch.load(buffer, map_location=torch.device("cpu"))
+                        .cpu()
+                        .numpy()
+                    )
+
+                decoded_images = torch.from_numpy(npy)
+
+                logger.info(
+                    f"[{self.name}] Received pre-decoded video tensor with shape: "
+                    f"{decoded_images.shape}, dtype: {decoded_images.dtype}, "
+                    f"range: [{decoded_images.min():.3f}, {decoded_images.max():.3f}]"
+                )
+
+                decoded_info = {
+                    "shape": decoded_images.shape,
+                    "dtype": str(decoded_images.dtype),
+                }
+                metadata["decoded_info"] = decoded_info
+                metadata["decode_duration"] = "0.00"
+                metadata.setdefault("input_info", {})
+                metadata["input_info"].update(
+                    {
+                        "shape": decoded_images.shape,
+                        "dtype": str(decoded_images.dtype),
+                        "min": f"{decoded_images.min():.3f}",
+                        "max": f"{decoded_images.max():.3f}",
+                    }
+                )
+                metadata["uuid"] = uuid
+                logger.info(f"[{self.name}] Prepared pre-decoded video batch for {uuid}")
+
+            elif is_image_payload:
                 # Parse image tensor payload; prefer NPY [B,C,H,W] uint8
                 try:
                     buffer = io.BytesIO(file)

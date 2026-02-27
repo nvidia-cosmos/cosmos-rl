@@ -326,6 +326,21 @@ def main():
             )
             if not os.path.exists(model_path):
                 download_file(loaded_config.decode_args.model_path, model_path)
+        # Resolve Wan2pt2 model path if configured.
+        wan2pt2_model_path = loaded_config.decode_args.wan2pt2_model_path
+        if (
+            wan2pt2_model_path
+            and not wan2pt2_model_path.startswith("s3://")
+            and not os.path.exists(wan2pt2_model_path)
+        ):
+            wan2pt2_local = os.path.join(
+                get_cosmos_rl_reward_cache_dir(),
+                os.path.basename(wan2pt2_model_path),
+            )
+            if not os.path.exists(wan2pt2_local):
+                download_file(wan2pt2_model_path, wan2pt2_local)
+            wan2pt2_model_path = wan2pt2_local
+
         # Initialize the DecodeHandler in the worker process with decoder args
         initialized = decoder.threading_pool.submit(
             DecodeHandler.initialize,
@@ -337,6 +352,8 @@ def main():
             chunk_duration=loaded_config.decode_args.chunk_duration,
             temporal_window=loaded_config.decode_args.temporal_window,
             load_mean_std=loaded_config.decode_args.load_mean_std,
+            wan2pt2_model_path=wan2pt2_model_path,
+            wan2pt2_credential_path=loaded_config.decode_args.wan2pt2_credential_path,
         )
     else:
         # Initialize without decoder (skip heavy imports/downloads)

@@ -80,6 +80,16 @@ class DecodeArgs(BaseModel):
     load_mean_std: bool = Field(
         default=False, description="Whether to load mean and std for normalization"
     )
+    wan2pt2_model_path: str = Field(
+        default="",
+        description="Path to the Wan2pt2 VAE model for Cosmos3 latent decoding. "
+        "Supports HuggingFace model ID (e.g. 'Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth'), "
+        "HuggingFace URL, or local path. Empty = disabled.",
+    )
+    wan2pt2_credential_path: str = Field(
+        default="",
+        description="Path to S3 credentials JSON for wan2pt2_model_path (only needed for s3:// paths).",
+    )
 
 
 class Config(BaseModel):
