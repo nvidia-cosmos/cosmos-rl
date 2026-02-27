@@ -87,6 +87,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         self.signal_handler = None
         if self.config.train.save_ckpt_at_exit:
             sig = signal.Signals[self.config.train.signal_to_handle.upper()]
+            logger.info(f"Setting up signal handler for signal: {sig}.")
             self.signal_handler = DistributedSignalHandler(sig)
 
     def check_config(self):

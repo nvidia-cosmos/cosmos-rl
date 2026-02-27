@@ -927,6 +927,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 data_arrival_event = torch.cuda.Event(enable_timing=True)
                 data_arrival_event.record()
 
+                if self.signal_handler is not None and any(
+                    self.signal_handler.signals_received()
+                ):
+                    # If processes was killed by signal trapped, stop training and finish the main_loop.
+                    stop_training = True
+                    self.signal_handler.release()
+                    break
+
             if stop_training:
                 break
             cur_epoch += 1
@@ -944,27 +952,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
     def handle_shutdown(self):
         # handle the ckpt saving
-        if self.signal_handler is not None and any(
-            self.signal_handler.signals_received()
-        ):
-            pp_last_stage = False
-
-            if self.parallel_dims.pp_enabled:
-                pp_last_stage = (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
-                )
-            self.trainer.checkpointing(
-                total_steps=self.total_steps,
-                train_step=self.train_step,
-                save_freq=self._save_freq,
-                is_last_step=False,  # For ckpt saving at Signal exit, we always set this to False
-                pp_last_stage=pp_last_stage,
-                val_score=None,
-                do_save=True,
-            )
-            # release the signal handler
-            self.signal_handler.release()
-
+        logger.info("Handling shutdown...")
         if (
             hasattr(self.trainer, "upload_thread")
             and self.trainer.upload_thread is not None
