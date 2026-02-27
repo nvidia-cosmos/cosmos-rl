@@ -24,19 +24,21 @@ def get_world_size():
 
 def get_device(local_rank=None):
     backend = torch.distributed.get_backend()
-    if backend == "nccl":
+    if "nccl" in backend:
         if local_rank is None:
             device = torch.device("cuda")
         else:
             device = torch.device(f"cuda:{local_rank}")
-    elif backend == "gloo":
+    elif "gloo" in backend:
         device = torch.device("cpu")
     else:
         raise RuntimeError
     return device
 
 
-def all_gather_item(item, dtype, group=None, async_op=False, local_rank=None):
+def all_gather_item(
+    item, dtype, group=None, async_op=False, local_rank=None
+) -> list[bool]:
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return [item]
 
