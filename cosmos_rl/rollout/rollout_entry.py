@@ -25,6 +25,10 @@ from cosmos_rl.rollout.worker.llm_worker import LLMRolloutWorker
 def run_rollout(args: Optional[argparse.Namespace] = None, **kwargs):
     # This means that args are not parsed in dataset entry script
     # So we need to parse the args manually
+    assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+        "0",
+        "false",
+    ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 0 for rollout"
     if args is None:
         parser = worker_entry_parser()
         try:
