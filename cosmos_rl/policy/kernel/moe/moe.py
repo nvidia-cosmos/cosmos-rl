@@ -41,7 +41,7 @@ from cosmos_rl.policy.kernel.megatron_moe.moe_utils import (
 from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
-    MoEAlltoAllTokenDispatcher
+    MoEAlltoAllTokenDispatcher,
 )
 from transformers.activations import ACT2FN
 
@@ -429,7 +429,7 @@ class GroupedExpertsDeepEP(nn.Module):
 
             output2 = ops.gmm(
                 output1_,
-                self.down_projs.to_local(),
+                ScaleGrad.apply(self.down_projs.to_local(), self.moe_weight_scale),
                 tokens_per_expert,
                 trans_b=True,
             )
