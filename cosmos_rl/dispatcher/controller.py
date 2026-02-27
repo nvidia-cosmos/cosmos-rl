@@ -323,6 +323,8 @@ maxmemory-policy allkeys-lfu
         if (
             step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
+            # Don't do the weight version control at fetching when there is replica scaling since the pending rollout count may not reflect the real training status of the policy replicas during scaling, which may lead to too aggressive throttling and cause starvation of rollout generation.
+            and len(self.policy_status_manager.replica_scaling_log) == 0
         ):
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,

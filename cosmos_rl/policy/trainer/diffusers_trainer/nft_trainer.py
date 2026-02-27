@@ -168,10 +168,11 @@ class NFTTrainer(DiffusersTrainer):
 
     def weight_resume(self):
         model_loaded = False
+        ckpt_extra_info = {}
         if self.config.train.resume:
             try:
                 # Need to reload again from checkpoint to make sure the model is in the correct state
-                self.model_resume_from_checkpoint()
+                ckpt_extra_info = self.model_resume_from_checkpoint()
                 model_loaded = True
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
@@ -193,7 +194,7 @@ class NFTTrainer(DiffusersTrainer):
         assert model_loaded, "Model weight must be populated before training starts."
         self.model.transformer.train()
 
-        return False
+        return ckpt_extra_info
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
         pass

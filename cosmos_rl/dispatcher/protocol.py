@@ -118,6 +118,10 @@ class GetShardSendRecvInstsRequest(BaseModel):
     rank: int
 
 
+class ResumeInfoRequest(BaseModel):
+    ckpt_extra_info: Dict[str, Any]
+
+
 class RegisterRequest(BaseModel):
     replica_name: str
     role: str

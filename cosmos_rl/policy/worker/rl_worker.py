@@ -492,7 +492,14 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(WeightResumeCommand)
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        return self.trainer.weight_resume()
+        ckpt_extra_info = self.trainer.weight_resume()
+        if self.config.train.resume:
+            # Validate for resume, make sure the ckpt extra info is consistent with the loaded ckpt extra info in the data fetcher.
+            self.api_client.post_resume_info(ckpt_extra_info)
+            logger.info(
+                f"[Policy] Posted resume info to controller for weight resume with ckpt extra info: {ckpt_extra_info}"
+            )
+        return False
 
     @CommMixin.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):

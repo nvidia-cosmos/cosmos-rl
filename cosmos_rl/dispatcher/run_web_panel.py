@@ -47,6 +47,7 @@ from cosmos_rl.dispatcher.protocol import (
     GetShardSendRecvInstsRequest,
     IpcInfoRequest,
     QueryIpcInfoRequest,
+    ResumeInfoRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.network_util import find_available_port
@@ -77,6 +78,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
     COSMOS_API_IPC_INFO_SUFFIX,
     COSMOS_API_QUERY_IPC_INFO_SUFFIX,
+    COSMOS_API_RESUME_INFO_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
@@ -333,6 +335,13 @@ async def get_trainable_params():
             constant.ErrorCode.INTERNAL_ERROR,
             "Error getting trainable params",
         )
+
+
+@app.post(COSMOS_API_RESUME_INFO_SUFFIX)
+async def resume_info(request: ResumeInfoRequest):
+    logger.info(f"[Dispatcher] Validate resume info: {request.ckpt_extra_info}")
+    controller.data_fetcher.validate_after_resume(request.ckpt_extra_info)
+    return {"message": "Resume info received and processed"}
 
 
 """
