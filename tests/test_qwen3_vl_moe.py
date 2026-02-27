@@ -368,4 +368,5 @@ class TestCosmosHfPrecision(unittest.TestCase):
 # torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py
 if __name__ == "__main__":
     os.environ["COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU"] = "1"
+    os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
     unittest.main()
