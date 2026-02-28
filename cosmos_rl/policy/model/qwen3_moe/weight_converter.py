@@ -98,6 +98,10 @@ def convert_weight_from_hf(
         #  EP=1: 8, 9, 10, 11, 12, 13, 14, 15
         #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
         #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
+        if not load_weight_test:
+            dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
+            dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+
         n_expert_per_ep = n_experts // tp_ep_size
         belongs_to_current_ep = (
             tp_ep_rank * n_expert_per_ep
