@@ -95,7 +95,9 @@ class P2RCollectiveManager:
             if mesh_key not in self.unique_ids_cache:
                 if self.global_rank == 0:
                     nccl_unique_id = create_nccl_uid()
-                    logger.debug(f"[Policy] Creating nccl group id for {mesh_key}")
+                    logger.debug(
+                        f"[Policy] Created nccl group id for {mesh_key} in {self.role} side."
+                    )
                     self.api_client.post_nccl_comm_initiator(mesh_key, nccl_unique_id)
 
                 # broadcast the nccl group id to all ranks

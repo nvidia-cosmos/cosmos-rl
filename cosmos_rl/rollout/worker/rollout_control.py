@@ -1051,7 +1051,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
-            if self.rl_mode != "colocated_separated":
+            if (
+                self.rl_mode != "colocated_separated"
+                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+            ):
                 # Only in non-colocated-separated mode, we could use NCCL group feature.
                 nccl_group_start(comm_id)
 
@@ -1100,15 +1103,24 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 total_bytes_received += bytes_received
 
                 pending_groups += 1
-                if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                    if self.rl_mode != "colocated_separated":
+                if pending_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                    if (
+                        self.rl_mode != "colocated_separated"
+                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                    ):
                         nccl_group_end(comm_id)
                     flush_completions(pending_bytes, pending_completions)
-                    if self.rl_mode != "colocated_separated":
+                    if (
+                        self.rl_mode != "colocated_separated"
+                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                    ):
                         nccl_group_start(comm_id)
                     pending_groups = 0
 
-            if self.rl_mode != "colocated_separated":
+            if (
+                self.rl_mode != "colocated_separated"
+                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+            ):
                 nccl_group_end(comm_id)
 
             flush_completions(pending_bytes, pending_completions)
@@ -1398,6 +1410,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"No such command supoorted in rollout {current_command}"
                 )
             try:
+                logger.debug(
+                    f"[Rollout] Executing command: {current_command._serialize()} for rank: {self.global_rank}"
+                )
                 handler(self, current_command)
                 logger.debug(
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
