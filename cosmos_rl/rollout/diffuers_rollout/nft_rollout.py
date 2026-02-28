@@ -25,6 +25,7 @@ from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.diffusers import DiffuserModel
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.logging import logger
 
 
 @RolloutRegistry.register(rollout_type="diffusion_nft_rollout")
@@ -55,6 +56,9 @@ class NFTRollout(RolloutBase):
             max_sequence_length=self.diffusers_config.max_prompt_length,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_prompt_attention_mask = neg_text_embedding_dict[
+            "encoder_attention_mask"
+        ]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def rollout_generation(
@@ -82,6 +86,7 @@ class NFTRollout(RolloutBase):
                 max_sequence_length=self.diffusers_config.max_prompt_length,
             )
             prompt_embeds = text_embedding_dict["encoder_hidden_states"]
+            prompt_attention_mask = text_embedding_dict["encoder_attention_mask"]
             pooled_prompt_embeds = text_embedding_dict["pooled_projections"]
             prompt_ids = self.model.tokenizers[0](
                 prompts,
@@ -93,20 +98,17 @@ class NFTRollout(RolloutBase):
 
             self.model.transformer.set_adapter("old")
             # Create generators with random seeds for each generation to ensure diversity
+            total_batch = prompt_embeds.shape[0]
             generators = [
                 torch.Generator(device=self.device).manual_seed(
                     int(torch.randint(0, 2**31, (1,), device=self.device).item())
                 )
-                for _ in range(self.config.rollout.n_generation)
+                for _ in range(total_batch)
             ]
             with torch.no_grad():
                 # Inference with logprob computation
                 # mm_datas contains the generated images/videos
-                call_kwargs = {
-                    "prompt_embeds": prompt_embeds,
-                    "negative_prompt_embeds": self.neg_prompt_embed.repeat(
-                        self.config.rollout.n_generation, 1, 1
-                    ),
+                base_call_kwargs = {
                     "num_inference_steps": self.diffusers_config.sample.num_steps,
                     "guidance_scale": self.diffusers_config.sample.guidance_scale,
                     "output_type": "pt",
@@ -114,25 +116,80 @@ class NFTRollout(RolloutBase):
                     "width": self.diffusers_config.inference_size[1],
                     "noise_level": self.diffusers_config.sample.noise_level,
                     "deterministic": self.diffusers_config.sample.deterministic_sampling,
-                    "generator": generators,
                     "solver": self.diffusers_config.sample.solver,
                     "num_frames": self.diffusers_config.train_frames,
                 }
 
-                if pooled_prompt_embeds is not None:
-                    call_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+                mini_batch = (
+                    self.config.rollout.n_generation_mini_batch
+                    if self.config.rollout.n_generation_mini_batch is not None
+                    else total_batch
+                )
+                if mini_batch <= 0:
+                    raise ValueError(
+                        f"n_generation_mini_batch must be positive (got {mini_batch})."
+                    )
+                mini_batch = min(mini_batch, total_batch)
+                num_mini_batch = (
+                    total_batch + mini_batch - 1
+                ) // mini_batch  # ceil division
 
-                if self.neg_pooled_prompt_embed is not None:
-                    call_kwargs["negative_pooled_prompt_embeds"] = (
-                        self.neg_pooled_prompt_embed.repeat(
-                            self.config.rollout.n_generation, 1
+                mm_datas_chunks = []
+                latents_clean_chunks = []
+                for mini_idx, start in enumerate(
+                    range(0, total_batch, mini_batch), start=1
+                ):
+                    end = min(total_batch, start + mini_batch)
+                    cur_bs = end - start
+
+                    if num_mini_batch > 1:
+                        logger.info(
+                            f"Running rollout mini-batch {mini_idx}/{num_mini_batch} (batch_size={cur_bs})"
                         )
+
+                    call_kwargs = dict(base_call_kwargs)
+                    call_kwargs["prompt_embeds"] = prompt_embeds[start:end]
+                    call_kwargs["negative_prompt_embeds"] = (
+                        self.neg_prompt_embed.repeat(cur_bs, 1, 1)
+                    )
+                    call_kwargs["generator"] = generators[start:end]
+
+                    if pooled_prompt_embeds is not None:
+                        call_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds[
+                            start:end
+                        ]
+                    if prompt_attention_mask is not None:
+                        call_kwargs["prompt_attention_mask"] = prompt_attention_mask[
+                            start:end
+                        ]
+                    if self.neg_pooled_prompt_embed is not None:
+                        call_kwargs["negative_pooled_prompt_embeds"] = (
+                            self.neg_pooled_prompt_embed.repeat(cur_bs, 1)
+                        )
+                    if self.neg_prompt_attention_mask is not None:
+                        call_kwargs["negative_prompt_attention_mask"] = (
+                            self.neg_prompt_attention_mask.repeat(cur_bs, 1)
+                        )
+
+                    mm_datas_chunk, latents_chunk, _ = self.model.pipeline_with_logprob(
+                        **call_kwargs
                     )
 
-                mm_datas, latents, _ = self.model.pipeline_with_logprob(**call_kwargs)
-                latents = torch.stack(latents, dim=1)
+                    mm_datas_chunks.append(mm_datas_chunk)
+                    latents_clean_chunks.append(latents_chunk[-1])
+
+                if len(mm_datas_chunks) == 1:
+                    mm_datas = mm_datas_chunks[0]
+                else:
+                    if not isinstance(mm_datas_chunks[0], torch.Tensor):
+                        raise TypeError(
+                            "Expected pipeline_with_logprob to return a torch.Tensor when output_type='pt'."
+                        )
+                    mm_datas = torch.cat(mm_datas_chunks, dim=0)
+
+                latents_clean = torch.cat(latents_clean_chunks, dim=0)
                 timesteps = self.model.pipeline.scheduler.timesteps.repeat(
-                    len(prompts), 1
+                    total_batch, 1
                 ).to(self.device)
 
             response.append(
@@ -146,9 +203,10 @@ class NFTRollout(RolloutBase):
                         "prompt_ids": prompt_ids,
                         "prompt_metadatas": metadatas,
                         "prompt_embeds": prompt_embeds,
+                        "prompt_attention_mask": prompt_attention_mask,
                         "pooled_prompt_embeds": pooled_prompt_embeds,
                         "timesteps": timesteps,
-                        "latents_clean": latents[:, -1],
+                        "latents_clean": latents_clean,
                     },
                 )
             )

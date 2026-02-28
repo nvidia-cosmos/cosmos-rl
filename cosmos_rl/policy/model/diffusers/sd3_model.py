@@ -92,6 +92,7 @@ class SD3Model(DiffuserModel):
                     model_tuple[1].to("cpu")
         return {
             "encoder_hidden_states": prompt_embeds,
+            "encoder_attention_mask": None,
             "pooled_projections": pooled_prompt_embeds,
         }
 
@@ -334,6 +335,7 @@ class SD3Model(DiffuserModel):
         self,
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
         pooled_prompt_embeds: torch.Tensor,
         timestep: torch.Tensor,
         num_frames: int,
@@ -346,6 +348,7 @@ class SD3Model(DiffuserModel):
         Args:
             latents: Noised latent tensor
             prompt_embeds: Text embedding tensor
+            prompt_attention_mask: Attention mask for text embedding
             pooled_prompt_embeds: Pooled text embedding tensor
             timestep: Timestep tensor
             num_frames: Number of frames to be generated

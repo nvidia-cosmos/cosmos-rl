@@ -255,7 +255,9 @@ class NFTTrainer(DiffusersTrainer):
         for out_idx, sample_idx in enumerate(sample_indices):
             out_path = os.path.join(mm_data_dir, f"{current_step}_{out_idx}.{ext}")
             if modality == "video":
-                video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
+                video = (
+                    mm_datas_cpu[sample_idx].to(torch.float16).numpy()
+                )  # [T, C, H, W]
                 frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
                 imageio.mimsave(
                     out_path,
@@ -294,9 +296,12 @@ class NFTTrainer(DiffusersTrainer):
         neg_text_embedding_dict = self.model.text_embedding(
             [""],
             device=self.device,
-            max_sequence_length=128,
+            max_sequence_length=self.config.policy.diffusers.max_prompt_length,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_prompt_attention_mask = neg_text_embedding_dict[
+            "encoder_attention_mask"
+        ]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def step_training(
@@ -447,6 +452,18 @@ class NFTTrainer(DiffusersTrainer):
                                     mini_batch["prompt_embeds"],
                                 ]
                             )
+                            if self.neg_prompt_attention_mask is not None:
+                                prompt_attention_mask = torch.cat(
+                                    [
+                                        self.neg_prompt_attention_mask.repeat(
+                                            cur_mini_size, 1
+                                        ),
+                                        mini_batch["prompt_attention_mask"],
+                                    ],
+                                    dim=1,
+                                )
+                            else:
+                                prompt_attention_mask = None
                             if self.neg_pooled_prompt_embed is not None:
                                 pooled_embeds = torch.cat(
                                     [
@@ -461,6 +478,7 @@ class NFTTrainer(DiffusersTrainer):
                         else:
                             embeds = mini_batch["prompt_embeds"]
                             pooled_embeds = mini_batch["pooled_prompt_embeds"]
+                            prompt_attention_mask = mini_batch["prompt_attention_mask"]
 
                         for j_idx, j_timestep_orig_idx in enumerate(
                             range(self.num_train_timesteps)
@@ -478,6 +496,9 @@ class NFTTrainer(DiffusersTrainer):
                                 self.model.nft_prepare_transformer_input(
                                     latents=xt,
                                     prompt_embeds=embeds,
+                                    prompt_attention_mask=prompt_attention_mask
+                                    if prompt_attention_mask is not None
+                                    else None,
                                     pooled_prompt_embeds=pooled_embeds
                                     if pooled_embeds is not None
                                     else None,

@@ -1092,7 +1092,6 @@ class PolicyStatusManager:
                                                 mm_result_sample["reward"],
                                             ),
                                             format="mp4",
-                                            fps=8,
                                         )
                                         for mm_result_sample in raw_data
                                     ]

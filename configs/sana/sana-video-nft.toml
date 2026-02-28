@@ -2,60 +2,61 @@ redis = "12800"
 mode = "colocated"
 
 [policy]
-model_name_or_path = "nvidia/Cosmos-Predict2.5-2B"
-model_revision = "diffusers/base/post-trained"
+model_name_or_path = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
 is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.lora]
 lora_names = ["default", "old"]
-r = 32
-lora_alpha = 64
+r = 4
+lora_alpha = 4
 init_lora_weights = "gaussian"
-target_modules = [ # Set both attention and cross-attention modules
-    "to_k",
-    "to_out.0",
-    "to_q",
-    "to_v",
-    "ff.net.0.proj",
-    "ff.net.2",
+target_modules = [
+    "attn1.to_q",
+    "attn1.to_k",
+    "attn1.to_v",
+    "attn1.to_out.0",
+    "attn2.to_q",
+    "attn2.to_k",
+    "attn2.to_v",
+    "attn2.to_out.0",
 ]
 
 [policy.diffusers]
-dtype = "float32"
+dtype = "bfloat16"
 is_video = true
 offload = false
-max_prompt_length = 512
-inference_size = [512, 512]
+max_prompt_length = 300
+inference_size = [480, 832]
 timestep_fraction = 0.99
 nft_beta = 1.0
 weight_copy_decay_type = 1
-train_frames = 93
 
 [policy.diffusers.sample]
 num_steps = 10
 eval_num_steps = 40
 guidance_scale = 1.0
-noise_level = 0.7
-solver = "dpm2"
+noise_level = 1
+solver = "euler"
 deterministic_sampling = true
 
 [rollout]
 backend = "diffusion_nft_rollout"
-n_generation = 12
+n_generation = 8
 
 [logging]
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
-multi_modal_log_interval = 10
+multi_modal_log_interval = 1
 
 [train]
 non_text = true
 resume = false
-train_batch_per_replica = 32  # 4*8
-epoch = 10
-output_dir = "./outputs/cosmos-predict2-5_2b-medium_720_nft"
+epoch = 100000
+seed = 42
+train_batch_per_replica = 384  # 6*8*8
+output_dir = "./outputs/sana-video-nft"
 epsilon = 1e-8
 optm_name = "AdamW"
 optm_lr = 3e-4
@@ -72,11 +73,12 @@ compile = false
 [train.train_policy]
 type = "grpo"
 trainer_type = "diffusion_nft"
-use_remote_reward = true
 uncentralized_training = true
-dataset.name = "pickscore"
+use_remote_reward = true
+dataset.name = "dance_grpo_t2v"
 dataset.split = "train"
-kl_beta = 1.0
+kl_beta = 0.0001
+mini_batch = 4
 advantage_high = 5.0
 advantage_low = -5.0
 
@@ -93,7 +95,8 @@ save_freq = 5
 save_mode = "async"
 
 [validation]
-dataset.name = "pickscore"
+enable = true
+dataset.name = "dance_grpo_t2v"
 dataset.split = "test"
 
 [rollout.parallelism]

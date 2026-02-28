@@ -1327,6 +1327,10 @@ class RolloutConfig(BaseModel):
         default=False,
         description="Whether to treat n_generation as batch dimension in rollout generation.",
     )
+    n_generation_mini_batch: Optional[int] = Field(
+        default=None,
+        description="The mini-batch size for n_generation, mainly used for diffusion rl to avoid cuda out-of-memory.",
+    )
 
     batch_size: int = Field(default=1, description="Batch size for rollout.")
 
