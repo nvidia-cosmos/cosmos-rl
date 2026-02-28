@@ -396,7 +396,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
 
                     def grouped_send(grouped_send_ops):
-                        if self.rl_mode != "colocated_separated":
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
                             # Only in non-colocated-separated mode, we could use NCCL group feature.
                             nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
@@ -406,7 +409,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                             self.p2r_collective_manager.send(
                                 base_mesh_key, view, r_rank
                             )
-                        if self.rl_mode != "colocated_separated":
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
                             nccl_group_end(comm_id)
                         grouped_send_ops.clear()
 
@@ -464,7 +470,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                                 grouped_send_ops.append((view, r_rank, dest_name))
                                 total_bytes_sent += view.numel() * view.element_size()
                         num_groups += 1
-                        if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                        if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                             grouped_send(grouped_send_ops)
                             num_groups = 0
 
