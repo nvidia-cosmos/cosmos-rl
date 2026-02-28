@@ -1039,29 +1039,18 @@ class Qwen3VLMoeModel(BaseModel):
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         visual_n_heads = self.config.encoder_args.n_heads
         llm_n_heads = self.config.lm_args.n_heads
-        cp_compatible = (
-            visual_n_heads % (cp_size * tp_size) == 0
-            and llm_n_heads % (cp_size * tp_size) == 0
-        )
+        cp_compatible = visual_n_heads % cp_size == 0 and llm_n_heads % cp_size == 0
         if not cp_compatible:
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size})"
             )
 
     def check_tp_compatible(self, tp_size: int):
-        visual_n_heads = self.config.encoder_args.n_heads
-        llm_n_heads = self.config.lm_args.n_heads
-        llm_n_kv_heads = self.config.lm_args.n_kv_heads
         llm_n_experts = self.config.lm_args.n_experts
-        non_divisible_by_tp_size = (
-            visual_n_heads % tp_size != 0
-            or llm_n_heads % tp_size != 0
-            or llm_n_kv_heads % tp_size != 0
-            or llm_n_experts % tp_size != 0
-        )
+        non_divisible_by_tp_size = llm_n_experts % tp_size != 0
         if non_divisible_by_tp_size:
             raise ValueError(
-                f"Model is not compatible with tp/ep parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} or llm_n_kv_heads={llm_n_kv_heads} or llm_n_experts={llm_n_experts} is not satisified by tp size({tp_size})"
+                f"Model is not compatible with tp/ep parallelism, model's llm_n_experts={llm_n_experts} is not divisible by tp size({tp_size})"
             )
         assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
             "1",
