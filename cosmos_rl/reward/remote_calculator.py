@@ -249,7 +249,7 @@ class RemoteRewardCalculator:
             for _ in range(batch_size):
                 video_infos.append({"video_fps": video_fps})
             data["video_infos"] = video_infos
-            data["media_type"] = "video"
+            data["media_type"] = "latent"
         else:  # image
             data["media_type"] = "image"
             mm_tensor = (

@@ -148,6 +148,7 @@ tensor = latents[0:1].cpu()
 
 # Example json format to be sent together with the encoded latents to the "/api/reward/enqueue" endpoint for calculating rewards.
 data = {
+    "media_type": "latent",
     "prompts": prompts[0:1],  # List of prompts corresponding to the batch size.
     "reward_fn": {
         "cosmos_reason1": 1.0,  # Cosmos-Reason1 function and all Cosmos-Reason1 related reward will be calculated.
