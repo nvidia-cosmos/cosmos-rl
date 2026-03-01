@@ -280,7 +280,14 @@ Submit a reward calculation request to the service queue.
 #### Request Body
 
 The request body consists of JSON metadata followed by bytes of the videos/images, which are combined as a whole chunk of bytes: `<JSON>\n<MM_BYTES>`
-The sent videos' bytes are bytes of the latents encoded from the original videos to reduce the size, while images' bytes are directly a tensor. Inside the service, the received video bytes are decoded back to normal video format first.
+
+We have three `media_type` for the bytes. Detailed loading and processing can be found in the example clients.
+
+| media_type |                         Description                          |      Shape      |  Range   |
+| ---------- | :----------------------------------------------------------: | :-------------: | :------: |
+| latent     | Encoded from the original videos to reduce the size. The received video bytes are decoded back in the service. | [B, C, T, H, W] |    -     |
+| image      |                The tensors of original images                |  [B, H, W, C]   | [0, 255] |
+| video      |                The tensors of original videos                | [B, C, T, H, W] | [0, 255] |
 
 ##### JSON Metadata
 
@@ -296,7 +303,8 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
     {
       "fps": 30
     }
-  ]
+  ],
+  "media_type": "latent",
 }
 
 # Image (HPSv2, ImageReward)
@@ -361,14 +369,6 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
 | `prompt` | str | For GenEval reward, the description of the image. (GenEval does not support batched data currently; you can divide a batch into separate requests.) |
 | `tag` | str | For GenEval reward, choices in [`single_object`, `two_object`, `counting`, `colors`, `position`, `color_attr`], full definition can be found [here](https://github.com/djghosh13/geneval) |
 | `include` | List[Dict] | For GenEval reward, class, count, and color information of the input image. |
-
-##### Bytes of MultiModal Data
-
-Images: [`B, H, W, C`]
-
-Videos: [`B, C, T, H, W`]
-
-Detailed loading and processing can be found in the example clients.
 
 #### Response
 

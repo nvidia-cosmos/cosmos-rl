@@ -667,7 +667,7 @@ class WorldFoundationalModel(nn.Module):
         sync_rewards = {}
         for k, v in self.inference_infos.rewards.items():
             valid = v["valid"]
-            if valid and v["bg_id"] is not None and v["replica_id"] is not None:
+            if valid and v["bg_id"] is not None:
                 try:
                     reward = (
                         self.reward_models[k]
