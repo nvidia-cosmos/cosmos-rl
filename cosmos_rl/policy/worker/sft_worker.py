@@ -16,6 +16,7 @@
 
 import inspect
 import os
+import atexit
 import torch
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
@@ -244,6 +245,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             dataset=dataset,
             val_dataset=val_dataset,
         )
+
+        # Register the exit function to be called when the program exits
+        atexit.register(self.handle_shutdown)
 
     def setup(
         self,
@@ -923,6 +927,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 data_arrival_event = torch.cuda.Event(enable_timing=True)
                 data_arrival_event.record()
 
+                if self.signal_handler is not None and any(
+                    self.signal_handler.signals_received()
+                ):
+                    # If processes was killed by signal trapped, stop training and finish the main_loop.
+                    stop_training = True
+                    self.signal_handler.release()
+                    break
+
             if stop_training:
                 break
             cur_epoch += 1
@@ -938,6 +950,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_score=val_avg_loss,
         )
 
+    def handle_shutdown(self):
+        # handle the ckpt saving
+        logger.info("Handling shutdown...")
         if (
             hasattr(self.trainer, "upload_thread")
             and self.trainer.upload_thread is not None

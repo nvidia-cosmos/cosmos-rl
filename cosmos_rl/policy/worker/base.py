@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import signal
 import torch
 
 from transformers import AutoConfig
@@ -27,6 +28,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.profiler import CosmosProfiler
+from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 
 
 class PolicyWorkerBase(WorkerBase, CommMixin):
@@ -82,6 +84,12 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
 
         self.rl_mode = self.config.mode
 
+        self.signal_handler = None
+        if self.config.train.save_ckpt_at_exit:
+            sig = signal.Signals[self.config.train.signal_to_handle.upper()]
+            logger.info(f"Setting up signal handler for signal: {sig}.")
+            self.signal_handler = DistributedSignalHandler(sig)
+
     def check_config(self):
         mini_batch = 1
         policy_type = self.config.train.train_policy.type
@@ -126,3 +134,6 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 except Exception as e:
                     logger.error(f"Failed to finalize checkpoint manager: {e}")
             self.destroy_worker()
+
+    def handle_shutdown(self):
+        pass

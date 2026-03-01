@@ -882,6 +882,16 @@ class TrainingConfig(BaseModel):
         description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
     )
 
+    save_ckpt_at_exit: bool = Field(
+        default=False,
+        description="Whether to save checkpoint at exit. If set to True, the checkpoint will be saved when the process receives a specified signal.",
+    )
+
+    signal_to_handle: str = Field(
+        default="SIGTERM",
+        description="The signal to handle. If set to SIGTERM, the checkpoint will be saved when the process receives a SIGTERM signal.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.async_tp_enabled and not self.compile:
