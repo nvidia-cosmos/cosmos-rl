@@ -33,6 +33,7 @@ if [ ! -x "$PIP_BIN" ]; then
 fi
 
 PYTHON_BIN="${VENV_PATH}/bin/python"
+PIP_BIN="${VENV_PATH}/bin/pip"
 
 mkdir -p "${DOWNLOAD_PATH}/reward_ckpts"
 cd "${DOWNLOAD_PATH}/reward_ckpts"
@@ -85,7 +86,7 @@ git checkout v1.7.2
 rm -rf build dist *.egg-info
 "${PYTHON_BIN}" -m pip install ninja
 MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py build_ext --inplace
-MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py develop
+MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PIP_BIN}" install -e . --no-build-isolation
 cd "${DOWNLOAD_PATH}"
 
 # Install MMDetection (2.x)
