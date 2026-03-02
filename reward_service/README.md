@@ -21,6 +21,7 @@ A service for calculating rewards of generated videos/images for world foundatio
 - `image_reward`: [ImageReward](https://github.com/THUDM/ImageReward) - Image quality and prompt alignment scoring
 - `ocr`: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) based reward for text rendering accuracy
 - `gen_eval`: [GenEval](https://github.com/djghosh13/geneval) - Object detection based compositional generation evaluation
+- `unified_reward`: [UnifiedReward](https://huggingface.co/CodeGoat24/UnifiedReward-7b-v1.5) - For multimodal understanding and generation assessment
 
 ## 2. Installation
 
@@ -254,6 +255,8 @@ Each `[[reward_args]]` block defines a reward calculation type. Multiple blocks 
 | `model_path` | string | Path or identifier of the reward model, specific to each reward type |
 | `download_path` | string | (Optional) Directory where model files should be downloaded if explicit downloading is needed |
 | `dtype` | string | Data type for model inference (e.g., "float16", "float32") |
+| `endpoint_url` | string | Custom endpoint URL for model inference if applicable (e.g., for sglang or vllm served models) |
+| `endpoint_api_key` | string | API key for the custom endpoint if applicable |
 | `enable` | boolean | Whether this reward calculator is enabled (true/false) |
 
 
@@ -307,12 +310,13 @@ We have three `media_type` for the bytes. Detailed loading and processing can be
   "media_type": "latent",
 }
 
-# Image (HPSv2, ImageReward)
+# Image (HPSv2, ImageReward, UnifiedReward)
 {
-  "prompts": ["a photo of a cat", "a beautiful sunset"]
+  "prompts": ["a photo of a cat", "a beautiful sunset"],
   "reward_fn": {
     "hpsv2": 1.0,
     "image_reward": 1.0,
+    "unified_reward": 1.0,
   },
   "media_type": "image",
 }
@@ -486,6 +490,22 @@ Inside each field of the response, the values are lists corresponding to the bat
     'duration': '0.30',
     'decoded_duration': '0.00',
     'type': 'image_reward'
+}
+
+# Image (UnifiedReward)
+{
+    'scores':{
+        'unified_reward': [0.2, 0.2]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '8.24',
+    'decoded_duration': '0.00',
+    'type': 'unified_reward'
 }
 
 # Image (HPSv3)
