@@ -313,11 +313,24 @@ log "Container image: ${CONTAINER_IMAGE}"
 # --- 3c. Container Mounts --------------------------------------------------
 
 MOUNTS="/lustre:/lustre/"
-MOUNTS="${MOUNTS},${HOME}/.cache/huggingface:/root/.cache/huggingface"
+if [[ -d "${HOME}/.cache/huggingface" ]]; then
+    MOUNTS="${MOUNTS},${HOME}/.cache/huggingface:/root/.cache/huggingface"
+fi
 # wandb needs .netrc to access the wandb api
-MOUNTS="${MOUNTS},${HOME}/.netrc:/root/.netrc"
+if [[ -d "${HOME}/.netrc" ]]; then
+    MOUNTS="${MOUNTS},${HOME}/.netrc:/root/.netrc"
+fi
 MOUNTS="${MOUNTS},$(dirname "${CONFIG_PATH}"):/opt/config"
-MOUNTS="${MOUNTS},${WORKDIR}:/opt/workspace"
+
+# No need to mount WORKDIR since we will use the specified cosmos-rl repo path or the already installed cosmos-rl inside the container for code execution.
+# MOUNTS="${MOUNTS},${WORKDIR}:/opt/workspace"
+
+REPO_ROOT_PATH="[[REPO_ROOT_PATH]]"
+if [[ -n "$REPO_ROOT_PATH" ]]; then
+    # If the repo root path is provided, mount it and set PYTHONPATH so that the container can use the cosmos_rl package from there.
+    MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"
+    export PYTHONPATH="/opt/cosmos-rl:${PYTHONPATH}"
+fi
 
 # --- 3d. Node List Setup ---------------------------------------------------
 
@@ -382,8 +395,14 @@ srun \
     -o ${new_run_dir}/policy_%t.out \
     -e ${new_run_dir}/policy_%t.err \
     bash -c '
-    cd /opt/workspace
-    python scripts/cosmos-rl/cosmos_rl_slurm_launch.py --type policy --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
+    python -c "import cosmos_rl; print(f\"cosmos_rl location: {cosmos_rl.__file__}\"); print(f\"cosmos_rl version: {cosmos_rl.__version__}\")" 2>/dev/null || true
+    cosmos_dir=$(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))" 2>/dev/null | tail -1)
+    if [[ -z "${cosmos_dir}" ]] || [[ ! -d "${cosmos_dir}" ]]; then
+        echo "ERROR: Cannot find cosmos_rl package directory" >&2
+        exit 1
+    fi
+    cd "${cosmos_dir}"
+    python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
     &
 pid_policy=$!
@@ -402,8 +421,14 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         -o ${new_run_dir}/rollout_%t.out \
         -e ${new_run_dir}/rollout_%t.err \
         bash -c '
-        cd /opt/workspace
-        python scripts/cosmos-rl/cosmos_rl_slurm_launch.py --type rollout --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
+        python -c "import cosmos_rl; print(f\"cosmos_rl location: {cosmos_rl.__file__}\"); print(f\"cosmos_rl version: {cosmos_rl.__version__}\")" 2>/dev/null || true
+        cosmos_dir=$(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))" 2>/dev/null | tail -1)
+        if [[ -z "${cosmos_dir}" ]] || [[ ! -d "${cosmos_dir}" ]]; then
+            echo "ERROR: Cannot find cosmos_rl package directory" >&2
+            exit 1
+        fi
+        cd "${cosmos_dir}"
+        python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
         ' \
         &
     pid_rollout=$!

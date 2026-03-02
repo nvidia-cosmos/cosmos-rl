@@ -94,17 +94,14 @@ IGNORE_PATTERNS_LIST = [
     "*.sqsh",
 ]
 
-# Directories to ignore only at the top level
-IGNORE_TOP_LEVEL_DIRS = {
-    "wandb",
-    ".venv",
-    ".git",
-    ".vscode",
-    ".ruff_cache",
-    ".pytest_cache",
-    ".mypy_cache",
-    "figures",
-    "tests",
+# Directories to allow for copy at the top level
+ALLOW_TOP_LEVEL_DIRS = {
+    "cosmos_rl",
+    ".github",
+    "configs",
+    "reward_service",
+    "docs",
+    "README.md",
 }
 
 
@@ -115,7 +112,7 @@ def make_ignore_function(src_root: str) -> Callable[[str, list[str]], set[str]]:
     def ignore_func(directory: str, files: list[str]) -> set[str]:
         ignored = set(pattern_ignore(directory, files))
         if os.path.abspath(directory) == os.path.abspath(src_root):
-            ignored.update(name for name in IGNORE_TOP_LEVEL_DIRS if name in files)
+            ignored.update(name for name in files if name not in ALLOW_TOP_LEVEL_DIRS)
         return ignored
 
     return ignore_func
@@ -277,7 +274,15 @@ def main():
         help="Path to the output root directory",
     )
     parser.add_argument(
+        "--repo-root-path",
+        type=str,
+        default=None,
+        help="Path to the cosmos-rl repository root, container will use this path for mounting and setting PYTHONPATH, so that the cosmos_rl package can be used from this specified repo.",
+    )
+    parser.add_argument(
+        "--cosmos-container",
         "--container",
+        dest="container",
         type=str,
         required=True,
         help="Path to the container (Docker URI or .sqsh file)",
@@ -291,17 +296,15 @@ def main():
     )
     # Arguments for sandbox, autoresume, etc.
     parser.add_argument(
-        "--no-copycode",
-        dest="copycode",
-        action="store_false",
-        default=True,
-        help="Disable code copying (default: enabled)",
+        "--copycode",
+        action="store_true",
+        help="Enable code copying (default: disabled)",
     )
     parser.add_argument(
         "--duration",
         type=float,
         default=4,
-        help="Job duration in hours, supports decimals e.g. 1.5 (default: 4)",
+        help="Job duration in hours, supports decimals e.g. 1.5 (default: 4), if slurm-job-time is also provided, this will be ignored and slurm-job-time will take precedence.",
     )
     parser.add_argument(
         "--retries",
@@ -330,14 +333,14 @@ def main():
     parser.add_argument(
         "--slurm-job-time",
         type=str,
-        default="04:00:00",
-        help="SLURM job time, default is 4 hours",
+        default=None,
+        help="SLURM job time, default is 4 hours, if both duration and slurm-job-time are provided, slurm-job-time will take precedence.",
     )
     parser.add_argument(
         "launcher",
         nargs="?",  # "?" means 0 or 1 occurrences
-        default="cosmos_rl.dispatcher.run_web_panel",
-        help="The launcher module (default: cosmos_rl.dispatcher.run_web_panel). "
+        default="cosmos_rl.launcher.__init__",
+        help="The launcher module (default: cosmos_rl.launcher.__init__). "
         "A custom launcher can be provided for custom dataset and reward functions.",
     )
 
@@ -364,17 +367,22 @@ def main():
     # Copy source code if enabled
     workdir = os.path.abspath("./")
     if args.copycode:
-        code_dir = os.path.join(output_dir, "code")
-        logger.info(f"Copying source code to {code_dir}")
-        if not args.dry_run:
-            copytree(
-                "./",
-                code_dir,
-                ignore=make_ignore_function("./"),
-                dirs_exist_ok=True,
+        if args.repo_root_path:
+            code_dir = os.path.join(output_dir, "code")
+            if not args.dry_run:
+                copytree(
+                    os.path.join(args.repo_root_path),
+                    os.path.join(code_dir),
+                    ignore=make_ignore_function(args.repo_root_path),
+                    dirs_exist_ok=True,
+                )
+            logger.info(
+                f"Launch from workdir: {workdir} and code execution from cosmos-rl repo-root-path: {args.repo_root_path}. Copying specified source code {args.repo_root_path} to {code_dir}"
             )
-        workdir = code_dir
-        logger.info(f"Will use workdir: {workdir}")
+        else:
+            logger.warning(
+                f"Launch from workdir: {workdir} and code execution from intrinsic cosmos-rl installed inside container {args.container}. No need to copy code."
+            )
 
     with open(args.config_path) as f:
         config = toml.load(f)
@@ -473,7 +481,8 @@ def main():
         "EXTRA_SBATCH_ARGS": "\n".join(
             f"#SBATCH {arg}" for arg in args.extra_sbatch_args
         ),
-        "DURATION": f"{int(args.duration)}:{int((args.duration % 1) * 60):02d}:00",
+        "DURATION": args.slurm_job_time
+        or f"{int(args.duration)}:{int((args.duration % 1) * 60):02d}:00",
         "RETRIES": str(args.retries),
         "PRE_TIMEOUT_SIGNAL": str(args.pre_timeout_signal),
         "AUTORESUME": "1" if args.autoresume else "0",
@@ -489,6 +498,9 @@ def main():
         "NODE_LAUNCH_METADATA_ROLLOUT": json.dumps(
             [x.to_json() for x in rollout_node_launch_metadata]
         ),
+        "REPO_ROOT_PATH": args.repo_root_path
+        if args.repo_root_path is not None
+        else "",
     }
 
     # Read the template relative to the current file

@@ -62,10 +62,12 @@ python tools/slurm/dispatch_job.py \
 | `--slurm-account`        | str   |       | `av_alpamayo_reasoning`     | SLURM account                             |
 | `--config-path`          | str   | **Y** | -                           | Controller config file (TOML)             |
 | `--output-root-path`     | str   | **Y** | -                           | Output root directory                     |
-| `--container`            | str   | **Y** | -                           | Container (Docker URI or `.sqsh`)         |
+| `--repo-root-path`       | str   |       | None                        | Cosmos-rl repo root directory (to specify cosmos-rl code for execution otherwise executing the installed cosmos-rl in container) |
+| `--container (--cosmos-container)` | str   | **Y** | -                 | Container (Docker URI or `.sqsh`)         |
 | `--extra-sbatch-args`    | str[] |       | `[]`                        | Extra #SBATCH args                        |
-| `--no-copycode`          | flag  |       | enabled                     | Disable code copying                      |
+| `--copycode`             | flag  |       | disabled                    | Enable code copying                      |
 | `--duration`             | float |       | 4                           | Duration in hours (e.g., 1.5)             |
+| `--slurm-job-time`       | str   |       | None                        | Duration in H:M:S format (e.g., 4:0:0), prior to `--duration`    |
 | `--retries`              | int   |       | 3                           | Retries on failure                        |
 | `--pre-timeout-signal`   | int   |       | 1200                        | Seconds before auto-resume                |
 | `--no-autoresume`        | flag  |       | enabled                     | Disable auto-resume                       |
