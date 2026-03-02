@@ -51,7 +51,9 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
     elif hf_config.model_type == "qwen3_vl":
-        if hasattr(model, "model") and hasattr(getattr(model.model, "visual", None), "config"):
+        if hasattr(model, "model") and hasattr(
+            getattr(model.model, "visual", None), "config"
+        ):
             visual_forward_qwen3_vl_patch(model.model)
     elif hf_config.model_type == "NemotronH_Nano_VL_V2":
 
@@ -385,7 +387,9 @@ def visual_forward_qwen3_vl_patch(model):
         **kwargs,
     ):
         if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
@@ -416,7 +420,9 @@ def visual_forward_qwen3_vl_patch(model):
         if not skip_visual:
             # Qwen3VLModel.get_image_features: ViT → merger → torch.split per image/video
             # Returns (tuple_of_per_item_embeds, list_of_deepstack_layer_tensors)
-            all_embeds, deepstack_image_embeds = self.get_image_features(final_pixel_value, final_thw)
+            all_embeds, deepstack_image_embeds = self.get_image_features(
+                final_pixel_value, final_thw
+            )
             image_embeds = list(all_embeds[:num_image])
             video_embeds = list(all_embeds[num_image:])
         elif self.training:
@@ -429,26 +435,36 @@ def visual_forward_qwen3_vl_patch(model):
             dummy_h, dummy_w = 16, 16
             dummy_pixels = torch.zeros(
                 dummy_h * dummy_w,
-                self.visual.config.temporal_patch_size * self.visual.config.patch_size ** 2 * 3,
+                self.visual.config.temporal_patch_size
+                * self.visual.config.patch_size**2
+                * 3,
                 device=inputs_embeds.device,
                 dtype=self.visual.dtype,
             )
-            dummy_thw = torch.tensor([[1, dummy_h, dummy_w]], device=inputs_embeds.device)
-            image_embeds, deepstack_image_embeds = self.get_image_features(dummy_pixels, dummy_thw)
+            dummy_thw = torch.tensor(
+                [[1, dummy_h, dummy_w]], device=inputs_embeds.device
+            )
+            image_embeds, deepstack_image_embeds = self.get_image_features(
+                dummy_pixels, dummy_thw
+            )
             image_embeds = [e[0:0] for e in image_embeds]
             deepstack_image_embeds = [e[0:0] for e in deepstack_image_embeds]
 
         # ---- scatter embeddings into inputs_embeds ----
         # Qwen3VLModel.get_placeholder_mask: finds image/video token positions in input_ids
         if image_embeds is not None and len(image_embeds) > 0:
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_embeds = torch.cat(image_embeds, dim=0).to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
         if video_embeds is not None and len(video_embeds) > 0:
-            video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            video_embeds = torch.cat(video_embeds, dim=0).to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
             _, video_mask = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
             )
@@ -475,7 +491,9 @@ def visual_forward_qwen3_vl_patch(model):
             for ds_embed in deepstack_image_embeds:
                 img_ds = ds_embed[:n_image_tok]
                 vid_ds = ds_embed[n_image_tok:]
-                embed_joint = ds_embed.new_zeros(visual_pos_masks.sum(), ds_embed.shape[-1])
+                embed_joint = ds_embed.new_zeros(
+                    visual_pos_masks.sum(), ds_embed.shape[-1]
+                )
                 embed_joint[image_mask_joint] = img_ds
                 embed_joint[video_mask_joint] = vid_ds
                 deepstack_visual_embeds.append(embed_joint)
@@ -491,12 +509,19 @@ def visual_forward_qwen3_vl_patch(model):
         # ---- position ids (unchanged) ----
         if position_ids is None:
             attention_mask_tensor = (
-                attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
+                attention_mask
+                if not isinstance(attention_mask, dict)
+                else attention_mask["full_attention"]
             )
             if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
-                attention_mask_tensor = torch.diagonal(attention_mask_tensor[:, 0], dim1=1, dim2=2)
+                attention_mask_tensor = torch.diagonal(
+                    attention_mask_tensor[:, 0], dim1=1, dim2=2
+                )
                 if attention_mask_tensor.dtype.is_floating_point:
-                    attention_mask_tensor = attention_mask_tensor / torch.finfo(attention_mask_tensor.dtype).min
+                    attention_mask_tensor = (
+                        attention_mask_tensor
+                        / torch.finfo(attention_mask_tensor.dtype).min
+                    )
                     attention_mask_tensor = (1.0 - attention_mask_tensor).int()
 
             prefill_compiled_stage = is_torchdynamo_compiling() and (
@@ -507,7 +532,9 @@ def visual_forward_qwen3_vl_patch(model):
                 (cache_position is not None and cache_position[0] == 0)
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             )
-            if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
+            if (
+                prefill_compiled_stage or prefill_noncompiled_stage
+            ) or self.rope_deltas is None:
                 position_ids, rope_deltas = self.get_rope_index(
                     input_ids,
                     image_grid_thw,
