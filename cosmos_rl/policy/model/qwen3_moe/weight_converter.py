@@ -40,8 +40,8 @@ def convert_weight_from_hf(
 
     load_weight_test = not hasattr(parallel_dims, "mesh")
     if not load_weight_test:
-        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
-        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+        dp_shard_rank = parallel_dims.mesh["dp_cp_tp"].get_local_rank()
+        dp_shard_size = parallel_dims.mesh["dp_cp_tp"].size()
     else:
         dp_shard_rank = 0
         dp_shard_size = 1
@@ -54,11 +54,11 @@ def convert_weight_from_hf(
     dest_name = map_key_from_hf(name, src_model_type)
 
     if "lm_head.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif "lm_head.bias" == dest_name:
         shard = tensor
     elif "embed_tokens.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif dest_name in ["norm.weight", "norm.bias"]:
         shard = tensor
     elif (
@@ -78,16 +78,13 @@ def convert_weight_from_hf(
             dest_name,
         )
     ) is not None:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(
             r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
         )
     ) is not None:
-        if dest_name.endswith(".bias"):
-            shard = tensor
-        else:
-            shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
@@ -101,6 +98,10 @@ def convert_weight_from_hf(
         #  EP=1: 8, 9, 10, 11, 12, 13, 14, 15
         #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
         #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
+        if not load_weight_test:
+            dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
+            dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+
         n_expert_per_ep = n_experts // tp_ep_size
         belongs_to_current_ep = (
             tp_ep_rank * n_expert_per_ep

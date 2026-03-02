@@ -45,8 +45,8 @@ def multi_modal_projector_weight_from_hf(
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
     if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
-        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+        dp_shard_rank = parallel_dims.mesh[tuple(("dp_cp_tp",))].get_local_rank()
+        dp_shard_size = parallel_dims.mesh[tuple(("dp_cp_tp",))].size()
     else:
         dp_shard_rank = 0
         dp_shard_size = 1
@@ -77,8 +77,8 @@ def qwen3_moe_lm_weight_from_hf(
 
     load_weight_test = not hasattr(parallel_dims, "mesh")
     if not load_weight_test:
-        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
-        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+        dp_shard_rank = parallel_dims.mesh[tuple(("dp_cp_tp",))].get_local_rank()
+        dp_shard_size = parallel_dims.mesh[tuple(("dp_cp_tp",))].size()
     else:
         dp_shard_rank = 0
         dp_shard_size = 1
@@ -91,11 +91,11 @@ def qwen3_moe_lm_weight_from_hf(
     dest_name = map_key_from_hf(name, src_model_type)
 
     if "lm_head.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif "lm_head.bias" == dest_name:
         shard = tensor
     elif "embed_tokens.weight" == dest_name:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif dest_name in ["norm.weight", "norm.bias"]:
         shard = tensor
     elif (
@@ -115,23 +115,22 @@ def qwen3_moe_lm_weight_from_hf(
             dest_name,
         )
     ) is not None:
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(
             r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
         )
     ) is not None:
-        if dest_name.endswith(".bias"):
-            shard = tensor
-        else:
-            shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
+        shard = tensor
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
-        # shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+        if not load_weight_test:
+            dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
+            dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
         # Check whether this expert belongs to the current process
         # Groups example (with 32 experts, and 4 EP groups):
         #  EP=0: 0, 1, 2, 3, 4, 5, 6, 7

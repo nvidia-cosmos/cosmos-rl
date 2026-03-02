@@ -867,18 +867,18 @@ class Qwen3MoE(BaseModel):
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+        if not (self.model_args.n_heads % cp_size == 0):
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size})"
             )
 
     def check_tp_compatible(self, tp_size: int):
-        non_divisible_by_tp_size = (
-            self.model_args.n_heads % tp_size != 0
-            or self.model_args.n_kv_heads % tp_size != 0
-            or self.model_args.n_experts % tp_size != 0
-        )
+        non_divisible_by_tp_size = self.model_args.n_experts % tp_size != 0
         if non_divisible_by_tp_size:
             raise ValueError(
-                f"Model is not compatible with tp/ep parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} or expert number={self.model_args.n_experts} is not satisified by tp size({tp_size})"
+                f"Model is not compatible with tp/ep parallelism, model's expert number={self.model_args.n_experts} is not divisible by tp size({tp_size})"
             )
+        assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+            "1",
+            "true",
+        ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 1 for Qwen3-MoE"

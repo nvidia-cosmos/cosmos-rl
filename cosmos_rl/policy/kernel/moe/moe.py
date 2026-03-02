@@ -282,6 +282,18 @@ class GroupedExperts(nn.Module):
         return y
 
 
+class ScaleGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w, scale: Optional[float]):
+        ctx.scale = float(scale) if scale is not None else None
+        return w  # identity
+
+    @staticmethod
+    def backward(ctx, grad_w):
+        # scale ONLY the gradient for w
+        return grad_w * ctx.scale if ctx.scale is not None else grad_w, None
+
+
 class GroupedExpertsDeepEP(nn.Module):
     """
     Sparse MoE implementation using DeepEP.
@@ -329,7 +341,7 @@ class GroupedExpertsDeepEP(nn.Module):
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
         self.ep_size = ep_mesh.size()
         self.ep_rank = ep_mesh.get_local_rank()
-
+        self.moe_weight_scale = 1.0 / self.ep_size if self.ep_size > 1 else None
         # TODO: merge with MoEArgs
         config = MoEConfig(
             moe_router_topk=self.args.n_activated_experts,
@@ -392,7 +404,9 @@ class GroupedExpertsDeepEP(nn.Module):
         if torch.count_nonzero(tokens_per_expert) > 0:
             output1 = ops.gmm(
                 permuted_local_hidden_states,
-                self.gate_and_up_projs.to_local(),
+                ScaleGrad.apply(
+                    self.gate_and_up_projs.to_local(), self.moe_weight_scale
+                ),
                 tokens_per_expert,
                 trans_b=True,
             )
@@ -409,13 +423,22 @@ class GroupedExpertsDeepEP(nn.Module):
                 trans_b=True,
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
+            output1 = torch.matmul(
+                x[0] * 0,
+                ScaleGrad.apply(
+                    self.gate_and_up_projs.to_local()[0].t(), self.moe_weight_scale
+                ),
+            )
             if self.enable_glu:
                 output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             else:
                 output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
-
+            output2 = torch.matmul(
+                output1_,
+                ScaleGrad.apply(
+                    self.down_projs.to_local()[0].t(), self.moe_weight_scale
+                ),
+            )
         y = self.token_dispatcher.token_unpermutation(output2)
 
         return y
