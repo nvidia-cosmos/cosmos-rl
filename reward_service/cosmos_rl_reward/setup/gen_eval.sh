@@ -69,7 +69,7 @@ echo "[gen_eval setup] Installing Python dependencies into venv..."
 "${PYTHON_BIN}" -m pip install redis msgpack
 
 "${PYTHON_BIN}" -m pip install -U openmim
-"${PYTHON_BIN}" -m pip install -U pip setuptools # openmim will downgrade setuptools to make mim install failed weith Python3.12
+"${PYTHON_BIN}" -m pip install setuptools==80.10.2 # openmim will downgrade setuptools to make mim install failed with Python3.12
 "${PYTHON_BIN}" -m mim install mmengine open-clip-torch clip-benchmark
 
 cd "${DOWNLOAD_PATH}"
