@@ -197,7 +197,7 @@ class TextAttr(AbstractEmbModel):
         self._input_key = input_key
         self._dropout_rate = dropout_rate
 
-    def forward(self, token: torch.Tensor):
+    def forward(self, token: torch.Tensor, *args):
         return {"crossattn_emb": token}
 
     def random_dropout_input(
