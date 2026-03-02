@@ -210,19 +210,19 @@ for uuid, replica_id, reward_types in pending_requests:
     # For GenEval type score:
     {
         'scores': {
-            'gen_eval_score': [0.0],
-            'gen_eval_reward': [0.0],
-            'gen_eval_strict': [0.0],
+            'gen_eval_score': [0.0, 0.0],
+            'gen_eval_reward': [0.0, 0.0],
+            'gen_eval_strict': [0.0, 0.0],
             'gen_eval_group': {
-                'single_object': [0.0],
-                'two_object': [-10.0],
-                'counting': [-10.0],
-                'colors': [-10.0],
-                'position': [-10.0],
-                'color_attr': [-10.0]
+                'single_object': [0.0, 0.0],
+                'two_object': [-10.0, -10.0],
+                'counting': [-10.0, -10.0],
+                'colors': [-10.0, -10.0],
+                'position': [-10.0, -10.0],
+                'color_attr': [-10.0, -10.0]
         },
         'input_info': {
-            'shape': [1, 512, 512, 3],
+            'shape': [2, 512, 512, 3],
             'dtype': 'torch.uint8',
             'min': '0.000',
             'max': '254.000'
