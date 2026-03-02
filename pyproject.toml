@@ -108,6 +108,7 @@ vla = [
     "thop",
     "timm<1",
     "wandb>0.13.1",
+    "transformers<5.0.0",
 ]
 
 rl = [

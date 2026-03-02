@@ -21,7 +21,14 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from transformers.cache_utils import Cache, HybridCache, StaticCache
+from transformers.cache_utils import Cache, StaticCache
+
+try:
+    from transformers.cache_utils import HybridCache
+except ImportError as e:
+    print(f"Error importing HybridCache: {e}")
+    HybridCache = None
+
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
