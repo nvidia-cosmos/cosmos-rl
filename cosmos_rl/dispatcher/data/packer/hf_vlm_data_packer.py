@@ -137,6 +137,8 @@ class HFVLMDataPacker(DataPacker):
         self.use_siglip2_process = os.environ.get(
             "USE_SIGLIP2_PROCESS", "0"
         ) in ["1", "true", "True"]
+        self.max_num_patches = config.custom.get('sigle_image_max_num_patches',256)
+        self.max_frame_num_patches = config.custom.get('sigle_frame_max_num_patches',196)
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -378,7 +380,10 @@ class HFVLMDataPacker(DataPacker):
                 kwarg["images"] = image_inputs
                 kwarg["videos"] = video_inputs
                 kwarg["video_metadata"] = video_metadatas
-                kwarg["do_resize"] = True if self.use_siglip2_process else False
+                kwarg["do_resize"] = False
+
+                if self.use_siglip2_process:
+                    kwarg["max_num_patches"] = self.max_num_patches 
 
             inputs = self.hf_processor(
                 text=[text],

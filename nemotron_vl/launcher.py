@@ -85,19 +85,30 @@ def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_
 
 ########################################################
 
-def modify_messages(messages, max_pixels = None):
+def modify_messages(messages, max_pixels = None, max_num_patches = None, max_frame_num_patches = None, scale_factor = 1):
     for message in messages:
         if isinstance(message['content'], str):
             message['content'] = [{'type': 'text', 'text': message['content']}]
+        # check number of images and videos
+        num_images = 0
+        for content in message['content']:
+            if content['type'] == 'image':
+                num_images += 1
+
         for content in message['content']:
             if content['type'] == 'image':
                 if max_pixels is not None:
                     content['max_pixels'] = max_pixels
+                if max_num_patches is not None:
+                    if num_images < 4:
+                        content['max_pixels'] = max_num_patches * scale_factor
+                    else:
+                        content['max_pixels'] = max_frame_num_patches * scale_factor
             elif content['type'] == 'video':
                 content['fps'] = 1
                 content['max_frames'] = 30
-                if max_pixels is not None:
-                    content['total_pixels'] = max_pixels
+                if max_frame_num_patches is not None:
+                    content['total_pixels'] = max_frame_num_patches * content['max_frames'] * scale_factor
     return messages
 
 class CustomDataset(Dataset):
@@ -119,14 +130,16 @@ class CustomDataset(Dataset):
                     line = line.strip()
                     if line:
                         self.data_list.append(json.loads(line)['messages'])
-        self.max_pixels = config.policy.model_max_length * 0.9 * ((16 * 2) ** 2)
-
+        self.scale_factor = (16 * 2) ** 2
+        self.max_pixels = None
+        self.max_num_patches = config.custom.get('sigle_image_max_num_patches',256)
+        self.max_frame_num_patches = config.custom.get('sigle_frame_max_num_patches',196)
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, idx: int) -> list[dict]:
         sample = self.data_list[idx]
-        sample = modify_messages(sample, self.max_pixels)
+        sample = modify_messages(sample, self.max_pixels, self.max_num_patches, self.max_frame_num_patches, self.scale_factor)
         return sample
 
     

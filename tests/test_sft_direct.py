@@ -133,7 +133,7 @@ def build_toy_config(
         "policy": {
             "model_name_or_path": model_path,
             "model_safetensor_path": model_path,
-            "model_max_length": 2048,
+            "model_max_length": 8192,
             "model_gradient_checkpointing": True,
             "parallelism": {
                 "n_init_replicas": 1,
@@ -155,6 +155,8 @@ def build_toy_config(
             "enable_moe_load_balancing_training": False,
             "train_layers": ["PatchMerger"],  # Use "PatchMerger" (not "FSDPPatchMerger") when not using FSDP
             "include_video": True,  # Same as working training config
+            "sigle_image_max_num_patches":1960,
+            "sigle_frame_max_num_patches":196,
         },
     }
     return CosmosConfig.from_dict(full_config)
