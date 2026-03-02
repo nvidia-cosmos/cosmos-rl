@@ -64,3 +64,10 @@ except ImportError as e:
     print("[DEBUG] HPSv3Reward not found")
     print(e)
     pass
+
+try:
+    from cosmos_rl_reward.model.unified_reward import UnifiedReward  # noqa: F401
+except ImportError as e:
+    print("[DEBUG] UnifiedReward not found")
+    print(e)
+    pass

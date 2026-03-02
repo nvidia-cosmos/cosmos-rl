@@ -54,6 +54,14 @@ class RewardArgs(BaseModel):
         default="cuda",
         description="Device to run the reward model on, e.g., 'cuda' or 'cpu'",
     )
+    endpoint_url: str = Field(
+        default="",
+        description="Custom endpoint URL for model inference if applicable (e.g., for sglang or vllm served models)",
+    )
+    endpoint_api_key: str = Field(
+        default="",
+        description="API key for the custom endpoint if applicable",
+    )
     enable: bool = Field(default=True, description="Whether to enable this reward")
 
 
