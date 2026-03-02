@@ -291,12 +291,12 @@ class GenEvalReward(BaseRewardHandler):
             reward = sum(rewards) / len(rewards) if rewards else 0
             return correct, reward, "\n".join(reason)
 
-        def evaluate_image(image_pils, metadatas, only_strict):
+        def evaluate_image(image_pils, gen_eval_metadatas, only_strict):
             from mmdet.apis import inference_detector
 
             results = inference_detector(object_detector, [np.array(image_pil) for image_pil in image_pils])
             ret = []
-            for result, image_pil, metadata in zip(results, image_pils, metadatas):
+            for result, image_pil, metadata in zip(results, image_pils, gen_eval_metadatas):
                 bbox = result[0] if isinstance(result, tuple) else result
                 segm = result[1] if isinstance(result, tuple) and len(result) > 1 else None
                 image = ImageOps.exif_transpose(image_pil)
@@ -345,7 +345,7 @@ class GenEvalReward(BaseRewardHandler):
             return ret
 
         @torch.no_grad()
-        def compute_geneval(images, metadatas, only_strict=False):
+        def compute_geneval(images, gen_eval_metadatas, only_strict=False):
             required_keys = [
                 "single_object",
                 "two_object",
@@ -359,7 +359,7 @@ class GenEvalReward(BaseRewardHandler):
             grouped_strict_rewards = defaultdict(list)
             rewards = []
             grouped_rewards = defaultdict(list)
-            results = evaluate_image(images, metadatas, only_strict=only_strict)
+            results = evaluate_image(images, gen_eval_metadatas, only_strict=only_strict)
             for result in results:
                 strict_rewards.append(1.0 if result["strict_correct"] else 0.0)
                 scores.append(result["score"])
@@ -421,15 +421,29 @@ class GenEvalReward(BaseRewardHandler):
             )
         x = images.to(torch.uint8)
         imgs = [Image.fromarray(x[i].cpu().numpy()) for i in range(x.shape[0])]
-        metas = metadata.get("video_infos")
-        if not isinstance(metas, list) or len(metas) != len(imgs):
-            metas = [metadata] * len(imgs)
+
+        # Reconstruct metadata list for each image
+        for key in ["prompts", "geneval_tags", "geneval_includes"]:
+            assert key in metadata, f"metadata must include '{key}' key"
+        prompts = metadata.get("prompts")
+        tags = metadata.get("geneval_tags")
+        includes = metadata.get("geneval_includes")
+        gen_eval_metadatas = []
+        for prompt, tag, include in zip(prompts, tags, includes):
+            gen_eval_metadatas.append(
+                {
+                    "prompt": prompt,
+                    "tag": tag,
+                    "include": include,
+                }
+            )
+
         if getattr(self, "compute_geneval", None) is None:
             raise RuntimeError(
                 "[gen_eval] Inferencer not initialized. set_up() was not called or failed; check initialization logs."
             )
         scores, rewards, strict_rewards, group_rewards, group_strict_rewards = self.compute_geneval(
-            imgs, metas, only_strict=bool(metadata.get("geneval_only_strict", False))
+            imgs, gen_eval_metadatas, only_strict=bool(metadata.get("geneval_only_strict", False))
         )
         logger.info(f"[gen_eval] Score: {scores}")
         logger.info(f"[gen_eval] Reward: {rewards}")
