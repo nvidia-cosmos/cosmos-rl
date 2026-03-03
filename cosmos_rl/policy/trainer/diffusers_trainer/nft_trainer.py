@@ -205,8 +205,8 @@ class NFTTrainer(DiffusersTrainer):
 
         return ckpt_extra_info
 
-    def build_lr_schedulers(self):
-        return common_build_lr_schedulers(self.optimizers, self.config, 1e6)
+    def build_lr_schedulers(self, total_steps):
+        return common_build_lr_schedulers(self.optimizers, self.config, total_steps)
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
         if not self.lr_schedulers_updated:
@@ -220,7 +220,7 @@ class NFTTrainer(DiffusersTrainer):
             # TODO(jiaxinc): This is a tricky part:
             # Rebuild lr schedulers for the very first step because
             # only until the first step, we can know the exact total steps from the controller
-            new_lr_schedulers = self.build_lr_schedulers()
+            new_lr_schedulers = self.build_lr_schedulers(total_steps)
             with torch.no_grad():
                 # Note: we need to load the state dict of the old lr schedulers
                 # in case it is resumed from a checkpoint,
