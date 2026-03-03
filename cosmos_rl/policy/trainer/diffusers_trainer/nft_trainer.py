@@ -205,7 +205,7 @@ class NFTTrainer(DiffusersTrainer):
 
         return ckpt_extra_info
 
-    def build_lr_schedulers(self, total_steps):
+    def build_lr_schedulers(self, total_steps: int = int(1e6)):
         return common_build_lr_schedulers(self.optimizers, self.config, total_steps)
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
