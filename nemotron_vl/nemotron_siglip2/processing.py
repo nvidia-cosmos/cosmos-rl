@@ -17,7 +17,7 @@ import numpy as np
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, PILImageResampling, ChannelDimension
-from transformers.processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
+from transformers.processing_utils import ImagesKwargs, MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.video_utils import VideoInput, group_videos_by_shape, reorder_videos
 from transformers.utils import logging
@@ -33,7 +33,12 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoP
 logger = logging.get_logger(__name__)
 
 
+class NemotronImagesKwargs(ImagesKwargs, total=False):
+    max_num_patches: Optional[int]
+
+
 class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
+    images_kwargs: NemotronImagesKwargs
     _defaults = {
         "text_kwargs": {
             "padding": False,
@@ -324,14 +329,12 @@ class NemotronNanoV3BridgeProcessor(ProcessorMixin):
             - **image_grid_thw** -- List of image 3D grid in LLM. Returned when `images` is not `None`.
             - **video_grid_thw** -- List of video 3D grid in LLM. Returned when `videos` is not `None`.
         """
-        max_num_patches = kwargs.pop('max_num_patches')
         output_kwargs = self._merge_kwargs(
             Qwen3VLProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
             **kwargs,
         )
         if images is not None:
-            output_kwargs["images_kwargs"].update({'max_num_patches': max_num_patches})
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
             pixel_attention_mask = image_inputs.pop("pixel_attention_mask")
             pixel_values = image_inputs.pop("pixel_values")
