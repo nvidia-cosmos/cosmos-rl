@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import copy
 from typing import Optional
 import os, sys
 os.environ["USE_QWEN_VL_PROCESS"] = "1"
@@ -139,6 +140,7 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx: int) -> list[dict]:
         sample = self.data_list[idx]
+        sample = copy.deepcopy(sample)
         sample = modify_messages(sample, self.max_pixels, self.max_num_patches, self.max_frame_num_patches, self.scale_factor)
         return sample
 
