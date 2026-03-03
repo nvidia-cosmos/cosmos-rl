@@ -11,7 +11,7 @@
 #   torchrun --nproc_per_node=1 test_dpo_direct.py
 #
 # Usage (multi GPU, e.g. 8 GPUs for TP=8):
-#   torchrun --nproc_per_node=8 test_dpo_direct.py --tp_size 8 
+#   torchrun --nproc_per_node=8 test_dpo_direct.py --tp_size 8
 # Usage /workspace/ruipul/vlm_data/MMPR-v1.2
 #   torchrun --nproc_per_node=8 tests/test_dpo_direct.py --tp_size 8 --num_steps 2 --dataset_path /workspace/ruipul/vlm_data/MMPR-v1.2
 #
@@ -45,9 +45,12 @@ from transformers import AutoConfig
 import uuid
 
 # Import nemotron-specific modules for monkey patching
-import sys 
+import sys
+
 print(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl")
+)
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
 from launcher_dpo import (
@@ -118,7 +121,7 @@ def build_toy_config(
         },
         "policy": {
             "model_name_or_path": model_path,
-            "model_safetensor_path": '/workspace/ruipul/cosmos-rl-private/nemotron_vl/outputs/siglip2_official_nemotron_vl_stage1/20260224071826/safetensors/step_12105',
+            "model_safetensor_path": "/workspace/ruipul/cosmos-rl-private/nemotron_vl/outputs/siglip2_official_nemotron_vl_stage1/20260224071826/safetensors/step_12105",
             "model_max_length": 8192,
             "model_gradient_checkpointing": True,
             "parallelism": {
@@ -171,9 +174,7 @@ def run_dpo_direct(
     )
     cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
     cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
-    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = (
-        policy_map_local_key_for_export_tensor
-    )
+    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
 
     # 2. Mock CommMixin.init_comm to skip controller registration
     from cosmos_rl.comm.base import CommMixin
@@ -203,7 +204,9 @@ def run_dpo_direct(
     )
 
     init_distributed()
-    parallel_dims = ParallelDims.from_config(parallesim_config=config.policy.parallelism)
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
     parallel_dims.build_mesh(device_type="cuda")
 
     # 4. Create SFTPolicyWorker with DPO dataset and HFVLMDataPacker
@@ -218,7 +221,9 @@ def run_dpo_direct(
 
     # 5. Run training loop
     losses = []
-    for step, global_batch in enumerate(sft_worker.get_batch_from_dataloader(sft_worker.train_data_loader)):
+    for step, global_batch in enumerate(
+        sft_worker.get_batch_from_dataloader(sft_worker.train_data_loader)
+    ):
         if step >= num_train_steps:
             break
         data_arrival_event = torch.cuda.Event(enable_timing=True)
@@ -242,12 +247,16 @@ def run_dpo_direct(
     destroy_distributed()
 
     if global_rank == 0:
-        assert len(losses) == num_train_steps, f"Expected {num_train_steps} steps, got {len(losses)}"
+        assert (
+            len(losses) == num_train_steps
+        ), f"Expected {num_train_steps} steps, got {len(losses)}"
         logger.info(f"[Test] DPO direct run completed. Losses: {losses}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Direct DPO test for Nemotron VLM (no controller)")
+    parser = argparse.ArgumentParser(
+        description="Direct DPO test for Nemotron VLM (no controller)"
+    )
     parser.add_argument(
         "--model_path",
         type=str,

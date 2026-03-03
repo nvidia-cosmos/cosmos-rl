@@ -18,7 +18,14 @@ import os
 import base64
 import torch
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple, Union  # Tuple used in dpo_collate_fn
+from typing import (
+    List,
+    Any,
+    Dict,
+    Optional,
+    Tuple,
+    Union,
+)  # Tuple used in dpo_collate_fn
 from transformers import AutoProcessor, AutoConfig
 
 from cosmos_rl.utils.util import retry
@@ -134,11 +141,15 @@ class HFVLMDataPacker(DataPacker):
         self.use_qwen_vl_process = self.model_type in ["qwen3_vl"] or os.environ.get(
             "USE_QWEN_VL_PROCESS", "0"
         ) in ["1", "true", "True"]
-        self.use_siglip2_process = os.environ.get(
-            "USE_SIGLIP2_PROCESS", "0"
-        ) in ["1", "true", "True"]
-        self.max_num_patches = config.custom.get('sigle_image_max_num_patches',256)
-        self.max_frame_num_patches = config.custom.get('sigle_frame_max_num_patches',196)
+        self.use_siglip2_process = os.environ.get("USE_SIGLIP2_PROCESS", "0") in [
+            "1",
+            "true",
+            "True",
+        ]
+        self.max_num_patches = config.custom.get("sigle_image_max_num_patches", 256)
+        self.max_frame_num_patches = config.custom.get(
+            "sigle_frame_max_num_patches", 196
+        )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -361,7 +372,9 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            if (self.use_qwen_vl_process or self.use_siglip2_process)and isinstance(conversation, list):
+            if (self.use_qwen_vl_process or self.use_siglip2_process) and isinstance(
+                conversation, list
+            ):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     conversation,
                     image_patch_size=16,  # TODO: hardcode
@@ -383,7 +396,7 @@ class HFVLMDataPacker(DataPacker):
                 kwarg["do_resize"] = False
 
                 if self.use_siglip2_process:
-                    kwarg["max_num_patches"] = self.max_num_patches 
+                    kwarg["max_num_patches"] = self.max_num_patches
 
             inputs = self.hf_processor(
                 text=[text],
@@ -774,7 +787,9 @@ class HFVLMDataPacker(DataPacker):
             label_ids = d.get("label_ids")
             if label_ids is not None:
                 if isinstance(label_ids, list):
-                    d["logprob_masks"] = [1 if x != IGNORE_LABEL_ID else 0 for x in label_ids]
+                    d["logprob_masks"] = [
+                        1 if x != IGNORE_LABEL_ID else 0 for x in label_ids
+                    ]
                 else:
                     d["logprob_masks"] = (label_ids != IGNORE_LABEL_ID).long().tolist()
         max_len = getattr(self.config.policy, "model_max_length", None)
@@ -798,10 +813,17 @@ class HFVLMDataPacker(DataPacker):
         # _collate_fn expects all vision keys; image-only samples from _process_single_sample
         # may lack pixel_values_videos etc. Fill missing keys with None before collating.
         _OPTIONAL_COLLATE_KEYS = [
-            "pixel_values_videos", "video_grid_thw", "second_per_grid_ts",
-            "pixel_values", "image_grid_thw",
-            "pixel_values_videos_lengths_per_sample", "pixel_values_lengths_per_sample",
-            "aspect_ratio_ids", "aspect_ratio_mask", "image_sizes", "batch_num_images",
+            "pixel_values_videos",
+            "video_grid_thw",
+            "second_per_grid_ts",
+            "pixel_values",
+            "image_grid_thw",
+            "pixel_values_videos_lengths_per_sample",
+            "pixel_values_lengths_per_sample",
+            "aspect_ratio_ids",
+            "aspect_ratio_mask",
+            "image_sizes",
+            "batch_num_images",
         ]
 
         def _ensure_collate_keys(samples: List[Dict]) -> None:

@@ -19,43 +19,48 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import call_setup
-import sys 
+import sys
+
 print(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl")
+)
 from launcher_dpo import DPODataset
 
 
 def build_test_config(dataset_path: str) -> CosmosConfig:
     """Build minimal config for DPODataset."""
-    return CosmosConfig.from_dict({
-        "redis": "12800",
-        "train": {
-            "resume": False,
-            "epoch": 1,
-            "output_dir": "/tmp/test_mmpr",
-            "train_policy": {
-                "type": "sft",
-                "trainer_type": "dpo",
-                "dataset": {"name": dataset_path, "subset": "", "split": "train"},
-                "conversation_column_name": "",
-                "mini_batch": 2,
+    return CosmosConfig.from_dict(
+        {
+            "redis": "12800",
+            "train": {
+                "resume": False,
+                "epoch": 1,
+                "output_dir": "/tmp/test_mmpr",
+                "train_policy": {
+                    "type": "sft",
+                    "trainer_type": "dpo",
+                    "dataset": {"name": dataset_path, "subset": "", "split": "train"},
+                    "conversation_column_name": "",
+                    "mini_batch": 2,
+                },
             },
-        },
-        "policy": {
-            "model_name_or_path": "dummy",
-            "model_max_length": 2048,
-            "parallelism": {
-                "n_init_replicas": 1,
-                "tp_size": 1,
-                "cp_size": 1,
-                "dp_shard_size": 1,
-                "pp_size": 1,
-                "dp_replicate_size": 1,
+            "policy": {
+                "model_name_or_path": "dummy",
+                "model_max_length": 2048,
+                "parallelism": {
+                    "n_init_replicas": 1,
+                    "tp_size": 1,
+                    "cp_size": 1,
+                    "dp_shard_size": 1,
+                    "pp_size": 1,
+                    "dp_replicate_size": 1,
+                },
             },
-        },
-        "validation": {"enable": False},
-        "logging": {"logger": ["console"]},
-    })
+            "validation": {"enable": False},
+            "logging": {"logger": ["console"]},
+        }
+    )
 
 
 def main():
@@ -99,7 +104,9 @@ def main():
         print(f"\n--- Sample {i} ---")
         try:
             sample = dataset[i]
-            assert "chosen" in sample and "rejected" in sample, "Missing chosen/rejected"
+            assert (
+                "chosen" in sample and "rejected" in sample
+            ), "Missing chosen/rejected"
             chosen = sample["chosen"]
             rejected = sample["rejected"]
 
@@ -120,7 +127,9 @@ def main():
                                 parts.append(f"[image: {img}]")
                             elif c.get("type") == "text":
                                 t = c.get("text", "")[:60]
-                                parts.append(f"text: {t}..." if len(t) >= 60 else f"text: {t}")
+                                parts.append(
+                                    f"text: {t}..." if len(t) >= 60 else f"text: {t}"
+                                )
                         else:
                             parts.append(str(c)[:40])
                     preview = "; ".join(parts)
@@ -157,6 +166,7 @@ def main():
         except Exception as e:
             print(f"  ERROR: {e}")
             import traceback
+
             traceback.print_exc()
 
     print("\n✓ DPODataset load test passed")

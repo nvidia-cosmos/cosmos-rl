@@ -165,9 +165,7 @@ class DPODataset(Dataset):
                 if hasattr(self.data_packer, "dpo_process_sample"):
                     item = self.data_packer.dpo_process_sample(raw_item)
                 else:
-                    raise ValueError(
-                        "DPO requires data_packer with dpo_process_sample"
-                    )
+                    raise ValueError("DPO requires data_packer with dpo_process_sample")
                 break
             except Exception as e:
                 if attempt >= max_retries - 1:

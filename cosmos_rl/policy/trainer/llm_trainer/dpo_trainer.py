@@ -13,11 +13,9 @@
 # Each dict must have: input_ids, logprob_masks (1=response tokens), pixel_values, etc.
 # Requires a data_packer with dpo_collate_fn / dpo_process_sample for DPO format.
 
-import os
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from collections import OrderedDict
 from functools import partial
 from typing import Optional, List, Dict, Any
 
@@ -29,7 +27,6 @@ import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 
-from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 
@@ -77,11 +74,21 @@ class DPOTrainer(LLMTrainer):
         self.beta = getattr(
             config.train.train_policy,
             "dpo_beta",
-            custom.get("dpo_beta", 0.1) if isinstance(custom, dict) else getattr(custom, "dpo_beta", 0.1),
+            custom.get("dpo_beta", 0.1)
+            if isinstance(custom, dict)
+            else getattr(custom, "dpo_beta", 0.1),
         )
         # MPO: loss_type=["sigmoid", "bco_pair", "sft"], loss_weights=[0.8, 0.2, 1.0]
-        self.loss_types = custom.get("dpo_loss_type", ["sigmoid"]) if isinstance(custom, dict) else getattr(custom, "dpo_loss_type", ["sigmoid"])
-        self.loss_weights = custom.get("dpo_loss_weights", [1.0]) if isinstance(custom, dict) else getattr(custom, "dpo_loss_weights", [1.0])
+        self.loss_types = (
+            custom.get("dpo_loss_type", ["sigmoid"])
+            if isinstance(custom, dict)
+            else getattr(custom, "dpo_loss_type", ["sigmoid"])
+        )
+        self.loss_weights = (
+            custom.get("dpo_loss_weights", [1.0])
+            if isinstance(custom, dict)
+            else getattr(custom, "dpo_loss_weights", [1.0])
+        )
         if len(self.loss_weights) != len(self.loss_types):
             self.loss_weights = [1.0] * len(self.loss_types)
         self.enable_dp_load_balancing = False
@@ -210,14 +217,20 @@ class DPOTrainer(LLMTrainer):
                 combined[k] = c
         return combined
 
-    def _compute_sft_loss(self, chosen_batch: Dict[str, Any], chosen_logits: torch.Tensor) -> torch.Tensor:
+    def _compute_sft_loss(
+        self, chosen_batch: Dict[str, Any], chosen_logits: torch.Tensor
+    ) -> torch.Tensor:
         """Cross-entropy on chosen response tokens (TRL sft loss)."""
-        shift_logits = chosen_logits[..., :-1, :].contiguous().view(-1, chosen_logits.size(-1))
+        shift_logits = (
+            chosen_logits[..., :-1, :].contiguous().view(-1, chosen_logits.size(-1))
+        )
         shift_labels = chosen_batch["input_ids"][..., 1:].contiguous().view(-1)
         # Mask: predict only on response positions (logprob_masks=1 at target position)
         logprob_masks = chosen_batch.get("logprob_masks")
         if logprob_masks is None:
-            logprob_masks = (chosen_batch.get("label_ids", chosen_batch["input_ids"]) != -100).long()
+            logprob_masks = (
+                chosen_batch.get("label_ids", chosen_batch["input_ids"]) != -100
+            ).long()
         shift_mask = logprob_masks[..., 1:].contiguous().view(-1).bool()
         if shift_mask.sum() == 0:
             return chosen_logits.new_zeros(1)
@@ -235,8 +248,14 @@ class DPOTrainer(LLMTrainer):
     ) -> torch.Tensor:
         """Single forward: concat chosen+rejected, run one forward, compute combined loss (MPO-style)."""
         self.model.train()
-        chosen_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in chosen_batch.items()}
-        rejected_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in rejected_batch.items()}
+        chosen_batch = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in chosen_batch.items()
+        }
+        rejected_batch = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in rejected_batch.items()
+        }
 
         # Concatenate chosen and rejected for single forward (avoids issues with dual forward)
         combined_batch = self._concat_dpo_batches(chosen_batch, rejected_batch)
@@ -261,18 +280,24 @@ class DPOTrainer(LLMTrainer):
         total_loss = chosen_logps.new_zeros(1)
         for loss_type, weight in zip(self.loss_types, self.loss_weights, strict=False):
             if loss_type == "sigmoid":
-                total_loss = total_loss + weight * dpo_loss(chosen_logps, rejected_logps, self.beta)
+                total_loss = total_loss + weight * dpo_loss(
+                    chosen_logps, rejected_logps, self.beta
+                )
             elif loss_type == "bco_pair":
                 # TRL bco_pair: -logsigmoid(β*chosen) - logsigmoid(-β*rejected) for quality
                 chosen_rewards = self.beta * chosen_logps
                 rejected_rewards = self.beta * rejected_logps
-                bco = (-F.logsigmoid(chosen_rewards) - F.logsigmoid(-rejected_rewards)).mean()
+                bco = (
+                    -F.logsigmoid(chosen_rewards) - F.logsigmoid(-rejected_rewards)
+                ).mean()
                 total_loss = total_loss + weight * bco
             elif loss_type == "sft":
                 sft_loss = self._compute_sft_loss(chosen_batch, chosen_logits)
                 total_loss = total_loss + weight * sft_loss
             else:
-                raise ValueError(f"Unknown dpo_loss_type: {loss_type}. Use sigmoid, bco_pair, sft.")
+                raise ValueError(
+                    f"Unknown dpo_loss_type: {loss_type}. Use sigmoid, bco_pair, sft."
+                )
 
         return total_loss
 
@@ -320,7 +345,9 @@ class DPOTrainer(LLMTrainer):
             all_params,
             self.config.train.optm_grad_norm_clip,
             foreach=True,
-            pp_mesh=self.parallel_dims.mesh["pp"] if self.parallel_dims.pp_enabled else None,
+            pp_mesh=self.parallel_dims.mesh["pp"]
+            if self.parallel_dims.pp_enabled
+            else None,
             return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
         )
 
@@ -333,7 +360,10 @@ class DPOTrainer(LLMTrainer):
         end_event.record()
 
         loss_cpu = loss.detach().cpu()
-        if self.parallel_dims.dp_replicate_enabled or self.parallel_dims.dp_shard_enabled:
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+        ):
             torch.distributed.all_reduce(
                 loss_cpu,
                 op=torch.distributed.ReduceOp.AVG,
@@ -347,7 +377,9 @@ class DPOTrainer(LLMTrainer):
             report_data["train/loss_avg"] = loss_cpu.item()
             report_data["train/iteration_time"] = fwd_bwd_time
             report_data["train/batch_arrival_time_mean"] = batch_arrival_time
-            report_data["optimizer/grad_norm"] = grad_norm if grad_norm is not None else -1.0
+            report_data["optimizer/grad_norm"] = (
+                grad_norm if grad_norm is not None else -1.0
+            )
 
         return report_data
 
@@ -364,7 +396,11 @@ class DPOTrainer(LLMTrainer):
                 padded = []
                 for t in tensors:
                     if t.shape[-1] < max_len:
-                        pad_val = pad_id if key == "input_ids" else (-100 if key == "label_ids" else 0)
+                        pad_val = (
+                            pad_id
+                            if key == "input_ids"
+                            else (-100 if key == "label_ids" else 0)
+                        )
                         t = F.pad(t, (0, max_len - t.shape[-1]), value=pad_val)
                     padded.append(t)
                 batched[key] = torch.stack(padded)
@@ -377,7 +413,9 @@ class DPOTrainer(LLMTrainer):
             if isinstance(vals[0], torch.Tensor):
                 if vals[0].dim() == 0:
                     batched[key] = torch.stack(vals)
-                elif vals[0].shape[0] == 1 and all(v.shape == vals[0].shape for v in vals):
+                elif vals[0].shape[0] == 1 and all(
+                    v.shape == vals[0].shape for v in vals
+                ):
                     batched[key] = torch.cat(vals, dim=0)
                 else:
                     batched[key] = torch.stack(vals)
@@ -396,15 +434,23 @@ class DPOTrainer(LLMTrainer):
         """DPO validation: compute validation loss (no backward)."""
         with torch.no_grad():
             if hasattr(self.data_packer, "dpo_collate_fn"):
-                chosen_batch, rejected_batch = self.data_packer.dpo_collate_fn(global_batch)
+                chosen_batch, rejected_batch = self.data_packer.dpo_collate_fn(
+                    global_batch
+                )
             else:
                 chosen_list = [x["chosen"] for x in global_batch]
                 rejected_list = [x["rejected"] for x in global_batch]
                 chosen_batch = self._stack_dpo_batch(chosen_list)
                 rejected_batch = self._stack_dpo_batch(rejected_list)
 
-            chosen_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in chosen_batch.items()}
-            rejected_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in rejected_batch.items()}
+            chosen_batch = {
+                k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                for k, v in chosen_batch.items()
+            }
+            rejected_batch = {
+                k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                for k, v in rejected_batch.items()
+            }
             loss = self._dpo_forward_and_loss(chosen_batch, rejected_batch)
         return loss.item()
 
@@ -419,6 +465,7 @@ class DPOTrainer(LLMTrainer):
         (chosen/rejected forward); this is used by parallelize_fn when pp_size > 1.
         Returns a pass-through that accepts (loss, target) and returns loss.mean().
         """
+
         def fake_compute_loss(
             loss: torch.Tensor,
             target: torch.Tensor,

@@ -41,9 +41,12 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.utils.logging import logger
 from transformers import AutoConfig
 import uuid
-import sys 
+import sys
+
 print(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nemotron_vl")
+)
 # Import nemotron-specific modules for monkey patching
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
@@ -68,7 +71,9 @@ def get_my_dataset(config: CosmosConfig):
             return len(self.data)
 
         def __getitem__(self, idx):
-            return self.data[idx]  # messages 格式，需与 data_packer.sft_process_sample 兼容
+            return self.data[
+                idx
+            ]  # messages 格式，需与 data_packer.sft_process_sample 兼容
 
     return MyDataset()
 
@@ -117,7 +122,11 @@ def build_toy_config(
             "train_policy": {
                 "type": "sft",
                 "trainer_type": trainer_type,  # 换 trainer: "sft"|"grpo"|自定义注册的 type
-                "dataset": {"name": "/workspace/haoyuan/vlm_data/stage1", "subset": "", "split": "train"},
+                "dataset": {
+                    "name": "/workspace/haoyuan/vlm_data/stage1",
+                    "subset": "",
+                    "split": "train",
+                },
                 "conversation_column_name": "conversation",  # CustomDataset returns messages directly
                 "mini_batch": 2,
                 "dataloader_shuffle": True,
@@ -153,10 +162,12 @@ def build_toy_config(
         "validation": {"enable": False},
         "custom": {
             "enable_moe_load_balancing_training": False,
-            "train_layers": ["PatchMerger"],  # Use "PatchMerger" (not "FSDPPatchMerger") when not using FSDP
+            "train_layers": [
+                "PatchMerger"
+            ],  # Use "PatchMerger" (not "FSDPPatchMerger") when not using FSDP
             "include_video": True,  # Same as working training config
-            "sigle_image_max_num_patches":1960,
-            "sigle_frame_max_num_patches":196,
+            "sigle_image_max_num_patches": 1960,
+            "sigle_frame_max_num_patches": 196,
         },
     }
     return CosmosConfig.from_dict(full_config)
@@ -180,9 +191,7 @@ def run_sft_direct(
     )
     cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
     cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
-    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = (
-        policy_map_local_key_for_export_tensor
-    )
+    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
 
     # 2. Mock CommMixin.init_comm to skip controller registration (like launch_test_worker)
     from cosmos_rl.comm.base import CommMixin
@@ -213,7 +222,9 @@ def run_sft_direct(
     )
 
     init_distributed()
-    parallel_dims = ParallelDims.from_config(parallesim_config=config.policy.parallelism)
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
     parallel_dims.build_mesh(device_type="cuda")
 
     # 4. Dataset: 传入 (config)->Dataset 的 factory，或 None 则从 config.dataset.name 加载 HF/磁盘数据
@@ -232,7 +243,9 @@ def run_sft_direct(
 
     # 6. Run training loop for a few steps
     losses = []
-    for step, global_batch in enumerate(sft_worker.get_batch_from_dataloader(sft_worker.train_data_loader)):
+    for step, global_batch in enumerate(
+        sft_worker.get_batch_from_dataloader(sft_worker.train_data_loader)
+    ):
         if step >= num_train_steps:
             break
         data_arrival_event = torch.cuda.Event(enable_timing=True)
@@ -256,12 +269,16 @@ def run_sft_direct(
     destroy_distributed()
 
     if global_rank == 0:
-        assert len(losses) == num_train_steps, f"Expected {num_train_steps} steps, got {len(losses)}"
+        assert (
+            len(losses) == num_train_steps
+        ), f"Expected {num_train_steps} steps, got {len(losses)}"
         logger.info(f"[Test] SFT direct run completed. Losses: {losses}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Direct SFT test for Nemotron VLM (no controller)")
+    parser = argparse.ArgumentParser(
+        description="Direct SFT test for Nemotron VLM (no controller)"
+    )
     parser.add_argument(
         "--model_path",
         type=str,

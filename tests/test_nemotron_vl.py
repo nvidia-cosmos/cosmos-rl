@@ -29,7 +29,6 @@ from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
 from cosmos_rl.dispatcher.data.packer.hf_vlm_data_packer import HFVLMDataPacker
 from transformers import (
     AutoProcessor,
-    Qwen3VLMoeForConditionalGeneration,
     Siglip2VisionModel,
     AutoModel,
 )
@@ -162,7 +161,9 @@ def create_assistant_tokens_mask(tokens, processor):  # Qwen2 based model
 
 
 def create_debug_input(model_name_or_path):
-    processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
     messages = [
         {
             "role": "user",
@@ -174,13 +175,13 @@ def create_debug_input(model_name_or_path):
                     "max_pixels": 1024 * 28 * 28,
                 },
                 {
-                "type": "image", 
-                "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg"
-                }, 
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
                 {
-                "type": "image", 
-                "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg"
-                }, 
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
                 {"type": "text", "text": "Describe the image caption."},
             ],
         },
@@ -192,8 +193,9 @@ def create_debug_input(model_name_or_path):
                     "text": "The image captures a serene and joyful moment on a sandy beach at sunset. The sky is a soft gradient of warm colors, transitioning from a pale blue at the horizon to a deeper, golden hue near the horizon line. The ocean waves gently roll onto the shore, creating a tranquil and picturesque backdrop.\nIn the foreground, a person is sitting on the sand, facing a light-colored dog, likely a Labrador Retriever. The person is dressed in a plaid shirt and dark pants, with their legs crossed and one hand resting on their knee. The dog is wearing a harness with a colorful collar and is sitting on its haunches, facing the person. The dog's tail is wagging, and it appears to be engaged in a playful interaction with the person, possibly giving a high-five or pawing at their hand.",
                 },
             ],
-        }]
-    
+        },
+    ]
+
     # Preparation for inference
     inputs = processor.apply_chat_template(
         messages,
@@ -223,7 +225,9 @@ def create_debug_input(model_name_or_path):
 
 
 def create_debug_video_input(model_name_or_path):
-    processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
     messages = [
         {
             "role": "user",
@@ -243,7 +247,8 @@ def create_debug_video_input(model_name_or_path):
                     "text": "Blurred nighttime city scene with bokeh lights and indistinct figures walking, suggesting a busy urban street.",
                 },
             ],
-        }]+[
+        },
+    ] + [
         {
             "role": "user",
             "content": [
@@ -254,13 +259,13 @@ def create_debug_video_input(model_name_or_path):
                     "max_pixels": 1024 * 28 * 28,
                 },
                 {
-                "type": "image", 
-                "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg"
-                }, 
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
                 {
-                "type": "image", 
-                "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg"
-                }, 
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
                 {"type": "text", "text": "Describe the image caption."},
             ],
         },
@@ -272,7 +277,8 @@ def create_debug_video_input(model_name_or_path):
                     "text": "The image captures a serene and joyful moment on a sandy beach at sunset. The sky is a soft gradient of warm colors, transitioning from a pale blue at the horizon to a deeper, golden hue near the horizon line. The ocean waves gently roll onto the shore, creating a tranquil and picturesque backdrop.\nIn the foreground, a person is sitting on the sand, facing a light-colored dog, likely a Labrador Retriever. The person is dressed in a plaid shirt and dark pants, with their legs crossed and one hand resting on their knee. The dog is wearing a harness with a colorful collar and is sitting on its haunches, facing the person. The dog's tail is wagging, and it appears to be engaged in a playful interaction with the person, possibly giving a high-five or pawing at their hand.",
                 },
             ],
-        }]
+        },
+    ]
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
@@ -297,13 +303,17 @@ def create_debug_video_input(model_name_or_path):
         "video_grid_thw": inputs.get("video_grid_thw", None),
         "labels": labels,
     }
-class TestCosmosHfPrecision(unittest.TestCase):
 
-    model_name = "/workspace/nemotron-vlm/NVIDIA-Nemotron-3-Nano-SIGLIP2-officaial-30B-A3B-BF16"
+
+class TestCosmosHfPrecision(unittest.TestCase):
+    model_name = (
+        "/workspace/nemotron-vlm/NVIDIA-Nemotron-3-Nano-SIGLIP2-officaial-30B-A3B-BF16"
+    )
     debug_toml_file = "/workspace/ruipul/cosmos-rl-private/nemotron_vl/sft_debug.toml"
-    official_siglip2_name = 'google/siglip2-so400m-patch16-naflex'
+    official_siglip2_name = "google/siglip2-so400m-patch16-naflex"
+
     def test_cosmos_hf_precision(self):
-        model_name =self.model_name
+        model_name = self.model_name
         # ================================
         # create config
         # ================================
@@ -328,7 +338,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
         # ================================
         data_batch = create_debug_input(model_name_or_path=model_name)
         # fill in position_ids
-        
+
         for k, v in data_batch.items():
             data_batch[k] = v.to("cuda")
 
@@ -338,7 +348,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             device_map="auto",
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            trust_remote_code=True
+            trust_remote_code=True,
         )
         hf_model.eval()
         with torch.no_grad():
@@ -352,7 +362,6 @@ class TestCosmosHfPrecision(unittest.TestCase):
             ).logits
             print(f"before logits_hf: {logits_hf.shape}")
 
-    
     def test_siglip_diff(self):
         model_name = self.model_name
         # ================================
@@ -379,7 +388,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
         # ================================
         data_batch = create_debug_input(model_name_or_path=model_name)
         # fill in position_ids
-        
+
         for k, v in data_batch.items():
             data_batch[k] = v.to("cuda")
 
@@ -389,31 +398,34 @@ class TestCosmosHfPrecision(unittest.TestCase):
             device_map="auto",
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            trust_remote_code=True
+            trust_remote_code=True,
         )
-        
+
         pixel_values = data_batch["pixel_values"].type(hf_model.model.visual.dtype)
         last_hidden_state = hf_model.model.visual(
-            pixel_values=pixel_values,
-            grid_thw=data_batch["image_grid_thw"]) 
+            pixel_values=pixel_values, grid_thw=data_batch["image_grid_thw"]
+        )
 
         # compare with official model
-        offcial_model = Siglip2VisionModel.from_pretrained(self.official_siglip2_name, 
-            device_map="auto", 
-            dtype=torch.bfloat16, 
-            attn_implementation="flash_attention_2"
-            ).eval()
+        offcial_model = Siglip2VisionModel.from_pretrained(
+            self.official_siglip2_name,
+            device_map="auto",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+        ).eval()
         with torch.no_grad():
-            image_embeddings = offcial_model(pixel_values=data_batch["pixel_values_origin"],
+            image_embeddings = offcial_model(
+                pixel_values=data_batch["pixel_values_origin"],
                 pixel_attention_mask=data_batch["pixel_attention_mask"],
-                spatial_shapes=data_batch["spatial_shapes"])  
+                spatial_shapes=data_batch["spatial_shapes"],
+            )
             last_hidden_state_official = image_embeddings.last_hidden_state
         last_hidden_state_official = last_hidden_state_official.view(-1, 1152)
         patch_size = last_hidden_state.shape[0]
-        print(last_hidden_state - last_hidden_state_official[:patch_size,:])
-    
+        print(last_hidden_state - last_hidden_state_official[:patch_size, :])
+
     def test_video_support(self):
-        model_name =self.model_name
+        model_name = self.model_name
         # ================================
         # create config
         # ================================
@@ -446,7 +458,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             device_map="auto",
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            trust_remote_code=True
+            trust_remote_code=True,
         )
         hf_model.eval()
         with torch.no_grad():
@@ -461,7 +473,8 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 return_dict=True,
             ).logits
             print(f"before logits_hf: {logits_hf.shape}")
-        
+
+
 # torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py
 if __name__ == "__main__":
     os.environ["COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU"] = "1"
@@ -473,7 +486,7 @@ if __name__ == "__main__":
     # print("Running test_siglip_diff")
     # suite.addTest(TestCosmosHfPrecision('test_siglip_diff'))
     print("Running test_video_support")
-    suite.addTest(TestCosmosHfPrecision('test_video_support'))
+    suite.addTest(TestCosmosHfPrecision("test_video_support"))
     # 运行测试
     runner = unittest.TextTestRunner()
     results = runner.run(suite)

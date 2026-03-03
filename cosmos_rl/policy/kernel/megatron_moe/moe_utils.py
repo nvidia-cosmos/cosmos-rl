@@ -48,7 +48,7 @@ with importlib_metadata_version_context():
             moe_permute_with_probs,
             moe_unpermute,
             moe_sort_chunks_by_index,
-            moe_sort_chunks_by_index_with_probs 
+            moe_sort_chunks_by_index_with_probs,
         )
 
         HAVE_TE = True
@@ -154,6 +154,7 @@ def permute(
     permuted_input = tokens.index_select(0, sorted_indices)
 
     return permuted_input, permuted_probs, sorted_indices
+
 
 def unpermute(
     permuted_tokens: torch.Tensor,
@@ -277,7 +278,9 @@ def sort_chunks_by_idxs(
                 "fused_sort_chunks_by_index_with_probs is not available. "
                 "Please install TE >= 2.1.0."
             )
-        return moe_sort_chunks_by_index_with_probs(input, probs, split_sizes, sorted_idxs)
+        return moe_sort_chunks_by_index_with_probs(
+            input, probs, split_sizes, sorted_idxs
+        )
 
     input = torch.split(input, split_sizes.tolist(), dim=0)
     output = torch.cat([input[i] for i in sorted_idxs.tolist()], dim=0)
@@ -287,6 +290,7 @@ def sort_chunks_by_idxs(
     else:
         permuted_probs = None
     return output, permuted_probs
+
 
 @torch.compile
 def swiglu(y):
