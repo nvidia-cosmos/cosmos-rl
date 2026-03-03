@@ -9,4 +9,6 @@
 WORKSPACE_DIR="${1:-/workspace}"
 VENV_DIR="${2:-$HOME/unified_reward}"
 
+echo "[unified_reward setup] Installing Python dependencies..."
 python -m pip install openai
+echo "[unified_reward setup] Done."
