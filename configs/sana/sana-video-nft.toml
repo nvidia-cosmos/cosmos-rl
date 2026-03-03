@@ -96,7 +96,7 @@ save_freq = 20
 save_mode = "async"
 
 [validation]
-enable = true
+enable = false
 dataset.name = "dance_grpo_t2v"
 dataset.split = "test"
 

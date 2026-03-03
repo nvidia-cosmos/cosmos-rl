@@ -38,7 +38,7 @@ Cosmos-RL supports `DiffusionNFT <https://arxiv.org/pdf/2509.16117>`_ algorithm 
 
 - SD3
 - Cosmos-Predict2.5
-- SANA-Image/Video (coming soon)
+- SANA-Image/Video
 
 We construct the WFM RL training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.
 

@@ -14,7 +14,7 @@
 </div>
 
 
-This document specifies how to post-train a diffusion model with DDRL, using the cosmos-predict model series as an example. 
+This document specifies how to post-train a diffusion model with DDRL, using the cosmos-predict model series as an example.
 
 The overall idea is to combine reward maximization (such as the GRPO objective) with standard diffusion training objective to replace the unreliable KL divergence regularization. For more details about the algorithm, please check the [paper](https://www.arxiv.org/pdf/2512.04332).
 
@@ -35,7 +35,7 @@ For inference, you can see the Cosmos-Predict2.5 [document](https://github.com/n
 
 ## Tutorial
 
-For fully document about diffusion RL, you can find it at the [offical document](https://nvidia-cosmos.github.io/cosmos-rl/wfm/overview.html#rl-deprecated) of Cosmos-RL.
+For a full document about diffusion RL, you can find it at the [offcial document](https://nvidia-cosmos.github.io/cosmos-rl/wfm/overview.html#rl-deprecated) of Cosmos-RL.
 
 ### Configuration
 
@@ -93,7 +93,7 @@ class RLConfig:
 
 ### Reward service
 
-Considering the computation overhead, it's necessary to use a seperated async service for reward computing.
+Considering the computation overhead, it's necessary to use a separate async service for reward computing.
 
 - You can launch a reward service by following this [document](https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service/README.md).
 - Configure the trainer to make it communicate with the reward service. Set environment variable ``REMOTE_REWARD_TOKEN``, ``REMOTE_REWARD_ENQUEUE_URL``, and ``REMOTE_REWARD_FETCH_URL``
