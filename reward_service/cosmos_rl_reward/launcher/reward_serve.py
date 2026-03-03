@@ -310,6 +310,8 @@ def main():
             reward_arg.dtype,
             device=reward_arg.device,
             download_path=reward_arg.download_path,
+            endpoint_url=reward_arg.endpoint_url,
+            endpoint_api_key=reward_arg.endpoint_api_key,
         )
         RewardRegistry.register_reward_venv(key, reward_arg.venv_python)
         controllers[key].init_process(

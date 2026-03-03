@@ -22,8 +22,6 @@ from cosmos_rl_reward.handler.registry import RewardRegistry
 from cosmos_rl_reward.utils.logging import logger
 
 
-
-
 @RewardRegistry.register()
 class ImageReward(BaseRewardHandler):
     NEEDS_LATENT_DECODER = False

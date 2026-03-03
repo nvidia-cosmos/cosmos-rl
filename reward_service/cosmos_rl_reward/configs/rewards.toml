@@ -67,3 +67,10 @@ download_path = "/workspace"
 device = "cuda"
 dtype = "float16"
 enable = false
+
+[[reward_args]]
+reward_type  = "unified_reward"
+venv_python = "python"
+endpoint_url = "YOUR_ENDPOINT_URL"
+endpoint_api_key = "YOUR_ENDPOINT_API_KEY"
+enable = false

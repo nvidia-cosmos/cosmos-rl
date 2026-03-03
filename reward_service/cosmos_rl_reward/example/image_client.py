@@ -231,5 +231,20 @@ for uuid, replica_id, reward_types in pending_requests:
         'decoded_duration': '0.00',
         'type': 'gen_eval'
     }
+    # For UnifiedReward type score:
+    {
+        'scores':{
+            'unified_reward': [0.2, 0.2]
+        },
+        'input_info': {
+            'shape': [2, 512, 512, 3],
+            'dtype': 'torch.uint8',
+            'min': '0.000',
+            'max': '254.000'
+        },
+        'duration': '8.24',
+        'decoded_duration': '0.00',
+        'type': 'unified_reward'
+    }
     Inside each field of the response, the values are lists corresponding to the batch size.    
 """
