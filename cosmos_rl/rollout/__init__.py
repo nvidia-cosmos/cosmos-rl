@@ -54,6 +54,12 @@ except ImportError as e:
     logger.error(f"Failed to import Diffusion NFT Rollout. Error: {e}")
     pass
 
+try:
+    import cosmos_rl.rollout.wfm_policy_rollout.wfm_policy_rollout as wfm_policy_rollout_dummy  # noqa: F401
+except ImportError as e:
+    logger.error(f"Failed to import WFM Policy Rollout. Error: {e}")
+    pass
+
 
 class State:
     UNINITIALIZED = 0

@@ -319,18 +319,6 @@ class CosmosPolicyModel(nn.Module):
         else:
             _, x0, _ = self.get_data_and_condition(data_batch)
 
-        # --- DEBUG DUMP: pre-condition ---
-        _dump = {"x0_encoded": x0.detach().cpu()}
-        _dump["crossattn_emb_pre"] = condition.crossattn_emb.detach().cpu() if condition.crossattn_emb is not None else None
-        _dump["padding_mask_pre"] = condition.padding_mask.detach().cpu() if condition.padding_mask is not None else None
-        _dump["fps"] = condition.fps.detach().cpu() if condition.fps is not None else None
-        _dump["use_video_condition"] = condition.use_video_condition.detach().cpu() if condition.use_video_condition is not None else None
-        _dump["has_uncondition"] = uncondition is not None
-        for k, v in data_batch.items():
-            if isinstance(v, torch.Tensor):
-                _dump[f"batch_{k}"] = v.detach().cpu()
-        # --- END pre-condition ---
-
         condition = condition.set_video_condition(x0, ncf_min, ncf_max, num_conditional_frames)
         if uncondition is not None:
             uncondition = uncondition.set_video_condition(x0, ncf_min, ncf_max, num_conditional_frames)
@@ -366,15 +354,6 @@ class CosmosPolicyModel(nn.Module):
                        "current_image2_latent_idx", "action_latent_idx"]:
                 if k in data_batch and torch.all(data_batch[k] != -1):
                     condition.condition_video_input_mask_B_C_T_H_W[batch_idx, :, data_batch[k], :, :] = 0
-
-        # --- DEBUG DUMP: post-injection condition ---
-        _dump["gt_frames_post"] = condition.gt_frames.detach().cpu()
-        _dump["condition_mask_post"] = condition.condition_video_input_mask_B_C_T_H_W.detach().cpu()
-        _dump["crossattn_emb_post"] = condition.crossattn_emb.detach().cpu() if condition.crossattn_emb is not None else None
-        _dump["orig_gt_frames"] = orig_gt_frames.detach().cpu()
-        torch.save(_dump, "/tmp/debug_rl.pt")
-        print("[DEBUG] Saved cosmos-rl dump to /tmp/debug_rl.pt")
-        # --- END post-injection ---
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             cond_x0 = self.denoise(noise_x, sigma, condition).x0
@@ -440,15 +419,6 @@ class CosmosPolicyModel(nn.Module):
         x_sigma_max = arch_invariant_rand(
             (n_sample,) + tuple(state_shape), torch.float32, "cuda", seed,
         ) * self.sde.sigma_max * sigma_max_scale
-
-        # --- DEBUG DUMP: x_sigma_max ---
-        _rl_dump = torch.load("/tmp/debug_rl.pt")
-        _rl_dump["x_sigma_max"] = x_sigma_max.detach().cpu()
-        _rl_dump["sigma_max"] = self.sde.sigma_max
-        _rl_dump["state_shape"] = list(state_shape)
-        torch.save(_rl_dump, "/tmp/debug_rl.pt")
-        print(f"[DEBUG] x_sigma_max shape={x_sigma_max.shape}, sigma_max={self.sde.sigma_max}")
-        # --- END ---
 
         samples = self.sampler(
             x0_fn, x_sigma_max,

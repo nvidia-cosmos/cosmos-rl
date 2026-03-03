@@ -103,6 +103,7 @@ class LiberoEnvWrapper(gym.Env):
         full_images = []
         wrist_images = []
         states = []
+        proprio_9d = []
         for env_id in range(len(obs)):
             full_images.append(obs[env_id]["agentview_image"][::-1, ::-1])
             wrist_images.append(obs[env_id]["robot0_eye_in_hand_image"][::-1, ::-1])
@@ -115,10 +116,20 @@ class LiberoEnvWrapper(gym.Env):
                     ]
                 )
             )
+            proprio_9d.append(
+                np.concatenate(
+                    [
+                        obs[env_id]["robot0_gripper_qpos"],
+                        obs[env_id]["robot0_eef_pos"],
+                        obs[env_id]["robot0_eef_quat"],
+                    ]
+                )
+            )
         return {
             "full_images": np.stack(full_images),
             "wrist_images": np.stack(wrist_images),
             "states": np.stack(states),
+            "proprio_9d": np.stack(proprio_9d),
         }
 
     def _reconfigure(
@@ -152,9 +163,7 @@ class LiberoEnvWrapper(gym.Env):
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(env_ids):
             self.env_states[env_id].current_obs = {
-                "full_images": images_and_states["full_images"][i],
-                "wrist_images": images_and_states["wrist_images"][i],
-                "states": images_and_states["states"][i],
+                k: v[i] for k, v in images_and_states.items()
             }
         return images_and_states, task_descriptions
 
@@ -248,9 +257,7 @@ class LiberoEnvWrapper(gym.Env):
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(env_ids):
             self.env_states[env_id].current_obs = {
-                "full_images": images_and_states["full_images"][i],
-                "wrist_images": images_and_states["wrist_images"][i],
-                "states": images_and_states["states"][i],
+                k: v[i] for k, v in images_and_states.items()
             }
         descriptions = [self.env_states[env_id].language for env_id in env_ids]
         return images_and_states, descriptions
@@ -287,7 +294,7 @@ class LiberoEnvWrapper(gym.Env):
         finish_steps = np.array([self.env_states[env_id].step for env_id in env_ids])
 
         full_images_and_states = {}
-        for key in ["full_images", "wrist_images", "states"]:
+        for key in ["full_images", "wrist_images", "states", "proprio_9d"]:
             full_images_and_states[key] = np.stack(
                 [self.env_states[env_id].current_obs[key] for env_id in env_ids]
             )
