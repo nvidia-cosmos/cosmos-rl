@@ -29,6 +29,9 @@ from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.trainer.optm import (
+    build_lr_schedulers as common_build_lr_schedulers,
+)
 from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
     DiffusersTrainer,
 )
@@ -118,6 +121,11 @@ class NFTTrainer(DiffusersTrainer):
 
         self.grpo_config = self.config.train.train_policy
 
+        # For optimizers
+        self.lr_schedulers = self.build_lr_schedulers()
+        self.lr_schedulers_updated = False
+        self.optimizers.zero_grad()
+
         # For iteration control
         self.mini_batch = self.grpo_config.mini_batch
         self.batch_size_per_optimize = self.grpo_config.batch_size_per_optimize
@@ -128,7 +136,6 @@ class NFTTrainer(DiffusersTrainer):
             self.config.policy.diffusers.sample.num_steps
             * self.config.policy.diffusers.timesteps_fraction
         )
-        self.optimizers.zero_grad()
 
     def save_checkpoint(
         self,
@@ -137,6 +144,7 @@ class NFTTrainer(DiffusersTrainer):
         remain_samples_num: int,
     ):
         logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+        # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
         if self.config.train.ema_enable and self.ema is not None:
             self.ema.copy_ema_to(self.trainable_params, store_temp=True)
         model_state_dict = self.model.get_trained_model_state_dict()
@@ -152,6 +160,7 @@ class NFTTrainer(DiffusersTrainer):
             },
         )
         self.ckpt_manager.save_check(step=current_step)
+        # Restore current weights after saving ema weights to checkpoint
         if self.config.train.ema_enable and self.ema is not None:
             self.ema.copy_temp_to(self.trainable_params)
 
@@ -196,8 +205,29 @@ class NFTTrainer(DiffusersTrainer):
 
         return ckpt_extra_info
 
+    def build_lr_schedulers(self):
+        return common_build_lr_schedulers(self.optimizers, self.config, 1e6)
+
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
-        pass
+        if not self.lr_schedulers_updated:
+            assert (
+                total_steps is not None and total_steps > 0
+            ), "Total steps must be set for lr scheduler"
+            logger.info(
+                f"[Policy] Building lr schedulers for total steps {total_steps}"
+            )
+
+            # TODO(jiaxinc): This is a tricky part:
+            # Rebuild lr schedulers for the very first step because
+            # only until the first step, we can know the exact total steps from the controller
+            new_lr_schedulers = self.build_lr_schedulers()
+            with torch.no_grad():
+                # Note: we need to load the state dict of the old lr schedulers
+                # in case it is resumed from a checkpoint,
+                # otherwise, the lr scheduler will be reset to the initial value
+                new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+            self.lr_schedulers = new_lr_schedulers
+            self.lr_schedulers_updated = True
 
     def all_reduce_states(self, inter_policy_nccl: HighAvailabilitylNccl) -> float:
         """
@@ -754,8 +784,7 @@ class NFTTrainer(DiffusersTrainer):
                 # Calculate the iteration time
                 assert end_event.query()
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
-                # TODO(dinghaoy): support lr schedulers
-                report_data["train/learning_rate"] = self.config.train.optm_lr
+                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
                 report_data["train/iteration_time"] = iter_time
 
                 for k, v in reduced_avg.items():
@@ -787,6 +816,9 @@ class NFTTrainer(DiffusersTrainer):
                             current_step=current_step,
                         )
                         report_data[f"rollout_{modality}s"] = mm_report_data
+
+        # Only step lr scheduler when all the mini-batches are processed
+        self.lr_schedulers.step()
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):

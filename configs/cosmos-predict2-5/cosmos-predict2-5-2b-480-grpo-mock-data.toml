@@ -260,5 +260,5 @@ ratio = 1
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos-predict2-5_2b_480_grpo_mock_data"
+name = "cosmos-predict2-5-2b-480-grpo-mock-data"
 wandb_mode = "online"
