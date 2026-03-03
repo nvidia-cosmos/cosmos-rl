@@ -21,7 +21,7 @@ import threading
 from collections import defaultdict
 from queue import Queue, Empty
 from datetime import timedelta
-from typing import Dict, Iterable, Optional, Union, Callable
+from typing import Dict, Iterable, Optional, Union, Callable, List
 from functools import partial
 
 # Third party imports
@@ -183,7 +183,7 @@ gradient_reduce_across_dp_replicas_.first_invoke = True
 
 @torch.no_grad()
 def gradient_norm_clipping(
-    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    parameters: List[torch.Tensor],
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
@@ -217,6 +217,8 @@ def gradient_norm_clipping(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
+    if isinstance(parameters, Iterable):
+        parameters = set(parameters)
     # Group the parameters by their device meshes.
     parameters_by_mesh = defaultdict(list)
     for param in parameters:

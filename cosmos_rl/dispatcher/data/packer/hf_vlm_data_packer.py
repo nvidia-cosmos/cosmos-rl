@@ -16,6 +16,7 @@
 import io
 import os
 import base64
+import copy
 import torch
 from PIL import Image
 from typing import (
@@ -282,6 +283,7 @@ class HFVLMDataPacker(DataPacker):
         add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
+            conversation = copy.deepcopy(conversation)
             # Replace all the assistant content with consecutive `pad_token` * 10
             pad_token = self.tokenizer.pad_token
             pad_token_id = self.tokenizer.pad_token_id

@@ -733,9 +733,7 @@ class OpenVLA(BaseModel):
 
     def separate_model_parts(self) -> List[torch.nn.Module]:
         """Separate model into parts for parallelization"""
-        parts = []
-        parts.append(self.model)
-        return parts
+        return [self.model]
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         """Calculate number of parameters and FLOPs for VLA model"""

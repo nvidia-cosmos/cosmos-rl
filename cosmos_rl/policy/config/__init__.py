@@ -717,9 +717,9 @@ class TrainingConfig(BaseModel):
         description="Optimizer name",
         choices=["AdamW", "Adam"],
     )
-    optm_lr: Union[float, List[float]] = Field(
+    optm_lr: Union[float, List[float], Dict[str, float]] = Field(
         default=1e-6,
-        description="Learning rate for optimizer, can be a float or a list of floats for multiple optimizers",
+        description="Learning rate for optimizer, can be a float, a list of floats for multiple optimizers, or a dict of {module_path : lr}.",
     )
     optm_impl: Union[str, List[str]] = Field(
         default="fused",

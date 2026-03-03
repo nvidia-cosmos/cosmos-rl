@@ -43,6 +43,28 @@ except ImportError:
 T = TypeVar("T", bound=Optimizer)
 
 
+class OptimizerDesc:
+    num_parameters: int
+    num_trainable_parameters: int
+    lr: float
+    optimizer_cls: str
+    model_part: str = ""
+
+    def __init__(
+        self,
+        num_parameters: int,
+        num_trainable_parameters: int,
+        lr: float,
+        optimizer_cls: str,
+        model_part: str = "",
+    ) -> None:
+        self.num_parameters = num_parameters
+        self.num_trainable_parameters = num_trainable_parameters
+        self.lr = lr
+        self.optimizer_cls = optimizer_cls
+        self.model_part = model_part
+
+
 class OptimizersContainer(Optimizer, Generic[T]):
     """A container for multiple optimizers.
 
@@ -87,9 +109,25 @@ class OptimizersContainer(Optimizer, Generic[T]):
         total_trainable_params = 0
         all_trainable_params = []
         param_set = set()
+
+        optimizer_desc_by_model_part = {}
         for model_id, (model, optimizer_kwargs_i) in enumerate(
             zip(self.model_parts, optimizer_kwargs)
         ):
+            model_part_name = (
+                self.model_modpath[model_id]
+                if self.model_modpath and model_id < len(self.model_modpath)
+                else f"part_{model_id}"
+            )
+
+            optimizer_desc_by_model_part[model_id] = OptimizerDesc(
+                num_parameters=0,
+                num_trainable_parameters=0,
+                lr=optimizer_kwargs_i.get("lr", None),
+                optimizer_cls=optimizer_cls.__name__,
+                model_part=model_part_name,
+            )
+
             if model is None:
                 continue
             optimizer_kwargs_copy = deepcopy(optimizer_kwargs_i)
@@ -98,38 +136,58 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 # Group the parameters by device mesh to do optimizer fusion.
                 parameters_by_mesh = collections.defaultdict(list)
                 for name, p in model.named_parameters():
-                    if p.requires_grad and p in param_set:
-                        logger.warning(
-                            f"{name} is already set by previous optimizer, will be skipped in current optimizer."
-                        )
-                    elif p.requires_grad and p not in param_set:
+                    if p not in param_set:
                         param_set.add(p)
-                        all_trainable_params.append(name)
-                        device_mesh = (
-                            p.device_mesh if hasattr(p, "device_mesh") else "default"
+                        optimizer_desc_by_model_part[
+                            model_id
+                        ].num_parameters += p.numel()
+
+                        if p.requires_grad:
+                            param_set.add(p)
+                            all_trainable_params.append(name)
+                            device_mesh = (
+                                p.device_mesh
+                                if hasattr(p, "device_mesh")
+                                else "default"
+                            )
+                            parameters_by_mesh[device_mesh].append(p)
+                            all_params.append(p)
+                            total_trainable_params += p.numel()
+                            optimizer_desc_by_model_part[
+                                model_id
+                            ].num_trainable_parameters += p.numel()
+                    elif p.requires_grad:
+                        logger.warning(
+                            f"Parameter {name} in model part {model_part_name} is duplicated but requires grad. "
+                            f"Only the first occurrence will be optimized."
                         )
-                        parameters_by_mesh[device_mesh].append(p)
-                        all_params.append(p)
-                        total_trainable_params += p.numel()
                 for params in parameters_by_mesh.values():
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
             else:
                 for name, p in model.named_parameters():
-                    if p.requires_grad:
-                        optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
-                        self.optimizers[model_id].append(optimizer)
-                        all_params.append(p)
-                        total_trainable_params += p.numel()
-                        all_trainable_params.append(name)
+                    if p not in param_set:
+                        param_set.add(p)
+                        optimizer_desc_by_model_part[
+                            model_id
+                        ].num_parameters += p.numel()
+
+                        if p.requires_grad:
+                            optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
+                            self.optimizers[model_id].append(optimizer)
+                            all_params.append(p)
+                            total_trainable_params += p.numel()
+                            optimizer_desc_by_model_part[
+                                model_id
+                            ].num_trainable_parameters += p.numel()
+                            all_trainable_params.append(name)
         logger.info(f"Total number of trainable parameters: {total_trainable_params}")
         logger.debug(f"Trainable parameters: {all_trainable_params}")
-        _print_optimizer_table(
-            optimizer_cls,
-            optimizer_kwargs,
-            optimizer_count=[len(opt_list) for opt_list in self.optimizers],
-            model_modpath=model_modpath,
-        )
+        descs = [
+            optimizer_desc_by_model_part[i]
+            for i in sorted(optimizer_desc_by_model_part)
+        ]
+        _print_optimizer_desc_table(descs)
 
         self._post_init(all_params, optimizer_kwargs)
 
@@ -193,74 +251,50 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
-def _print_optimizer_table(
-    optimizer_cls,
-    optimizer_kwargs_list,
-    optimizer_count: list[int],
-    model_modpath=None,
-):
-    if not optimizer_kwargs_list:
-        logger.info("No optimizer configs to display.")
+def _print_optimizer_desc_table(descs: list["OptimizerDesc"]) -> None:
+    if not descs:
+        logger.info("No optimizer descs to display.")
         return
 
-    # Collect all unique keys (preserve order of first appearance)
-    seen_keys = []
-    for kw in optimizer_kwargs_list:
-        for k in kw.keys():
-            if k not in seen_keys:
-                seen_keys.append(k)
+    columns = [
+        "model_part",
+        "optimizer_cls",
+        "lr",
+        "num_parameters",
+        "num_trainable_parameters",
+        "status",
+    ]
 
-    columns = ["model_part", "class name"] + seen_keys
-
-    # Default model part names
-    if model_modpath is None:
-        model_modpath = [f"part_{i}" for i in range(len(optimizer_kwargs_list))]
-
-    # Keys that count as "learning rate"
-    lr_keys = {"lr", "learning_rate", "learning-rate", "learning rate"}
-
-    # Build rows
     rows = []
-    for idx, kw in enumerate(optimizer_kwargs_list):
-        optm_cnt = optimizer_count[idx] if idx < len(optimizer_count) else None
-        row = [model_modpath[idx], optimizer_cls.__name__]
+    for d in descs:
+        status = "FROZEN" if d.num_trainable_parameters == 0 else "TRAINABLE"
+        rows.append(
+            [
+                str(d.model_part),
+                str(d.optimizer_cls),
+                str(d.lr),
+                str(d.num_parameters),
+                str(d.num_trainable_parameters),
+                status,
+            ]
+        )
 
-        for k in seen_keys:
-            v = kw.get(k, "")
-            v_str = str(v)
+    # column widths
+    widths = [len(c) for c in columns]
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(cell))
 
-            # Strikethrough LR text when optimizer count is 0 for this model part
-            if optm_cnt == 0 and str(k).strip().lower() in lr_keys:
-                v_str = f"{v_str} (FROZEN)"
+    def fmt(r):
+        return " | ".join(r[i].ljust(widths[i]) for i in range(len(r)))
 
-            row.append(v_str)
-
-        rows.append(row)
-
-    # Convert everything to string
-    str_rows = [[str(x) for x in row] for row in rows]
-    str_columns = [str(c) for c in columns]
-
-    # Compute column widths
-    widths = []
-    for col_idx in range(len(columns)):
-        max_width = len(str_columns[col_idx])
-        for row in str_rows:
-            max_width = max(max_width, len(row[col_idx]))
-        widths.append(max_width)
-
-    # Helper to format a row
-    def format_row(row):
-        return " | ".join(row[i].ljust(widths[i]) for i in range(len(row)))
-
-    # Print table
-    header = format_row(str_columns)
-    separator = "-+-".join("-" * w for w in widths)
+    header = fmt(columns)
+    sep = "-+-".join("-" * w for w in widths)
 
     logger.info(header)
-    logger.info(separator)
-    for row in str_rows:
-        logger.info(format_row(row))
+    logger.info(sep)
+    for r in rows:
+        logger.info(fmt(r))
 
 
 def build_optimizers(

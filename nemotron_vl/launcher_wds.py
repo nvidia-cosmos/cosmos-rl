@@ -490,6 +490,11 @@ class CustomWebDatasetDataset(Dataset):
     """
     def setup(self, config: CosmosConfig, *args, **kwargs):
         self.cosmos_config = config
+        # Controls (put these in config.custom)
+        custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
+        self.include_video = bool(custom.get("include_video", False))
+        self.video_sample_fps = float(custom.get("video_sample_fps", 1.0))
+        self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
 
         self.n_shards_to_skip = 0
         self.n_samples_to_skip_in_shard = 0
@@ -508,15 +513,13 @@ class CustomWebDatasetDataset(Dataset):
                 n_steps_per_shard = 50000 * num_workers // self.cosmos_config.train.train_batch_per_replica
                 self.n_shards_to_skip = resume_step // n_steps_per_shard
                 self.n_samples_to_skip_in_shard = (resume_step % n_steps_per_shard) * self.cosmos_config.train.train_batch_per_replica // num_workers
+                self.n_samples_to_skip_in_shard += int(self.shuffle_buf * 0.5)
 
         # Fake the resume logic by skipping a certain number of shards and samples in the current shard.
         # self.n_shards_to_skip = 5
         # self.n_samples_to_skip_in_shard = 100
         if self.n_shards_to_skip > 0 or self.n_samples_to_skip_in_shard > 0:
             print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
-
-        # Controls (put these in config.custom)
-        custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
 
         webdataset_root_paths = custom["webdataset_root_paths"]
         if isinstance(webdataset_root_paths, str):
@@ -545,11 +548,6 @@ class CustomWebDatasetDataset(Dataset):
         # Reserve ~half the context for video, round down to FRAME_FACTOR=2.
         max_vf = max(4, int(config.policy.model_max_length * 0.5 / 128))
         self.max_video_frames = max_vf // 2 * 2  # align to FRAME_FACTOR
-
-        self.include_video = bool(custom.get("include_video", False))
-        self.video_sample_fps = float(custom.get("video_sample_fps", 1.0))
-        self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
-
         self.setup_wds_dataset()
 
     def setup_wds_dataset(self):

@@ -822,6 +822,9 @@ class HFModel(BaseModel):
     def named_parameters(self, *args, **kwargs):
         return self.model.named_parameters(*args, **kwargs)
 
+    def named_modules(self, *args, **kwargs):
+        return self.model.named_modules(*args, **kwargs)
+
     @classmethod
     def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
