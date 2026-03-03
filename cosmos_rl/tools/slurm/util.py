@@ -14,19 +14,21 @@
 # limitations under the License.
 
 import json
+from dataclasses import asdict, dataclass
 from typing import List, Literal
-from dataclasses import dataclass, asdict
 
 
 @dataclass
 class ReplicaLaunchMetadata:
+    """Metadata for launching a single replica on a node."""
+
     # The number of nodes for the specific replica
     nnode: int
     # The role of the specific replica
     role: Literal["policy", "rollout"]
     # The head node of specific replica
     rendezvous_node: int
-    # Port for rendezvous, in case there are multiple replicas on the same node to avoid port conflicts
+    # Port for rendezvous; avoids port conflicts with multiple replicas on same node
     rendezvous_port: int
     # The number of GPUs visible to the specific replica
     visible_gpus: List[int]
@@ -48,16 +50,21 @@ class ReplicaLaunchMetadata:
 
 @dataclass
 class NodeLaunchMetadata:
+    """Metadata for launching replicas on a single node."""
+
     colocation: List[ReplicaLaunchMetadata]
 
     def __init__(self, colocation: List[ReplicaLaunchMetadata]):
+        """Initialize with a list of colocated replica metadata."""
         self.colocation = colocation
 
     def to_json(self):
+        """Convert to JSON-serializable dictionary."""
         return asdict(self)
 
     @staticmethod
     def from_json_list(json_str: str) -> List["NodeLaunchMetadata"]:
+        """Parse a JSON string into a list of NodeLaunchMetadata objects."""
         dicts = json.loads(json_str)
         return [
             NodeLaunchMetadata(
