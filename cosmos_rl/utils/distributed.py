@@ -217,19 +217,20 @@ def gradient_norm_clipping(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    if isinstance(parameters, Iterable):
-        parameters = set(parameters)
+    param_set = set()
     # Group the parameters by their device meshes.
     parameters_by_mesh = defaultdict(list)
     for param in parameters:
-        if param.grad is not None:
-            # If one parameter belongs to multiple meshes, use a flattened mesh name
-            # by concatenating all the mesh names together.
-            if hasattr(param, "device_mesh"):
-                device_mesh_str = "-".join(list(param.device_mesh.mesh_dim_names))
-            else:
-                device_mesh_str = "default"
-            parameters_by_mesh[device_mesh_str].append(param)
+        if param not in param_set:
+            param_set.add(param)
+            if param.grad is not None:
+                # If one parameter belongs to multiple meshes, use a flattened mesh name
+                # by concatenating all the mesh names together.
+                if hasattr(param, "device_mesh"):
+                    device_mesh_str = "-".join(list(param.device_mesh.mesh_dim_names))
+                else:
+                    device_mesh_str = "default"
+                parameters_by_mesh[device_mesh_str].append(param)
     # Compute the norm for each mesh group
     per_mesh_norm_list = []
     for mesh, params in parameters_by_mesh.items():
