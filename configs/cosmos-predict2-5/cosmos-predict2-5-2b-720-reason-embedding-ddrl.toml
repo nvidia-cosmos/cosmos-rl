@@ -75,6 +75,7 @@ data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
+use_same_seed = false
 
 [trainer]
 max_iter = 2001
