@@ -110,6 +110,8 @@ class CrossEntropyLoss(torch.nn.Module):
         lin_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if lin_weight is not None:
+            if isinstance(lin_weight, torch.distributed.tensor.DTensor):
+                lin_weight = lin_weight.to(input.dtype).full_tensor()
             return self.ce_impl(
                 lin_weight,
                 input,

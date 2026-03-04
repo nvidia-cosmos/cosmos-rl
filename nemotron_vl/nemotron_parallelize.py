@@ -478,11 +478,6 @@ def apply_fsdp(
         logger.info("Applying FSDP to the language model embeddings")
         fully_shard(embed_tokens, **fsdp_config_no_moe, reshard_after_forward=True)
 
-    lm_head = model.lm_head
-    # Apply separate FSDP to the lm_head
-    if lm_head is not None:
-        fully_shard(lm_head, **fsdp_config_no_moe, reshard_after_forward=False)
-
     fully_shard(model.model, **fsdp_config_no_moe, reshard_after_forward=True)
 
 def apply_ddp(

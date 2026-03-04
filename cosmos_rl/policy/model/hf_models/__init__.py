@@ -852,8 +852,13 @@ class HFModel(BaseModel):
     def check_sequence_packing_compatible(self):
         if self.sequence_packing_forward_patched is None:
             # called only once if patch is successful
+            force_sequence_packing = int(os.environ.get("FORCE_SEQUENCE_PACKING", 0))
             patch_success = sequence_packing_forward_patch(self.hf_config, self)
-            self.sequence_packing_forward_patched = patch_success
+            self.sequence_packing_forward_patched = (
+                patch_success or force_sequence_packing == 1
+            )
+            if (not patch_success) and force_sequence_packing == 1:
+                logger.info("force packing without patch")
         return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):

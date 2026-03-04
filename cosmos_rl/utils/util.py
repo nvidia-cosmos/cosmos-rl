@@ -1237,16 +1237,37 @@ def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) 
         replace_child(name, child, new_child, root)
 
     # special case for lm_head
-    if config.policy.enable_liger_fused_cross_entropy:
-        for name, child in list(root.named_children()):
-            if "lm_head" in name:
-                # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
-                new_lm_head = IdentityLayer()
-                setattr(new_lm_head, "weight", child.weight)
-                setattr(new_lm_head, "bias", child.bias)
+    if (
+        config.policy.enable_liger_fused_cross_entropy
+        and config.train.train_policy.type == "sft"
+    ):
+        found_module = None
+        found_count = 0
+        names = []
+        for name, child in root.named_modules():
+            names.append(name)
 
-                replace_child(name, child, new_lm_head, root)
-                break
+        for name, child in root.named_modules():
+            # split by "." and check if last part is "lm_head" to avoid false positive like "model.lm_head_adapter"
+            if name.split(".")[-1] == "lm_head":
+                found_count += 1
+                found_module = child
+        if found_count == 0:
+            pass
+        elif found_count > 1:
+            raise ValueError(
+                f"Multiple modules with 'lm_head' in their name were found ({found_count}), cannot determine which one to replace for fused cross entropy."
+            )
+        else:
+            logger.info(
+                f"Found module {name} for lm_head to replace with IdentityLayer for fused cross entropy."
+            )
+            # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
+            new_lm_head = IdentityLayer()
+            new_lm_head.register_parameter("weight", found_module.weight)
+            if hasattr(found_module, "bias") and found_module.bias is not None:
+                new_lm_head.register_parameter("bias", found_module.bias)
+            replace_child(name, found_module, new_lm_head, root)
 
 
 @functools.lru_cache(maxsize=None)
