@@ -32,6 +32,11 @@ def pre_hf_models_patch(hf_config: AutoConfig):
         hf_config.vision_config.num_hidden_layers = 32
         # Set video pruning rate to 0 for training
         hf_config.video_pruning_rate = 0.0
+    elif hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        # TODO: Support fa2/fa3 for Qwen3.5 models
+        # Workaround: Qwen3.5 models currently have an illegal memory access issue with flash attention;
+        # force SDPA instead.
+        hf_config._attn_implementation = "sdpa"
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):

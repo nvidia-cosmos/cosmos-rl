@@ -93,11 +93,15 @@ class HFModel(BaseModel):
         # cosmos_default_dtype is config.train.master_dtype
         # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
         self.model = self.model.to(dtype=torch.get_default_dtype())
+        attn_implementation = getattr(
+            self.hf_config, "_attn_implementation", "flash_attention_2"
+        )
         try:
-            self.model.set_attn_implementation("flash_attention_2")
+            self.model.set_attn_implementation(attn_implementation)
+            logger.info(f"Set attn_implementation to {attn_implementation}")
         except Exception as e:
             logger.warning(
-                f"Set attn_implementation to flash_attention_2 failed with error: {e}"
+                f"Set attn_implementation to {attn_implementation} failed with error: {e}"
             )
         self.model_class = model_class
         self.is_vlm = is_vlm
@@ -357,7 +361,7 @@ class HFModel(BaseModel):
                 "vision_model.radio_model.input_conditioner.norm_mean",
                 "vision_model.radio_model.input_conditioner.norm_std",
             ]
-        elif self.hf_config.model_type == "qwen3_5":
+        elif self.hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
             # Skip loading multi token prediction layer for Qwen3-5
             filter_list = [
                 "mtp.*",
