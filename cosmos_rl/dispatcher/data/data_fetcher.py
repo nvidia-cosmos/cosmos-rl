@@ -298,6 +298,8 @@ class ControllerDataFetcher(DataFetcherBase):
                         ),
                     )
                     if self.batch_sampler is not None:
+                        if hasattr(self.batch_sampler, "set_epoch"):
+                            self.batch_sampler.set_epoch(self.epoch)
                         self.batch_sampler = SkippingSampler(
                             base_sampler=self.batch_sampler,
                             skip_samples=train_dataloader_bias
@@ -546,6 +548,8 @@ class ControllerDataFetcher(DataFetcherBase):
                         if hasattr(self.train_sampler, "set_epoch"):
                             # Here the epoch from 1 to total epoch count, not start from 0
                             self.train_sampler.set_epoch(self.epoch)
+                        if hasattr(self.batch_sampler, "set_epoch"):
+                            self.batch_sampler.set_epoch(self.epoch)
                         if self.epoch <= self.config.train.epoch:
                             logger.info(f"[Controller] Epoch {self.epoch} start.")
                             iterator = iter(self.train_dataloader)
