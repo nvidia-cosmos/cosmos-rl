@@ -184,9 +184,9 @@ def get_action(
     generate_future_state_and_value_in_parallel: bool = True,
     batch_size: int = 1,
 ) -> Dict[str, Any]:
-    from cosmos_rl.policy.model.wfm.models.cosmos_policy_model import (
-        extract_action_chunk,
-        extract_value,
+    from cosmos_rl.policy.model.wfm.cosmos_policy import (
+        _extract_action_chunk as extract_action_chunk,
+        _extract_value as extract_value,
         ACTION_DIM,
     )
 
@@ -350,7 +350,7 @@ def get_action(
 
 def run_inference(cfg: PolicyTestConfig):
     """Load model, run inference on sample observation, print results."""
-    from cosmos_rl.policy.model.wfm.models.cosmos_policy_model import load_cosmos_policy_model
+    from cosmos_rl.policy.model.wfm.cosmos_policy import CosmosPolicy, CosmosPolicyConfig
 
     print("Loading dataset stats...")
     dataset_stats = load_dataset_stats(cfg.dataset_stats_path)
@@ -359,8 +359,9 @@ def run_inference(cfg: PolicyTestConfig):
     t5_cache = load_t5_embeddings(cfg.t5_text_embeddings_path)
 
     print("Loading model...")
-    ckpt_path = resolve_hf_path(cfg.ckpt_path)
-    model, model_config = load_cosmos_policy_model(ckpt_path)
+    cosmos_policy = CosmosPolicy.from_pretrained(None, cfg.ckpt_path)
+    model = cosmos_policy.generative_model
+    model_config = model.config
 
     print("Loading observation...")
     with open(cfg.observation_pkl, "rb") as f:

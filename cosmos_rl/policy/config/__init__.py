@@ -1470,6 +1470,11 @@ class VLAConfig(BaseModel):
         description="The unnormalized key for the dataset.",
     )
 
+    max_steps: Optional[int] = Field(
+        default=None,
+        description="Override max steps per episode. None uses the simulator default.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         return self

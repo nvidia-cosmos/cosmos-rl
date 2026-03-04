@@ -112,7 +112,8 @@ def extract_simulator_config(config: Config):
         )
 
         cfg.task_suite_name = config.validation.dataset.subset
-        cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+        default_max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+        cfg.max_steps = config.vla.max_steps or default_max_steps
     elif sim_type == "robotwin":
         # Robotwin-specific config
         cfg.task_suite_name = config.validation.dataset.subset
@@ -639,3 +640,73 @@ class OpenVLARollout(RolloutBase):
 
         results = [pack_trajectory(i) for i in range(n_payloads)]
         return results
+
+    # ------------------------------------------------------------------
+    # Standalone evaluation (no controller / dataset pipeline needed)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def evaluate(
+        self,
+        task_ids: Optional[List[int]] = None,
+        trials_per_task: int = 1,
+    ) -> Dict[str, Any]:
+        """Run standalone evaluation over the configured sim environment.
+
+        Works for any model registered in ``ModelRegistry`` (OpenVLA, PI05,
+        CosmosPolicy, …) with any simulator backend (LIBERO, RoboTwin, …).
+
+        Args:
+            task_ids: Which task indices to evaluate.  ``None`` → all tasks.
+            trials_per_task: Number of trials per task.
+
+        Returns:
+            Dict with ``success_rate``, ``n_success``, ``n_total``,
+            ``per_task`` (list of per-episode dicts).
+        """
+        if not self._engine_initialized:
+            self.init_engine()
+
+        sim_type = get_simulator_type(self.config)
+        if task_ids is None:
+            if sim_type == "libero":
+                from cosmos_rl.simulators.libero.utils import get_benchmark_overridden
+                suite = get_benchmark_overridden(
+                    self.config.validation.dataset.subset
+                )()
+                task_ids = list(range(suite.n_tasks))
+            else:
+                task_ids = [0]
+
+        payloads = [
+            SimpleNamespace(prompt={"task_id": tid, "trial_id": trial})
+            for tid in task_ids
+            for trial in range(trials_per_task)
+        ]
+        payload_indices = np.arange(len(payloads))
+
+        rollout_start = time.time()
+        task_records = self._do_rollout(
+            payloads, payload_indices, is_validation=True, continuous=False,
+        )
+        rollout_end = time.time()
+
+        total_steps = sum(r.get("finish_step", 0) for r in task_records)
+        duration = rollout_end - rollout_start
+        fps = total_steps / duration if duration > 0 else 0.0
+
+        n_ok = sum(1 for r in task_records if r["complete"])
+        sr = n_ok / len(task_records) * 100 if task_records else 0.0
+
+        logger.info(
+            f"Evaluation: {len(task_records)} episodes, "
+            f"success rate {sr:.1f}% ({n_ok}/{len(task_records)}), "
+            f"{total_steps} steps, {duration:.1f}s, {fps:.1f} sim-FPS"
+        )
+
+        return {
+            "success_rate": sr,
+            "n_success": n_ok,
+            "n_total": len(task_records),
+            "per_task": task_records,
+        }

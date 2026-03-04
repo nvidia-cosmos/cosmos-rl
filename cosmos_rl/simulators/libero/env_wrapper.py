@@ -25,7 +25,6 @@ from cosmos_rl.simulators.libero.venv import ReconfigureSubprocEnv
 from cosmos_rl.simulators.libero.utils import (
     get_benchmark_overridden,
     get_libero_dummy_action,
-    quat2axisangle,
 )
 from cosmos_rl.simulators.utils import save_rollout_video
 
@@ -103,7 +102,6 @@ class LiberoEnvWrapper(gym.Env):
         full_images = []
         wrist_images = []
         states = []
-        proprio_9d = []
         for env_id in range(len(obs)):
             full_images.append(obs[env_id]["agentview_image"][::-1, ::-1])
             wrist_images.append(obs[env_id]["robot0_eye_in_hand_image"][::-1, ::-1])
@@ -111,17 +109,8 @@ class LiberoEnvWrapper(gym.Env):
                 np.concatenate(
                     [
                         obs[env_id]["robot0_eef_pos"],
-                        quat2axisangle(obs[env_id]["robot0_eef_quat"]),
-                        obs[env_id]["robot0_gripper_qpos"],
-                    ]
-                )
-            )
-            proprio_9d.append(
-                np.concatenate(
-                    [
-                        obs[env_id]["robot0_gripper_qpos"],
-                        obs[env_id]["robot0_eef_pos"],
                         obs[env_id]["robot0_eef_quat"],
+                        obs[env_id]["robot0_gripper_qpos"],
                     ]
                 )
             )
@@ -129,7 +118,6 @@ class LiberoEnvWrapper(gym.Env):
             "full_images": np.stack(full_images),
             "wrist_images": np.stack(wrist_images),
             "states": np.stack(states),
-            "proprio_9d": np.stack(proprio_9d),
         }
 
     def _reconfigure(
@@ -294,7 +282,7 @@ class LiberoEnvWrapper(gym.Env):
         finish_steps = np.array([self.env_states[env_id].step for env_id in env_ids])
 
         full_images_and_states = {}
-        for key in ["full_images", "wrist_images", "states", "proprio_9d"]:
+        for key in ["full_images", "wrist_images", "states"]:
             full_images_and_states[key] = np.stack(
                 [self.env_states[env_id].current_obs[key] for env_id in env_ids]
             )
@@ -310,11 +298,9 @@ class LiberoEnvWrapper(gym.Env):
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
 
-        # Libero-specific gripper post-processing
-        actions = normalize_gripper_action(actions)
-        actions = invert_gripper_action(actions)
-
-        steps = actions.shape[1]
+        steps = actions.shape[1] if actions.ndim > 2 else 1
+        if actions.ndim == 2:
+            actions = actions[:, None, :]
         for step in range(steps):
             results = self.step(env_ids, actions[:, step])
 

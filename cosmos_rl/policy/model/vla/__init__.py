@@ -39,6 +39,13 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import resolve_model_path
 
 
+def _postprocess_gripper(actions: torch.Tensor) -> torch.Tensor:
+    """Normalize gripper from [0,1]→[-1,1], binarize, then invert for LIBERO."""
+    a = actions.clone()
+    a[..., -1] = -torch.sign(2.0 * a[..., -1] - 1.0)
+    return a
+
+
 def _find_or_get_model_path_file(name_or_path: str, subpath: str):
     local_model_path = resolve_model_path(name_or_path)
     file_path = os.path.join(local_model_path, subpath)
@@ -897,6 +904,9 @@ class OpenVLA(BaseModel):
             # Process proprioception
             if self.hf_config.use_proprio:
                 state = inputs["states"][i]
+                if state.shape[-1] == 9:
+                    from cosmos_rl.simulators.libero.utils import quat2axisangle
+                    state = np.concatenate([state[:3], quat2axisangle(state[3:7]), state[7:]])
                 norm_proprio = normalize_proprio(
                     state, self.norm_stats[unnorm_key]["proprio"]
                 )
@@ -980,6 +990,7 @@ class OpenVLA(BaseModel):
                 temperature=temperature,
             )
 
+            actions = _postprocess_gripper(actions)
             return {
                 "action": actions,
                 "responses": responses,
