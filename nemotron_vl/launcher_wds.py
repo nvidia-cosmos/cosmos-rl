@@ -17,6 +17,8 @@ import json
 from typing import Optional
 import os, sys
 os.environ["USE_QWEN_VL_PROCESS"] = "1"
+if os.environ.get("APPLY_SIGLIP2_PATCH"):
+    os.environ["USE_SIGLIP2_PROCESS"] = "1"
 # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
 os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
 import webdataset as wds
@@ -28,7 +30,7 @@ from typing import Any, Iterator, Union, List, Optional, Sequence
 import glob
 import torch, re
 import numpy as np
-import decord
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from qwen_vl_utils.vision_process import smart_nframes, calculate_video_frame_range
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -36,10 +38,87 @@ from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
 from torch.utils.data import Dataset
 from cosmos_rl.policy.config import Config as CosmosConfig
+
+from webdataset.tariterators import (
+    base_plus_ext as _wds_base_plus_ext,
+    valid_sample as _wds_valid_sample,
+    url_opener as _wds_url_opener,
+    tar_file_expander as _wds_tar_file_expander,
+)
+
+
+import decord
+from torchcodec.decoders import VideoDecoder
+
 try:
     import wandb
 except ImportError:
     wandb = None
+
+
+def _check_torchcodec() -> tuple[bool, str]:
+    """Return (available, reason) for torchcodec."""
+    try:
+        from torchcodec.decoders import VideoDecoder  # noqa: F401
+        return True, ""
+    except ImportError as e:
+        return False, f"ImportError: {e}"
+    except RuntimeError as e:
+        return False, f"RuntimeError: {e}"
+
+
+def _check_decord() -> tuple[bool, str]:
+    """Return (available, reason) for decord."""
+    try:
+        import decord  # noqa: F401
+        return True, ""
+    except ImportError as e:
+        return False, f"ImportError: {e}"
+
+
+def _is_torchcodec_available():
+    return _check_torchcodec()[0]
+
+
+def _is_decord_available():
+    return _check_decord()[0]
+
+
+@lru_cache(maxsize=1)
+def _get_video_backend() -> str:
+    """Select video decoding backend: torchcodec > decord.
+
+    Honours ``FORCE_QWENVL_VIDEO_READER`` env-var to pin a specific backend.
+    """
+    forced = os.environ.get("FORCE_QWENVL_VIDEO_READER")
+    if forced:
+        if forced == "torchcodec":
+            ok, reason = _check_torchcodec()
+            if ok:
+                return "torchcodec"
+            raise ImportError(
+                f"Forced video backend 'torchcodec' is not available: {reason}\n"
+                f"Hint: torchcodec requires FFmpeg shared libraries "
+                f"(apt-get install -y ffmpeg). Unset FORCE_QWENVL_VIDEO_READER to fall back to decord."
+            )
+        elif forced == "decord":
+            ok, reason = _check_decord()
+            if ok:
+                return "decord"
+            raise ImportError(
+                f"Forced video backend 'decord' is not available: {reason}"
+            )
+        else:
+            raise ImportError(
+                f"Unknown video backend '{forced}'. Choose 'torchcodec' or 'decord'."
+            )
+    if _is_torchcodec_available():
+        return "torchcodec"
+    if _is_decord_available():
+        return "decord"
+    raise ImportError(
+        "No video decoding backend found. Install torchcodec (preferred) or decord."
+    )
 ########################################################
 # Auxiliary helper functions for MoE load balancing tracking.
 ########################################################
@@ -116,13 +195,6 @@ def _sanitize_wds_filename(fname: str) -> str:
 # Tolerant tarfile_to_samples: handles both dots-in-key and duplicate IDs
 # without losing samples.
 # ---------------------------------------------------------------------------
-from webdataset.tariterators import (
-    base_plus_ext as _wds_base_plus_ext,
-    valid_sample as _wds_valid_sample,
-    url_opener as _wds_url_opener,
-    tar_file_expander as _wds_tar_file_expander,
-)
-
 
 def _group_by_keys_tolerant(data, keys=_wds_base_plus_ext, lcase=True,
                             suffixes=None, handler=None):
@@ -262,15 +334,86 @@ def modify_messages(messages, max_seq_len=None):
         if not isinstance(message['content'], list):
             continue
         for content in message['content']:
-            if content['type'] == 'image':
+            if content.get('type') == 'image':
                 pixel_cap = IMAGE_MAX_PIXELS
                 if per_item_pixels is not None:
                     pixel_cap = min(pixel_cap, per_item_pixels)
                 content['max_pixels'] = pixel_cap
-            elif content['type'] == 'video':
+            elif content.get('type') == 'video':
                 if per_item_pixels is not None:
                     content['total_pixels'] = per_item_pixels
     return messages
+
+def modify_messages_siglip2(messages, max_num_patches=256, max_frame_num_patches=196,
+                            scale_factor=1024, max_seq_len=None, video_max_frames=30):
+    """Hybrid SigLIP2 pixel budget: fixed patch counts + dynamic overflow cap.
+
+    Computes fixed per-item budgets from patch counts, then optionally caps
+    with a dynamic budget derived from remaining context length.
+
+    - Images (<4 per message): max_num_patches * scale_factor pixels
+    - Images (>=4 per message): max_frame_num_patches * scale_factor pixels
+    - Videos: fps=1, max_frames=video_max_frames,
+              total_pixels = max_frame_num_patches * video_max_frames * scale_factor
+
+    If max_seq_len is set, computes a dynamic cap via approx_max_pixels() and
+    takes min(fixed_budget, dynamic_share) per item to prevent context overflow.
+
+    Returns None if text alone fills the context (signals caller to drop sample).
+    """
+    # Step 1: Dynamic overflow cap (optional)
+    dynamic_per_item = None
+    if max_seq_len is not None:
+        dynamic_max = approx_max_pixels(messages, max_seq_len)
+        if dynamic_max is None:
+            return None  # text alone fills the context
+
+        # Count vision items for fair sharing of the dynamic budget
+        n_vision = 0
+        for message in messages:
+            content = message.get('content')
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get('type') in ('image', 'video'):
+                        n_vision += 1
+        if n_vision > 0:
+            dynamic_per_item = int(dynamic_max / n_vision)
+
+    # Step 2: Apply fixed budgets per message, capped by dynamic budget
+    for message in messages:
+        if isinstance(message['content'], str):
+            if message.get('role') in ('system', 'assistant'):
+                continue
+            message['content'] = [{'type': 'text', 'text': message['content']}]
+        if not isinstance(message['content'], list):
+            continue
+
+        # Count images in this message for the <4 / >=4 threshold
+        num_images = 0
+        for content in message['content']:
+            if isinstance(content, dict) and content.get('type') == 'image':
+                num_images += 1
+
+        for content in message['content']:
+            if content.get('type') == 'image':
+                if num_images < 4:
+                    fixed_px = max_num_patches * scale_factor
+                else:
+                    fixed_px = max_frame_num_patches * scale_factor
+                if dynamic_per_item is not None:
+                    content['max_pixels'] = min(fixed_px, dynamic_per_item)
+                else:
+                    content['max_pixels'] = fixed_px
+            elif content.get('type') == 'video':
+                # fps/max_frames are already set during decoding in
+                # _attach_media_from_sample — only the pixel budget matters here.
+                fixed_px = max_frame_num_patches * video_max_frames * scale_factor
+                if dynamic_per_item is not None:
+                    content['total_pixels'] = min(fixed_px, dynamic_per_item)
+                else:
+                    content['total_pixels'] = fixed_px
+    return messages
+
 
 def _expand_wds_urls(name: Union[str, Sequence[str]]) -> List[str]:
     """
@@ -357,16 +500,62 @@ def _iter_media_items(messages: list[dict]):
                 yield c
 
 
-def _decode_video_from_bytes(blob: bytes, ele: dict,
+def _decode_video_torchcodec(blob: bytes, ele: dict,
                               decoding_timeout: int = 60) -> tuple[list[Image.Image], float, float]:
-    """Decode video bytes in-memory and return sampled frames as PIL Images.
-
-    Matches qwen_vl_utils._read_video_decord behaviour: uses the full content
-    dict *ele* so that smart_nframes respects per-sample fps / min_frames /
-    max_frames, and calculate_video_frame_range honours video_start / video_end.
+    """Decode video bytes using torchcodec (preferred backend).
 
     Returns (pil_frames, sample_fps, video_fps).
     """
+
+    decoder = VideoDecoder(blob)
+    metadata = decoder.metadata
+    total_frames = metadata.num_frames
+    video_fps = metadata.average_fps
+
+    if total_frames is None or video_fps is None:
+        raise ValueError("torchcodec metadata missing num_frames or average_fps")
+    if total_frames == 0:
+        raise ValueError("Video has 0 frames")
+    if video_fps < 1:
+        raise ValueError(f"Video FPS {video_fps} < 1")
+
+    orig_total_frames = total_frames
+    start_frame, end_frame, total_frames = calculate_video_frame_range(
+        ele, total_frames, video_fps)
+    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    idx = torch.linspace(start_frame, end_frame, nframes).round().long().tolist()
+    # Clamp to valid absolute frame indices within [start_frame, end_frame].
+    idx = [min(max(i, start_frame), end_frame) for i in idx]
+
+    # Timeout guard — any decoder could hang on corrupt video
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(lambda: decoder.get_frames_at(idx).data)
+    try:
+        # get_frames_at returns FrameBatch with .data as NCHW tensor
+        frames_tensor = future.result(timeout=decoding_timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(f"Video decoding (torchcodec) timed out after {decoding_timeout}s")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    # Convert NCHW -> NHWC numpy for PIL
+    frames_np = frames_tensor.permute(0, 2, 3, 1).cpu().numpy()
+    pil_frames = [Image.fromarray(frame) for frame in frames_np]
+    sample_fps = nframes / max(orig_total_frames, 1e-6) * video_fps
+
+    del decoder
+    return pil_frames, sample_fps, video_fps
+
+
+def _decode_video_decord(blob: bytes, ele: dict,
+                          decoding_timeout: int = 60) -> tuple[list[Image.Image], float, float]:
+    """Decode video bytes using decord (fallback backend).
+
+    Returns (pil_frames, sample_fps, video_fps).
+    """
+
     video_buffer = io.BytesIO(blob)
     vr = decord.VideoReader(video_buffer, num_threads=1)
     total_frames = len(vr)
@@ -377,12 +566,15 @@ def _decode_video_from_bytes(blob: bytes, ele: dict,
     if video_fps < 1:
         raise ValueError(f"Video FPS {video_fps} < 1")
 
+    orig_total_frames = total_frames
     start_frame, end_frame, total_frames = calculate_video_frame_range(
         ele, total_frames, video_fps)
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
     idx = torch.linspace(start_frame, end_frame, nframes).round().long().tolist()
+    # Clamp to valid absolute frame indices within [start_frame, end_frame].
+    idx = [min(max(i, start_frame), end_frame) for i in idx]
 
-    # Timeout guard against hanging decord (same pattern as video_decoder_qwen.py)
+    # Timeout guard against hanging decord
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(lambda: vr.get_batch(idx).asnumpy())
     try:
@@ -390,18 +582,33 @@ def _decode_video_from_bytes(blob: bytes, ele: dict,
     except TimeoutError:
         future.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
-        raise TimeoutError(f"Video decoding timed out after {decoding_timeout}s")
+        raise TimeoutError(f"Video decoding (decord) timed out after {decoding_timeout}s")
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
     pil_frames = [Image.fromarray(frame) for frame in frames]
-    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+    sample_fps = nframes / max(orig_total_frames, 1e-6) * video_fps
 
-    # Cleanup
-    vr.seek(0)
     del vr
-
     return pil_frames, sample_fps, video_fps
+
+
+def _decode_video_from_bytes(blob: bytes, ele: dict,
+                              decoding_timeout: int = 60) -> tuple[list[Image.Image], float, float]:
+    """Decode video bytes in-memory and return sampled frames as PIL Images.
+
+    Dispatches to the best available backend (torchcodec > decord).
+    Matches qwen_vl_utils._read_video_decord behaviour: uses the full content
+    dict *ele* so that smart_nframes respects per-sample fps / min_frames /
+    max_frames, and calculate_video_frame_range honours video_start / video_end.
+
+    Returns (pil_frames, sample_fps, video_fps).
+    """
+    backend = _get_video_backend()
+    if backend == "torchcodec":
+        return _decode_video_torchcodec(blob, ele, decoding_timeout)
+    else:
+        return _decode_video_decord(blob, ele, decoding_timeout)
 
 
 def _attach_media_from_sample(messages: list[dict], sample: dict,
@@ -543,11 +750,20 @@ class CustomWebDatasetDataset(Dataset):
         # using approx_max_pixels(), so we only store max_seq_len here.
         self.max_seq_len = config.policy.model_max_length
 
-        # Cap video frames so tokens fit in model_max_length.
-        # Each frame produces at least VIDEO_MIN_TOKEN_NUM=128 tokens in qwen_vl_utils.
-        # Reserve ~half the context for video, round down to FRAME_FACTOR=2.
-        max_vf = max(4, int(config.policy.model_max_length * 0.5 / 128))
-        self.max_video_frames = max_vf // 2 * 2  # align to FRAME_FACTOR
+        # Max video frames: use config value (consistent with modify_messages_siglip2),
+        # falling back to 30 to match launcher.py's hardcoded default.
+        self.max_video_frames = int(custom.get('video_max_frames', 30))
+
+        self.include_video = bool(custom.get("include_video", False))
+        self.video_sample_fps = float(custom.get("video_sample_fps", 1.0))
+        self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
+
+        # SigLIP2 mode: fixed patch-count pixel budget with dynamic overflow cap
+        self.siglip2_mode = bool(os.environ.get("APPLY_SIGLIP2_PATCH"))
+        if self.siglip2_mode:
+            self.scale_factor = (16 * 2) ** 2  # 1024
+            self.max_num_patches = int(custom.get('single_image_max_num_patches', 256))
+            self.max_frame_num_patches = int(custom.get('single_frame_max_num_patches', 196))
         self.setup_wds_dataset()
 
     def setup_wds_dataset(self):
@@ -698,9 +914,20 @@ class CustomWebDatasetDataset(Dataset):
             return None
 
         # Apply per-sample pixel budget (max_pixels for images, total_pixels for videos).
-        # Video frame limiting (fps, max_frames) is handled during decoding in _attach_media_from_sample.
-        # modify_messages returns None when the text alone fills the context → skip.
-        messages = modify_messages(messages, self.max_seq_len)
+        # Video frame selection (fps, max_frames) was already applied during decoding in
+        # _attach_media_from_sample — the functions below only set pixel budgets.
+        # Both modify_messages variants return None when the text alone fills the context → skip.
+        if self.siglip2_mode:
+            messages = modify_messages_siglip2(
+                messages,
+                max_num_patches=self.max_num_patches,
+                max_frame_num_patches=self.max_frame_num_patches,
+                scale_factor=self.scale_factor,
+                max_seq_len=self.max_seq_len,
+                video_max_frames=self.max_video_frames,
+            )
+        else:
+            messages = modify_messages(messages, self.max_seq_len)
         if messages is None:
             return None
         assert isinstance(messages, list), "messages should be a list of dicts"
@@ -797,17 +1024,32 @@ def get_dataset(config: CosmosConfig):
     return CustomWebDatasetDataset()
 
 if __name__ == "__main__":
-    # Do some monkey patching to support Nemotron-3-Nano Vision-Language Model parallelization.
     import cosmos_rl
-    # Override the parallelize_fn to support EP parallelization.
-    cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
-    # # Override the convert_weight_from_hf to support EP weight sharding during initialization
-    cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
-    # # Override the step_hook to enable aux-free load balancing update bias after each step update.
-    cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
-    # # Map the weight name from custom DeepEP convention back to HF convention for safetensor saving.
-    cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
-    
+
+    if os.environ.get("APPLY_QWEN3VL_PATCH") and os.environ.get("APPLY_SIGLIP2_PATCH"):
+        raise RuntimeError(
+            "APPLY_QWEN3VL_PATCH and APPLY_SIGLIP2_PATCH cannot both be set. "
+            "Please set exactly one to select the model-specific patches."
+        )
+
+    if os.environ.get("APPLY_QWEN3VL_PATCH"):
+        # Qwen3VL: skip NemotronH-specific overrides, apply Qwen3VL-specific patches
+        # from qwen3_vl_patches import apply_qwen3vl_patches
+        # apply_qwen3vl_patches()
+        pass
+    elif os.environ.get("APPLY_SIGLIP2_PATCH"):
+        # SigLIP2: uses NemotronH as LLM backbone, same monkey patches apply
+        cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+        cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
+        cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
+        cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    else:
+        # NemotronH: monkey patching for EP parallelization, weight conversion, etc.
+        cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+        cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
+        cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
+        cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+
     # Launch the worker
     cosmos_rl.launcher.worker_entry.main(
         # Uncomment this if you want to use a custom dataset

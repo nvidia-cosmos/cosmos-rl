@@ -2133,6 +2133,20 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
 
         if not skip_visual_embedding:
             image_embeds, video_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
+        elif skip_visual_embedding and self.training:
+            # Dummy forward to keep FSDP all-gather synchronised across ranks
+            merge_size = self.projector.spatial_merge_size
+            dummy_height = merge_size
+            dummy_width = merge_size
+            channels = self.visual.config.num_channels * self.visual.config.patch_size ** 2
+            final_pixel_value = torch.zeros(
+                dummy_height * dummy_width, channels,
+                device=inputs_embeds.device, dtype=self.visual.dtype
+            )
+            final_thw = torch.tensor([[1, dummy_height, dummy_width]], device=inputs_embeds.device)
+            num_image = 1
+            image_embeds, video_embeds = self.get_image_features(final_pixel_value, final_thw, num_image)
+            image_embeds = [image_embed[0:0] for image_embed in image_embeds]
         else:
             image_embeds = None
             video_embeds = None

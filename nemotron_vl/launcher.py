@@ -133,8 +133,8 @@ class CustomDataset(Dataset):
                         self.data_list.append(json.loads(line)['messages'])
         self.scale_factor = (16 * 2) ** 2
         self.max_pixels = None
-        self.max_num_patches = config.custom.get('sigle_image_max_num_patches',256)
-        self.max_frame_num_patches = config.custom.get('sigle_frame_max_num_patches',196)
+        self.max_num_patches = config.custom.get('single_image_max_num_patches',256)
+        self.max_frame_num_patches = config.custom.get('single_frame_max_num_patches',196)
     def __len__(self):
         return len(self.data_list)
 

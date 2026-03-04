@@ -166,8 +166,8 @@ def build_toy_config(
                 "PatchMerger"
             ],  # Use "PatchMerger" (not "FSDPPatchMerger") when not using FSDP
             "include_video": True,  # Same as working training config
-            "sigle_image_max_num_patches": 1960,
-            "sigle_frame_max_num_patches": 196,
+            "single_image_max_num_patches": 1960,
+            "single_frame_max_num_patches": 196,
         },
     }
     return CosmosConfig.from_dict(full_config)
