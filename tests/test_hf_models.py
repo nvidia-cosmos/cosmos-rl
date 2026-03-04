@@ -66,6 +66,7 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen/Qwen3.5-4B",
             # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
@@ -152,6 +153,7 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen/Qwen3.5-4B",
             # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
@@ -174,6 +176,7 @@ class TestHFModel(unittest.TestCase):
                         model_id,
                         max_position_embeddings=max_position_embeddings,
                     )
+
             cosmos_hf_model._apply(
                 lambda t: torch.empty_like(t, device=device)
                 if t.device.type == "meta"
@@ -187,6 +190,10 @@ class TestHFModel(unittest.TestCase):
                 model_id, parallel_dims, device, revision=None
             )
             cosmos_hf_model.eval()
+
+            # Workaround: Qwen3.5 models currently have an illegal memory access issue with flash attention; force SDPA instead.
+            if model_id == "Qwen/Qwen3.5-4B":
+                config._attn_implementation = "sdpa"
 
             hf_model = (
                 cosmos_hf_model.model_class.from_pretrained(
