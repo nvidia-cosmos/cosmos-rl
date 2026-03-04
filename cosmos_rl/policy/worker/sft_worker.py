@@ -414,6 +414,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             # Filter kwargs to only those the function accepts
             filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
             batch_sampler = batch_sampler(**filtered)
+        self.train_batch_sampler = batch_sampler
 
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
@@ -485,7 +486,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             else:
                 # Resume training from the last checkpoint if needed
                 total_steps_per_epoch = len(
-                    get_train_data_loader(self.train_sampler, batch_sampler)
+                    get_train_data_loader(self.train_sampler, self.train_batch_sampler)
                 )
                 data_loader_bias = self.train_step % total_steps_per_epoch
                 data_loader_bias *= self.config.train.train_batch_per_replica
@@ -510,15 +511,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             else 1
                         ),
                     )
-                if batch_sampler is not None:
-                    batch_sampler = SkippingSampler(
-                        batch_sampler,
-                        skip_samples=data_loader_bias
-                        // (
-                            len(list(islice(iter(batch_sampler), 1))[0])
-                            if isinstance(list(islice(iter(batch_sampler), 1))[0], list)
-                            else 1
-                        ),
+                if self.train_batch_sampler is not None:
+                    if hasattr(self.train_batch_sampler, "set_epoch"):
+                        self.train_batch_sampler.set_epoch(
+                            self.train_step // total_steps_per_epoch
+                        )
+                    batched_loader_bias = self.train_step % total_steps_per_epoch
+                    self.train_batch_sampler = SkippingSampler(
+                        self.train_batch_sampler,
+                        skip_samples=batched_loader_bias,
                     )
                 self.start_epoch = self.train_step // total_steps_per_epoch
 
@@ -549,7 +550,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             self.train_data_loader = train_dataset.dataset.data_loader
         else:
             self.train_data_loader = get_train_data_loader(
-                self.train_sampler, batch_sampler
+                self.train_sampler, self.train_batch_sampler
             )
 
         if hasattr(val_dataset.dataset, "data_loader"):
@@ -842,6 +843,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
         for _ in range(self.start_epoch, self.epoch):
             if hasattr(self.train_sampler, "set_epoch"):
                 self.train_sampler.set_epoch(cur_epoch)
+            if hasattr(self.train_batch_sampler, "set_epoch"):
+                self.train_batch_sampler.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
 
             data_arrival_event = torch.cuda.Event(enable_timing=True)
@@ -874,6 +877,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     save_freq=self._save_freq,
                     data_arrival_event=data_arrival_event,
                 )
+                report_data["train/epoch"] = cur_epoch
 
                 self.train_step += 1
 
