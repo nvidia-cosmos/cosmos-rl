@@ -357,12 +357,11 @@ def main() -> None:
         payload_bytes = build_fake_video_torch_bytes(shape, dtype=args.video_dtype)
         # Matches video_client.py: include video_infos; also include media_type for clarity.
         meta = {
-            "media_type": "video",
+            "media_type": "latent",
             "prompts": ["Latency benchmark prompt." for _ in range(batch)],
             "reward_fn": reward_fn,
             "video_infos": [{"video_fps": 16.0} for _ in range(batch)],
         }
-
     log(
         f"[LatencyBenchmark] Prepared payload: media_type={args.media_type}, shape={shape}, bytes={len(payload_bytes)}"
     )
