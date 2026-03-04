@@ -46,9 +46,15 @@ from webdataset.tariterators import (
     tar_file_expander as _wds_tar_file_expander,
 )
 
+try:
+    import decord
+except ImportError:
+    decord = None
 
-import decord
-from torchcodec.decoders import VideoDecoder
+try:
+    from torchcodec.decoders import VideoDecoder
+except ImportError:
+    VideoDecoder = None
 
 try:
     import wandb
@@ -67,23 +73,6 @@ def _check_torchcodec() -> tuple[bool, str]:
         return False, f"RuntimeError: {e}"
 
 
-def _check_decord() -> tuple[bool, str]:
-    """Return (available, reason) for decord."""
-    try:
-        import decord  # noqa: F401
-        return True, ""
-    except ImportError as e:
-        return False, f"ImportError: {e}"
-
-
-def _is_torchcodec_available():
-    return _check_torchcodec()[0]
-
-
-def _is_decord_available():
-    return _check_decord()[0]
-
-
 @lru_cache(maxsize=1)
 def _get_video_backend() -> str:
     """Select video decoding backend: torchcodec > decord.
@@ -93,28 +82,15 @@ def _get_video_backend() -> str:
     forced = os.environ.get("FORCE_QWENVL_VIDEO_READER")
     if forced:
         if forced == "torchcodec":
-            ok, reason = _check_torchcodec()
-            if ok:
-                return "torchcodec"
-            raise ImportError(
-                f"Forced video backend 'torchcodec' is not available: {reason}\n"
-                f"Hint: torchcodec requires FFmpeg shared libraries "
-                f"(apt-get install -y ffmpeg). Unset FORCE_QWENVL_VIDEO_READER to fall back to decord."
-            )
+            assert VideoDecoder is not None, "torchcodec is not available"
         elif forced == "decord":
-            ok, reason = _check_decord()
-            if ok:
-                return "decord"
-            raise ImportError(
-                f"Forced video backend 'decord' is not available: {reason}"
-            )
+            assert decord is not None, "decord is not available"
         else:
-            raise ImportError(
-                f"Unknown video backend '{forced}'. Choose 'torchcodec' or 'decord'."
-            )
-    if _is_torchcodec_available():
+            raise ValueError(f"Invalid FORCE_QWENVL_VIDEO_READER value: {forced}, must be 'torchcodec' or 'decord'")
+        return forced
+    if VideoDecoder is not None:
         return "torchcodec"
-    if _is_decord_available():
+    elif decord is not None:
         return "decord"
     raise ImportError(
         "No video decoding backend found. Install torchcodec (preferred) or decord."
