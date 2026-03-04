@@ -46,6 +46,18 @@ For fully document about diffusion RL, you can find it at the [offical document]
 
 > **Important Note**: Since the merged SFT checkpoints are not released in the huggingface, we use the pre-trained checkpoint instead.
 
+**Parallelism**: We recommend to use 256 GPUs (with memory > 80GB) for 2B model training, while 1024 GPUs for 14B model. You can adjust the DDP/FSDP/CP by change the following configs:
+
+```toml
+[model]
+fsdp_shard_size = 32  # For FSDP size
+dp_replicate_size = 4  # For DDP size, also the HSDP dp_replicate
+
+[model_parallel]
+context_parallel_size = 8  # For CP size
+```
+
+
 The DDRL parameters and explanations are listed as below. Detailed usage can be found in `cosmos_rl/policy/config/wfm/__init__.py`.
 
 ```python
