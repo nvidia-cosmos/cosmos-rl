@@ -639,7 +639,11 @@ class ModelRegistry:
                 mark_only_lora_as_trainable(model, config.policy.lora)
 
             if config.policy.enable_liger_kernel:
-                util.replace_with_liger_equivalents(model, config)
+                from cosmos_rl.policy.model.hf_models import HFModel
+
+                util.replace_with_liger_equivalents(
+                    model.model if isinstance(model, HFModel) else model, config
+                )
 
             # Apply pattern-based trainable configuration
             trainable_pattern = config.policy.trainable_pattern

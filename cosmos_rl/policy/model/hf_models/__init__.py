@@ -825,6 +825,24 @@ class HFModel(BaseModel):
     def named_modules(self, *args, **kwargs):
         return self.model.named_modules(*args, **kwargs)
 
+    def parameters(self, *args, **kwargs):
+        return self.model.parameters(*args, **kwargs)
+
+    def modules(self, *args, **kwargs):
+        return self.model.modules(*args, **kwargs)
+
+    def children(self, *args, **kwargs):
+        return self.model.children(*args, **kwargs)
+
+    def named_children(self, *args, **kwargs):
+        return self.model.named_children(*args, **kwargs)
+
+    def buffers(self, *args, **kwargs):
+        return self.model.buffers(*args, **kwargs)
+
+    def named_buffers(self, *args, **kwargs):
+        return self.model.named_buffers(*args, **kwargs)
+
     @classmethod
     def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [

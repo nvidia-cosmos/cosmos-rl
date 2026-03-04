@@ -1241,33 +1241,14 @@ def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) 
         config.policy.enable_liger_fused_cross_entropy
         and config.train.train_policy.type == "sft"
     ):
-        found_module = None
-        found_count = 0
-        names = []
-        for name, child in root.named_modules():
-            names.append(name)
-
-        for name, child in root.named_modules():
-            # split by "." and check if last part is "lm_head" to avoid false positive like "model.lm_head_adapter"
-            if name.split(".")[-1] == "lm_head":
-                found_count += 1
-                found_module = child
-        if found_count == 0:
-            pass
-        elif found_count > 1:
-            raise ValueError(
-                f"Multiple modules with 'lm_head' in their name were found ({found_count}), cannot determine which one to replace for fused cross entropy."
-            )
-        else:
-            logger.info(
-                f"Found module {name} for lm_head to replace with IdentityLayer for fused cross entropy."
-            )
-            # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
-            new_lm_head = IdentityLayer()
-            new_lm_head.register_parameter("weight", found_module.weight)
-            if hasattr(found_module, "bias") and found_module.bias is not None:
-                new_lm_head.register_parameter("bias", found_module.bias)
-            replace_child(name, found_module, new_lm_head, root)
+        for name, child in root.named_children():
+            if name == "lm_head":
+                # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
+                new_lm_head = IdentityLayer()
+                new_lm_head.register_parameter("weight", child.weight)
+                if hasattr(child, "bias") and child.bias is not None:
+                    new_lm_head.register_parameter("bias", child.bias)
+                replace_child(name, child, new_lm_head, root)
 
 
 @functools.lru_cache(maxsize=None)
