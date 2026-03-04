@@ -639,7 +639,7 @@ class ModelRegistry:
                 mark_only_lora_as_trainable(model, config.policy.lora)
 
             if config.policy.enable_liger_kernel:
-                util.replace_with_liger_equivalents(model)
+                util.replace_with_liger_equivalents(model, config)
 
             # Apply pattern-based trainable configuration
             trainable_pattern = config.policy.trainable_pattern

@@ -1195,18 +1195,13 @@ def rank0_print(msg, *args, **kwargs):
         logger.info(msg, *args, **kwargs)
 
 
-def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
-    # Walk children first so we can safely replace in-place.
-    for name, child in list(root.named_children()):
-        replace_with_liger_equivalents(child)
-
-        lig = getattr(child, "liger_equivalent", None)
-        if lig is None:
-            continue
-
-        # Call the factory/method if it's callable; otherwise assume it's already a module.
-        new_child = lig() if callable(lig) else lig
-
+def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) -> None:
+    def replace_child(
+        name: str,
+        child: torch.nn.Module,
+        new_child: torch.nn.Module,
+        root: torch.nn.Module,
+    ):
         # Keep training/eval state.
         try:
             new_child.train(child.training)
@@ -1228,6 +1223,30 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
         rank0_print(f"Replaced {name} with liger equivalent")
         # Swap it in.
         setattr(root, name, new_child)
+
+    # Walk children first so we can safely replace in-place.
+    for name, child in list(root.named_children()):
+        replace_with_liger_equivalents(child, config)
+
+        lig = getattr(child, "liger_equivalent", None)
+        if lig is None:
+            continue
+
+        # Call the factory/method if it's callable; otherwise assume it's already a module.
+        new_child = lig() if callable(lig) else lig
+        replace_child(name, child, new_child, root)
+
+    # special case for lm_head
+    if config.policy.enable_liger_fused_cross_entropy:
+        for name, child in list(root.named_children()):
+            if "lm_head" in name:
+                # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
+                new_lm_head = IdentityLayer()
+                setattr(new_lm_head, "weight", child.weight)
+                setattr(new_lm_head, "bias", child.bias)
+
+                replace_child(name, child, new_lm_head, root)
+                break
 
 
 @functools.lru_cache(maxsize=None)

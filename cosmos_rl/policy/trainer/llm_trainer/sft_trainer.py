@@ -43,11 +43,13 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.kernel.loss import CrossEntropyLoss
 
 
 def async_safe_ce(
     output: torch.Tensor,
     target: torch.LongTensor,
+    ce_impl: torch.nn.Module,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
     output_packing_mask: Optional[torch.Tensor] = None,
@@ -57,11 +59,13 @@ def async_safe_ce(
     **kwargs,
 ) -> torch.Tensor:
     if output_packing_mask is not None:
-        output = (
-            output[output_packing_mask].contiguous().view(-1, output.size(-1)).float()
-        )
+        output = output[output_packing_mask].contiguous().view(-1, output.size(-1))
     else:
-        output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+        output = output[:, :-1].contiguous().view(-1, output.size(-1))
+
+    lin_weight = kwargs.get(
+        "lin_weight", None
+    )  # For fused cross entropy, we need to pass the weight of lm_head to the loss function
 
     if target_packing_mask is not None:
         target = target[target_packing_mask].contiguous().view(-1)
@@ -70,11 +74,12 @@ def async_safe_ce(
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
         loss = (
-            torch.nn.functional.cross_entropy(
+            ce_impl(
                 output,
                 target,
                 ignore_index=ignore_index,
                 reduction="mean",
+                lin_weight=lin_weight,
             )
             * loss_scaling_factor
         )
@@ -82,11 +87,12 @@ def async_safe_ce(
         loss = torch.nan_to_num(loss, nan=0.0)
         return loss
     else:
-        loss = torch.nn.functional.cross_entropy(
+        loss = ce_impl(
             output,
             target,
             ignore_index=ignore_index,
             reduction="none",
+            lin_weight=lin_weight,
         )
 
         # Compute all token numbers across dp-world
@@ -136,6 +142,7 @@ class SFTTrainer(LLMTrainer):
 
         self.loss_fn = partial(
             async_safe_ce,
+            ce_impl=CrossEntropyLoss(self.config),
             dp_group=dp_group
             if self.config.train.train_policy.balance_dp_token
             else None,
@@ -366,13 +373,21 @@ class SFTTrainer(LLMTrainer):
                                 else aux_loss_dict[k] + v.detach()
                             )
                             loss = loss + v
+                kwargs = {
+                    "output_packing_mask": batch.get("input_packing_mask", None),
+                    "target_packing_mask": batch.get("label_packing_mask", None),
+                    "loss_scaling_factor": 1.0 / len(mini_batch_begin_idxs),
+                }
+
+                if self.config.policy.enable_liger_fused_cross_entropy:
+                    # In this case, `logits` in model output is not processed by lm_head. We have to pass weight
+                    # of lm_head to the loss function to fuse the linear and cross entropy.
+                    kwargs["lin_weight"] = self.model.lm_head.weight
 
                 ce_loss = self.loss_fn(
                     logits,
                     labels,
-                    output_packing_mask=batch.get("input_packing_mask", None),
-                    target_packing_mask=batch.get("label_packing_mask", None),
-                    loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                    **kwargs,
                 )
                 aux_loss_dict["loss"] = (
                     ce_loss.detach()
@@ -776,6 +791,7 @@ class SFTTrainer(LLMTrainer):
         return torch.compile(
             partial(
                 async_safe_ce,
+                ce_impl=CrossEntropyLoss(),
                 loss_scaling_factor=loss_scaling_factor,
                 dp_group=dp_group
                 if self.config.train.train_policy.balance_dp_token

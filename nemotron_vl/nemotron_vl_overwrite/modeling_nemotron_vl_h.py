@@ -2453,7 +2453,9 @@ class NemotronVLForConditionCausalLM(NemotronVLPreTrainedModel, GenerationMixin)
 
         # TODO: Check zamba_modeling.py: https://github.com/huggingface/transformers/blob/d7188ba600e36d3fd191b12e19f1b3bb81a8404f/src/transformers/models/zamba/modeling_zamba.py#L1284C1-L1286C2
         #logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
-        logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
+        # We move cast to float32 in the loss function to avoid precision issues.
+        # If in liger cross entropy, we even don't need to cast to float32.
+        logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype))
 
         loss = None
         if labels is not None:

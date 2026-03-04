@@ -1166,6 +1166,15 @@ class PolicyConfig(BaseModel):
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
+    enable_liger_cross_entropy: bool = Field(
+        default=False,
+        description="Whether to use liger cross entropy. Only valid for SFT now.",
+    )
+    enable_liger_fused_cross_entropy: bool = Field(
+        default=False,
+        description="Whether to use liger fused cross entropy. Only valid for SFT now.",
+    )
+
     aux_loss_coeff: float = Field(
         default=0.0,
         description="Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.",
