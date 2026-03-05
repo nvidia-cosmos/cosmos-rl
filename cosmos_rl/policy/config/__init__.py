@@ -21,8 +21,14 @@ from typing import Any, Dict, Union, Optional, List, Literal
 import os
 import json
 import hashlib
-from cosmos_rl.utils.modelscope import update_config_if_modelscope
-from cosmos_rl.utils.logging import logger
+
+# For building sphinx documentation, the doc-build environment does not have cosmos_rl installed
+# so we need to import the utils.modelscope and utils.logging from the cosmos_rl package.
+try:
+    from cosmos_rl.utils.modelscope import update_config_if_modelscope
+    from cosmos_rl.utils.logging import logger
+except ImportError:
+    pass
 
 
 def config_hash(config: BaseModel) -> str:
