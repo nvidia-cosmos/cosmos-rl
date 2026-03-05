@@ -1,13 +1,13 @@
 #!/bin/bash
 #
-# 
+#
 # Usage:
 #   ./ocr.sh [WORKSPACE_DIR] [VENV_DIR]
 #   - WORKSPACE_DIR: Ignored (kept for interface consistency with other scripts)
 #   - VENV_DIR:      Directory for the virtual environment (default: ~/ocr)
 # Backward-compatible:
 #   ./ocr.sh [VENV_DIR]    # when only one arg is provided, it is treated as VENV_DIR
-# 
+#
 
 WORKSPACE_DIR="${1:-/workspace}"
 VENV_DIR="${2:-${1:-$HOME/ocr}}"
@@ -41,7 +41,7 @@ fi
 
 # Install OCR dependencies into the venv
 "$PIP_BIN" install torch>=2.6.0 torchvision>=0.21.0
-"$PIP_BIN" install redis msgpack requests 
+"$PIP_BIN" install redis msgpack requests
 "$PIP_BIN" install paddlepaddle-gpu==2.6.2
 "$PIP_BIN" install paddleocr==2.9.1
 "$PIP_BIN" install python-Levenshtein

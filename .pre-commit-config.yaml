@@ -17,4 +17,12 @@ repos:
       args: [ -i, --style=Google]
       files: ^cosmos_rl/csrc/
       additional_dependencies: ['clang-format']
-
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.0.1
+  hooks:
+    - id: trailing-whitespace
+      exclude_types: [python]
+      args: [--markdown-linebreak-ext=md]
+    - id: end-of-file-fixer
+      exclude_types: [python]
+    - id: check-symlinks

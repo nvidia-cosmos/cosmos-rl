@@ -74,7 +74,7 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
             assert isinstance(
                 conversation, list
             ), f"Prompt should be a string, but got {type(conversation)}， {conversation}"
-            
+
             # Apply chat-template to get the raw prompt in text
             return self.tokenizer.apply_chat_template(
                 conversation,
@@ -135,7 +135,7 @@ Save this file to `./custom_entry.py`
     --rollout 2 \
     custom_entry.py
 
-Check `./tools/dataset/ <#>`_ for more pre-defined customized datasets. 
+Check `./tools/dataset/ <#>`_ for more pre-defined customized datasets.
 
 Customized reward
 -------------------
@@ -300,7 +300,7 @@ Here we just reuse the pre-defined LLM data packer to demonstrate how to pass yo
     if __name__ == "__main__":
         def get_dataset_factory(config: Config) -> Dataset:
             return GSM8kDataset()
- 
+
         launch_worker(
             #...
             dataset=get_dataset_factory,
@@ -321,7 +321,7 @@ To customize the model, one needs to implement:
 Let's take `deepseek_v3` as an example.
 
 .. code-block:: python
-    
+
     from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
     from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
     from cosmos_rl.policy.model.deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
@@ -333,12 +333,10 @@ Let's take `deepseek_v3` as an example.
         ...
 
 
-Import weight mapper class and data packer class from the external source code. 
+Import weight mapper class and data packer class from the external source code.
 
 Then register the model into the registry via `ModelRegistry.register` decorator.
 
-User can launch job with: 
+User can launch job with:
 
 >>> cosmos-rl --config ./configs/deepseek-v3/deepseek-v3-moe-670b-fsdp64-cp4-ep64-sft.toml
-
-

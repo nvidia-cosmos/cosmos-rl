@@ -3,7 +3,7 @@
 # Usage: ./dance_grpo.sh [WORKSPACE_DIR] [VENV_DIR]
 # WORKSPACE_DIR: Directory where DanceGRPO and VideoReward will be cloned (default: /workspace)
 # VENV_DIR: Directory for the virtual environment (default: ~/dance_grpo)
-# 
+#
 # Example:
 #   ./dance_grpo.sh /workspace ~/my_venv
 #   ./dance_grpo.sh /custom/workspace  # Uses default venv at ~/dance_grpo
@@ -101,4 +101,3 @@ info "DanceGRPO setup completed successfully!"
 info "To activate the environment, run: source $VENV_DIR/bin/activate"
 
 exit 0
-

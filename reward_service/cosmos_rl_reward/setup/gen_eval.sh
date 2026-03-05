@@ -109,5 +109,3 @@ echo "[gen_eval setup] - ckpt:        ${DOWNLOAD_PATH}/reward_ckpts/${CKPT_NAME}
 echo "[gen_eval setup] - class names: ${DOWNLOAD_PATH}/reward_ckpts/object_names.txt"
 echo "[gen_eval setup] - config:      ${DOWNLOAD_PATH}/mmdetection/configs/mask2former/mask2former_swin-s-p4-w7-224_lsj_8x2_50e_coco.py"
 echo "[gen_eval setup] Service will use download_path from rewards.toml."
-
-

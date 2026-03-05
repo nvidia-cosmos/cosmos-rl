@@ -39,7 +39,7 @@ For a full document about diffusion RL, you can find it at the [offcial document
 
 ### Configuration
 
-**Experiment**: DDRL configurations can be found in `configs/cosmos-predict2-5`. 
+**Experiment**: DDRL configurations can be found in `configs/cosmos-predict2-5`.
 
 - The 2B experiment from the pre-trained checkpoint is `cosmos-predict2-5-2b-720-reason-embedding-ddrl.toml`.
 - The 14B experiment from the pre-trained checkpoint is `cosmos-predict2-5-14b-720-reason-embedding-ddrl.toml`.
@@ -62,20 +62,20 @@ The DDRL parameters and explanations are listed as below. Detailed usage can be 
 
 ```python
 class RLConfig:
-    enabled: bool = False   
+    enabled: bool = False  
 
     ## Rollout parameters ##
-    
+
     # Number of rollout group size. The total batch size is
-    # World_size / num_rollout / model_parallel.context_parallel_size 
-    num_rollout: int = 8    
+    # World_size / num_rollout / model_parallel.context_parallel_size
+    num_rollout: int = 8  
 
     on_policy: bool = True  # Whether to use training policy to rollout
     sample_steps: int = 20  # How many sample steps in rollout
     # Control sample data type (0-t2v, 1-i2v, 2-v2v)
-    min_num_conditional_frames: int = 0 
+    min_num_conditional_frames: int = 0
     max_num_conditional_frames: int = 1
-    
+
     # Whether to use same initial seed within a rollout group
     use_same_seed: bool = False
 
@@ -86,18 +86,18 @@ class RLConfig:
     s_t_min: float = 0.0
     s_noise: float = 1.0
     guidance: float = 0.0       # We do not enable CFG during DDRL
-    
+
     # Training parameters
     train_on: list[int] = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
     update_ref_every_iter: int = 0  # Frequency to update ref model
     clip_ratio: float = 0.0001
     kl_beta: float = 0.0           # Coefficient of reverse KL
     data_beta: float = 0.01          # Coefficient of diffusion loss
-    
+
     # Diffusion loss paramteres. Required When data_beta > 0
     use_rl_sigma_and_noise: bool = True # whether to use rollout noise
     data_on_first_only: bool = False    # Whether to comput diffusion loss once
-    
+
     # Reward configuration
     reward_config: RewardConfig = RewardConfig()
     exp_reward: bool = False            # Whether to rescale reward
@@ -112,7 +112,7 @@ Considering the computation overhead, it's necessary to use a separate async ser
 
 ### Dataset
 
-We provide a data preparation example based on [Cosmos-Predict2.5](https://github.com/nvidia-cosmos/cosmos-predict2.5/blob/main/docs/post-training_video2world_cosmos_nemo_assets.md), you can also construct your own dataset with the same format. 
+We provide a data preparation example based on [Cosmos-Predict2.5](https://github.com/nvidia-cosmos/cosmos-predict2.5/blob/main/docs/post-training_video2world_cosmos_nemo_assets.md), you can also construct your own dataset with the same format.
 
 #### Downloading Dataset
 

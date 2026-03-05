@@ -104,7 +104,7 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
 
 4. Monitor training progress via Wandb.
 
-5. Evaluate the trained world foundational model using the evaluation script. 
+5. Evaluate the trained world foundational model using the evaluation script.
    For Cosmos-Predict2.5, you can refer this repo: `cosmos-predict2.5 <https://github.com/nvidia-cosmos/cosmos-predict2.5>`_.
 
 .. note::
