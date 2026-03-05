@@ -34,7 +34,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffusers", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
+    "diffusers>=0.36.0", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
     "peft",
     "zmq>=0.0.0",
     "nvidia-ml-py>=13.590.48",
