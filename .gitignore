@@ -252,6 +252,11 @@ reward_service/cosmos_rl_reward/_version.py
 */kill_all.sh
 nemotron_vl/*.toml
 nemotron_vl/*.md
-nemotron_vl/launcher_wds_v1.py
-nemotron_vl/debug.sh
-
+nemotron_vl/ut_test_qwen3vl_patches.py
+nemotron_vl/qwen3_vl_patches.py
+nemotron_vl/*.sh
+nemotron_vl/*.txt
+nemotron_vl/*.png
+nemotron_vl/*.md
+*/nohup.out
+docs/plans

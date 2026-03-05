@@ -666,8 +666,10 @@ class CheckpointMananger:
                     )
                     return extra_vars, new_scheduler
             except Exception as e:
+                import traceback
+
                 logger.error(
-                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint...\n{traceback.format_exc()}"
                 )
 
         raise FileNotFoundError(f"No checkpoint found at {base_paths}")

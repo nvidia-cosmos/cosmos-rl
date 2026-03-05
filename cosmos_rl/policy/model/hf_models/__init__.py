@@ -295,6 +295,7 @@ class HFModel(BaseModel):
             "model.embed_tokens",
             "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
+            "model.embeddings",
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
             if embed_tokens is not None:
@@ -822,6 +823,27 @@ class HFModel(BaseModel):
     def named_parameters(self, *args, **kwargs):
         return self.model.named_parameters(*args, **kwargs)
 
+    def named_modules(self, *args, **kwargs):
+        return self.model.named_modules(*args, **kwargs)
+
+    def parameters(self, *args, **kwargs):
+        return self.model.parameters(*args, **kwargs)
+
+    def modules(self, *args, **kwargs):
+        return self.model.modules(*args, **kwargs)
+
+    def children(self, *args, **kwargs):
+        return self.model.children(*args, **kwargs)
+
+    def named_children(self, *args, **kwargs):
+        return self.model.named_children(*args, **kwargs)
+
+    def buffers(self, *args, **kwargs):
+        return self.model.buffers(*args, **kwargs)
+
+    def named_buffers(self, *args, **kwargs):
+        return self.model.named_buffers(*args, **kwargs)
+
     @classmethod
     def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
@@ -849,8 +871,13 @@ class HFModel(BaseModel):
     def check_sequence_packing_compatible(self):
         if self.sequence_packing_forward_patched is None:
             # called only once if patch is successful
+            force_sequence_packing = int(os.environ.get("FORCE_SEQUENCE_PACKING", 0))
             patch_success = sequence_packing_forward_patch(self.hf_config, self)
-            self.sequence_packing_forward_patched = patch_success
+            self.sequence_packing_forward_patched = (
+                patch_success or force_sequence_packing == 1
+            )
+            if (not patch_success) and force_sequence_packing == 1:
+                logger.info("force packing without patch")
         return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
