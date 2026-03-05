@@ -295,6 +295,7 @@ class HFModel(BaseModel):
             "model.embed_tokens",
             "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
+            "model.embeddings",
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
             if embed_tokens is not None:
