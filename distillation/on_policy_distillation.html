@@ -1,0 +1,396 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>On-Policy Distillation &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Overview" href="../wfm/overview.html" />
+    <link rel="prev" title="FP8 Quantization" href="../quantization/fp8.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">On-Policy Distillation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#quick-start">Quick Start</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#example-commands">Example Commands</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#deepmath-dataset-qwen3-8b">DeepMath Dataset (Qwen3-8B)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#countdown-dataset-qwen2-5-1-5b">Countdown Dataset (Qwen2.5-1.5B)</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#configuration-file-structure">Configuration File Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#distillation-parameters">Distillation Parameters</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#core-configuration">Core Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#parallelism-configuration">Parallelism Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#advanced-options">Advanced Options</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#teacher-model-setting-configuration">Teacher Model Setting Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#loss-sampling-algorithm-configuration">Loss &amp; Sampling Algorithm Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#model-training-framework-configuration">Model Training Framework Configuration</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#launching-on-slurm">Launching on SLURM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#notes">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#launching-on-lepton">Launching on Lepton</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#reference-job">Reference Job</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#steps-to-clone-and-customize">Steps to Clone and Customize</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">On-Policy Distillation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/distillation/on_policy_distillation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="on-policy-distillation">
+<h1>On-Policy Distillation<a class="headerlink" href="#on-policy-distillation" title="Link to this heading"></a></h1>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>On-policy distillation is a training approach where a student model learns from a teacher model’s logits distribution through knowledge distillation during the rollout phase. This technique enables efficient transfer of knowledge from larger or better-performing teacher models to smaller or faster student models on targeted datasets.</p>
+<p>In Cosmos RL, on-policy distillation is integrated into the training pipeline where:</p>
+<ol class="arabic simple">
+<li><p>The student model generates completions during rollout</p></li>
+<li><p>The teacher model receives all completions the student model generates to get the logits and probability distributions</p></li>
+<li><p>The student model receives the teacher’s logit probability distributions and is trained to match the teacher’s distribution using simple reserve KL or Jensen-Shannon Divergence (JSD) loss</p></li>
+<li><p>This happens within the standard training loop alongside other optimization objectives</p></li>
+</ol>
+</section>
+<section id="quick-start">
+<h2>Quick Start<a class="headerlink" href="#quick-start" title="Link to this heading"></a></h2>
+<section id="example-commands">
+<h3>Example Commands<a class="headerlink" href="#example-commands" title="Link to this heading"></a></h3>
+<section id="deepmath-dataset-qwen3-8b">
+<h4>DeepMath Dataset (Qwen3-8B)<a class="headerlink" href="#deepmath-dataset-qwen3-8b" title="Link to this heading"></a></h4>
+<p>To start an on-policy distillation job for the Qwen3-8B model on the DeepMath dataset:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/qwen3/qwen3-8b-distill-deepmath.toml<span class="w"> </span>tools/dataset/deepmath_distill.py
+</pre></div>
+</div>
+<p>Breaking down the command:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">cosmos-rl</span></code>: Main CLI entry point</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--config</span></code>: Path to the TOML configuration file</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tools/dataset/deepmath_distill.py</span></code>: Custom dataset and reward function script that handles data loading and evaluation</p></li>
+</ul>
+</section>
+<section id="countdown-dataset-qwen2-5-1-5b">
+<h4>Countdown Dataset (Qwen2.5-1.5B)<a class="headerlink" href="#countdown-dataset-qwen2-5-1-5b" title="Link to this heading"></a></h4>
+<p>To start an on-policy distillation job for the Qwen2.5-1.5B model on the Countdown dataset:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/qwen2-5/qwen2-5-1.5b-distill-countdown.toml<span class="w"> </span>tools/dataset/countdown_distill.py
+</pre></div>
+</div>
+<p>This example uses a smaller model (1.5B) with a different task (Countdown numbers game) compared to the DeepMath example.</p>
+</section>
+</section>
+</section>
+<section id="configuration-file-structure">
+<h2>Configuration File Structure<a class="headerlink" href="#configuration-file-structure" title="Link to this heading"></a></h2>
+<p>The configuration file (TOML format) contains multiple sections. Here’s the example section in the toml config for distillation:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[distillation]</span>
+<span class="n">enable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">model_name_or_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Qwen/Qwen3-8B&quot;</span>
+<span class="n">compile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">mini_batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span>
+<span class="n">master_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
+<span class="n">param_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;bfloat16&quot;</span>
+<span class="n">logprob_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
+<span class="n">fsdp_reduce_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
+<span class="n">fsdp_offload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">fsdp_reshard_after_forward</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;default&quot;</span>
+<span class="n">batch_size_per_replica</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">16</span>
+<span class="n">top_k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">jsd_beta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">include_prompt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">trainer_token_ids_from_teacher</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">rollout_top_k_recompute</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+
+<span class="k">[distillation.parallelism]</span>
+<span class="n">n_init_replicas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">tp_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">cp_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">dp_shard_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span>
+<span class="n">pp_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">dp_replicate_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+</pre></div>
+</div>
+</section>
+<section id="distillation-parameters">
+<h2>Distillation Parameters<a class="headerlink" href="#distillation-parameters" title="Link to this heading"></a></h2>
+<section id="core-configuration">
+<h3>Core Configuration<a class="headerlink" href="#core-configuration" title="Link to this heading"></a></h3>
+<dl>
+<dt><strong>enable</strong> (boolean)</dt><dd><p>Enable/disable distillation during training. Set to <code class="docutils literal notranslate"><span class="pre">true</span></code> to activate the distillation loss.</p>
+</dd>
+<dt><strong>model_name_or_path</strong> (string)</dt><dd><p>Path or HuggingFace model identifier for the teacher model. This is the model from which logits will be extracted during rollout.</p>
+<p>Example: <code class="docutils literal notranslate"><span class="pre">&quot;Qwen/Qwen3-8B&quot;</span></code></p>
+</dd>
+<dt><strong>mini_batch</strong> (integer)</dt><dd><p>Batch size at each GPU for each forward execution when the teacher model generates logits and logprobs using the student-generated prompt and completion. Smaller values reduce peak memory usage during teacher inference.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">1</span></code></p>
+</dd>
+<dt><strong>batch_size_per_replica</strong> (integer)</dt><dd><p>Total number of samples processed per teacher model replica per distillation step. This may be first split to each GPU in the replica and then further split into multiple <code class="docutils literal notranslate"><span class="pre">mini_batch</span></code> forward passes for memory efficiency. For example, if <code class="docutils literal notranslate"><span class="pre">batch_size_per_replica=32</span></code> and <code class="docutils literal notranslate"><span class="pre">mini_batch=8</span></code> and there are 2 GPUs in the replica, the teacher will make 2 forward passes per GPU.</p>
+<p>Formula: <code class="docutils literal notranslate"><span class="pre">number_of_teacher_forward_passes</span> <span class="pre">=</span> <span class="pre">batch_size_per_replica</span> <span class="pre">//</span> <span class="pre">(number_of_gpus_in_replica</span> <span class="pre">*</span> <span class="pre">mini_batch)</span></code></p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">8</span></code></p>
+</dd>
+</dl>
+</section>
+<section id="parallelism-configuration">
+<h3>Parallelism Configuration<a class="headerlink" href="#parallelism-configuration" title="Link to this heading"></a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">[distillation.parallelism]</span></code> section configures GPU parallelism for distillation:</p>
+<dl class="simple">
+<dt><strong>n_init_replicas</strong> (integer)</dt><dd><p>Number of parallel distillation workers. Keep at <code class="docutils literal notranslate"><span class="pre">1</span></code> unless running multi-node distillation.</p>
+</dd>
+<dt><strong>tp_size</strong> (integer)</dt><dd><p>Tensor parallelism degree. Splits model parameters across GPUs. Use for very large models.</p>
+</dd>
+<dt><strong>dp_shard_size</strong> (integer)</dt><dd><p>Data parallelism shard size. Number of GPUs for data parallelism.</p>
+</dd>
+</dl>
+</section>
+<section id="advanced-options">
+<h3>Advanced Options<a class="headerlink" href="#advanced-options" title="Link to this heading"></a></h3>
+<section id="teacher-model-setting-configuration">
+<h4>Teacher Model Setting Configuration<a class="headerlink" href="#teacher-model-setting-configuration" title="Link to this heading"></a></h4>
+<dl class="simple">
+<dt><strong>compile</strong>, <strong>master_dtype</strong>, <strong>param_dtype</strong>, <strong>logprob_dtype</strong>, <strong>fsdp_reduce_dtype</strong>, <strong>fsdp_offload</strong>, <strong>fsdp_reshard_after_forward</strong></dt><dd><p>These parameters work the same as in the <code class="docutils literal notranslate"><span class="pre">[train]</span></code> section for normal model settings. They control compilation, mixed precision forward, FSDP behavior, and memory management for the teacher model. See the <code class="docutils literal notranslate"><span class="pre">[train]</span></code> section documentation for detailed explanations.</p>
+</dd>
+</dl>
+</section>
+<section id="loss-sampling-algorithm-configuration">
+<h4>Loss &amp; Sampling Algorithm Configuration<a class="headerlink" href="#loss-sampling-algorithm-configuration" title="Link to this heading"></a></h4>
+<dl>
+<dt><strong>jsd_beta</strong> (float)</dt><dd><p>Interpolation coefficient between <code class="docutils literal notranslate"><span class="pre">0.0</span></code> and <code class="docutils literal notranslate"><span class="pre">1.0</span></code> of the Generalized Jensen-Shannon Divergence loss.</p>
+<ul class="simple">
+<li><p>When beta is <code class="docutils literal notranslate"><span class="pre">0.0</span></code>, the loss is the KL divergence</p></li>
+<li><p>When beta is <code class="docutils literal notranslate"><span class="pre">1.0</span></code>, the loss is the Inverse KL divergence</p></li>
+<li><p>Values between 0 and 1 interpolate between these two extremes</p></li>
+</ul>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">0.5</span></code></p>
+</dd>
+<dt><strong>top_k</strong> (integer)</dt><dd><p>Controls the distillation loss formulation:</p>
+<ul class="simple">
+<li><p>When <code class="docutils literal notranslate"><span class="pre">0</span></code>: Uses simple reverse KL for loss (as described in <a class="reference external" href="https://thinkingmachines.ai/blog/on-policy-distillation">On-Policy Distillation</a>)</p></li>
+<li><p>When <code class="docutils literal notranslate"><span class="pre">&gt;</span> <span class="pre">0</span></code>: Uses the generalized Jensen-Shannon Divergence loss for knowledge distillation using <code class="docutils literal notranslate"><span class="pre">F.kl_div</span></code>, restricting to top-k most likely tokens. See Eq. (1) of <a class="reference external" href="https://huggingface.co/papers/2306.13649">this paper</a> for the definition</p></li>
+</ul>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">0</span></code></p>
+</dd>
+</dl>
+</section>
+<section id="model-training-framework-configuration">
+<h4>Model Training Framework Configuration<a class="headerlink" href="#model-training-framework-configuration" title="Link to this heading"></a></h4>
+<dl>
+<dt><strong>include_prompt</strong> (boolean)</dt><dd><p>Include the prompt tokens in the distillation loss computation. When <code class="docutils literal notranslate"><span class="pre">false</span></code>, only completion tokens are considered.</p>
+<ul class="simple">
+<li><p>Set to <code class="docutils literal notranslate"><span class="pre">true</span></code> if you want the student to also match teacher’s prompt embeddings</p></li>
+<li><p>Set to <code class="docutils literal notranslate"><span class="pre">false</span></code> (default) to focus on generation quality</p></li>
+</ul>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">false</span></code></p>
+</dd>
+<dt><strong>trainer_token_ids_from_teacher</strong> (boolean)</dt><dd><p>Whether the trainer gets all top_k token ids directly from its redis-connected teacher model during distillation rather than from the rollout structure. This can simplify the rollout payload when being transferred in the framework.</p>
+<p>Note: When <code class="docutils literal notranslate"><span class="pre">top_k</span> <span class="pre">&lt;=</span> <span class="pre">0</span></code>, this parameter is automatically set to <code class="docutils literal notranslate"><span class="pre">false</span></code>.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">true</span></code></p>
+</dd>
+<dt><strong>rollout_top_k_recompute</strong> (boolean)</dt><dd><p>Whether to recompute all top-k logprobs with top-k token ids after the full sequence is generated during rollout for distillation. This can ensure the completion generation process doesn’t keep large top-k values that would degrade generation efficiency.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">false</span></code></p>
+</dd>
+</dl>
+</section>
+</section>
+</section>
+<section id="launching-on-slurm">
+<h2>Launching on SLURM<a class="headerlink" href="#launching-on-slurm" title="Link to this heading"></a></h2>
+<p>You can launch an on-policy distillation task on SLURM using the Cosmos RL dispatch helper:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span><span class="nv">$PATH_TO_COSMOS_RL_ROOT</span>/tools/slurm/dispatch_job.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--ngpu-per-node<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--config-path<span class="w"> </span><span class="nv">$PATH_TO_COSMOS_RL_ROOT</span>/configs/qwen3/qwen3-8b-distill-deepmath.toml<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output-root-path<span class="w"> </span><span class="nv">$PATH_TO_COSMOS_RL_ROOT</span>/s_output<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--cosmos-container<span class="w"> </span><span class="nv">$SQSH_PATH</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--slurm-partition<span class="w"> </span>batch<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--slurm-account<span class="w"> </span>sw_aidot<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--repo-root-path<span class="w"> </span><span class="nv">$PATH_TO_COSMOS_RL_ROOT</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>./cosmos_rl/tools/dataset/deepmath_distill.py
+</pre></div>
+</div>
+<section id="notes">
+<h3>Notes<a class="headerlink" href="#notes" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">$PATH_TO_COSMOS_RL_ROOT</span></code> to your local Cosmos RL repository root.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">$SQSH_PATH</span></code> to the container image path (<code class="docutils literal notranslate"><span class="pre">.sqsh</span></code>).</p></li>
+<li><p>You can swap the config and dataset entry script for other distillation tasks.</p></li>
+</ul>
+</section>
+</section>
+<section id="launching-on-lepton">
+<h2>Launching on Lepton<a class="headerlink" href="#launching-on-lepton" title="Link to this heading"></a></h2>
+<p>For cloud-based training on NVIDIA Lepton, you can clone an existing reference job and customize it for your needs.</p>
+<section id="reference-job">
+<h3>Reference Job<a class="headerlink" href="#reference-job" title="Link to this heading"></a></h3>
+<p>Start with the Qwen8B DeepMath distillation reference job:</p>
+<p><a class="reference external" href="https://dashboard.dgxc-lepton.nvidia.com/workspace/b5k2m9x7/compute/jobs/archived/qwen8b-distill-deepmath-checkbase-476b/replicas/list">Qwen8B DeepMath Distillation Job</a></p>
+</section>
+<section id="steps-to-clone-and-customize">
+<h3>Steps to Clone and Customize<a class="headerlink" href="#steps-to-clone-and-customize" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p><strong>Clone the Job</strong>:
+- Click the “Clone” or “Create from Template” button in the job details view
+- This will create a copy of the job configuration with all settings pre-populated</p></li>
+<li><p><strong>Customize Configuration</strong>:
+- Modify the job name and description for your experiment
+- Update the toml configuration file content and path (<code class="docutils literal notranslate"><span class="pre">config.toml</span></code>)
+- Update the launch entry script or module if needed (<code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.deepmath_distill</span></code>)
+- Adjust resource allocation (GPU count, memory) based on your model size and requirements</p></li>
+<li><p><strong>Submit and Monitor</strong>:
+- Click “Submit Job” to launch the training
+- Monitor training progress through the Lepton dashboard and wandb logs</p></li>
+</ol>
+</section>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../quickstart/single_node_example.html"><span class="doc">Single node example</span></a> - Basic training setup</p></li>
+<li><p><span class="xref std std-doc">../parallelism/index</span> - Distributed training configuration</p></li>
+<li><p><span class="xref std std-doc">../rollout/index</span> - Rollout configuration details</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../quantization/fp8.html" class="btn btn-neutral float-left" title="FP8 Quantization" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../wfm/overview.html" class="btn btn-neutral float-right" title="Overview" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
