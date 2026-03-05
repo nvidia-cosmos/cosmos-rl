@@ -228,7 +228,7 @@ class OpenVLARollout(RolloutBase):
             self.model.load_hf_weights(
                 self.config.policy.model_name_or_path,
                 self.parallel_dims,
-                torch.device("cuda"),
+                self.device,
             )
         self.model.eval()
         self.vla_input_keys = self.model.model_input_keys

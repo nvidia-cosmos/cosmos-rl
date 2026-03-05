@@ -63,7 +63,6 @@ def _build_config_from_args(args: argparse.Namespace):
     vla_type = getattr(args, "vla_type", "cosmos-policy")
 
     base = {
-        "mode": "colocated",
         "train": {"output_dir": args.output_dir},
         "policy": {"model_name_or_path": ckpt},
         "rollout": {"backend": "vla", "n_generation": 1},
@@ -95,9 +94,9 @@ def _build_config_from_args(args: argparse.Namespace):
         base["vla"]["num_images_in_input"] = 2
     else:
         # openvla-oft / openvla
-        base["vla"]["use_proprio"] = True
-        base["vla"]["proprio_dim"] = 9
-        base["vla"]["num_images_in_input"] = 2
+        base["vla"]["use_proprio"] = False
+        base["vla"]["proprio_dim"] = 7
+        base["vla"]["num_images_in_input"] = 1
 
     return Config.model_validate(base)
 
@@ -180,8 +179,11 @@ def main():
     if my_payload_pairs:
         from cosmos_rl.rollout.vla_rollout import OpenVLARollout
 
+        # Use explicit cuda:local_rank so model weights load on the correct GPU (avoids all ranks allocating on GPU 0).
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        device = torch.device(f"cuda:{local_rank}")
         rollout = OpenVLARollout(
-            config=config, parallel_dims=None, device=torch.device("cuda")
+            config=config, parallel_dims=None, device=device
         )
         rollout_obj = rollout
         result = rollout.evaluate(payload_pairs=my_payload_pairs)
