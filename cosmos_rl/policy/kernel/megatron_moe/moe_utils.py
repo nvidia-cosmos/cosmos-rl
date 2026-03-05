@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -47,6 +47,8 @@ with importlib_metadata_version_context():
             moe_permute,
             moe_permute_with_probs,
             moe_unpermute,
+            moe_sort_chunks_by_index,
+            moe_sort_chunks_by_index_with_probs,
         )
 
         HAVE_TE = True
@@ -241,6 +243,53 @@ def unpermute(
         0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens
     )
     return output_tokens.to(dtype=input_dtype)
+
+
+def sort_chunks_by_idxs(
+    input: torch.Tensor,
+    split_sizes: torch.Tensor,
+    sorted_idxs: torch.Tensor,
+    probs: Optional[torch.Tensor] = None,
+    fused: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Split and sort the input tensor based on the split_sizes and sorted indices.
+
+    Args:
+        input (torch.Tensor): The input tensor.
+        split_sizes (torch.Tensor): The split sizes.
+        sorted_idxs (torch.Tensor): The sorted indices.
+        probs (torch.Tensor, optional): The probs tensor. Defaults to None.
+        fused (bool, optional): Whether to use the fused version of the sort_chunks_by_idxs
+                                function. Defaults to False.
+
+    Returns:
+        Tuple[torch.Tensor, Optional[torch.Tensor]]: The sorted output tensor and permuted probs.
+    """
+    if fused and probs is None:
+        if not HAVE_TE or moe_sort_chunks_by_index is None:
+            raise ValueError(
+                "fused_sort_chunks_by_index is not available. Please install TE >= 2.1.0."
+            )
+        return moe_sort_chunks_by_index(input, split_sizes, sorted_idxs), None
+
+    if fused and probs is not None:
+        if not HAVE_TE or moe_sort_chunks_by_index_with_probs is None:
+            raise ValueError(
+                "fused_sort_chunks_by_index_with_probs is not available. "
+                "Please install TE >= 2.1.0."
+            )
+        return moe_sort_chunks_by_index_with_probs(
+            input, probs, split_sizes, sorted_idxs
+        )
+
+    input = torch.split(input, split_sizes.tolist(), dim=0)
+    output = torch.cat([input[i] for i in sorted_idxs.tolist()], dim=0)
+    if probs is not None:
+        probs = torch.split(probs, split_sizes.tolist(), dim=0)
+        permuted_probs = torch.cat([probs[i] for i in sorted_idxs.tolist()], dim=0)
+    else:
+        permuted_probs = None
+    return output, permuted_probs
 
 
 @torch.compile

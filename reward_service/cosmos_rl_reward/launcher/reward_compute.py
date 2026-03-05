@@ -123,6 +123,20 @@ def main():
         help="Data type for model inference.",
     )
 
+    parser.add_argument(
+        "--endpoint_url",
+        type=str,
+        default="",
+        help="Custom endpoint URL for model inference if applicable.",
+    )
+
+    parser.add_argument(
+        "--endpoint_api_key",
+        type=str,
+        default="",
+        help="API key for the custom endpoint if applicable.",
+    )
+
     args = parser.parse_args()
     calculate_reward_loop(
         args.reward,
@@ -131,6 +145,8 @@ def main():
         device=args.device,
         dtype=args.dtype,
         download_path=args.download_path,
+        endpoint_url=args.endpoint_url,
+        endpoint_api_key=args.endpoint_api_key,
     )
 
 

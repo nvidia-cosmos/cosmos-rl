@@ -161,6 +161,8 @@ if [ "$TYPE" == "policy" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$TYPE" == "rollout" ]; then
+  # Disable TP_EP_INTERCHANGABLE_WITH_DP_FUSED for rollout to avoid potential unstable issues
+  export TP_EP_INTERCHANGABLE_WITH_DP_FUSED=0
   if [ "$BACKEND" == "trtllm" ]; then
     COSMOS_WORLD_SIZE=$((NNODES * NGPU))
     export COSMOS_WORLD_SIZE

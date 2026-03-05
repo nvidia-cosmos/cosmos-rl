@@ -30,7 +30,7 @@ use_rf_ckpts = true
 resolution = "720"
 
 [model_parallel]
-context_parallel_size = 2
+context_parallel_size = 8
 
 [model.net]
 model_channels = 5120
@@ -79,6 +79,7 @@ data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
+use_same_seed = false
 
 [model.tokenizer]
 temporal_window = 4
@@ -155,7 +156,7 @@ n_x0_level = 4
 n_viz_sample = 3
 n_sample_to_save = 128
 num_sampling_step = 20
-guidance = [7]
+guidance = [3]
 is_x0 = false
 is_sample = true
 save_s3 = true
@@ -173,7 +174,7 @@ n_x0_level = 4
 n_viz_sample = 3
 n_sample_to_save = 128
 num_sampling_step = 20
-guidance = [7]
+guidance = [3]
 is_x0 = false
 is_sample = true
 save_s3 = true
@@ -254,7 +255,7 @@ offline_text_embedding = false
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos-predict2-5_14b_720_reason_embedding_ddrl"
+name = "cosmos-predict2-5-14b-720-reason-embedding-ddrl"
 wandb_mode = "online"
 
 [checkpoint]

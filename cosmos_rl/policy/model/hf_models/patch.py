@@ -13,10 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+
 import torch
-from typing import Any
+import transformers
+from typing import Any, Optional
 from transformers import AutoConfig
+from transformers.cache_utils import Cache
+from transformers.utils.import_utils import is_torchdynamo_compiling
+
 from cosmos_rl.utils.logging import logger
+
+_EXPECTED_TRANSFORMERS_VERSION = "4.57.6"
 
 
 def pre_hf_models_patch(hf_config: AutoConfig):
@@ -47,6 +55,11 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
     ):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
+    elif hf_config.model_type == "qwen3_vl":
+        if hasattr(model, "model") and hasattr(
+            getattr(model.model, "visual", None), "config"
+        ):
+            visual_forward_qwen3_vl_patch(model.model)
     elif hf_config.model_type == "NemotronH_Nano_VL_V2":
 
         def patch_forward(self, **kwargs) -> torch.LongTensor:
@@ -328,6 +341,251 @@ def sequence_packing_forward_llm_patch(model):
         layer.self_attn.forward = make_new_self_attn_forward(
             original_attn_forward
         ).__get__(layer.self_attn, type(layer.self_attn))
+
+
+def visual_forward_qwen3_vl_patch(model):
+    """Monkey-patch a ``Qwen3VLModel`` **instance's** forward with two improvements:
+
+    1. **Merged image+video ViT pass**: When a batch contains both images and
+       videos, concatenate their pixels and run a single ``get_image_features``
+       call instead of separate image/video calls.  (Follows the NemotronVL
+       pattern in ``modeling_nemotron_vl_h.py:2135-2152``.)
+
+    2. **Dummy visual forward for pure-text batches**: Under FSDP, every rank
+       must call ``self.visual(...)`` each forward step so that collective
+       all-gather operations stay in sync.  When a batch contains only text,
+       a lightweight dummy image (16x16 zeros) is pushed through the full
+       ViT -> merger -> deepstack pipeline, then outputs are sliced to ``[0:0]``
+       so they carry ``grad_fn`` but contribute no features.
+
+    Args:
+        model: The ``Qwen3VLModel`` instance (i.e. ``model.model`` when
+            the outer model is ``Qwen3VLForConditionalGeneration``).
+    """
+    if transformers.__version__ != _EXPECTED_TRANSFORMERS_VERSION:
+        logger.warning(
+            "visual_forward_qwen3_vl_patch was written for transformers==%s, "
+            "but found transformers==%s. The patched forward may be incompatible "
+            "with the installed version — verify Qwen3VLModel.forward signature and internals.",
+            _EXPECTED_TRANSFORMERS_VERSION,
+            transformers.__version__,
+        )
+
+    # Resolve the output dataclass from the actual runtime module
+    model_module = importlib.import_module(type(model).__module__)
+    Qwen3VLModelOutputWithPast = getattr(model_module, "Qwen3VLModelOutputWithPast")
+
+    # Replaces Qwen3VLModel.forward from:
+    #   transformers.models.qwen3_vl.modeling_qwen3_vl  (transformers v4.57.6)
+    def visual_forward_qwen3_vl_inner(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
+
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings()(input_ids)
+
+        image_mask = None
+        video_mask = None
+        image_embeds = None
+        video_embeds = None
+        deepstack_image_embeds = None
+        skip_visual = False
+
+        # ---- merged visual forward (follows NemotronVL: modeling_nemotron_vl_h.py:2135-2152) ----
+        if pixel_values is None and pixel_values_videos is None:
+            skip_visual = True
+        elif pixel_values is None:
+            final_pixel_value = pixel_values_videos
+            final_thw = video_grid_thw
+            num_image = 0
+        elif pixel_values_videos is None:
+            final_pixel_value = pixel_values
+            final_thw = image_grid_thw
+            num_image = image_grid_thw.shape[0]
+        else:
+            final_pixel_value = torch.cat([pixel_values, pixel_values_videos], dim=0)
+            final_thw = torch.cat([image_grid_thw, video_grid_thw], dim=0)
+            num_image = image_grid_thw.shape[0]
+
+        if not skip_visual:
+            # Qwen3VLModel.get_image_features: ViT → merger → torch.split per image/video
+            # Returns (tuple_of_per_item_embeds, list_of_deepstack_layer_tensors)
+            all_embeds, deepstack_image_embeds = self.get_image_features(
+                final_pixel_value, final_thw
+            )
+            image_embeds = list(all_embeds[:num_image])
+            video_embeds = list(all_embeds[num_image:])
+        elif self.training:
+            # ---- dummy visual forward for pure-text batches ----
+            # Run a tiny dummy image through the full visual pipeline so that
+            # FSDP all-gather operations stay synchronised across ranks.
+            # Slice outputs to [0:0] so no dummy features leak into the LM,
+            # while the empty tensors still carry grad_fn (SliceBackward)
+            # keeping the ViT → merger → deepstack graph connected.
+            dummy_h, dummy_w = 16, 16
+            dummy_pixels = torch.zeros(
+                dummy_h * dummy_w,
+                self.visual.config.temporal_patch_size
+                * self.visual.config.patch_size**2
+                * 3,
+                device=inputs_embeds.device,
+                dtype=self.visual.dtype,
+            )
+            dummy_thw = torch.tensor(
+                [[1, dummy_h, dummy_w]], device=inputs_embeds.device
+            )
+            image_embeds, deepstack_image_embeds = self.get_image_features(
+                dummy_pixels, dummy_thw
+            )
+            image_embeds = [e[0:0] for e in image_embeds]
+            deepstack_image_embeds = [e[0:0] for e in deepstack_image_embeds]
+
+        # ---- scatter embeddings into inputs_embeds ----
+        # Qwen3VLModel.get_placeholder_mask: finds image/video token positions in input_ids
+        if image_embeds is not None and len(image_embeds) > 0:
+            image_embeds = torch.cat(image_embeds, dim=0).to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
+            image_mask, _ = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+        if video_embeds is not None and len(video_embeds) > 0:
+            video_embeds = torch.cat(video_embeds, dim=0).to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
+            _, video_mask = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        # ---- aggregate visual_pos_masks / deepstack_visual_embeds ----
+        # Consumed by Qwen3VLTextModel._deepstack_process which does:
+        #   hidden_states[visual_pos_masks, :].clone() + visual_embeds
+        # So deepstack_visual_embeds[i] must be in SEQUENCE order (matching
+        # visual_pos_masks), not ViT batch order.
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            # deepstack_image_embeds from merged ViT is in concatenation order:
+            # [image_tokens..., video_tokens...].  Reorder to sequence order
+            # so _deepstack_process adds features to the correct positions.
+            n_image_tok = image_mask.sum().item()
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            deepstack_visual_embeds = []
+            for ds_embed in deepstack_image_embeds:
+                img_ds = ds_embed[:n_image_tok]
+                vid_ds = ds_embed[n_image_tok:]
+                embed_joint = ds_embed.new_zeros(
+                    visual_pos_masks.sum(), ds_embed.shape[-1]
+                )
+                embed_joint[image_mask_joint] = img_ds
+                embed_joint[video_mask_joint] = vid_ds
+                deepstack_visual_embeds.append(embed_joint)
+        elif image_mask is not None:
+            image_mask = image_mask[..., 0]
+            visual_pos_masks = image_mask
+            deepstack_visual_embeds = deepstack_image_embeds
+        elif video_mask is not None:
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = video_mask
+            deepstack_visual_embeds = deepstack_image_embeds
+
+        # ---- position ids (unchanged) ----
+        if position_ids is None:
+            attention_mask_tensor = (
+                attention_mask
+                if not isinstance(attention_mask, dict)
+                else attention_mask["full_attention"]
+            )
+            if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
+                attention_mask_tensor = torch.diagonal(
+                    attention_mask_tensor[:, 0], dim1=1, dim2=2
+                )
+                if attention_mask_tensor.dtype.is_floating_point:
+                    attention_mask_tensor = (
+                        attention_mask_tensor
+                        / torch.finfo(attention_mask_tensor.dtype).min
+                    )
+                    attention_mask_tensor = (1.0 - attention_mask_tensor).int()
+
+            prefill_compiled_stage = is_torchdynamo_compiling() and (
+                (input_ids is not None and input_ids.shape[1] != 1)
+                or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
+            )
+            prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
+                (cache_position is not None and cache_position[0] == 0)
+                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            )
+            if (
+                prefill_compiled_stage or prefill_noncompiled_stage
+            ) or self.rope_deltas is None:
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    attention_mask=attention_mask_tensor,
+                )
+                self.rope_deltas = rope_deltas
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = (
+                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                    if cache_position is not None
+                    else 0
+                )
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        # Qwen3VLTextModel.forward — calls _deepstack_process at each deepstack layer
+        outputs = self.language_model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            **kwargs,
+        )
+
+        return Qwen3VLModelOutputWithPast(
+            last_hidden_state=outputs.last_hidden_state,
+            past_key_values=outputs.past_key_values,
+            rope_deltas=self.rope_deltas,
+        )
+
+    # Replace the forward method
+    model.forward = visual_forward_qwen3_vl_inner.__get__(model, type(model))
+    logger.info(
+        "Patched %s instance forward with merged visual pass + pure-text dummy forward",
+        type(model).__name__,
+    )
 
 
 # In order to support sequence packing during forward passes, the forward method of the language model must be patched.

@@ -16,9 +16,17 @@
 import io
 import os
 import base64
+import copy
 import torch
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple, Union
+from typing import (
+    List,
+    Any,
+    Dict,
+    Optional,
+    Tuple,
+    Union,
+)  # Tuple used in dpo_collate_fn
 from transformers import AutoProcessor, AutoConfig
 
 from cosmos_rl.utils.util import retry
@@ -136,6 +144,15 @@ class HFVLMDataPacker(DataPacker):
             "qwen3_5",
             "qwen3_5_moe",
         ] or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
+        self.use_siglip2_process = os.environ.get("USE_SIGLIP2_PROCESS", "0") in [
+            "1",
+            "true",
+            "True",
+        ]
+        self.max_num_patches = config.custom.get("single_image_max_num_patches", 256)
+        self.max_frame_num_patches = config.custom.get(
+            "single_frame_max_num_patches", 196
+        )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -190,7 +207,7 @@ class HFVLMDataPacker(DataPacker):
         video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
         if (
-            self.use_qwen_vl_process
+            (self.use_qwen_vl_process or self.use_siglip2_process)
             and len(image_inputs) == 0
             and len(video_inputs) == 0
         ):
@@ -268,6 +285,7 @@ class HFVLMDataPacker(DataPacker):
         add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
+            conversation = copy.deepcopy(conversation)
             # Replace all the assistant content with consecutive `pad_token` * 10
             pad_token = self.tokenizer.pad_token
             pad_token_id = self.tokenizer.pad_token_id
@@ -358,7 +376,9 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            if self.use_qwen_vl_process and isinstance(messages, list):
+            if (self.use_qwen_vl_process or self.use_siglip2_process) and isinstance(
+                messages, list
+            ):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     messages,
                     image_patch_size=16,  # TODO: hardcode
@@ -378,6 +398,9 @@ class HFVLMDataPacker(DataPacker):
                 kwarg["videos"] = video_inputs
                 kwarg["video_metadata"] = video_metadatas
                 kwarg["do_resize"] = False
+
+                if self.use_siglip2_process:
+                    kwarg["max_num_patches"] = self.max_num_patches
 
             inputs = self.hf_processor(
                 text=[text],
@@ -728,13 +751,101 @@ class HFVLMDataPacker(DataPacker):
         """
         Accepts either raw text or conversation format.
         """
-        return self.get_policy_input(sample, add_generation_prompt=False)
+        result = self.get_policy_input(sample, add_generation_prompt=False)
+
+        # Safety check: if the sequence still exceeds model_max_length after
+        # upstream pixel-budget control, raise so the caller can skip and retry
+        # with the next sample rather than hitting a token/feature mismatch
+        # inside the model forward pass.
+        max_len = getattr(self.config.policy, "model_max_length", None)
+        if max_len is not None and len(result["input_ids"]) > max_len:
+            raise ValueError(
+                f"Sample exceeds model_max_length after tokenization "
+                f"({len(result['input_ids'])} > {max_len}), skipping."
+            )
+
+        return result
 
     def sft_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
         """
         Compute the maximum sequence length of the processed samples
         """
         return max([len(x["input_ids"]) for x in processed_samples])
+
+    def dpo_process_sample(
+        self, sample: Dict[str, "HFVLMDataPacker.Payload"]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        DPO: Process a sample with chosen/rejected conversation pairs.
+        sample: {"chosen": messages_list, "rejected": messages_list}
+        Returns: {"chosen": model_input_dict, "rejected": model_input_dict}
+        """
+        chosen = self._process_single_sample(
+            sample["chosen"], add_generation_prompt=False
+        )
+        rejected = self._process_single_sample(
+            sample["rejected"], add_generation_prompt=False
+        )
+        # DPO needs logprob_masks (1 = response tokens for log prob)
+        for d in [chosen, rejected]:
+            label_ids = d.get("label_ids")
+            if label_ids is not None:
+                if isinstance(label_ids, list):
+                    d["logprob_masks"] = [
+                        1 if x != IGNORE_LABEL_ID else 0 for x in label_ids
+                    ]
+                else:
+                    d["logprob_masks"] = (label_ids != IGNORE_LABEL_ID).long().tolist()
+        max_len = getattr(self.config.policy, "model_max_length", None)
+        if max_len is not None:
+            for d in [chosen, rejected]:
+                if len(d["input_ids"]) > max_len:
+                    raise ValueError(
+                        f"DPO sample exceeds model_max_length ({len(d['input_ids'])} > {max_len})"
+                    )
+        return {"chosen": chosen, "rejected": rejected}
+
+    def dpo_collate_fn(
+        self, batch: List[Dict[str, Dict[str, Any]]]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Collate a list of {"chosen": dict, "rejected": dict} into batched chosen and rejected.
+        """
+        chosen_list = [x["chosen"] for x in batch]
+        rejected_list = [x["rejected"] for x in batch]
+
+        # _collate_fn expects all vision keys; image-only samples from _process_single_sample
+        # may lack pixel_values_videos etc. Fill missing keys with None before collating.
+        _OPTIONAL_COLLATE_KEYS = [
+            "pixel_values_videos",
+            "video_grid_thw",
+            "second_per_grid_ts",
+            "pixel_values",
+            "image_grid_thw",
+            "pixel_values_videos_lengths_per_sample",
+            "pixel_values_lengths_per_sample",
+            "aspect_ratio_ids",
+            "aspect_ratio_mask",
+            "image_sizes",
+            "batch_num_images",
+        ]
+
+        def _ensure_collate_keys(samples: List[Dict]) -> None:
+            for s in samples:
+                for k in _OPTIONAL_COLLATE_KEYS:
+                    if k not in s:
+                        s[k] = None
+
+        _ensure_collate_keys(chosen_list)
+        _ensure_collate_keys(rejected_list)
+
+        computed_max_len_chosen = self.policy_compute_max_len(chosen_list)
+        computed_max_len_rejected = self.policy_compute_max_len(rejected_list)
+        # Use max of both for padding
+        computed_max_len = max(computed_max_len_chosen, computed_max_len_rejected)
+        chosen_batch = self._collate_fn(chosen_list, computed_max_len)
+        rejected_batch = self._collate_fn(rejected_list, computed_max_len)
+        return chosen_batch, rejected_batch
 
     def sft_collate_fn(
         self,

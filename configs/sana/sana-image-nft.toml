@@ -64,6 +64,7 @@ optm_impl = "foreach"
 optm_weight_decay = 1e-4
 optm_betas = [ 0.9, 0.999,]
 optm_grad_norm_clip = 1.0
+optm_warmup_steps = 0
 ema_enable = true
 ema_decay = 0.9
 ema_update_step_interval = 1
@@ -90,12 +91,12 @@ scale = 1.0
 pickscore = 1.0
 
 [train.ckpt]
-enable_checkpoint = false
-save_freq = 5
+enable_checkpoint = true
+save_freq = 20
 save_mode = "async"
 
 [validation]
-enable = true
+enable = false
 dataset.name = "pickscore"
 dataset.split = "test"
 

@@ -21,8 +21,14 @@ from typing import Any, Dict, Union, Optional, List, Literal
 import os
 import json
 import hashlib
-from cosmos_rl.utils.modelscope import update_config_if_modelscope
-from cosmos_rl.utils.logging import logger
+
+# For building sphinx documentation, the doc-build environment does not have cosmos_rl installed
+# so we need to import the utils.modelscope and utils.logging from the cosmos_rl package.
+try:
+    from cosmos_rl.utils.modelscope import update_config_if_modelscope
+    from cosmos_rl.utils.logging import logger
+except ImportError:
+    pass
 
 
 def config_hash(config: BaseModel) -> str:
@@ -717,9 +723,9 @@ class TrainingConfig(BaseModel):
         description="Optimizer name",
         choices=["AdamW", "Adam"],
     )
-    optm_lr: Union[float, List[float]] = Field(
+    optm_lr: Union[float, List[float], Dict[str, float]] = Field(
         default=1e-6,
-        description="Learning rate for optimizer, can be a float or a list of floats for multiple optimizers",
+        description="Learning rate for optimizer, can be a float, a list of floats for multiple optimizers, or a dict of {module_path : lr}.",
     )
     optm_impl: Union[str, List[str]] = Field(
         default="fused",
@@ -1166,6 +1172,15 @@ class PolicyConfig(BaseModel):
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
+    enable_liger_cross_entropy: bool = Field(
+        default=False,
+        description="Whether to use liger cross entropy. Only valid for SFT now.",
+    )
+    enable_liger_fused_cross_entropy: bool = Field(
+        default=False,
+        description="Whether to use liger fused cross entropy. Only valid for SFT now.",
+    )
+
     aux_loss_coeff: float = Field(
         default=0.0,
         description="Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.",
@@ -1532,7 +1547,7 @@ class DistillationConfig(BaseModel):
     )
 
     batch_size_per_replica: int = Field(
-        default=1, description="Batch size for teacher model per replica."
+        default=8, description="Batch size for teacher model per replica."
     )
 
     max_token_len_per_mini_batch: Optional[int] = Field(
@@ -1546,7 +1561,7 @@ class DistillationConfig(BaseModel):
     )
 
     mini_batch: int = Field(
-        default=2,
+        default=1,
         description="mini batch size for teacher model in each replica.",
     )
 

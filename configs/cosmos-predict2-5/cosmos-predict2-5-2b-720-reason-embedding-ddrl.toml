@@ -75,6 +75,7 @@ data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
+use_same_seed = false
 
 [trainer]
 max_iter = 2001
@@ -247,7 +248,7 @@ offline_text_embedding = false
 [job]
 project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
-name = "cosmos-predict2-5_2b_720_reason_embedding_ddrl"
+name = "cosmos-predict2-5-2b-720-reason-embedding-ddrl"
 wandb_mode = "online"
 
 [checkpoint]

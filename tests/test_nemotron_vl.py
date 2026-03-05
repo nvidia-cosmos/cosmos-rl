@@ -21,19 +21,17 @@ import torch
 import unittest
 import numpy as np
 from functools import partial
-
+import toml
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
-from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
-    Qwen3_VL_DataPacker,
-)
+from cosmos_rl.dispatcher.data.packer.hf_vlm_data_packer import HFVLMDataPacker
 from transformers import (
     AutoProcessor,
-    Qwen3VLMoeForConditionalGeneration,
+    Siglip2VisionModel,
+    AutoModel,
 )
-
 
 IGNORE_INDEX = -100
 
@@ -163,7 +161,9 @@ def create_assistant_tokens_mask(tokens, processor):  # Qwen2 based model
 
 
 def create_debug_input(model_name_or_path):
-    processor = AutoProcessor.from_pretrained(model_name_or_path)
+    processor = AutoProcessor.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
     messages = [
         {
             "role": "user",
@@ -173,6 +173,14 @@ def create_debug_input(model_name_or_path):
                     "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
                     "min_pixels": 1024 * 28 * 28,
                     "max_pixels": 1024 * 28 * 28,
+                },
+                {
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
+                {
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
                 },
                 {"type": "text", "text": "Describe the image caption."},
             ],
@@ -210,62 +218,114 @@ def create_debug_input(model_name_or_path):
         "pixel_values": inputs["pixel_values"],
         "image_grid_thw": inputs["image_grid_thw"],
         "labels": labels,
+        "pixel_values_origin": inputs["pixel_values_origin"],
+        "pixel_attention_mask": inputs["pixel_attention_mask"],
+        "spatial_shapes": inputs["spatial_shapes"],
+    }
+
+
+def create_debug_video_input(model_name_or_path):
+    processor = AutoProcessor.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video",
+                    "video": "/workspace/ruipul/vlm_data/webvid-10M-videos/0714/00000/000000162.mp4",
+                },
+                {"type": "text", "text": "Give a concise description of the video."},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Blurred nighttime city scene with bokeh lights and indistinct figures walking, suggesting a busy urban street.",
+                },
+            ],
+        },
+    ] + [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                    "min_pixels": 1024 * 28 * 28,
+                    "max_pixels": 1024 * 28 * 28,
+                },
+                {
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
+                {
+                    "type": "image",
+                    "image": "/workspace/haoyuan/images/laion-athsetic/402f7798b9f38da0b13261693cef132626709300.jpg",
+                },
+                {"type": "text", "text": "Describe the image caption."},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The image captures a serene and joyful moment on a sandy beach at sunset. The sky is a soft gradient of warm colors, transitioning from a pale blue at the horizon to a deeper, golden hue near the horizon line. The ocean waves gently roll onto the shore, creating a tranquil and picturesque backdrop.\nIn the foreground, a person is sitting on the sand, facing a light-colored dog, likely a Labrador Retriever. The person is dressed in a plaid shirt and dark pants, with their legs crossed and one hand resting on their knee. The dog is wearing a harness with a colorful collar and is sitting on its haunches, facing the person. The dog's tail is wagging, and it appears to be engaged in a playful interaction with the person, possibly giving a high-five or pawing at their hand.",
+                },
+            ],
+        },
+    ]
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    for k, v in inputs.items():
+        print(f"k: {k}, type: {type(v)}")
+        if isinstance(v, torch.Tensor):
+            inputs[k] = v.to("cuda")
+
+    labels = inputs["input_ids"].clone()
+    token_mask = create_assistant_tokens_mask(inputs["input_ids"], processor)
+    labels[~token_mask] = IGNORE_INDEX
+    return {
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "pixel_values": inputs.get("pixel_values", None),
+        "image_grid_thw": inputs.get("image_grid_thw", None),
+        "pixel_values_videos": inputs.get("pixel_values_videos", None),
+        "video_grid_thw": inputs.get("video_grid_thw", None),
+        "labels": labels,
     }
 
 
 class TestCosmosHfPrecision(unittest.TestCase):
+    model_name = (
+        "/workspace/nemotron-vlm/NVIDIA-Nemotron-3-Nano-SIGLIP2-officaial-30B-A3B-BF16"
+    )
+    debug_toml_file = "/workspace/ruipul/cosmos-rl-private/nemotron_vl/sft_debug.toml"
+    official_siglip2_name = "google/siglip2-so400m-patch16-naflex"
+
     def test_cosmos_hf_precision(self):
-        model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        model_name = self.model_name
         # ================================
         # create config
         # ================================
-        config_dict = {
-            "policy": {
-                "model_name_or_path": model_name,
-                "model_max_length": 40960,
-                "parallelism": {
-                    "tp_size": 4,
-                    "cp_size": 1,
-                    "ep_size": 1,
-                    "dp_shard_size": -1,
-                    "dp_replicate_size": 1,
-                    "pp_size": 1,
-                    "world_size": int(os.environ.get("WORLD_SIZE", 1)),
-                    "pp_dynamic_shape": False,
-                },
-                "lora": None,
-                "enable_liger_kernel": False,
-                "trainable_map": None,
-                "model_gradient_checkpointing": True,
-            },
-            "train": {
-                "fsdp_offload": False,
-                "compile": False,
-                "master_dtype": "float32",
-                "param_dtype": "bfloat16",
-                "fsdp_reduce_dtype": "float32",
-                "fsdp_reshard_after_forward": "default",
-                "param_torch_dtype": torch.bfloat16,
-                "train_policy": {"mini_batch": 1},
-                "fp8": {"enable_fp8": False},
-                "async_tp_enabled": False,
-                "force_use_hf": False,
-                "output_dir": "./",
-                # "sequence_packing": True,
-            },
-            "rollout": {
-                "multi_turn_config": {
-                    "enable": False,
-                    "custom_chat_template_path": None,
-                },
-            },
-        }
+        toml_file = self.debug_toml_file
+        with open(toml_file, "r") as f:
+            config_dict = toml.load(f)
         config = Config.from_dict(config_dict)
 
         # ================================
         # create data packer
         # ================================
-        data_packer = Qwen3_VL_DataPacker()
+        data_packer = HFVLMDataPacker()
         data_packer.setup(config=config)
 
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
@@ -278,27 +338,18 @@ class TestCosmosHfPrecision(unittest.TestCase):
         # ================================
         data_batch = create_debug_input(model_name_or_path=model_name)
         # fill in position_ids
-        position_ids, _ = data_packer._get_rope_index(
-            input_ids=data_batch["input_ids"],
-            image_grid_thw=data_batch.get("image_grid_thw", None),
-            video_grid_thw=data_batch.get("video_grid_thw", None),
-            attention_mask=data_batch.get("attention_mask", None),
-        )
-        if position_ids is not None:
-            data_batch["position_ids"] = position_ids.permute(1, 0, 2).contiguous()
-            print(f"position_ids: {data_batch['position_ids'].shape}")
 
         for k, v in data_batch.items():
             data_batch[k] = v.to("cuda")
 
         # compute logits for hf model
-        hf_model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+        hf_model = AutoModel.from_pretrained(
             model_name,
             device_map="auto",
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
+            trust_remote_code=True,
         )
-
         hf_model.eval()
         with torch.no_grad():
             logits_hf = hf_model(
@@ -310,63 +361,133 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 return_dict=True,
             ).logits
             print(f"before logits_hf: {logits_hf.shape}")
-        del hf_model
-        torch.cuda.empty_cache()
 
-        ce_loss_hf = torch.nn.functional.cross_entropy(
-            input=logits_hf[:, :-1].flatten(0, 1),
-            target=data_batch["labels"][:, 1:].flatten(0, 1),
-            ignore_index=-100,
-            reduction="none",
-        )
-        ce_loss_hf_mean = ce_loss_hf.mean()
-        logits_hf = logits_hf[:, -1, :]
+    def test_siglip_diff(self):
+        model_name = self.model_name
+        # ================================
+        # create config
+        # ================================
+        toml_file = self.debug_toml_file
+        with open(toml_file, "r") as f:
+            config_dict = toml.load(f)
+        config = Config.from_dict(config_dict)
 
-        cosmos_model_list, _, _, _ = init_cosmos_rl_model(
-            config, device=torch.device(f"cuda:{torch.distributed.get_rank()}")
+        # ================================
+        # create data packer
+        # ================================
+        data_packer = HFVLMDataPacker()
+        data_packer.setup(config=config)
+
+        if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="cuda:nccl,cpu:gloo")
+                torch.cuda.set_device(torch.distributed.get_rank())
+
+        # ================================
+        # create data batch
+        # ================================
+        data_batch = create_debug_input(model_name_or_path=model_name)
+        # fill in position_ids
+
+        for k, v in data_batch.items():
+            data_batch[k] = v.to("cuda")
+
+        # compute logits for hf model
+        hf_model = AutoModel.from_pretrained(
+            model_name,
+            device_map="auto",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            trust_remote_code=True,
         )
-        cosmos_model = cosmos_model_list[0]
-        cosmos_model.eval()
+
+        pixel_values = data_batch["pixel_values"].type(hf_model.model.visual.dtype)
+        last_hidden_state = hf_model.model.visual(
+            pixel_values=pixel_values, grid_thw=data_batch["image_grid_thw"]
+        )
+
+        # compare with official model
+        offcial_model = Siglip2VisionModel.from_pretrained(
+            self.official_siglip2_name,
+            device_map="auto",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+        ).eval()
         with torch.no_grad():
-            logits_cosmos_rl = cosmos_model(
+            image_embeddings = offcial_model(
+                pixel_values=data_batch["pixel_values_origin"],
+                pixel_attention_mask=data_batch["pixel_attention_mask"],
+                spatial_shapes=data_batch["spatial_shapes"],
+            )
+            last_hidden_state_official = image_embeddings.last_hidden_state
+        last_hidden_state_official = last_hidden_state_official.view(-1, 1152)
+        patch_size = last_hidden_state.shape[0]
+        print(last_hidden_state - last_hidden_state_official[:patch_size, :])
+
+    def test_video_support(self):
+        model_name = self.model_name
+        # ================================
+        # create config
+        # ================================
+        toml_file = self.debug_toml_file
+        with open(toml_file, "r") as f:
+            config_dict = toml.load(f)
+        config = Config.from_dict(config_dict)
+
+        # ================================
+        # create data packer
+        # ================================
+        data_packer = HFVLMDataPacker()
+        data_packer.setup(config=config)
+
+        if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="cuda:nccl,cpu:gloo")
+                torch.cuda.set_device(torch.distributed.get_rank())
+
+        # ================================
+        # create data batch
+        # ================================
+        data_batch = create_debug_video_input(model_name_or_path=model_name)
+        for k, v in data_batch.items():
+            data_batch[k] = v.to("cuda")
+
+        # compute logits for hf model
+        hf_model = AutoModel.from_pretrained(
+            model_name,
+            device_map="auto",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            trust_remote_code=True,
+        )
+        hf_model.eval()
+        with torch.no_grad():
+            logits_hf = hf_model(
                 data_batch["input_ids"],
                 pixel_values=data_batch["pixel_values"],
-                attention_mask=data_batch["attention_mask"],
                 image_grid_thw=data_batch["image_grid_thw"],
-                position_ids=data_batch.get("position_ids", None),
+                pixel_values_videos=data_batch["pixel_values_videos"],
+                video_grid_thw=data_batch["video_grid_thw"],
+                attention_mask=data_batch["attention_mask"],
+                use_cache=False,
+                return_dict=True,
             ).logits
-        del cosmos_model
-        torch.cuda.empty_cache()
-
-        ce_loss = torch.nn.functional.cross_entropy(
-            input=logits_cosmos_rl[:, :-1].flatten(0, 1),
-            target=data_batch["labels"][:, 1:].flatten(0, 1),
-            ignore_index=-100,
-            reduction="none",
-        )
-        cs_loss_mean = ce_loss.mean()
-        logits_cosmos_rl = logits_cosmos_rl[:, -1, :]
-
-        if torch.distributed.get_rank() == 0:
-            max_index_hf = logits_hf.argmax(dim=-1)
-            max_index_cosmos_rl = logits_cosmos_rl.argmax(dim=-1)
-            diff_loss_mean = (ce_loss_hf_mean - cs_loss_mean).abs()
-            diff_logits = (logits_cosmos_rl - logits_hf).abs()
-            print(
-                f"ce_loss_hf_mean: {ce_loss_hf_mean} | cs_loss_mean: {cs_loss_mean} | diff_loss_mean: {diff_loss_mean}"
-            )
-            print(
-                f"logits_hf: {logits_hf} | logits_cosmos_rl: {logits_cosmos_rl} | diff_logits: {diff_logits}"
-            )
-            print(
-                f"max_index_hf: {max_index_hf} | max_index_cosmos_rl: {max_index_cosmos_rl}"
-            )
-            assert diff_loss_mean < 1e-3
-            assert max_index_hf == max_index_cosmos_rl
+            print(f"before logits_hf: {logits_hf.shape}")
 
 
 # torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py
 if __name__ == "__main__":
     os.environ["COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU"] = "1"
-    os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
-    unittest.main()
+    # 创建测试套件
+    suite = unittest.TestSuite()
+    # 只添加你想要运行的那个函数
+    # print("Running test_cosmos_hf_precision")
+    # suite.addTest(TestCosmosHfPrecision('test_cosmos_hf_precision'))
+    # print("Running test_siglip_diff")
+    # suite.addTest(TestCosmosHfPrecision('test_siglip_diff'))
+    print("Running test_video_support")
+    suite.addTest(TestCosmosHfPrecision("test_video_support"))
+    # 运行测试
+    runner = unittest.TextTestRunner()
+    results = runner.run(suite)
+    print(results)

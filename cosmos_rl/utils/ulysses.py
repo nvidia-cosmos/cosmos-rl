@@ -218,6 +218,7 @@ def slice_input_tensor(
     partial_size = data.size(dim) // cp_world_size
     slc = [slice(None)] * len(data.shape)
     slc[dim] = slice(cp_rank * partial_size, (cp_rank + 1) * partial_size)
+    slc = tuple(slc)  # turn into tuple is better.
     return data[slc].contiguous()
 
 
@@ -298,18 +299,22 @@ def gather_heads_scatter_seq(
 
 
 def ulysses_wrapper_of_attn_func(
+    module: nn.Module,  # Compatible with transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     value_states: torch.Tensor,
+    *args,
     cp_mesh: DeviceMesh,
     original_attn_func: Callable,
-    *args,
     **kwargs,
-):
+) -> torch.Tensor | tuple[torch.Tensor, Any]:
     """Insert all-to-all before and after flash attention.
     DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
 
     Args:
+        module: nn.Module. Compatible with transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
+        If `module` is `None`, we won't pass this argument to the original attention function.
+        If `module` is not `None`, we will pass it to the original attention function, this is for `transformers`.
         query_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads, head_dim]
         key_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
         value_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
@@ -329,33 +334,63 @@ def ulysses_wrapper_of_attn_func(
     # - nheads_k=4, sp=8, repeats=2
     # - nheads_k=8, sp=8, repeats=1
     # - nheads_k=16, sp=8, repeats=1
+
+    if module is not None:
+        # this means we are using ulysses for transformer
+        # For transformers, the sequence dimension is 2 and the head dimension is 1
+        # query: [bsz, n_head, seq_len, head_dim]
+        # we transpose back first
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
     repeats = max(cp_world_size // key_states.size(2), 1)
     key_states = repeat_kv(key_states, repeats)
     value_states = repeat_kv(value_states, repeats)
 
+    # This is for [bs, seq_len, n_head, head_dim] inputs.
+    seq_dim = 1
+    head_dim = 2
+
     # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
     query_states = gather_seq_scatter_heads(
-        query_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+        query_states, seq_dim=seq_dim, head_dim=head_dim, cp_mesh=cp_mesh
     )
     key_states = gather_seq_scatter_heads(
-        key_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+        key_states, seq_dim=seq_dim, head_dim=head_dim, cp_mesh=cp_mesh
     )
     value_states = gather_seq_scatter_heads(
-        value_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+        value_states, seq_dim=seq_dim, head_dim=head_dim, cp_mesh=cp_mesh
     )
 
-    # (bsz, seq_len, n_head/n, head_dim)
-    attn_output = original_attn_func(
-        query_states, key_states, value_states, *args, **kwargs
-    )
+    if module is not None:
+        # we transpose back again
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
 
-    # AlltoAll for Ulysses
-    # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
-    attn_output = gather_heads_scatter_seq(
-        attn_output, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
-    )
+        attn_output = original_attn_func(
+            module, query_states, key_states, value_states, *args, **kwargs
+        )
+    else:
+        attn_output = original_attn_func(
+            query_states, key_states, value_states, *args, **kwargs
+        )
 
-    return attn_output
+    if isinstance(attn_output, tuple):
+        # For transformers API.
+        attn_output, second_result = attn_output
+        attn_output = gather_heads_scatter_seq(
+            attn_output, seq_dim=seq_dim, head_dim=head_dim, cp_mesh=cp_mesh
+        )
+        return attn_output, second_result
+    else:
+        # AlltoAll for Ulysses
+        # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
+        attn_output = gather_heads_scatter_seq(
+            attn_output, seq_dim=seq_dim, head_dim=head_dim, cp_mesh=cp_mesh
+        )
+        return attn_output
 
 
 def ulysses_wrapper_of_attn_func_varlen(
@@ -439,6 +474,18 @@ def ulysses_wrapper_of_attn_func_varlen(
 
 
 def ulysses_attn_func(
+    original_attn_func: Callable,
+    cp_mesh: DeviceMesh,
+):
+    return partial(
+        ulysses_wrapper_of_attn_func,
+        None,  # Binded first positional argument: `module` in `ulysses_wrapper_of_attn_func`.
+        original_attn_func=original_attn_func,
+        cp_mesh=cp_mesh,
+    )
+
+
+def transformer_ulysses_attn_func(
     original_attn_func: Callable,
     cp_mesh: DeviceMesh,
 ):
