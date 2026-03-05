@@ -245,9 +245,9 @@ class RolloutRegistry:
         allow_override: bool = False,
     ):
         def decorator(cls: Type) -> Type:
-            assert issubclass(
-                cls, RolloutBase
-            ), "Registered rollout must be a subclass of RolloutBase."
+            assert issubclass(cls, RolloutBase), (
+                "Registered rollout must be a subclass of RolloutBase."
+            )
             assert isinstance(rollout_type, str), "rollout_type must be a string."
             if (
                 not allow_override

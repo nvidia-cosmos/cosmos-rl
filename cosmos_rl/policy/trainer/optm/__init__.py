@@ -353,9 +353,9 @@ def build_optimizers(
         assert optm_impl in ["fused", "foreach", "for-loop"], "Invalid optm_impl"
         optm_impl = [optm_impl] * len(model_parts)
     elif isinstance(optm_impl, list):
-        assert len(optm_impl) == len(
-            model_parts
-        ), "The length of optm_impl and model_parts must be the same"
+        assert len(optm_impl) == len(model_parts), (
+            "The length of optm_impl and model_parts must be the same"
+        )
         assert all(
             optm_impl_i in ["fused", "foreach", "for-loop"] for optm_impl_i in optm_impl
         ), "Invalid optm_impl"
@@ -446,9 +446,9 @@ class LRSchedulersContainer(Stateful):
     schedulers: List[LRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
+        assert len(optimizers) > 0, (
+            "Must have at least one optimizer to create LRScheduler"
+        )
 
         # [[scheduler1_for_optm1, scheduler2_for_optm1], [scheduler1_for_optm2, scheduler2_for_optm2], ...]
         self.schedulers = [[] for _ in optimizers.model_parts]
@@ -576,9 +576,9 @@ def build_lr_schedulers(
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            assert (
-                warmup_steps != 0
-            ), "warmup_steps must not be zero to reach this branch"
+            assert warmup_steps != 0, (
+                "warmup_steps must not be zero to reach this branch"
+            )
             curr_adjustment = float(current_step / warmup_steps)
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0

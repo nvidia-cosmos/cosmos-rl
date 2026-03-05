@@ -15,7 +15,6 @@
 # Portions of this file are adapted from NVLabs DiffusionNFT (https://github.com/NVlabs/DiffusionNFT)
 # OCR functionality powered by PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
 
-import os
 import time
 from cosmos_rl_reward.utils.logging import logger
 from cosmos_rl_reward.handler.reward_base import BaseRewardHandler
@@ -24,28 +23,30 @@ import numpy as np
 from typing import List, Union
 
 
-
 class OcrScorer:
     def __init__(self, use_gpu: bool = False):
         self.use_gpu = use_gpu
         from paddleocr import PaddleOCR
+
         self.ocr = PaddleOCR(lang="en", use_gpu=self.use_gpu, show_log=False)
 
     def __call__(
-        self, images: Union[List["PILImage.Image"], List["np.ndarray"]], prompts: List[str]
+        self,
+        images: Union[List["PILImage.Image"], List["np.ndarray"]],  # noqa: F821
+        prompts: List[str],
     ):
         from PIL import Image as PILImage
         from Levenshtein import distance
+
         prompts = [prompt.split('"')[1] for prompt in prompts]
-        assert len(images) == len(
-            prompts
-        ), "Images and prompts must have the same length"
+        assert len(images) == len(prompts), (
+            "Images and prompts must have the same length"
+        )
         rewards: List[float] = []
         for img, prompt in zip(images, prompts):
             if isinstance(img, PILImage.Image):
                 img = np.array(img)
             try:
-
                 result = self.ocr.ocr(img)
                 recognized_text = (
                     "".join([res[1][0] if res[1][1] > 0 else "" for res in result[0]])
@@ -55,8 +56,10 @@ class OcrScorer:
                 recognized_text = recognized_text.replace(" ", "").lower()
                 prompt_n = prompt.replace(" ", "").lower()
 
-                hw = getattr(img, 'shape', None)
-                logger.info(f"[OCR DEBUG] img_shape={hw} prompt='{prompt}' rec='{recognized_text}'")
+                hw = getattr(img, "shape", None)
+                logger.info(
+                    f"[OCR DEBUG] img_shape={hw} prompt='{prompt}' rec='{recognized_text}'"
+                )
 
                 if prompt_n in recognized_text:
                     dist = 0
@@ -68,7 +71,9 @@ class OcrScorer:
                 logger.error(f"[ocr] OCR processing failed: {e}")
                 dist = len(prompt)
 
-            logger.info(f"[OCR DEBUG] dist={dist} len_prompt={len(prompt)} score={1 - dist / max(1, len(prompt))}")
+            logger.info(
+                f"[OCR DEBUG] dist={dist} len_prompt={len(prompt)} score={1 - dist / max(1, len(prompt))}"
+            )
 
             reward = 1 - dist / max(1, len(prompt))
             rewards.append(reward)
@@ -90,8 +95,10 @@ class OcrReward(BaseRewardHandler):
         self.scorers[self.use_gpu] = OcrScorer(use_gpu=self.use_gpu)
 
     def calculate_reward(self, images, metadata):
-        import torch 
+        import torch
+
         time_start = time.time()
+
         def _error(msg: str):
             logger.error(msg)
             return {
@@ -102,11 +109,14 @@ class OcrReward(BaseRewardHandler):
                 "decoded_duration": metadata.get("decode_duration", "N/A"),
                 "type": self.reward_name,
             }
+
         # Expect 4D image batch; client must provide BHWC/NHWC uint8 (B,H,W,C)
         if images is None:
             return _error("[ocr] images tensor is None.")
         if images.dim() != 4:
-            return _error(f"[ocr] expects 4D uint8 tensor in BHWC/NHWC layout (B,H,W,C); got shape={getattr(images,'shape',None)}, dtype={getattr(images,'dtype',None)}")
+            return _error(
+                f"[ocr] expects 4D uint8 tensor in BHWC/NHWC layout (B,H,W,C); got shape={getattr(images, 'shape', None)}, dtype={getattr(images, 'dtype', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[ocr] imagesbatch size is zero.")
         if images.dtype != torch.uint8:
@@ -120,7 +130,9 @@ class OcrReward(BaseRewardHandler):
         if len(images_list) == 1 and isinstance(prompts, str):
             prompts = [prompts]
         if len(prompts) != len(images_list):
-            return _error(f"[ocr] prompts length ({len(prompts)}) must match batch size ({len(images_list)}).")
+            return _error(
+                f"[ocr] prompts length ({len(prompts)}) must match batch size ({len(images_list)})."
+            )
         use_gpu = bool(metadata.get("ocr_use_gpu", self.use_gpu))
         scorer = self.scorers.get(use_gpu)
         if scorer is None:

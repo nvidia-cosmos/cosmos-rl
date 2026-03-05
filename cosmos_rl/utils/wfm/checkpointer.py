@@ -824,9 +824,9 @@ class ModelWrapper(Stateful):
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
         if self.load_ema_to_reg:
-            assert (
-                not self.model[0].config.ema.enabled
-            ), "EMA is enabled, can not load EMA weights to regular model weights"
+            assert not self.model[0].config.ema.enabled, (
+                "EMA is enabled, can not load EMA weights to regular model weights"
+            )
             all_keys = list(_state_dict.keys())
             for k in all_keys:
                 if k.startswith("net."):
@@ -837,13 +837,13 @@ class ModelWrapper(Stateful):
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         if self.load_ema_to_reg:
-            assert (
-                not self.model[0].config.ema.enabled
-            ), "EMA is enabled, can not load EMA weights to regular model weights"
+            assert not self.model[0].config.ema.enabled, (
+                "EMA is enabled, can not load EMA weights to regular model weights"
+            )
             all_keys = list(state_dict.keys())
-            assert all(
-                k.startswith("net_ema.") for k in all_keys
-            ), "All keys must start with net_ema."
+            assert all(k.startswith("net_ema.") for k in all_keys), (
+                "All keys must start with net_ema."
+            )
             for k in all_keys:
                 state_dict[k.replace("net_ema.", "net.")] = state_dict.pop(k)
         func = functools.partial(
@@ -958,9 +958,9 @@ def save_checkpoint_in_background(
                 sender_queue.close()
                 return
 
-            assert isinstance(
-                received_data, tuple
-            ), "Received data must be a tuple of (state_dict, checkpoint_path)"
+            assert isinstance(received_data, tuple), (
+                "Received data must be a tuple of (state_dict, checkpoint_path)"
+            )
             state_dict, checkpoint_path = received_data
 
             # Save checkpoint and measure time taken
@@ -1072,9 +1072,9 @@ class DistributedCheckpointer(AbstractCheckpointer):
                 checkpoint_path = None
         if len(self.keys_not_to_resume) > 0:
             for key in self.keys_not_to_resume:
-                assert (
-                    key in self.KEYS_TO_SAVE
-                ), f"Invalid key to resume: {key} not in {self.KEYS_TO_SAVE}"
+                assert key in self.KEYS_TO_SAVE, (
+                    f"Invalid key to resume: {key} not in {self.KEYS_TO_SAVE}"
+                )
             resume_keys = [
                 key for key in resume_keys if key not in self.keys_not_to_resume
             ]

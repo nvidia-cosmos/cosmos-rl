@@ -142,9 +142,9 @@ def create_assistant_tokens_mask(tokens, processor):  # Qwen2 based model
 
     # Initialize the mask with False values.
     masks = np.zeros_like(np_tokens, dtype=bool)
-    assert len(start_indices) == len(
-        end_indices
-    ), "remember to set add_generation_prompt=False in apply_chat_template"
+    assert len(start_indices) == len(end_indices), (
+        "remember to set add_generation_prompt=False in apply_chat_template"
+    )
     # For each pair of bos/eos, check if the role is 'assistant'
     # and apply the mask accordingly.
     for start, end in zip(start_indices, end_indices):

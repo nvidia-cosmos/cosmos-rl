@@ -66,14 +66,14 @@ def mock_for_decoupled_loss():
         rollout_logprobs = [
             i for sublist in minibatch["rollout_logprobs"] for i in sublist
         ]
-        assert len(logprobs) == len(
-            rollout_logprobs
-        ), f"{len(logprobs)} vs {len(rollout_logprobs)}"
+        assert len(logprobs) == len(rollout_logprobs), (
+            f"{len(logprobs)} vs {len(rollout_logprobs)}"
+        )
         all_same = True
         for lp, rlp in zip(logprobs, rollout_logprobs):
-            assert (
-                math.exp(lp - rlp) < 2.0
-            ), f"Logprob: {lp}, Rollout logprob: {rlp} : {lp - rlp} {math.exp(lp - rlp)}"
+            assert math.exp(lp - rlp) < 2.0, (
+                f"Logprob: {lp}, Rollout logprob: {rlp} : {lp - rlp} {math.exp(lp - rlp)}"
+            )
             if lp != rlp:
                 all_same = False
         assert not all_same, "All logprobs are the same, something is wrong."

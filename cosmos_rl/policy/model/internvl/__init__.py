@@ -192,9 +192,9 @@ class Qwen3MoE(nn.Module):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
@@ -335,9 +335,9 @@ class InternVLChatModel(BaseModel):
         n_image_tokens_in_vision_embeds = vision_embeds.reshape(-1, feature_dim).shape[
             0
         ]
-        assert (
-            n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds
-        ), f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
+        assert n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds, (
+            f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
+        )
         input_embeds = input_embeds.clone()
         input_embeds[selected] = (
             vision_embeds.reshape(-1, feature_dim)
@@ -372,9 +372,9 @@ class InternVLChatModel(BaseModel):
                     self.image_token_id,
                 )
         else:
-            assert (
-                input_ids.is_floating_point()
-            ), "input of pipeline stage > 0 must be of floating point type"
+            assert input_ids.is_floating_point(), (
+                "input of pipeline stage > 0 must be of floating point type"
+            )
             inputs_embeds = input_ids
 
         # For GRPO, we can pass in the logprob_masks to the model
@@ -586,14 +586,14 @@ class InternVLChatModel(BaseModel):
             if expert_id is not None:
                 local_view = local_view[expert_id]
             if slice_range is not None:
-                assert (
-                    local_view.shape[0] == 2 * self.model.model_args.ffn_dim
-                ), f"Shape mismatch: {local_view.shape[0]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                assert local_view.shape[0] == 2 * self.model.model_args.ffn_dim, (
+                    f"Shape mismatch: {local_view.shape[0]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                )
                 local_view = local_view[slice_range]
 
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 

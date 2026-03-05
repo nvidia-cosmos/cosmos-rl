@@ -154,16 +154,16 @@ class LoRATest(unittest.TestCase):
             # Base stays identical
             for n, p in model.named_parameters():
                 if "lora_" not in n:
-                    assert torch.equal(
-                        p, old_base[n]
-                    ), f"Base param {n} changed unexpectedly"
+                    assert torch.equal(p, old_base[n]), (
+                        f"Base param {n} changed unexpectedly"
+                    )
 
             # LoRA must change (use exact inequality, not allclose)
             for n, p in model.named_parameters():
                 if "lora_" in n:
-                    assert not torch.equal(
-                        p, old_lora[n]
-                    ), f"LoRA param {n} did not change"
+                    assert not torch.equal(p, old_lora[n]), (
+                        f"LoRA param {n} did not change"
+                    )
 
     def test_save_and_load_lora_only(self):
         model = TinyBlock()

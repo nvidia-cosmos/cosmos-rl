@@ -352,7 +352,9 @@ maxmemory-policy allkeys-lfu
                                 weight_version_for_each_payload
                             ]
                             == global_batch_size
-                        ), f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
+                        ), (
+                            f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
+                        )
                         weight_version_for_each_payload += 1
                     # record the number of valid prompts for each weight version
                     # tag the payload with the corresponding weight version

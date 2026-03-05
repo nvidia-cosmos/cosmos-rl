@@ -31,7 +31,6 @@ from cosmos_rl_reward.utils.logging import logger
 
 
 class HPSv3Scorer:
-
     def __init__(
         self,
         device: str = "cuda",
@@ -58,17 +57,24 @@ class HPSv3Scorer:
     @torch.inference_mode()
     def score(self, prompts: List[str], images_uint8_nhwc: torch.Tensor) -> List[float]:
         pil_images: List[Image.Image] = [
-            Image.fromarray(images_uint8_nhwc[i].contiguous().cpu().numpy()).convert("RGB")
+            Image.fromarray(images_uint8_nhwc[i].contiguous().cpu().numpy()).convert(
+                "RGB"
+            )
             for i in range(images_uint8_nhwc.shape[0])
         ]
 
         rewards = self.inferencer.reward(prompts=prompts, image_paths=pil_images)
         # HPSv3 returns (miu, sigma) per sample by default. We use miu (index 0).
-        if isinstance(rewards, torch.Tensor) and rewards.ndim == 2 and rewards.shape[-1] >= 1:
+        if (
+            isinstance(rewards, torch.Tensor)
+            and rewards.ndim == 2
+            and rewards.shape[-1] >= 1
+        ):
             mu = rewards[:, 0]
         else:
             mu = rewards
         return mu.float().cpu().tolist()
+
 
 @RewardRegistry.register()
 class HPSv3Reward(BaseRewardHandler):
@@ -86,7 +92,7 @@ class HPSv3Reward(BaseRewardHandler):
     ):
         super().__init__()
         self.device = device
-        self.dtype = dtype 
+        self.dtype = dtype
         self.download_path = download_path
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
@@ -121,11 +127,17 @@ class HPSv3Reward(BaseRewardHandler):
             }
 
         if self.model is None:
-            return _error("[hpsv3] model is not initialized. Check setup logs / dependencies.")
+            return _error(
+                "[hpsv3] model is not initialized. Check setup logs / dependencies."
+            )
         if images is None or not isinstance(images, torch.Tensor):
-            return _error(f"[hpsv3] expects torch.Tensor in BHWC/NHWC layout; got type={type(images)}")
+            return _error(
+                f"[hpsv3] expects torch.Tensor in BHWC/NHWC layout; got type={type(images)}"
+            )
         if images.dim() != 4:
-            return _error(f"[hpsv3] expects 4D tensor (B,H,W,C) or (B,C,H,W); got shape={getattr(images,'shape',None)}")
+            return _error(
+                f"[hpsv3] expects 4D tensor (B,H,W,C) or (B,C,H,W); got shape={getattr(images, 'shape', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[hpsv3] batch size is zero.")
 
@@ -135,7 +147,9 @@ class HPSv3Reward(BaseRewardHandler):
         if isinstance(prompts, str):
             prompts = [prompts]
         if len(prompts) != images.shape[0]:
-            return _error(f"[hpsv3] prompts length ({len(prompts)}) must match batch size ({images.shape[0]}).")
+            return _error(
+                f"[hpsv3] prompts length ({len(prompts)}) must match batch size ({images.shape[0]})."
+            )
 
         x = images
         if x.dtype != torch.uint8:
@@ -161,5 +175,3 @@ class HPSv3Reward(BaseRewardHandler):
             "decoded_duration": metadata.get("decode_duration", "N/A"),
             "type": self.reward_name,
         }
-
-

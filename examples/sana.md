@@ -117,4 +117,3 @@ cosmos-rl --config ./configs/sana/sana-image-nft.toml cosmos_rl.tools.dataset.di
       url={https://arxiv.org/abs/2509.24695},
     }
 ```
-

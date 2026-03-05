@@ -85,9 +85,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         assert self.replica_name == src_replica_name
         current_step = broadcast_command.weight_step
         if current_step is not None:
-            assert (
-                current_step >= self.current_weight_version
-            ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            assert current_step >= self.current_weight_version, (
+                f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            )
             self.current_weight_version = current_step
 
         if current_step is not None and current_step >= 0:
@@ -177,9 +177,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             self._command_queue.put(command)
         executed_cmd = super().consume_one_command(cmd_pred)
         logger.debug(f"[Rollout] Executing command: {executed_cmd}")
-        assert executed_cmd is None or isinstance(
-            executed_cmd, command_type
-        ), f"Invalid command type: {type(executed_cmd)}"
+        assert executed_cmd is None or isinstance(executed_cmd, command_type), (
+            f"Invalid command type: {type(executed_cmd)}"
+        )
         return executed_cmd
 
     def prepare_shard_infos_for_weight_sync_insts(self):

@@ -103,9 +103,9 @@ def _apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims
 
         for _, block in _model.model.layers.named_children():
             attn_module = block.self_attn.attn_module
-            assert isinstance(
-                attn_module, DotProductAttention
-            ), "Context parallelism is only supported for DotProductAttention."
+            assert isinstance(attn_module, DotProductAttention), (
+                "Context parallelism is only supported for DotProductAttention."
+            )
             assert attn_module.num_attention_heads % cp_mesh.size() == 0, (
                 f"Number of attention heads {attn_module.num_attention_heads} must be divisible by "
                 f"context parallel size {cp_mesh.size()}"

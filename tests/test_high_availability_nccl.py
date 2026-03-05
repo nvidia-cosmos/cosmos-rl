@@ -226,9 +226,9 @@ class TestHANccl(CommMixin):
 
         # 2. wait for the comm to be ready
         comm.wait_comm_ready()
-        assert (
-            comm.world_size() == dist.get_world_size()
-        ), f"world size should be {dist.get_world_size()}"
+        assert comm.world_size() == dist.get_world_size(), (
+            f"world size should be {dist.get_world_size()}"
+        )
         comm.destroy_nccl_comm()
         comm.shutdown()
         logger.info("  === normal case, passed")
@@ -269,9 +269,9 @@ class TestHANccl(CommMixin):
                     comm.push_cmd(cmd)
                 break
             comm.wait_comm_ready()
-            assert (
-                comm.world_size() == dist.get_world_size() - 1
-            ), f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
+            assert comm.world_size() == dist.get_world_size() - 1, (
+                f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
+            )
 
         comm.destroy_nccl_comm()
         comm.shutdown()
@@ -303,9 +303,9 @@ class TestHANccl(CommMixin):
 
         cmds = self.fetch_command()
         cmds = [cmd for cmd in cmds if isinstance(cmd, BuildMeshCommand)]
-        assert (
-            len(cmds) > 0
-        ), f"  replica_rank {self.replica_rank} should have at least one buildmesh command"
+        assert len(cmds) > 0, (
+            f"  replica_rank {self.replica_rank} should have at least one buildmesh command"
+        )
 
         # 3. test build mesh timeout
         # let rank 1 exit, so that other ranks will timeout, and rebuild mesh in scale down mode
@@ -319,9 +319,9 @@ class TestHANccl(CommMixin):
         else:
             # monitor that all other ranks execute the build mesh command
             cmd = cmds[-1]
-            assert (
-                len(cmd.replica_name_to_rank) == world_size - 1
-            ), f"buildmesh command should be {world_size - 1}"
+            assert len(cmd.replica_name_to_rank) == world_size - 1, (
+                f"buildmesh command should be {world_size - 1}"
+            )
             logger.info(
                 f"  replica_rank {self.replica_rank} push the buildmesh command: {cmd.replica_name_to_rank}"
             )
@@ -346,9 +346,9 @@ class TestHANccl(CommMixin):
                 retry_count += 1
 
             assert comm.is_ready(), "comm is not ready"
-            assert (
-                comm.world_size() == world_size - 1
-            ), f"world size should be {world_size - 1}, actual {comm.world_size()}"
+            assert comm.world_size() == world_size - 1, (
+                f"world size should be {world_size - 1}, actual {comm.world_size()}"
+            )
 
         # finally, shutdown the comm
         comm.destroy_nccl_comm()

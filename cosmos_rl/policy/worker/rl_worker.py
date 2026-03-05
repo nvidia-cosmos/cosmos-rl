@@ -69,9 +69,9 @@ class RLPolicyWorker(PolicyWorkerBase):
     config: CosmosConfig
 
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        assert isinstance(
-            config, CosmosConfig
-        ), "config must be a CosmosConfig object for this trainer"
+        assert isinstance(config, CosmosConfig), (
+            "config must be a CosmosConfig object for this trainer"
+        )
         super().__init__(config, parallel_dims=parallel_dims)
 
         self.report_data = {}
@@ -357,9 +357,9 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         self.p2r_collective_manager.setup_manager(command)
 
-        assert (
-            self.trainer.map_w_from_policy_to_rollout is not None
-        ), "No parameters to sync found."
+        assert self.trainer.map_w_from_policy_to_rollout is not None, (
+            "No parameters to sync found."
+        )
         st = time.time()
 
         if self.policy_to_rollout_insts is None:
@@ -485,9 +485,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                     if not hasattr(self, "synced_trainable_params"):
                         self.synced_trainable_params = transferred_params_cnt
                     else:
-                        assert (
-                            self.synced_trainable_params == transferred_params_cnt
-                        ), "Trainable synced params count must match at each weight sync."
+                        assert self.synced_trainable_params == transferred_params_cnt, (
+                            "Trainable synced params count must match at each weight sync."
+                        )
 
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
@@ -589,9 +589,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
                     if bmcmd:
-                        assert isinstance(
-                            bmcmd, BuildMeshCommand
-                        ), "Only buildmesh command is supported"
+                        assert isinstance(bmcmd, BuildMeshCommand), (
+                            "Only buildmesh command is supported"
+                        )
                         self.is_master_replica = (
                             bmcmd.replica_name_to_rank[self.replica_name] == 0
                         )
@@ -671,9 +671,9 @@ class RLPolicyWorker(PolicyWorkerBase):
             - Getting the prompt and conversation from the local dataset if local_dataset is enabled
             - Getting the teacher result from the Redis if the teacher result uuid is not empty
             """
-            assert all(
-                rollout.prompt_idx >= 0 for rollout in rollouts
-            ), "All rollouts from controller should have a valid prompt index"
+            assert all(rollout.prompt_idx >= 0 for rollout in rollouts), (
+                "All rollouts from controller should have a valid prompt index"
+            )
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
                     if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
@@ -684,7 +684,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                                 == self.inter_policy_nccl.replica_name_to_rank[
                                     self.replica_name
                                 ]
-                            ), f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
+                            ), (
+                                f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
+                            )
                     # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx

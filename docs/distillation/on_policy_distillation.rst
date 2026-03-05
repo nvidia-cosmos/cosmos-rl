@@ -89,19 +89,19 @@ Core Configuration
 
 **model_name_or_path** (string)
     Path or HuggingFace model identifier for the teacher model. This is the model from which logits will be extracted during rollout.
-    
+
     Example: ``"Qwen/Qwen3-8B"``
 
 **mini_batch** (integer)
     Batch size at each GPU for each forward execution when the teacher model generates logits and logprobs using the student-generated prompt and completion. Smaller values reduce peak memory usage during teacher inference.
-    
+
     Default: ``1``
 
 **batch_size_per_replica** (integer)
     Total number of samples processed per teacher model replica per distillation step. This may be first split to each GPU in the replica and then further split into multiple ``mini_batch`` forward passes for memory efficiency. For example, if ``batch_size_per_replica=32`` and ``mini_batch=8`` and there are 2 GPUs in the replica, the teacher will make 2 forward passes per GPU.
-    
+
     Formula: ``number_of_teacher_forward_passes = batch_size_per_replica // (number_of_gpus_in_replica * mini_batch)``
-    
+
     Default: ``8``
 
 Parallelism Configuration
@@ -131,20 +131,20 @@ Loss & Sampling Algorithm Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **jsd_beta** (float)
-    Interpolation coefficient between ``0.0`` and ``1.0`` of the Generalized Jensen-Shannon Divergence loss. 
-    
+    Interpolation coefficient between ``0.0`` and ``1.0`` of the Generalized Jensen-Shannon Divergence loss.
+
     - When beta is ``0.0``, the loss is the KL divergence
     - When beta is ``1.0``, the loss is the Inverse KL divergence
     - Values between 0 and 1 interpolate between these two extremes
-    
+
     Default: ``0.5``
 
 **top_k** (integer)
     Controls the distillation loss formulation:
-    
+
     - When ``0``: Uses simple reverse KL for loss (as described in `On-Policy Distillation <https://thinkingmachines.ai/blog/on-policy-distillation>`_)
     - When ``> 0``: Uses the generalized Jensen-Shannon Divergence loss for knowledge distillation using ``F.kl_div``, restricting to top-k most likely tokens. See Eq. (1) of `this paper <https://huggingface.co/papers/2306.13649>`_ for the definition
-    
+
     Default: ``0``
 
 Model Training Framework Configuration
@@ -152,22 +152,22 @@ Model Training Framework Configuration
 
 **include_prompt** (boolean)
     Include the prompt tokens in the distillation loss computation. When ``false``, only completion tokens are considered.
-    
+
     - Set to ``true`` if you want the student to also match teacher's prompt embeddings
     - Set to ``false`` (default) to focus on generation quality
-    
+
     Default: ``false``
 
 **trainer_token_ids_from_teacher** (boolean)
     Whether the trainer gets all top_k token ids directly from its redis-connected teacher model during distillation rather than from the rollout structure. This can simplify the rollout payload when being transferred in the framework.
-    
+
     Note: When ``top_k <= 0``, this parameter is automatically set to ``false``.
-    
+
     Default: ``true``
 
 **rollout_top_k_recompute** (boolean)
     Whether to recompute all top-k logprobs with top-k token ids after the full sequence is generated during rollout for distillation. This can ensure the completion generation process doesn't keep large top-k values that would degrade generation efficiency.
-    
+
     Default: ``false``
 
 Launching on SLURM
@@ -209,7 +209,7 @@ Start with the Qwen8B DeepMath distillation reference job:
 Steps to Clone and Customize
 :::::::::::::::::::::::::::::
 
-1. **Clone the Job**: 
+1. **Clone the Job**:
    - Click the "Clone" or "Create from Template" button in the job details view
    - This will create a copy of the job configuration with all settings pre-populated
 

@@ -258,21 +258,21 @@ class vLLMRolloutAsync(vLLMRollout):
         )
         # Here is a problem in vllm, when output_kind is not FINAL_ONLY, the count of result.outputs may not equal to the sampling_params.n
         # a valid solution is to set output_kind to FINAL_ONLY.
-        assert (
-            sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
-        ), "vLLM async rollout must set output_kind to FINAL_ONLY."
+        assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY, (
+            "vLLM async rollout must set output_kind to FINAL_ONLY."
+        )
 
         # TODO(zjx): should remove if vllm support putting multiple prompts in one call
-        assert (
-            len(payloads) == 1
-        ), "vLLM async rollout only support one prompt at a time."
+        assert len(payloads) == 1, (
+            "vLLM async rollout only support one prompt at a time."
+        )
 
         # Pack the payloads into prompts for vllm.
         prompts = []
         for pl in payloads:
-            assert (
-                pl.prompt is not None
-            ), "Prompt should not be None for single turn rollout generation."
+            assert pl.prompt is not None, (
+                "Prompt should not be None for single turn rollout generation."
+            )
             prompts.append(data_packer.get_rollout_input(pl.prompt))
         prompts = data_packer.rollout_collate_fn(prompts)
         if self.is_vlm:

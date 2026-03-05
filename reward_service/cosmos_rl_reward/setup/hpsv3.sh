@@ -68,4 +68,3 @@ PY
 
 echo "[hpsv3 setup] Done."
 echo "[hpsv3 setup] Checkpoint path: ${OUT_FILE}"
-

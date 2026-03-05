@@ -193,7 +193,7 @@ class FileClient:
     def _register_backend(cls, name, backend, force=False, prefixes=None):
         if not isinstance(name, str):
             raise TypeError(
-                "the backend name should be a string, " f"but got {type(name)}"
+                f"the backend name should be a string, but got {type(name)}"
             )
         if not inspect.isclass(backend):
             raise TypeError(f"backend should be a class but got {type(backend)}")

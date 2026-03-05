@@ -163,9 +163,9 @@ class SFTTrainer(LLMTrainer):
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            assert train_step == 0, (
+                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            )
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
@@ -742,9 +742,9 @@ class SFTTrainer(LLMTrainer):
                         self.optimizers, self.config, ckpt_total_steps
                     )
                 if ckpt_total_steps > 0:
-                    assert (
-                        self.lr_schedulers is not None
-                    ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
+                    assert self.lr_schedulers is not None, (
+                        "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
+                    )
 
             send_recv_hook = partial(
                 dist.broadcast,

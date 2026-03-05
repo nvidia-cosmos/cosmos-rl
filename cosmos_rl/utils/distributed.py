@@ -173,9 +173,9 @@ def gradient_reduce_across_dp_replicas_(
                 size = g.numel()
                 g.copy_(tmp_buffer[offset : offset + size].view_as(g))
                 offset += size
-                assert (
-                    offset <= tmp_buffer.numel()
-                ), "offset should be equal to total size"
+                assert offset <= tmp_buffer.numel(), (
+                    "offset should be equal to total size"
+                )
 
 
 gradient_reduce_across_dp_replicas_.first_invoke = True
@@ -778,9 +778,9 @@ class DistKVStore:
                 group=self.group,
             )
             local_ip, local_port = broadcast_object_list
-            assert (
-                local_ip is not None and local_port is not None
-            ), "Failed to broadcast local store info"
+            assert local_ip is not None and local_port is not None, (
+                "Failed to broadcast local store info"
+            )
 
             while True:
                 try:

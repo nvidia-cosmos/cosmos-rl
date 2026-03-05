@@ -144,7 +144,7 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
         """Set up test fixtures once for all test methods."""
         cls.config = MockRoboTwinConfig()
         print(
-            f"\n{'='*80}\n"
+            f"\n{'=' * 80}\n"
             f"Initializing RoboTwin environment with {cls.config.num_envs} environments...\n"
             f"Task: {cls.config.task_config['task_name']}\n"
             f"\n"
@@ -155,7 +155,7 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
             f"\n"
             f"Subsequent runs will be much faster (cached compilation).\n"
             f"Please wait...\n"
-            f"{'='*80}"
+            f"{'=' * 80}"
         )
 
         try:
@@ -175,13 +175,13 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
             )
             init_time = time.time() - start_time
             print(
-                f"\n{'='*80}\n"
+                f"\n{'=' * 80}\n"
                 f"✓ RoboTwinEnvWrapper initialized successfully in {init_time:.1f}s\n"
-                f"{'='*80}\n"
+                f"{'=' * 80}\n"
             )
         except Exception as e:
             print(
-                f"\n{'='*80}\n✗ Failed to initialize RoboTwinEnvWrapper: {e}\n{'='*80}\n"
+                f"\n{'=' * 80}\n✗ Failed to initialize RoboTwinEnvWrapper: {e}\n{'=' * 80}\n"
             )
             import traceback
 
@@ -675,7 +675,7 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
             do_validation=reset_do_validation,
         )
         async_start_time = time.time() - start_time
-        print(f"✓ Async reset initiated in {async_start_time*1000:.2f}ms")
+        print(f"✓ Async reset initiated in {async_start_time * 1000:.2f}ms")
 
         # While reset is happening, step the other environments
         print(f"\nStepping envs {step_env_ids} while reset is in progress...")
@@ -690,7 +690,9 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
             print(f"  - Step {step_num + 1}/{num_concurrent_steps} completed")
 
         step_duration = time.time() - step_start_time
-        print(f"✓ Completed {num_concurrent_steps} steps in {step_duration*1000:.2f}ms")
+        print(
+            f"✓ Completed {num_concurrent_steps} steps in {step_duration * 1000:.2f}ms"
+        )
 
         # Verify stepped environments advanced
         step_env_states = self.env.get_env_states(step_env_ids)
@@ -708,7 +710,7 @@ class TestRoboTwinEnvWrapper(unittest.TestCase):
             env_ids=reset_env_ids
         )
         wait_duration = time.time() - wait_start_time
-        print(f"✓ Async reset completed in {wait_duration*1000:.2f}ms (wait time)")
+        print(f"✓ Async reset completed in {wait_duration * 1000:.2f}ms (wait time)")
 
         # Verify reset results
         self.assertEqual(images_and_states["full_images"].shape[0], len(reset_env_ids))

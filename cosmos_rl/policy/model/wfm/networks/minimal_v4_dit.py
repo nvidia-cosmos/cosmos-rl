@@ -563,9 +563,9 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         dim_h = dim // 6 * 2
         dim_w = dim_h
         dim_t = dim - 2 * dim_h
-        assert (
-            dim == dim_h + dim_w + dim_t
-        ), f"bad dim: {dim} != {dim_h} + {dim_w} + {dim_t}"
+        assert dim == dim_h + dim_w + dim_t, (
+            f"bad dim: {dim} != {dim_h} + {dim_w} + {dim_t}"
+        )
         # TODO: (qsh 2025-01-04) this is tricky! https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py#L361
         self.register_buffer(
             "dim_spatial_range",
@@ -641,17 +641,17 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         temporal_freqs = 1.0 / (t_theta**self.dim_temporal_range)
 
         B, T, H, W, _ = B_T_H_W_C
-        assert (
-            H <= self.max_h and W <= self.max_w
-        ), f"Input dimensions (H={H}, W={W}) exceed the maximum dimensions (max_h={self.max_h}, max_w={self.max_w})"
+        assert H <= self.max_h and W <= self.max_w, (
+            f"Input dimensions (H={H}, W={W}) exceed the maximum dimensions (max_h={self.max_h}, max_w={self.max_w})"
+        )
         half_emb_h = torch.outer(self.seq[:H], h_spatial_freqs)
         half_emb_w = torch.outer(self.seq[:W], w_spatial_freqs)
 
         if self.enable_fps_modulation:
             uniform_fps = (fps is None) or (fps.min() == fps.max())
-            assert (
-                uniform_fps or B == 1 or T == 1
-            ), "For video batch, batch size should be 1 for non-uniform fps. For image batch, T should be 1"
+            assert uniform_fps or B == 1 or T == 1, (
+                "For video batch, batch size should be 1 for non-uniform fps. For image batch, T should be 1"
+            )
 
             # apply sequence scaling in temporal dimension
             if fps is None:  # image case
@@ -699,9 +699,9 @@ class LearnablePosEmbAxis(VideoPositionEmb):
         del kwargs  # unused
         super().__init__()
         self.interpolation = interpolation
-        assert self.interpolation in [
-            "crop"
-        ], f"Unknown interpolation method {self.interpolation}"
+        assert self.interpolation in ["crop"], (
+            f"Unknown interpolation method {self.interpolation}"
+        )
         self.model_channels = model_channels
 
         self.pos_emb_h = nn.Parameter(torch.zeros(len_h, model_channels))
@@ -962,9 +962,9 @@ class PatchEmbed(nn.Module):
         """
         assert x.dim() == 5
         _, _, T, H, W = x.shape
-        assert (
-            H % self.spatial_patch_size == 0 and W % self.spatial_patch_size == 0
-        ), f"H,W {(H, W)} should be divisible by spatial_patch_size {self.spatial_patch_size}"
+        assert H % self.spatial_patch_size == 0 and W % self.spatial_patch_size == 0, (
+            f"H,W {(H, W)} should be divisible by spatial_patch_size {self.spatial_patch_size}"
+        )
         assert T % self.temporal_patch_size == 0
         x = self.proj(x)
         return x
@@ -1696,9 +1696,9 @@ class MiniTrainDIT(WeightTrainingStat):
             timesteps: (B, ) tensor of timesteps
             crossattn_emb: (B, N, D) tensor of cross-attention embeddings
         """
-        assert isinstance(
-            data_type, DataType
-        ), f"Expected DataType, got {type(data_type)}. We need discuss this flag later."
+        assert isinstance(data_type, DataType), (
+            f"Expected DataType, got {type(data_type)}. We need discuss this flag later."
+        )
         x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D = (
             self.prepare_embedded_sequence(
                 x_B_C_T_H_W,
@@ -1711,9 +1711,9 @@ class MiniTrainDIT(WeightTrainingStat):
             crossattn_emb = self.crossattn_proj(crossattn_emb)
 
         if img_context_emb is not None:
-            assert (
-                self.extra_image_context_dim is not None
-            ), "extra_image_context_dim must be set if img_context_emb is provided"
+            assert self.extra_image_context_dim is not None, (
+                "extra_image_context_dim must be set if img_context_emb is provided"
+            )
             img_context_emb = self.img_context_proj(img_context_emb)
             context_input = (crossattn_emb, img_context_emb)
         else:
@@ -1732,9 +1732,9 @@ class MiniTrainDIT(WeightTrainingStat):
         self.crossattn_emb = crossattn_emb
 
         if extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D is not None:
-            assert (
-                x_B_T_H_W_D.shape == extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape
-            ), f"{x_B_T_H_W_D.shape} != {extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape}"
+            assert x_B_T_H_W_D.shape == extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape, (
+                f"{x_B_T_H_W_D.shape} != {extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape}"
+            )
 
         B, T, H, W, D = x_B_T_H_W_D.shape
         # x_B_THW_D = rearrange(x_B_T_H_W_D, "b t h w d -> b (t h w) d")

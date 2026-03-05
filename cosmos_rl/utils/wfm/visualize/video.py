@@ -58,9 +58,9 @@ def save_img_or_video(
         fps (int): Frames per second for video. Default is 24.
     """
     assert sample_C_T_H_W_in01.ndim == 4, "Only support 4D tensor"
-    assert isinstance(save_fp_wo_ext, str) or hasattr(
-        save_fp_wo_ext, "write"
-    ), "save_fp_wo_ext must be a string or file-like object"
+    assert isinstance(save_fp_wo_ext, str) or hasattr(save_fp_wo_ext, "write"), (
+        "save_fp_wo_ext must be a string or file-like object"
+    )
 
     if torch.is_floating_point(sample_C_T_H_W_in01):
         sample_C_T_H_W_in01 = sample_C_T_H_W_in01.clamp(0, 1)

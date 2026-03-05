@@ -140,7 +140,9 @@ class DecodeHandler:
             dtype=torch.bfloat16,
             temporal_window=4,
         )
-        logger.info(f"[{self.name}] Wan2pt2 latent decoder initialized from {model_path}")
+        logger.info(
+            f"[{self.name}] Wan2pt2 latent decoder initialized from {model_path}"
+        )
 
     def decode_video(self, latents: torch.Tensor):
         """
@@ -200,6 +202,7 @@ class DecodeHandler:
         logger.info(f"[{cls.name}] Setting latent attributes: {fields}")
         controller = cls.get_instance()
         from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+
         controller.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=fields.get("chunk_duration", 81),
             load_mean_std=fields.get("load_mean_std", False),
@@ -305,7 +308,6 @@ class DecodeHandler:
                     )
                     del reward_fn[key]
 
-
             media_type = metadata.get("media_type", None)
             is_image_payload = (
                 media_type is not None and str(media_type).lower() == "image"
@@ -350,7 +352,9 @@ class DecodeHandler:
                     }
                 )
                 metadata["uuid"] = uuid
-                logger.info(f"[{self.name}] Prepared pre-decoded video batch for {uuid}")
+                logger.info(
+                    f"[{self.name}] Prepared pre-decoded video batch for {uuid}"
+                )
 
             elif is_image_payload:
                 # Parse image tensor payload; prefer NPY [B,C,H,W] uint8
@@ -359,7 +363,11 @@ class DecodeHandler:
                     npy = np.load(buffer, allow_pickle=False)
                 except Exception:
                     buffer = io.BytesIO(file)
-                    npy = torch.load(buffer, map_location=torch.device("cpu")).cpu().numpy()
+                    npy = (
+                        torch.load(buffer, map_location=torch.device("cpu"))
+                        .cpu()
+                        .numpy()
+                    )
 
                 images_tensor = torch.from_numpy(npy)
 
@@ -376,16 +384,16 @@ class DecodeHandler:
                 metadata["decoded_info"] = decoded_info
                 metadata["decode_duration"] = "0.00"
                 metadata.setdefault("input_info", {})
-                metadata["input_info"].update({
-                    "shape": images_tensor.shape,
-                    "dtype": str(images_tensor.dtype),
-                    "min": f"{images_tensor.min():.3f}",
-                    "max": f"{images_tensor.max():.3f}",
-                })
-                metadata["uuid"] = uuid
-                logger.info(
-                    f"[{self.name}] Prepared image batch for {uuid}"
+                metadata["input_info"].update(
+                    {
+                        "shape": images_tensor.shape,
+                        "dtype": str(images_tensor.dtype),
+                        "min": f"{images_tensor.min():.3f}",
+                        "max": f"{images_tensor.max():.3f}",
+                    }
                 )
+                metadata["uuid"] = uuid
+                logger.info(f"[{self.name}] Prepared image batch for {uuid}")
             else:
                 try:
                     buffer = io.BytesIO(file)

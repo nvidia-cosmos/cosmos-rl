@@ -66,9 +66,9 @@ def get_video_dataset(
     dataset_info_fn: Callable = None,
     **kwargs,
 ):
-    assert (
-        resolution in VIDEO_RES_SIZE_INFO.keys()
-    ), "The provided resolution cannot be found in VIDEO_RES_SIZE_INFO."
+    assert resolution in VIDEO_RES_SIZE_INFO.keys(), (
+        "The provided resolution cannot be found in VIDEO_RES_SIZE_INFO."
+    )
     assert object_store in [
         "s3",
         "swiftstack",
@@ -79,30 +79,29 @@ def get_video_dataset(
         "video_basic_augmentor_v2_with_control",
     ]
     if video_decoder_name == "video_naive_bytes":
-        assert (
-            augmentor_name in basic_augmentor_names
-        ), "We can only use video_basic_augmentor_v2 with video_naive_bytes decoder."
+        assert augmentor_name in basic_augmentor_names, (
+            "We can only use video_basic_augmentor_v2 with video_naive_bytes decoder."
+        )
     if augmentor_name in basic_augmentor_names:
-        assert (
-            video_decoder_name == "video_naive_bytes"
-        ), "We can only use video_naive_bytes decoder with video_basic_augmentor_v2."
+        assert video_decoder_name == "video_naive_bytes", (
+            "We can only use video_naive_bytes decoder with video_basic_augmentor_v2."
+        )
 
-    assert (
-        dataset_resolution_type
-        in [
-            "all",
-            "gt720p",
-            "gt1080p",
-        ]
-    ), f"The provided dataset resolution type {dataset_resolution_type} is not supported."
+    assert dataset_resolution_type in [
+        "all",
+        "gt720p",
+        "gt1080p",
+    ], (
+        f"The provided dataset resolution type {dataset_resolution_type} is not supported."
+    )
     # dataset_resolution_type
     # -- all - uses all dataset resolutions
     # -- gt720p - Uses only resolutions >= 720p
     # -- gt1080p - Uses only resolutions >= 1080p
     if not object_store:
-        assert (
-            dataset_info_fn is not None
-        ), "dataset_info_fn is required for local loading."
+        assert dataset_info_fn is not None, (
+            "dataset_info_fn is required for local loading."
+        )
         dataset_info = dataset_info_fn()
     else:
         dataset_info_fn = DATASET_OPTIONS[dataset_name]
@@ -192,18 +191,17 @@ def get_image_dataset(
     embedding_type: str = "t5_xxl",
     **kwargs,
 ):
-    assert (
-        resolution in IMAGE_RES_SIZE_INFO.keys()
-    ), "The provided resolution cannot be found in IMAGE_RES_SIZE_INFO."
+    assert resolution in IMAGE_RES_SIZE_INFO.keys(), (
+        "The provided resolution cannot be found in IMAGE_RES_SIZE_INFO."
+    )
     assert object_store in ["s3", "swiftstack"], "We support s3 and swiftstack only."
-    assert (
-        dataset_resolution_type
-        in [
-            "all",
-            "gt720p",
-            "gt1080p",
-        ]
-    ), f"The provided dataset resolution type {dataset_resolution_type} is not supported."
+    assert dataset_resolution_type in [
+        "all",
+        "gt720p",
+        "gt1080p",
+    ], (
+        f"The provided dataset resolution type {dataset_resolution_type} is not supported."
+    )
     # dataset_resolution_type
     # -- all - uses all dataset resolutions
     # -- gt720p - Uses only resolutions >= 720p

@@ -191,9 +191,9 @@ class BaseModel(torch.nn.Module, ABC):
                         else:
                             dim_slice = DimSliceInfo.from_dict(part_slice[dim])
                         if dim not in dims_rank_info:
-                            assert (
-                                len(global_shape) > dim
-                            ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                            assert len(global_shape) > dim, (
+                                f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                            )
                             local_part = DimSliceInfo(offset=0, total_size=1)
                         else:
                             local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
@@ -880,9 +880,9 @@ class WeightMapper(ABC):
         It is inverse of the split operations in function `rollout_prepare_recv` and only do for name tranferring.
         If no split in the weight key, return the original weight key.
         """
-        assert hasattr(
-            self, "map_to_unsplited_weight_name"
-        ), "map_to_unsplited_weight_name is not set. Please call rollout_prepare_recv first."
+        assert hasattr(self, "map_to_unsplited_weight_name"), (
+            "map_to_unsplited_weight_name is not set. Please call rollout_prepare_recv first."
+        )
         if (
             hasattr(self, "map_to_unsplited_weight_name")
             and weight_key in self.map_to_unsplited_weight_name
@@ -1039,9 +1039,9 @@ class WeightMapper(ABC):
                 continue
             final_recv_key_n_shape_list.append(group_keys)
             total_count += len(group_keys)
-        assert (
-            len(final_rollout_weight_inplace_view_map) == total_count
-        ), f"{len(final_rollout_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        assert len(final_rollout_weight_inplace_view_map) == total_count, (
+            f"{len(final_rollout_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        )
         return final_rollout_weight_inplace_view_map, final_recv_key_n_shape_list
 
     def update_tensor_view(

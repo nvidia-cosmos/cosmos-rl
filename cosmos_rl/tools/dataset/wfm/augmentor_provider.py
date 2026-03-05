@@ -112,12 +112,12 @@ def get_video_augmentor_v1(
     Supported caption_type include vila_caption.
     Supported embedding_type include t5_xxl.
     """
-    assert (
-        caption_type == "vila_caption"
-    ), f"Unsupported caption type ({caption_type}) for video data"
-    assert (
-        embedding_type == "t5_xxl"
-    ), f"Unsupported embeddings type ({embedding_type}) for video data"
+    assert caption_type == "vila_caption", (
+        f"Unsupported caption type ({caption_type}) for video data"
+    )
+    assert embedding_type == "t5_xxl", (
+        f"Unsupported embeddings type ({embedding_type}) for video data"
+    )
     video_text_transform = get_video_text_transform(
         caption_type=caption_type,
         embedding_type=embedding_type,

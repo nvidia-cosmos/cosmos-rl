@@ -380,9 +380,9 @@ class Vid2VidModel(T2VModel):
         if self.parallel_dims is not None:
             pass
         else:
-            assert (
-                not self.net.is_context_parallel_enabled
-            ), "parallelism is not initialized, context parallel should be turned off."
+            assert not self.net.is_context_parallel_enabled, (
+                "parallelism is not initialized, context parallel should be turned off."
+            )
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             cond_x0 = self.denoise(noise_x, sigma, condition).x0
@@ -390,9 +390,9 @@ class Vid2VidModel(T2VModel):
             raw_x0 = cond_x0 + guidance * (cond_x0 - uncond_x0)
             if "guided_image" in data_batch:
                 # replacement trick that enables inpainting with base model
-                assert (
-                    "guided_mask" in data_batch
-                ), "guided_mask should be in data_batch if guided_image is present"
+                assert "guided_mask" in data_batch, (
+                    "guided_mask should be in data_batch if guided_image is present"
+                )
                 guide_image = data_batch["guided_image"]
                 guide_mask = data_batch["guided_mask"]
                 raw_x0 = guide_mask * guide_image + (1 - guide_mask) * raw_x0
@@ -402,9 +402,9 @@ class Vid2VidModel(T2VModel):
             x0 = self.denoise(noise_x, sigma, condition).x0
             if "guided_image" in data_batch:
                 # replacement trick that enables inpainting with base model
-                assert (
-                    "guided_mask" in data_batch
-                ), "guided_mask should be in data_batch if guided_image is present"
+                assert "guided_mask" in data_batch, (
+                    "guided_mask should be in data_batch if guided_image is present"
+                )
                 guide_image = data_batch["guided_image"]
                 guide_mask = data_batch["guided_mask"]
                 x0 = guide_mask * guide_image + (1 - guide_mask) * x0

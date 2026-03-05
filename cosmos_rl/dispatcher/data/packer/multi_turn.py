@@ -110,9 +110,9 @@ def get_token_ids_and_loss_mask_from_conversation(
             _idx += 1
     token_ids_parts.append(token_ids_template[_last_idx:])
 
-    assert (
-        len(token_ids_parts) == len(unmasked_role_contents) + 1
-    ), "Number of token ids parts should be the same as the number of unmasked role contents + 1"
+    assert len(token_ids_parts) == len(unmasked_role_contents) + 1, (
+        "Number of token ids parts should be the same as the number of unmasked role contents + 1"
+    )
 
     concat_token_ids = []
     concat_loss_mask = []

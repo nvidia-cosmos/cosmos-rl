@@ -294,9 +294,9 @@ class _DeepepManager(_DispatchManager):
             self.tokens_per_expert = self.tokens_per_expert.long()
 
         self.hidden_shape_before_permute = hidden_states.shape
-        assert (
-            self.dispatched_probs.dtype == torch.float32
-        ), "DeepEP only supports float32 probs"
+        assert self.dispatched_probs.dtype == torch.float32, (
+            "DeepEP only supports float32 probs"
+        )
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
             self.dispatched_routing_map,
@@ -391,10 +391,12 @@ class MoEFlexTokenDispatcher:
 
         self.num_local_experts = num_local_experts
         self.local_expert_indices = local_expert_indices
-        assert (
-            self.tp_size * self.ep_size > 1
-        ), "Flex token dispatcher requires TPxEP > 1"
-        assert self.config.moe_enable_deepep, "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert self.tp_size * self.ep_size > 1, (
+            "Flex token dispatcher requires TPxEP > 1"
+        )
+        assert self.config.moe_enable_deepep, (
+            "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        )
         if SHARING_DEEPEP_MANAGER:
             if MoEFlexTokenDispatcher.shared_comm_manager is None:
                 MoEFlexTokenDispatcher.shared_comm_manager = _DeepepManager(
@@ -842,9 +844,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.num_experts = config.num_moe_experts
         assert self.num_local_experts > 0, "Expected at least one expert"
         self.local_expert_indices = local_expert_indices
-        assert (
-            len(self.local_expert_indices) == self.num_local_experts
-        ), "Invalid local expert indices"
+        assert len(self.local_expert_indices) == self.num_local_experts, (
+            "Invalid local expert indices"
+        )
         for i in range(len(self.local_expert_indices) - 1):
             assert (
                 self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1

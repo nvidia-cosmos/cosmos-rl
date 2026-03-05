@@ -14,10 +14,10 @@ Cosmos-RL supports **elastic launching** of replicas, enabling users to dynamica
 
 There are two initialization modes based on the configuration field `n_init_replicas`:
 
-1. **`n_init_replicas = N > 1`**  
+1. **`n_init_replicas = N > 1`**
    Cosmos-RL will wait until `N` replicas have joined before proceeding, and will treat later replicas as dynamic.
 
-2. **`n_init_replicas = 1` (default)**  
+2. **`n_init_replicas = 1` (default)**
    Cosmos-RL immediately treats the first launched replica as active and dynamically integrates subsequent replicas.
 
 Policy and Rollout components each maintain their own `n_init_replicas` setting, defaulting to `1`.
@@ -95,7 +95,7 @@ You will see the new replicas appear in the web UI. Now, all four replicas (2 po
 Fault Tolerance
 ---------------
 
-Cosmos-RL maintains heartbeat communication between the controller and all replicas. 
+Cosmos-RL maintains heartbeat communication between the controller and all replicas.
 
 If either:
 

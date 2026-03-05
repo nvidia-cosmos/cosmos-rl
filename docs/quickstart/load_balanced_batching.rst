@@ -39,14 +39,14 @@ The system uses a pool-based approach:
 
 1. **Sample Pool**: Each rank maintains a pool of samples (default: 32 samples)
 2. **Best-Fit Selection**: When forming a batch, the system selects samples from the pool based on the batching mode:
-   
+
    **Without Sequence Packing** (default):
    - Maximizes batch_size * max_input_len while staying within ``max_tokens_for_batch``
    - Uses padding to align sequences to the same length
    - Batching strategies:
      - ``prefer_closest``: Selects samples with lengths closest to existing samples in the batch (minimizes padding)
      - ``prefer_first``: FIFO selection (faster but may have more padding)
-   
+
    **With Sequence Packing** (``sequence_packing = true``):
    - Maximizes total tokens (sum of all sequence lengths) while staying within ``max_tokens_for_batch``
    - Multiple sequences are packed into a single tensor without padding
@@ -79,39 +79,39 @@ enable_dp_load_balancing
 
 load_balanced_pool_size
    Size of the sample pool maintained by each rank (default: 32)
-   
+
    Larger pool sizes allow better batch formation but use more memory.
 
 load_balanced_max_tokens_for_batch
    Maximum number of tokens per batch (default: 32768)
-   
+
    This is the primary constraint for batch formation. The system will create batches that maximize batch_size * max_input_len while staying within this limit.
 
 load_balanced_batching_strategy
    Batching strategy: "prefer_closest" or "prefer_first" (default: "prefer_closest")
-   
+
    - ``prefer_closest``: Minimizes padding by selecting samples with similar lengths
    - ``prefer_first``: FIFO selection, faster but may have more padding
 
 max_num_steps (in ``[train]``)
    Maximum number of optimizer steps (training steps). **Required** when ``enable_dp_load_balancing = true``.
-   
+
    This defines the number of times ``optimizer.step()`` will be called. The actual number of batches processed will be ``max_num_steps * load_balanced_batches_per_optimizer_step``.
-   
+
    **Important**: When ``enable_dp_load_balancing = true``, training is **step-based**, not epoch-based. The user-provided ``epoch`` configuration parameter is ignored. The system uses ``max_num_steps`` (in ``[train]`` section) to determine when training should stop.
 
 load_balanced_batches_per_optimizer_step
    Number of batches to accumulate per optimizer step for gradient accumulation (default: 1)
-   
+
    Each DataLoader iteration will return this many batches, which are processed before calling ``optimizer.step()``. The total number of batches processed = ``max_num_steps`` (in ``[train]``) * ``load_balanced_batches_per_optimizer_step``.
 
 sequence_packing
    Enable sequence packing for training (default: false)
-   
+
    When enabled, multiple sequences are packed into a single tensor without padding, maximizing token utilization. The batch formation strategy changes from maximizing ``batch_size * max_input_len`` to maximizing ``sum(sequence_lengths)`` within the token limit.
-   
+
    **Important**: Sequence packing requires model support. Not all models support sequence packing. The system will check compatibility and warn if the model doesn't support it.
-   
+
    When sequence packing is enabled:
    - The batching strategy (``prefer_closest`` vs ``prefer_first``) is ignored
    - A greedy algorithm is used: sequences are added until total tokens exceed the limit
