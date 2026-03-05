@@ -29,7 +29,9 @@ OPENAI_DATASET_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
 class ResizeMaxSize(torch.nn.Module):
-    def __init__(self, max_size, interpolation=InterpolationMode.BICUBIC, fn="max", fill=0):
+    def __init__(
+        self, max_size, interpolation=InterpolationMode.BICUBIC, fn="max", fill=0
+    ):
         super().__init__()
         self.max_size = max_size
         self.interpolation = interpolation
@@ -47,7 +49,16 @@ class ResizeMaxSize(torch.nn.Module):
             img = F.resize(img, new_size, self.interpolation)
             pad_h = self.max_size - new_size[0]
             pad_w = self.max_size - new_size[1]
-            img = F.pad(img, padding=[pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2], fill=self.fill)
+            img = F.pad(
+                img,
+                padding=[
+                    pad_w // 2,
+                    pad_h // 2,
+                    pad_w - pad_w // 2,
+                    pad_h - pad_h // 2,
+                ],
+                fill=self.fill,
+            )
         return img
 
 
@@ -73,7 +84,12 @@ def image_transform_tensor(image_size: int, mean=None, std=None, fill_color: int
         mean = (mean,) * 3
     if not isinstance(std, (list, tuple)):
         std = (std,) * 3
-    return Compose([ResizeMaxSize(image_size, fill=fill_color), MaskAwareNormalize(mean=mean, std=std)])
+    return Compose(
+        [
+            ResizeMaxSize(image_size, fill=fill_color),
+            MaskAwareNormalize(mean=mean, std=std),
+        ]
+    )
 
 
 @RewardRegistry.register()
@@ -81,7 +97,14 @@ class HPSv2Reward(BaseRewardHandler):
     NEEDS_LATENT_DECODER = False
     reward_name = "hpsv2"
 
-    def __init__(self, model_path: str = "", download_path: str = "", device: str = "cuda", dtype: str = "float32", **kwargs):
+    def __init__(
+        self,
+        model_path: str = "",
+        download_path: str = "",
+        device: str = "cuda",
+        dtype: str = "float32",
+        **kwargs,
+    ):
         super().__init__()
         self.device = device
         self.dtype = torch.float32
@@ -97,7 +120,9 @@ class HPSv2Reward(BaseRewardHandler):
 
             # Resolve ckpt from download_path only
             base_dir = self.download_path
-            hps_ckpt = os.path.join(base_dir, "hpsv2", "ckpts", "HPS_v2.1_compressed.pt")
+            hps_ckpt = os.path.join(
+                base_dir, "hpsv2", "ckpts", "HPS_v2.1_compressed.pt"
+            )
             if not os.path.exists(hps_ckpt):
                 raise FileNotFoundError(
                     f"[hpsv2] checkpoint not found at {hps_ckpt}. Run setup script or update rewards.toml."
@@ -122,7 +147,9 @@ class HPSv2Reward(BaseRewardHandler):
             if isinstance(image_size, tuple):
                 image_size = image_size[0]
             self.model = model
-            self.preprocess = image_transform_tensor(image_size, mean=image_mean, std=image_std)
+            self.preprocess = image_transform_tensor(
+                image_size, mean=image_mean, std=image_std
+            )
             checkpoint = torch.load(hps_ckpt, map_location="cpu")
             self.model.load_state_dict(checkpoint["state_dict"])
             self.tokenizer = get_tokenizer("ViT-H-14")
@@ -143,14 +170,21 @@ class HPSv2Reward(BaseRewardHandler):
                 "decoded_duration": metadata.get("decode_duration", "N/A"),
                 "type": self.reward_name,
             }
+
         if images is None:
             return _error("[hpsv2] images tensor is None.")
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
-            return _error(f"[hpsv2] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+            return _error(
+                f"[hpsv2] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images, 'shape', None)} dtype={getattr(images, 'dtype', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[hpsv2] images batch size is zero.")
-        start = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
-        end = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        start = (
+            torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        )
+        end = (
+            torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        )
         if start is not None:
             start.record()
         x = images
@@ -177,7 +211,7 @@ class HPSv2Reward(BaseRewardHandler):
         if end is not None:
             end.record()
             torch.cuda.synchronize()
-            duration = f"{start.elapsed_time(end)/1000.0:.2f}"
+            duration = f"{start.elapsed_time(end) / 1000.0:.2f}"
         else:
             duration = "0.00"
         return {

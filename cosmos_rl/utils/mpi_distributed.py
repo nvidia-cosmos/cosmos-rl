@@ -72,13 +72,13 @@ def init_distributed_with_MPI():
     assert cosmos_local_world_size is not None, "COSMOS_LOCAL_WORLD_SIZE is not set."
 
     if cosmos_world_size is not None:
-        assert world_size == int(
-            cosmos_world_size
-        ), "COSMOS_WORLD_SIZE is not consistent with the world size of MPI."
+        assert world_size == int(cosmos_world_size), (
+            "COSMOS_WORLD_SIZE is not consistent with the world size of MPI."
+        )
     if cosmos_local_world_size is not None:
-        assert mpi_world_size() == int(
-            cosmos_local_world_size
-        ), "COSMOS_LOCAL_WORLD_SIZE is not consistent with the local world size of MPI."
+        assert mpi_world_size() == int(cosmos_local_world_size), (
+            "COSMOS_LOCAL_WORLD_SIZE is not consistent with the local world size of MPI."
+        )
 
     rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", None)
     assert rdzv_endpoint is not None, "COSMOS_RDZV_ENDPOINT is not set."

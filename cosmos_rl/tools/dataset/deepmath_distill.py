@@ -63,12 +63,12 @@ class DeepMathDataset(Dataset):
         """
         munual_converted = ""
         for idx, message in enumerate(messages):
-            assert (
-                message.get("thinking") is None
-            ), "TODO: support CoT in Qwen3 renderer"
-            assert isinstance(
-                message["content"], str
-            ), "Qwen3Renderer only supports message with string content"
+            assert message.get("thinking") is None, (
+                "TODO: support CoT in Qwen3 renderer"
+            )
+            assert isinstance(message["content"], str), (
+                "Qwen3Renderer only supports message with string content"
+            )
             maybe_newline = "\n" if idx > 0 else ""
             ob_str = f"{maybe_newline}<|im_start|>{message['role']}\n"
             ac_content = message["content"]
@@ -82,9 +82,9 @@ class DeepMathDataset(Dataset):
                 # <think> in the assistant messages, we so don't need to re-add it in those cases.
                 ob_str += "<think>\n"
             # Observation (prompt) part
-            assert (
-                "tool_calls" not in message
-            ), "Tool calls not supported in Qwen3 renderer"
+            assert "tool_calls" not in message, (
+                "Tool calls not supported in Qwen3 renderer"
+            )
             ac_content += "<|im_end|>"
             munual_converted += ob_str
             if message["role"] != "assistant":
@@ -220,9 +220,9 @@ class AIMEDataSet(Dataset):
 
     def __getitem__(self, idx: int) -> RLPayload:
         question = self.dataset[idx]["problem"].strip()
-        assert isinstance(
-            question, str
-        ), f"Prompt should be a string, but got {type(question)}, {question}"
+        assert isinstance(question, str), (
+            f"Prompt should be a string, but got {type(question)}, {question}"
+        )
         # Convert to templated prompt
         final_prompt = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.".format(
             question=question

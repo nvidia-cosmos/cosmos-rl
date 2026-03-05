@@ -336,9 +336,9 @@ class CosmosPredict2_5Model(DiffuserModel):
             pad_frames = last_frame.repeat(1, 1, n_pad_frames, 1, 1)  # [B, C, T, H, W]
             video = torch.cat((video, pad_frames), dim=2)
 
-        assert (
-            num_frames_in <= num_frames_out
-        ), f"expected ({num_frames_in=}) <= ({num_frames_out=})"
+        assert num_frames_in <= num_frames_out, (
+            f"expected ({num_frames_in=}) <= ({num_frames_out=})"
+        )
 
         video = video.to(device=device, dtype=vae_dtype)
 

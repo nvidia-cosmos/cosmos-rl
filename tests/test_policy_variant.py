@@ -54,9 +54,9 @@ class TestGspo(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestReferenceReset(unittest.TestCase):
@@ -90,9 +90,9 @@ class TestReferenceReset(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestPolicyBatchSize(unittest.TestCase):
@@ -126,9 +126,9 @@ class TestPolicyBatchSize(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestDecoupledLoss(unittest.TestCase):
@@ -218,9 +218,9 @@ class TestDecoupledLoss(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 if __name__ == "__main__":

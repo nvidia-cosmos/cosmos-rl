@@ -35,6 +35,7 @@ class UnifiedReward(BaseRewardHandler):
 
     def set_up(self):
         from openai import OpenAI
+
         self.client = OpenAI(api_key=self.endpoint_api_key, base_url=self.endpoint_url)
 
     def pil_image_to_base64(self, image):
@@ -59,7 +60,7 @@ class UnifiedReward(BaseRewardHandler):
         return scores
 
     def evaluate_image(self, prompt, image):
-        question = f"<image>\nYou are given a text caption and a generated image based on that caption. Your task is to evaluate this image based on two key criteria:\n1. Alignment with the Caption: Assess how well this image aligns with the provided caption. Consider the accuracy of depicted objects, their relationships, and attributes as described in the caption.\n2. Overall Image Quality: Examine the visual quality of this image, including clarity, detail preservation, color accuracy, and overall aesthetic appeal.\nBased on the above criteria, assign a score from 1 to 5 after \'Final Score:\'.\nYour task is provided as follows:\nText Caption: [{prompt}]"
+        question = f"<image>\nYou are given a text caption and a generated image based on that caption. Your task is to evaluate this image based on two key criteria:\n1. Alignment with the Caption: Assess how well this image aligns with the provided caption. Consider the accuracy of depicted objects, their relationships, and attributes as described in the caption.\n2. Overall Image Quality: Examine the visual quality of this image, including clarity, detail preservation, color accuracy, and overall aesthetic appeal.\nBased on the above criteria, assign a score from 1 to 5 after 'Final Score:'.\nYour task is provided as follows:\nText Caption: [{prompt}]"
         images_base64 = self.pil_image_to_base64(image)
         response = self.client.chat.completions.create(
             model="UnifiedReward-7b-v1.5",
@@ -84,12 +85,15 @@ class UnifiedReward(BaseRewardHandler):
         return response.choices[0].message.content
 
     def evaluate_batch_image(self, images, prompts):
-        results = [self.evaluate_image(prompt, img) for prompt, img in zip(prompts, images)]
+        results = [
+            self.evaluate_image(prompt, img) for prompt, img in zip(prompts, images)
+        ]
         return results
 
     def calculate_reward(self, images, metadata):
         import torch
         from PIL import Image
+
         def _error(msg: str):
             logger.error(msg)
             return {
@@ -100,11 +104,14 @@ class UnifiedReward(BaseRewardHandler):
                 "decoded_duration": metadata.get("decode_duration", "N/A"),
                 "type": self.reward_name,
             }
+
         t0 = time.perf_counter()
         if images is None:
             return _error("[unified_reward] images tensor is None.")
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
-            return _error(f"[unified_reward] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+            return _error(
+                f"[unified_reward] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images, 'shape', None)} dtype={getattr(images, 'dtype', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[unified_reward] images batch size is zero.")
         x = images
@@ -116,18 +123,24 @@ class UnifiedReward(BaseRewardHandler):
             x_nhwc = x.permute(0, 2, 3, 1).contiguous()
         else:
             raise ValueError(f"channel dim must be 3, got shape {x.shape}")
-        pil_images = [Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])]
+        pil_images = [
+            Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])
+        ]
         prompts = metadata.get("prompts")
         if prompts is None:
             return _error("[unified_reward] prompts are required and cannot be None.")
         if isinstance(prompts, str):
             prompts = [prompts]
         if len(prompts) != len(pil_images):
-            return _error(f"[unified_reward] prompts length ({len(prompts)}) must match batch size ({len(pil_images)}).")
+            return _error(
+                f"[unified_reward] prompts length ({len(prompts)}) must match batch size ({len(pil_images)})."
+            )
 
         text_outputs = self.evaluate_batch_image(pil_images, prompts)
         scores = self._extract_scores(text_outputs)
-        scores = [sc/5.0 for sc in scores]  # Normalize to [0,1] assuming the original score is in [0,5]
+        scores = [
+            sc / 5.0 for sc in scores
+        ]  # Normalize to [0,1] assuming the original score is in [0,5]
         duration = f"{(time.perf_counter() - t0):.2f}"
         return {
             "scores": {"unified_reward": scores},

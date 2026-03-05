@@ -104,9 +104,9 @@ def main():
         print(f"\n--- Sample {i} ---")
         try:
             sample = dataset[i]
-            assert (
-                "chosen" in sample and "rejected" in sample
-            ), "Missing chosen/rejected"
+            assert "chosen" in sample and "rejected" in sample, (
+                "Missing chosen/rejected"
+            )
             chosen = sample["chosen"]
             rejected = sample["rejected"]
 

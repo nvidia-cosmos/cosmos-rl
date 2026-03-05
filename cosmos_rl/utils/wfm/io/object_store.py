@@ -128,9 +128,9 @@ class ObjectStore:
         Returns:
             object (Any): The downloaded object.
         """
-        assert (
-            type is not None or load_func is not None
-        ), "Either type or load_func should be specified."
+        assert type is not None or load_func is not None, (
+            "Either type or load_func should be specified."
+        )
         with io.BytesIO() as buffer:
             # TODO(chenhsuanl): some may have more efficient implementations without loading the whole object.
             self.client.download_fileobj(Bucket=self.bucket, Key=key, Fileobj=buffer)

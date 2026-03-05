@@ -151,9 +151,9 @@ class LLMTrainer(Trainer):
                     if self.model_modpath[i] is None:
                         self.model_modpath[i] = f"model_part_{i}"
             else:
-                assert isinstance(
-                    config.train.optm_lr, dict
-                ), "Learning rate must be either a float, a list of floats, or a dict of {model_part: lr}."
+                assert isinstance(config.train.optm_lr, dict), (
+                    "Learning rate must be either a float, a list of floats, or a dict of {model_part: lr}."
+                )
                 import re
                 from typing import Tuple, Union, Iterable, List
 
@@ -185,9 +185,9 @@ class LLMTrainer(Trainer):
                 global_lr = config.train.optm_lr.get("global", None)
                 if global_lr is not None:
                     del config.train.optm_lr["global"]
-                    assert (
-                        isinstance(global_lr, float) and global_lr > 0
-                    ), f"Global learning rate must be a positive float if specified, but got {global_lr}."
+                    assert isinstance(global_lr, float) and global_lr > 0, (
+                        f"Global learning rate must be a positive float if specified, but got {global_lr}."
+                    )
 
                 # Check existence of the module paths specified in the learning rate dict
                 module_paths = sort_module_paths_deep_to_root(
@@ -196,9 +196,9 @@ class LLMTrainer(Trainer):
                 all_named_modules = dict(model.named_modules())
                 for module_path in module_paths:
                     if not self.parallel_dims.pp_enabled:
-                        assert (
-                            module_path in all_named_modules
-                        ), f"Module path {module_path} specified in learning rate dict not found in the model. Available module paths are: {list(all_named_modules.keys())}"
+                        assert module_path in all_named_modules, (
+                            f"Module path {module_path} specified in learning rate dict not found in the model. Available module paths are: {list(all_named_modules.keys())}"
+                        )
                     elif module_path not in all_named_modules:
                         logger.warning(
                             f"Module path {module_path} specified in learning rate dict not found in the model. Available module paths are: {list(all_named_modules.keys())}"
@@ -290,9 +290,9 @@ class LLMTrainer(Trainer):
 
         if has_reference_model:
             if len(self.reference_state_dict) == 0:
-                assert (
-                    not is_send
-                ), "Reference model state dict should be populated before sending"
+                assert not is_send, (
+                    "Reference model state dict should be populated before sending"
+                )
                 for key, value in model_state_dict[0].items():
                     self.reference_state_dict[key] = torch.empty_like(
                         value, device="cpu"

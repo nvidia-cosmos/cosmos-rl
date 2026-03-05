@@ -623,9 +623,9 @@ def main(
                 "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
             )
             raise e
-        assert (
-            args.config is not None
-        ), "Config file path is required. Please provide --config argument."
+        assert args.config is not None, (
+            "Config file path is required. Please provide --config argument."
+        )
 
     # Load config from file if provided
     loaded_config = None
@@ -653,9 +653,9 @@ def main(
                 )
 
         if data_packer is not None:
-            assert isinstance(data_packer, BaseDataPacker) or callable(
-                data_packer
-            ), "data_packer should be a BaseDataPacker instance or a Callable"
+            assert isinstance(data_packer, BaseDataPacker) or callable(data_packer), (
+                "data_packer should be a BaseDataPacker instance or a Callable"
+            )
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,

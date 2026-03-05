@@ -48,9 +48,9 @@ class HFVLMGRPODataset(Dataset):
         self.reward_function = config.train.train_policy.reward_function
         self.has_boxed_math_reward = "boxed_math" in self.reward_function
         self.has_format_reward = "format" in self.reward_function
-        assert (
-            self.has_image or self.has_video
-        ), "At least one of image or video column name must be provided"
+        assert self.has_image or self.has_video, (
+            "At least one of image or video column name must be provided"
+        )
         logger.info(f"[HFVLMGRPODataset] system_prompt: {self.system_prompt}")
 
         if config.train.train_policy.dataset.split:
@@ -95,9 +95,9 @@ class HFVLMGRPODataset(Dataset):
                 img_obj = images[0]
             else:
                 img_obj = images
-            assert isinstance(
-                img_obj, PILImage.Image
-            ), "image_obj is not PIL.Image.Image"
+            assert isinstance(img_obj, PILImage.Image), (
+                "image_obj is not PIL.Image.Image"
+            )
             pil_img = img_obj
             buffer = io.BytesIO()
             pil_img.save(buffer, format="PNG")
@@ -151,9 +151,9 @@ class HFVLMGRPOValDataset(HFVLMGRPODataset):
         self.video_column_name = config.train.train_policy.video_column_name
         self.has_image = self.image_column_name != ""
         self.has_video = self.video_column_name != ""
-        assert (
-            self.has_image or self.has_video
-        ), "At least one of image or video column name must be provided"
+        assert self.has_image or self.has_video, (
+            "At least one of image or video column name must be provided"
+        )
 
         if config.validation.dataset.split:
             if isinstance(config.validation.dataset.split, list):

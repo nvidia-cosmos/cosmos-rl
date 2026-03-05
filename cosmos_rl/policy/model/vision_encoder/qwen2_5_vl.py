@@ -119,9 +119,9 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
     def forward(self, seqlen: int, device: torch.device = None) -> torch.Tensor:
         if self.inv_freq.dtype != torch.float32:
             self.reset_inv_freq(device=device)
-            assert (
-                self.inv_freq.dtype == torch.float32
-            ), "inv_freq dtype should be float32"
+            assert self.inv_freq.dtype == torch.float32, (
+                "inv_freq dtype should be float32"
+            )
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )

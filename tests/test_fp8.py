@@ -110,12 +110,12 @@ class TestFp8(unittest.TestCase):
         converter.convert_model(demo_model)
 
         # Check the model is converted
-        assert isinstance(
-            demo_model.linear, Float8Linear
-        ), f"Got type: {type(demo_model.linear)}"
-        assert isinstance(
-            demo_model.linear2, Float8Linear
-        ), f"Got type: {type(demo_model.linear2)}"
+        assert isinstance(demo_model.linear, Float8Linear), (
+            f"Got type: {type(demo_model.linear)}"
+        )
+        assert isinstance(demo_model.linear2, Float8Linear), (
+            f"Got type: {type(demo_model.linear2)}"
+        )
 
 
 if __name__ == "__main__":

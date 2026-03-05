@@ -76,13 +76,13 @@ class GSM8kDataset(Dataset):
         ]
         ```
         """
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), (
+            "`self.tokenizer` should be set by the launcher"
+        )
         question = self.dataset[idx]["question"]
-        assert isinstance(
-            question, str
-        ), f"Prompt should be a string, but got {type(question)}, {question}"
+        assert isinstance(question, str), (
+            f"Prompt should be a string, but got {type(question)}, {question}"
+        )
         # Convert to templated prompt
         conversation = [
             {

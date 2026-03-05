@@ -129,9 +129,9 @@ class TestColocatedSeparated(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 if __name__ == "__main__":

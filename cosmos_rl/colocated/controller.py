@@ -253,9 +253,9 @@ class ColocatedController(Controller):
             if any(isinstance(cmd, t) for t in should_stop):
                 return cmd
             if not executed:
-                assert any(
-                    isinstance(cmd, t) for t in others
-                ), f"Unexpected command {cmd}"
+                assert any(isinstance(cmd, t) for t in others), (
+                    f"Unexpected command {cmd}"
+                )
 
     def rollout_consume_one_step_commands_util_r2r(self) -> bool:
         """
@@ -357,13 +357,14 @@ class ColocatedController(Controller):
                 f"[Controller] DataFetchCommand details: {data_fetch_cmd} at step {self.current_step}"
             )
             if not self.config.train.resume:
-                assert (
-                    data_fetch_cmd.do_save
-                    == (do_save and self.config.train.ckpt.enable_checkpoint)
-                ), f"Expected do_save {(do_save and self.config.train.ckpt.enable_checkpoint)} but got {data_fetch_cmd.do_save}"
-                assert (
-                    self.current_step == data_fetch_cmd.global_step
-                ), f"Expected global_step {self.current_step} but got {data_fetch_cmd.global_step}"
+                assert data_fetch_cmd.do_save == (
+                    do_save and self.config.train.ckpt.enable_checkpoint
+                ), (
+                    f"Expected do_save {(do_save and self.config.train.ckpt.enable_checkpoint)} but got {data_fetch_cmd.do_save}"
+                )
+                assert self.current_step == data_fetch_cmd.global_step, (
+                    f"Expected global_step {self.current_step} but got {data_fetch_cmd.global_step}"
+                )
 
         self.current_step = data_fetch_cmd.global_step
         self.total_steps = data_fetch_cmd.total_steps
@@ -486,9 +487,9 @@ class ColocatedController(Controller):
                     f"[RolloutGroup] from replica: {rollout_request.src_replica_name} with {len(rollout_request.payloads)} samples:"
                     f"example: rollouts[0]\n{rollouts[0]}"
                 )
-            assert (
-                self.rollout.parallel_dims.cp_coord[1] == 1
-            ), "Colocated rollout worker only supports cp size 1."
+            assert self.rollout.parallel_dims.cp_coord[1] == 1, (
+                "Colocated rollout worker only supports cp size 1."
+            )
             if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
                 for rollout in rollouts:
                     self.policy.data_queue.put_nowait(rollout)
@@ -508,9 +509,9 @@ class ColocatedController(Controller):
             return local_pending * self.policy.world_size
         else:
             if self.policy.global_rank != 0:
-                assert (
-                    self.pending_policy_samples() == 0
-                ), "Only global rank 0 should have pending samples."
+                assert self.pending_policy_samples() == 0, (
+                    "Only global rank 0 should have pending samples."
+                )
             return dist_util.broadcast_object_cpu(
                 local_pending, src=0, device=torch.device("cpu")
             )

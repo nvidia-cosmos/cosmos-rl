@@ -50,9 +50,9 @@ def parallelize(
     world_mesh = parallel_dims.mesh
     _, pp_size = parallel_dims.pp_coord
 
-    assert (
-        not parallel_dims.cp_enabled
-    ), "Context parallelism is not supported for HFModel"
+    assert not parallel_dims.cp_enabled, (
+        "Context parallelism is not supported for HFModel"
+    )
     assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
     assert not config.train.compile, "Compile is not supported for HFModel"
 

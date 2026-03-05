@@ -28,7 +28,6 @@ from cosmos_rl_reward.utils.logging import logger
 
 
 class PickScoreScorer(torch.nn.Module):
-
     def __init__(
         self,
         device: str = "cuda",
@@ -42,8 +41,14 @@ class PickScoreScorer(torch.nn.Module):
         self.device = device
         self.dtype = dtype
         cache_root = os.environ.get("HF_HOME", os.path.expanduser("~/.cache"))
-        self.processor = AutoProcessor.from_pretrained(processor_path, cache_dir=cache_root)
-        self.model = AutoModel.from_pretrained(model_path, cache_dir=cache_root).eval().to(device)
+        self.processor = AutoProcessor.from_pretrained(
+            processor_path, cache_dir=cache_root
+        )
+        self.model = (
+            AutoModel.from_pretrained(model_path, cache_dir=cache_root)
+            .eval()
+            .to(device)
+        )
         self.model = self.model.to(dtype=dtype)
 
     @torch.no_grad()
@@ -57,14 +62,20 @@ class PickScoreScorer(torch.nn.Module):
                     value = getattr(features, attr)
                     if isinstance(value, torch.Tensor):
                         return value
-            if isinstance(features, (tuple, list)) and len(features) > 0 and isinstance(features[0], torch.Tensor):
+            if (
+                isinstance(features, (tuple, list))
+                and len(features) > 0
+                and isinstance(features[0], torch.Tensor)
+            ):
                 return features[0]
             raise TypeError(
                 f"[pickscore] expected tensor-like features; got {type(features)} with attrs={dir(features)}"
             )
 
         if len(prompts) != len(images):
-            raise ValueError(f"[pickscore] prompts length ({len(prompts)}) must match images length ({len(images)}).")
+            raise ValueError(
+                f"[pickscore] prompts length ({len(prompts)}) must match images length ({len(images)})."
+            )
         image_inputs = self.processor(
             images=images,
             padding=True,
@@ -84,11 +95,15 @@ class PickScoreScorer(torch.nn.Module):
 
         image_features = self.model.get_image_features(**image_inputs)
         image_embs = _extract_features(image_features)
-        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(
+            1e-12
+        )
 
         text_features = self.model.get_text_features(**text_inputs)
         text_embs = _extract_features(text_features)
-        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(
+            1e-12
+        )
 
         logit_scale = self.model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
@@ -101,7 +116,9 @@ class PickScoreReward(BaseRewardHandler):
     NEEDS_LATENT_DECODER = False
     reward_name = "pickscore"
 
-    def __init__(self, dtype: str | torch.dtype = "float32", device: str = "cuda", **kwargs):
+    def __init__(
+        self, dtype: str | torch.dtype = "float32", device: str = "cuda", **kwargs
+    ):
         super().__init__()
         self.dtype = dtype
         self.device = device
@@ -125,9 +142,13 @@ class PickScoreReward(BaseRewardHandler):
             }
 
         if images is None or not isinstance(images, torch.Tensor):
-            return _error(f"[pickscore] expects torch.Tensor in BHWC/NHWC layout; got type={type(images)}")
+            return _error(
+                f"[pickscore] expects torch.Tensor in BHWC/NHWC layout; got type={type(images)}"
+            )
         if images.dim() != 4:
-            return _error(f"[pickscore] expects 4D tensor (B,H,W,C); got shape={getattr(images,'shape',None)}")
+            return _error(
+                f"[pickscore] expects 4D tensor (B,H,W,C); got shape={getattr(images, 'shape', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[pickscore] batch size is zero.")
 
@@ -147,9 +168,13 @@ class PickScoreReward(BaseRewardHandler):
         else:
             return _error(f"[pickscore] channel dim must be 3, got shape {x.shape}")
 
-        pil_images = [Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])]
+        pil_images = [
+            Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])
+        ]
         if len(prompts) != len(pil_images):
-            return _error(f"[pickscore] prompts length ({len(prompts)}) must match batch size ({len(pil_images)}).")
+            return _error(
+                f"[pickscore] prompts length ({len(prompts)}) must match batch size ({len(pil_images)})."
+            )
 
         start_time = time.time()
         scores = self.model(prompts, pil_images).float().cpu().tolist()
@@ -161,4 +186,3 @@ class PickScoreReward(BaseRewardHandler):
             "decoded_duration": metadata.get("decode_duration", "N/A"),
             "type": self.reward_name,
         }
-

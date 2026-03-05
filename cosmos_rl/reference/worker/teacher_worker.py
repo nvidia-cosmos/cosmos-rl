@@ -58,9 +58,9 @@ class TeacherWorker(PolicyWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         # parallel_dims is built from distillation parallelism config
         config = self.update_config(config)
-        assert isinstance(
-            config, CosmosConfig
-        ), "config must be a CosmosConfig object for this trainer"
+        assert isinstance(config, CosmosConfig), (
+            "config must be a CosmosConfig object for this trainer"
+        )
 
         kwargs["role"] = Role.REFERENCE
 
@@ -87,20 +87,20 @@ class TeacherWorker(PolicyWorkerBase):
 
     def check_config(self):
         assert self.config.distillation.enable, "Distillation must be enabled"
-        assert (
-            self.config.distillation.batch_size_per_replica > 0
-        ), "Batch size per replica must be greater than 0"
-        assert (
-            self.config.distillation.parallelism.dp_shard_size > 0
-        ), "DP shard size must be greater than 0"
-        assert (
-            self.config.distillation.parallelism.dp_replicate_size == 1
-        ), "DP replicate size must be 1"
+        assert self.config.distillation.batch_size_per_replica > 0, (
+            "Batch size per replica must be greater than 0"
+        )
+        assert self.config.distillation.parallelism.dp_shard_size > 0, (
+            "DP shard size must be greater than 0"
+        )
+        assert self.config.distillation.parallelism.dp_replicate_size == 1, (
+            "DP replicate size must be 1"
+        )
         dp_shard_size = self.config.distillation.parallelism.dp_shard_size
         assert dp_shard_size == self.parallel_dims.dp_shard
-        assert (
-            self.config.distillation.batch_size_per_replica % dp_shard_size == 0
-        ), "Batch size per replica must be divisible by DP shard size"
+        assert self.config.distillation.batch_size_per_replica % dp_shard_size == 0, (
+            "Batch size per replica must be divisible by DP shard size"
+        )
         logger.info("[Reference] Config checked successfully")
 
     def execute(self):
@@ -189,10 +189,11 @@ class TeacherWorker(PolicyWorkerBase):
                     f"[Reference] Failed to get rollouts: {e}, wait for next round"
                 )
             for rollout in teacher_requests:
-                assert (
-                    len(rollout["teacher_result_uuid"])
-                    == len(rollout["completion_token_ids"])
-                ), "Number of teacher result uuids and completion token ids must be the same"
+                assert len(rollout["teacher_result_uuid"]) == len(
+                    rollout["completion_token_ids"]
+                ), (
+                    "Number of teacher result uuids and completion token ids must be the same"
+                )
                 for tokens, uuid in zip(
                     rollout["completion_token_ids"], rollout["teacher_result_uuid"]
                 ):
@@ -284,9 +285,9 @@ class TeacherWorker(PolicyWorkerBase):
                     ):
                         scattered_rollouts[i].append(scattered_rollouts[0][0])
             for i in range(self.world_size):
-                assert (
-                    len(scattered_rollouts[i]) == len(scattered_rollouts[0])
-                ), f"Rank {i} has {len(scattered_rollouts[i])} rollouts, but rank 0 has {len(scattered_rollouts[0])} rollouts"
+                assert len(scattered_rollouts[i]) == len(scattered_rollouts[0]), (
+                    f"Rank {i} has {len(scattered_rollouts[i])} rollouts, but rank 0 has {len(scattered_rollouts[0])} rollouts"
+                )
         if self.world_size == 1:
             data = preprocess_rollouts(scattered_rollouts[0])
         logger.debug(

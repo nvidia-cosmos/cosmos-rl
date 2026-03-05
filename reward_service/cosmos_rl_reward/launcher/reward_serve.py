@@ -299,7 +299,9 @@ def main():
     )
     # Filter only enabled rewards
     enabled_reward_args = [
-        reward_arg for reward_arg in loaded_config.reward_args if getattr(reward_arg, "enable", True)
+        reward_arg
+        for reward_arg in loaded_config.reward_args
+        if getattr(reward_arg, "enable", True)
     ]
     for reward_arg in enabled_reward_args:
         logger.info(f"Setting up reward: {reward_arg.reward_type}")

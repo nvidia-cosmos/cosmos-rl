@@ -558,9 +558,9 @@ def get_cached_replay_dataloader(
         return _DataLoader(**kwargs)
 
     expected_batch_size = kwargs["batch_size"]
-    assert (
-        expected_batch_size % concat_size == 0
-    ), f"Batch size {expected_batch_size} must be divisible by concat_size {concat_size}"
+    assert expected_batch_size % concat_size == 0, (
+        f"Batch size {expected_batch_size} must be divisible by concat_size {concat_size}"
+    )
     kwargs["batch_size"] = expected_batch_size // concat_size
 
     dataloader = _DataLoader(**kwargs)

@@ -39,9 +39,9 @@ def genereate_dim_rank_info(
     tp_rank, tp_size = parallel_dims.tp_coord
     quant_method = getattr(module, "quant_method", None)
     assert quant_method is not None, "Must have quant_method for FusedMoE"
-    assert isinstance(
-        quant_method, Mxfp4MoEMethod
-    ), "Only mxfp4 quant method is supported for now."
+    assert isinstance(quant_method, Mxfp4MoEMethod), (
+        "Only mxfp4 quant method is supported for now."
+    )
     # get the rounded shape of weight
     # 768
     intermediate_size_per_partition_after_pad = quant_method.intermediate_size

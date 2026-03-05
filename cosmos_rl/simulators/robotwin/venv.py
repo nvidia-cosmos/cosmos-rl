@@ -515,9 +515,9 @@ class VectorEnv(gym.Env):
 
         # Setup seeds
         if env_seeds is not None:
-            assert (
-                len(env_seeds) == n_envs
-            ), f"env_seeds length ({len(env_seeds)}) must match n_envs ({n_envs})"
+            assert len(env_seeds) == n_envs, (
+                f"env_seeds length ({len(env_seeds)}) must match n_envs ({n_envs})"
+            )
             self.env_seeds = list(env_seeds)
         else:
             self.env_seeds = list(range(n_envs))

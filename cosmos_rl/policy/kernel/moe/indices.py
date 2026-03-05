@@ -314,7 +314,7 @@ def test_with_zero_tokens():
     print(f"total_tokens_per_expert = {total_tokens_per_expert}")
     print(f"m_sizes = {m_sizes}")
     print(f"m_offsets = {m_offsets}")
-    print(f"permuted_indices = {permuted_indices_gpu[:sum(m_sizes).item()]}")
+    print(f"permuted_indices = {permuted_indices_gpu[: sum(m_sizes).item()]}")
 
     # Check that experts with zero tokens have -1 in their slots
     for e in range(experts_per_rank):
@@ -322,12 +322,12 @@ def test_with_zero_tokens():
         end = m_offsets[e].item()
         expert_indices = permuted_indices_gpu[start:end]
         if total_tokens_per_expert[e] == 0:
-            assert (
-                expert_indices == -1
-            ).all(), f"Expert {e} with zero tokens should have all -1 indices"
-            assert (
-                expert_indices.size(0) >= alignment
-            ), f"Expert {e} with zero tokens should have at least {alignment} slots"
+            assert (expert_indices == -1).all(), (
+                f"Expert {e} with zero tokens should have all -1 indices"
+            )
+            assert expert_indices.size(0) >= alignment, (
+                f"Expert {e} with zero tokens should have at least {alignment} slots"
+            )
             print(
                 f"Expert {e} has zero tokens and {expert_indices.size(0)} slots with all -1"
             )

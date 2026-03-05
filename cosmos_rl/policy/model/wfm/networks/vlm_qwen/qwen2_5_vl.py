@@ -74,9 +74,9 @@ else:
     print("flash_attn_2 not available")
     flash_attn_varlen_func = None
 
-assert (
-    is_flash_attn_2_available()
-), "flash_attn_2 not available. run pip install flash_attn"
+assert is_flash_attn_2_available(), (
+    "flash_attn_2 not available. run pip install flash_attn"
+)
 
 logger = logging.get_logger(__name__)
 
@@ -1487,9 +1487,9 @@ class Qwen2_5_VLModel(nn.Module):
 
     def _seq_range(self, seqlen) -> tuple[int, int]:
         if self.cp_mesh is not None:
-            assert (
-                seqlen % self.cp_mesh.size() == 0
-            ), f"seqlen: {seqlen}, mesh size: {self.cp_mesh.size()}"
+            assert seqlen % self.cp_mesh.size() == 0, (
+                f"seqlen: {seqlen}, mesh size: {self.cp_mesh.size()}"
+            )
             local_seqlen = seqlen // self.cp_mesh.size()
             cp_rank = self.cp_mesh.get_local_rank()
             return (cp_rank * local_seqlen, (cp_rank + 1) * local_seqlen)

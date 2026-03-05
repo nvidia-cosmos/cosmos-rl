@@ -149,9 +149,9 @@ class SeqPackingTest(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
     def test_train_for_sequence_packing(self):
         self.run_train_for_sequence_packing(4, 1, 1)

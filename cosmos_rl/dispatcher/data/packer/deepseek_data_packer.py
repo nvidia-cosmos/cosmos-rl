@@ -45,9 +45,9 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
         computed_max_len = max(computed_max_len, self.seq_len)
         input_ids = [x.input_ids for x in processed_samples]
         logprob_masks = [x.logprob_masks for x in processed_samples]
-        assert len(input_ids) == len(
-            logprob_masks
-        ), "The length of input_ids, and logprob_masks should be the same"
+        assert len(input_ids) == len(logprob_masks), (
+            "The length of input_ids, and logprob_masks should be the same"
+        )
         device = torch.cuda.current_device()
 
         collated_dict = {}

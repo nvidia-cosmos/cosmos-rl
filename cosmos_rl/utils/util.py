@@ -197,7 +197,7 @@ def extract_fields(dc_instance):
                     "value": value,
                     "metadata": f.metadata,
                     "type": f.type,
-                    "input_type": "checkbox" if f.type == bool else "text",
+                    "input_type": "checkbox" if f.type == bool else "text",  # noqa: E721
                 }
                 fields[f.name] = field_data
         return fields
@@ -460,9 +460,9 @@ def prepare_cosmos_data(dataset, *args, **kwargs):
                         snapshot_dir, dataset.subset, "clips"
                     )
 
-                assert os.path.exists(
-                    downloaded_clips_dir
-                ), f"Cannot find clips at {downloaded_clips_dir}"
+                assert os.path.exists(downloaded_clips_dir), (
+                    f"Cannot find clips at {downloaded_clips_dir}"
+                )
 
                 # parallel extract
                 results = {}
@@ -942,9 +942,9 @@ def compute_logprobs(
     """
     # Shift token_ids
     if label_packing_mask is not None:
-        assert (
-            input_packing_mask is not None
-        ), "input_packing_mask must be provided if label_packing_mask is used"
+        assert input_packing_mask is not None, (
+            "input_packing_mask must be provided if label_packing_mask is used"
+        )
         shifted_input_ids = torch.zeros_like(input_ids_batch)
         shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
     else:
@@ -953,9 +953,9 @@ def compute_logprobs(
         shifted_input_ids[:, -1] = 0
 
     if is_full_logits:
-        assert (
-            logits.shape[:2] == shifted_input_ids.shape[:2]
-        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        assert logits.shape[:2] == shifted_input_ids.shape[:2], (
+            f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        )
         effective_logits = logits[logprob_masks]
     else:
         effective_logits = logits
@@ -1019,9 +1019,9 @@ def compute_logprobs_for_top_k_indices(
     """
     # Shift token_ids
     if label_packing_mask is not None:
-        assert (
-            input_packing_mask is not None
-        ), "input_packing_mask must be provided if label_packing_mask is used"
+        assert input_packing_mask is not None, (
+            "input_packing_mask must be provided if label_packing_mask is used"
+        )
         shifted_input_ids = torch.zeros_like(input_ids_batch)
         shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
     else:
@@ -1030,9 +1030,9 @@ def compute_logprobs_for_top_k_indices(
         shifted_input_ids[:, -1] = 0
 
     if is_full_logits:
-        assert (
-            logits.shape[:2] == shifted_input_ids.shape[:2]
-        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        assert logits.shape[:2] == shifted_input_ids.shape[:2], (
+            f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        )
         effective_logits = logits[logprob_masks]
     else:
         effective_logits = logits
@@ -1141,9 +1141,9 @@ def safe_deep_getattr(obj, attr_path, default=None):
 
 def load_model_class_by_config(hf_config):
     architectures = hf_config.architectures
-    assert (
-        len(architectures) == 1
-    ), f"zero or multiple architectures in config.json is not supported, {architectures=}"
+    assert len(architectures) == 1, (
+        f"zero or multiple architectures in config.json is not supported, {architectures=}"
+    )
 
     class_name = architectures[0]
     model_class = None
@@ -1170,11 +1170,11 @@ def decode_vision_info(prompts):
             multi_modal_data = new_prompt.pop("multi_modal_data")
             if "image" in multi_modal_data:
                 img_obj = multi_modal_data["image"]
-                assert isinstance(
-                    img_obj, list
-                ), f"image should be a list, but got {type(img_obj)}"
+                assert isinstance(img_obj, list), (
+                    f"image should be a list, but got {type(img_obj)}"
+                )
                 img_type = type(img_obj[0])
-                if img_type == str:
+                if img_type == str:  # noqa: E721
                     for i, img_b64 in enumerate(img_obj):
                         img_bytes = base64.b64decode(img_b64)
                         img_buffer = io.BytesIO(img_bytes)
@@ -1409,9 +1409,9 @@ def split_train_n_val_dataset(
         test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
         train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
     else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
+        assert hasattr(train_dataset, "train_test_split"), (
+            "train_dataset must have train_test_split method"
+        )
         split = train_dataset.train_test_split(
             test_size=config.dataset.test_size, shuffle=False
         )

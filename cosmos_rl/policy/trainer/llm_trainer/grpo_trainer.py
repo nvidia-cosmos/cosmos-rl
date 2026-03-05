@@ -131,21 +131,21 @@ def compute_loss(
     if current_advantages.shape == logprob_masks.shape:
         current_advantages = torch.masked_select(current_advantages, logprob_masks)
     else:
-        assert (
-            current_advantages.shape == current_token_logps.shape
-        ), f"current_advantages.shape: {current_advantages.shape} != current_token_logps.shape: {current_token_logps.shape}"
+        assert current_advantages.shape == current_token_logps.shape, (
+            f"current_advantages.shape: {current_advantages.shape} != current_token_logps.shape: {current_token_logps.shape}"
+        )
 
-    assert (
-        current_token_logps.shape == current_advantages.shape
-    ), "current_token_logps and current_advantages should have the same shape"
-    assert (
-        old_per_token_logps.shape == current_token_logps.shape
-    ), "old_per_token_logps and current_token_logps should have the same shape"
+    assert current_token_logps.shape == current_advantages.shape, (
+        "current_token_logps and current_advantages should have the same shape"
+    )
+    assert old_per_token_logps.shape == current_token_logps.shape, (
+        "old_per_token_logps and current_token_logps should have the same shape"
+    )
     if ref_per_token_logps is not None:
-        assert (
-            ref_per_token_logps.shape == current_token_logps.shape
-        ), "ref_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
-            ref_per_token_logps.shape, current_token_logps.shape
+        assert ref_per_token_logps.shape == current_token_logps.shape, (
+            "ref_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
+                ref_per_token_logps.shape, current_token_logps.shape
+            )
         )
     if rollout_per_token_logps is not None:
         rollout_per_token_logps = torch.tensor(
@@ -153,10 +153,10 @@ def compute_loss(
             device=current_token_logps.device,
             dtype=current_token_logps.dtype,
         ).detach()
-        assert (
-            rollout_per_token_logps.shape == current_token_logps.shape
-        ), "rollout_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
-            rollout_per_token_logps.shape, current_token_logps.shape
+        assert rollout_per_token_logps.shape == current_token_logps.shape, (
+            "rollout_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
+                rollout_per_token_logps.shape, current_token_logps.shape
+            )
         )
 
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
@@ -175,9 +175,9 @@ def compute_loss(
         for i in range(bsz):
             seq_tokens = negative_approx_kl[cu_seqlens[i] : cu_seqlens[i + 1]]
             seq_length = shifted_length[i]
-            assert (
-                len(seq_tokens) == shifted_length[i]
-            ), f"seq_length: {seq_length} != shifted_length: {shifted_length[i]}"
+            assert len(seq_tokens) == shifted_length[i], (
+                f"seq_length: {seq_length} != shifted_length: {shifted_length[i]}"
+            )
             if seq_length > 0:
                 negative_approx_kl_seq[i] = seq_tokens.sum() / seq_length
 
@@ -270,9 +270,9 @@ def compute_loss(
 
     # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
-        assert (
-            not ref_per_token_logps.requires_grad
-        ), "ref_per_token_logps should not require gradient"
+        assert not ref_per_token_logps.requires_grad, (
+            "ref_per_token_logps should not require gradient"
+        )
         """
             With reference model used for KL. The logic should be further reviewed to verify.
         """
@@ -386,12 +386,12 @@ def _swizzle_pp_grpo_forward(
     # User defined input
     user_input = kwargs.copy()
 
-    assert torch.all(
-        micro_batch_ids == micro_batch_id
-    ), f"micro_batch_ids are not all the same: {micro_batch_ids}"
-    assert torch.all(
-        mini_batch_ids == mini_batch_id
-    ), f"mini_batch_ids are not all the same: {mini_batch_ids}"
+    assert torch.all(micro_batch_ids == micro_batch_id), (
+        f"micro_batch_ids are not all the same: {micro_batch_ids}"
+    )
+    assert torch.all(mini_batch_ids == mini_batch_id), (
+        f"mini_batch_ids are not all the same: {mini_batch_ids}"
+    )
     del micro_batch_ids, mini_batch_ids
 
     n_args = len(args)
@@ -465,17 +465,17 @@ def _swizzle_pp_grpo_forward(
             micro_batch_id
         ]
         assert isinstance(old_per_token_logprobs, torch.Tensor)
-        assert (
-            old_per_token_logprobs.ndim == 1
-        ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
-        assert (
-            old_per_token_logprobs.shape == current_per_token_logprobs.shape
-        ), f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+        assert old_per_token_logprobs.ndim == 1, (
+            f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
+        )
+        assert old_per_token_logprobs.shape == current_per_token_logprobs.shape, (
+            f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+        )
     else:
         if config.train.train_policy.use_rollout_logprobs_for_loss:
-            assert (
-                "rollout_logprobs_as_old" in user_input
-            ), "rollout_logprobs_as_old is not found in user_input"
+            assert "rollout_logprobs_as_old" in user_input, (
+                "rollout_logprobs_as_old is not found in user_input"
+            )
             concatenated_rollout_logprobs = torch.cat(
                 [
                     t.to(current_per_token_logprobs.device)
@@ -500,12 +500,12 @@ def _swizzle_pp_grpo_forward(
         ref_per_token_logprobs = trainer.ref_per_token_logps[mini_batch_id][
             micro_batch_id
         ]
-        assert (
-            ref_per_token_logprobs.ndim == 1
-        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
-        assert (
-            ref_per_token_logprobs.shape == current_per_token_logprobs.shape
-        ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+        assert ref_per_token_logprobs.ndim == 1, (
+            f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
+        )
+        assert ref_per_token_logprobs.shape == current_per_token_logprobs.shape, (
+            f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+        )
 
     compute_loss_fn = trainer.loss_fn if hasattr(trainer, "loss_fn") else compute_loss
     loss, _, _ = compute_loss_fn(
@@ -603,9 +603,9 @@ class GRPOTrainer(LLMTrainer):
         computed_max_len: int,
     ) -> List[List[float]]:
         teacher_logprobs_list = []
-        assert (
-            len(processed_samples) == len(rollouts)
-        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        assert len(processed_samples) == len(rollouts), (
+            f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        )
         for i in range(len(rollouts)):
             # get the teacher logprobs for current rollout
             teacher_logprobs = rollouts[i].teacher_logprobs
@@ -616,9 +616,9 @@ class GRPOTrainer(LLMTrainer):
                 sampled_completion_logprobs = rollouts[i].completion_logprobs
                 sampled_prompt_logprobs = rollouts[i].prompt_logprobs
                 sampled_logprobs = sampled_prompt_logprobs + sampled_completion_logprobs
-                assert (
-                    len(sampled_logprobs) == len(teacher_logprobs)
-                ), f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
+                assert len(sampled_logprobs) == len(teacher_logprobs), (
+                    f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
+                )
             if teacher_logprobs is None:
                 logger.warning(
                     f"[Policy] Teacher logprobs is None for rollout {i}, using [0] * {computed_max_len} and set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs"
@@ -670,17 +670,17 @@ class GRPOTrainer(LLMTrainer):
             for token_id in token_ids:
                 assert len(token_id) > 0, "Token ids should not be empty"
                 if len(token_id) > self.config.distillation.top_k:
-                    assert (
-                        len(token_id) == self.config.distillation.top_k + 1
-                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    assert len(token_id) == self.config.distillation.top_k + 1, (
+                        f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    )
                     if self.config.distillation.top_k > 0:
                         token_id = token_id[
                             1:
                         ]  # remove the first token id which is the selected token only keep top_k token ids
                 else:
-                    assert (
-                        len(token_id) == self.config.distillation.top_k
-                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
+                    assert len(token_id) == self.config.distillation.top_k, (
+                        f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
+                    )
                 updated_token_ids.append(token_id)
             updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
             updated_token_ids = updated_token_ids[:computed_max_len] + [
@@ -701,7 +701,9 @@ class GRPOTrainer(LLMTrainer):
         teacher_logprobs = torch.masked_select(teacher_logprobs, logprob_masks)
         assert (
             current_logprobs.shape == teacher_logprobs.shape == current_advantages.shape
-        ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
+        ), (
+            f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
+        )
         reversed_kl = current_logprobs - teacher_logprobs
         return self.post_process_teacher_kl_advantages(
             reversed_kl,
@@ -724,19 +726,19 @@ class GRPOTrainer(LLMTrainer):
         and use it to adjust the current_advantages. Use top-k logprobs at each token for both current and teacher.
         """
         top_k = current_logprobs.shape[-1]
-        assert (
-            top_k == teacher_logprobs.shape[-1]
-        ), f"top_k: {top_k} != teacher_logprobs.shape[-1]: {teacher_logprobs.shape[-1]}"
+        assert top_k == teacher_logprobs.shape[-1], (
+            f"top_k: {top_k} != teacher_logprobs.shape[-1]: {teacher_logprobs.shape[-1]}"
+        )
         current_advantages = torch.masked_select(current_advantages, logprob_masks)
         teacher_logprobs = torch.masked_select(
             teacher_logprobs, logprob_masks.unsqueeze(-1)
         ).view(-1, top_k)
-        assert (
-            current_logprobs.shape == teacher_logprobs.shape
-        ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape}"
-        assert (
-            current_logprobs.shape[:-1] == current_advantages.shape
-        ), f"current_logprobs.shape[:-1]: {current_logprobs.shape[:-1]} != current_advantages.shape: {current_advantages.shape}"
+        assert current_logprobs.shape == teacher_logprobs.shape, (
+            f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape}"
+        )
+        assert current_logprobs.shape[:-1] == current_advantages.shape, (
+            f"current_logprobs.shape[:-1]: {current_logprobs.shape[:-1]} != current_advantages.shape: {current_advantages.shape}"
+        )
 
         if self.config.distillation.jsd_beta == 0:
             jsd = F.kl_div(
@@ -808,9 +810,9 @@ class GRPOTrainer(LLMTrainer):
             "teacher_kl_advantages": kl_advantages.sum() / logprob_masks.sum(),
         }
 
-        assert (
-            cu_seqlens[-1] == kl_advantages.shape[0]
-        ), f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
+        assert cu_seqlens[-1] == kl_advantages.shape[0], (
+            f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
+        )
         if kl_discount_factor != 0.0:
             # Compute discounted future sum of kl_advantages for each sequence
             # Only needed when kl_discount_factor != 0.0
@@ -853,9 +855,9 @@ class GRPOTrainer(LLMTrainer):
             )
         else:
             all_teacher_logprobs = teacher_logprobs_needed
-        assert (
-            len(all_teacher_logprobs) == len(mini_batch_indices)
-        ), f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
+        assert len(all_teacher_logprobs) == len(mini_batch_indices), (
+            f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
+        )
         for teacher_result, idx in zip(all_teacher_logprobs, mini_batch_indices):
             if teacher_result is None:
                 teacher_logprobs = None
@@ -877,10 +879,11 @@ class GRPOTrainer(LLMTrainer):
                         None,
                     )
                     if completion_token_ids is not None:
-                        assert (
-                            len(completion_token_ids)
-                            == len(rollouts[idx].completion_token_ids)
-                        ), f"Length of completion_token_ids {len(completion_token_ids)} should be equal to length of rollouts[{idx}].completion_token_ids {len(rollouts[idx].completion_token_ids)}"
+                        assert len(completion_token_ids) == len(
+                            rollouts[idx].completion_token_ids
+                        ), (
+                            f"Length of completion_token_ids {len(completion_token_ids)} should be equal to length of rollouts[{idx}].completion_token_ids {len(rollouts[idx].completion_token_ids)}"
+                        )
                         assert all(
                             [
                                 a[0] == b[0]
@@ -889,12 +892,16 @@ class GRPOTrainer(LLMTrainer):
                                     rollouts[idx].completion_token_ids,
                                 )
                             ]
-                        ), f"Token ids mismatch in completion_token_ids from teacher and rollouts for rollout {idx}"
+                        ), (
+                            f"Token ids mismatch in completion_token_ids from teacher and rollouts for rollout {idx}"
+                        )
                         rollouts[idx].completion_token_ids = completion_token_ids
                     if prompt_token_ids is not None:
-                        assert (
-                            len(prompt_token_ids) == len(rollouts[idx].prompt_token_ids)
-                        ), f"Length of prompt_token_ids {len(prompt_token_ids)} should be equal to length of rollouts[{idx}].prompt_token_ids {len(rollouts[idx].prompt_token_ids)}"
+                        assert len(prompt_token_ids) == len(
+                            rollouts[idx].prompt_token_ids
+                        ), (
+                            f"Length of prompt_token_ids {len(prompt_token_ids)} should be equal to length of rollouts[{idx}].prompt_token_ids {len(rollouts[idx].prompt_token_ids)}"
+                        )
                         assert all(
                             [
                                 a[0] == b[0]
@@ -902,7 +909,9 @@ class GRPOTrainer(LLMTrainer):
                                     prompt_token_ids, rollouts[idx].prompt_token_ids
                                 )
                             ]
-                        ), f"Token ids mismatch in prompt_token_ids from teacher and rollouts for rollout {idx}"
+                        ), (
+                            f"Token ids mismatch in prompt_token_ids from teacher and rollouts for rollout {idx}"
+                        )
                         rollouts[idx].prompt_token_ids = prompt_token_ids
             if (
                 teacher_logprobs is None
@@ -922,9 +931,9 @@ class GRPOTrainer(LLMTrainer):
     def clear_teacher_result_cache(self):
         # Clear the cached teacher interaction results to save memory
         for id in self.fetched_teacher_uuids:
-            assert (
-                id in self.teacher_interact_results
-            ), f"Teacher result uuid {id} not found in teacher_interact_results"
+            assert id in self.teacher_interact_results, (
+                f"Teacher result uuid {id} not found in teacher_interact_results"
+            )
             del self.teacher_interact_results[id]
         self.fetched_teacher_uuids.clear()
 
@@ -971,9 +980,9 @@ class GRPOTrainer(LLMTrainer):
             samples = [rollout.completed_conversation for rollout in rollouts]
         else:
             samples = [rollout.prompt for rollout in rollouts]
-        assert all(
-            rollout.prompt is not None for rollout in rollouts
-        ), "All rollouts should have a valid prompt"
+        assert all(rollout.prompt is not None for rollout in rollouts), (
+            "All rollouts should have a valid prompt"
+        )
 
         completions_list = [
             [t[0] for t in rollout.completion_token_ids]
@@ -996,9 +1005,9 @@ class GRPOTrainer(LLMTrainer):
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
-        assert all(
-            samples[i] is not None for i in range(len(samples))
-        ), "All samples should be not None"
+        assert all(samples[i] is not None for i in range(len(samples))), (
+            "All samples should be not None"
+        )
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
                 samples[i],
@@ -1009,9 +1018,11 @@ class GRPOTrainer(LLMTrainer):
         ]
 
         # On-policy Distillation related computations
-        assert (
-            len(processed_samples) == len(rollouts) and len(samples) == len(rollouts)
-        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        assert len(processed_samples) == len(rollouts) and len(samples) == len(
+            rollouts
+        ), (
+            f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        )
         advantages_list = [rollout.advantage for rollout in rollouts]
         advantages_t = torch.tensor(advantages_list).to(self.device)
 
@@ -1045,9 +1056,9 @@ class GRPOTrainer(LLMTrainer):
             n_microbatches = (
                 mini_batch_size // self.config.policy.parallelism.pp_micro_batch_size
             )
-            assert (
-                n_microbatches % self.parallel_dims.pp == 0
-            ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
+            assert n_microbatches % self.parallel_dims.pp == 0, (
+                f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
+            )
 
         need_compute_ref, kl_beta = self._swap_model_state_dict()
         need_compute_old_ahead = (
@@ -1236,10 +1247,11 @@ class GRPOTrainer(LLMTrainer):
                                         user_mini_batch["logprob_masks"]
                                     )
                                     for i in mini_batch_indices:
-                                        assert (
-                                            len(rollouts[i].completion_logprobs)
-                                            == len(completions_list[i])
-                                        ), f"Unexpected completion_logprobs length {len(rollouts[i].completion_logprobs)} vs completion length {len(completions_list[i])}"
+                                        assert len(
+                                            rollouts[i].completion_logprobs
+                                        ) == len(completions_list[i]), (
+                                            f"Unexpected completion_logprobs length {len(rollouts[i].completion_logprobs)} vs completion length {len(completions_list[i])}"
+                                        )
                                         # Skip the last token logprob which is for <eos> if needed
                                         # Skip the n_ignore_prefix_tokens as they are not included in the loss calculation
                                         rollout_logbprobs.append(
@@ -1374,9 +1386,9 @@ class GRPOTrainer(LLMTrainer):
                                             if hasattr(sample, "logprob_masks")
                                             else sample["logprob_masks"]
                                         )
-                                        assert (
-                                            len(sampled_logprobs) == len(mask)
-                                        ), "Mismatch in length between sampled_logprobs and mask"
+                                        assert len(sampled_logprobs) == len(mask), (
+                                            "Mismatch in length between sampled_logprobs and mask"
+                                        )
                                         rollout_effective_logprobs.append(
                                             torch.tensor(
                                                 sampled_logprobs,
@@ -1389,13 +1401,13 @@ class GRPOTrainer(LLMTrainer):
                                             self.old_per_token_logps[local_mini_step]
                                             is None
                                         ):
-                                            assert (
-                                                i_mu == 0
-                                            ), "Only first `mu_iteration` should append `old_per_token_logps`"
+                                            assert i_mu == 0, (
+                                                "Only first `mu_iteration` should append `old_per_token_logps`"
+                                            )
                                         else:
-                                            assert (
-                                                i_mu > 0
-                                            ), "Only `mu_iteration > 0` should reuse `old_per_token_logps`"
+                                            assert i_mu > 0, (
+                                                "Only `mu_iteration > 0` should reuse `old_per_token_logps`"
+                                            )
                                             assert (
                                                 len(
                                                     self.old_per_token_logps[
@@ -1571,9 +1583,9 @@ class GRPOTrainer(LLMTrainer):
                                     )
                                     # Compute ref per-token logprobs if needed
                                     if is_computing_ref:
-                                        assert (
-                                            i_mu == 0
-                                        ), "Only first iteration should compute ref"
+                                        assert i_mu == 0, (
+                                            "Only first iteration should compute ref"
+                                        )
                                         self.ref_per_token_logps[local_mini_step] = (
                                             current_per_token_logprobs.detach()
                                         )
@@ -1581,9 +1593,9 @@ class GRPOTrainer(LLMTrainer):
                                         local_mini_step += 1
                                         continue
                                     elif is_computing_old_ahead:
-                                        assert (
-                                            i_mu == 0
-                                        ), "Only first iteration should compute old ahead"
+                                        assert i_mu == 0, (
+                                            "Only first iteration should compute old ahead"
+                                        )
                                         self.old_per_token_logps[local_mini_step] = (
                                             current_per_token_logprobs.detach()
                                         )
@@ -1596,7 +1608,9 @@ class GRPOTrainer(LLMTrainer):
                                         ):
                                             assert (
                                                 i_mu == 0 and not need_compute_old_ahead
-                                            ), "Only first iteration should append `old_per_token_logps`"
+                                            ), (
+                                                "Only first iteration should append `old_per_token_logps`"
+                                            )
                                             if self.config.train.train_policy.use_rollout_logprobs_for_loss:
                                                 concatenated_rollout_logprobs = torch.cat(
                                                     [
@@ -1613,9 +1627,9 @@ class GRPOTrainer(LLMTrainer):
                                                     local_mini_step
                                                 ] = current_per_token_logprobs.detach()
                                         else:
-                                            assert (
-                                                i_mu > 0 or need_compute_old_ahead
-                                            ), "Only inner iteration should reuse `old_per_token_logps`"
+                                            assert i_mu > 0 or need_compute_old_ahead, (
+                                                "Only inner iteration should reuse `old_per_token_logps`"
+                                            )
 
                                         logprob_masks = user_mini_batch["logprob_masks"]
                                         current_advantages = (
@@ -1914,9 +1928,9 @@ class GRPOTrainer(LLMTrainer):
                 # Update the state dict of hf model so that it can be used for KL-divergence calculation
                 state_dict = self.model.state_dict()
                 for key, value in state_dict.items():
-                    assert (
-                        key in self.reference_state_dict
-                    ), f"Key {key} not found in reference state dict"
+                    assert key in self.reference_state_dict, (
+                        f"Key {key} not found in reference state dict"
+                    )
                     self.reference_state_dict[key] = value.detach().cpu()
                 if self.config.train.train_policy.reset_optimizer_with_reference:
                     logger.info("[Policy] Resetting optimizer.")
@@ -1926,9 +1940,9 @@ class GRPOTrainer(LLMTrainer):
                     for new_optimizer_list, new_lr_scheduler_list in zip(
                         self.optimizers.optimizers, self.lr_schedulers.schedulers
                     ):
-                        assert (
-                            len(new_optimizer_list) == len(new_lr_scheduler_list)
-                        ), "The number of new optimizers and new lr schedulers must be the same"
+                        assert len(new_optimizer_list) == len(new_lr_scheduler_list), (
+                            "The number of new optimizers and new lr schedulers must be the same"
+                        )
                         for new_optimizer, new_lr_scheduler in zip(
                             new_optimizer_list, new_lr_scheduler_list
                         ):
@@ -1973,9 +1987,9 @@ class GRPOTrainer(LLMTrainer):
             metrics: a dict of collected metrics, e.g. entropy
         """
         assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
-        assert (
-            "logprob_masks" in minibatch
-        ), "logprob_masks is required for computing logprobs"
+        assert "logprob_masks" in minibatch, (
+            "logprob_masks is required for computing logprobs"
+        )
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
@@ -2045,9 +2059,9 @@ class GRPOTrainer(LLMTrainer):
             model_loaded = True
 
         assert model_loaded, "Model weight must be populated before training starts."
-        assert (
-            self.map_w_from_policy_to_rollout is not None
-        ), "No parameters to sync found."
+        assert self.map_w_from_policy_to_rollout is not None, (
+            "No parameters to sync found."
+        )
 
         self.model.train()
 
@@ -2058,9 +2072,9 @@ class GRPOTrainer(LLMTrainer):
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
         if not self.lr_schedulers_updated:
-            assert (
-                total_steps is not None and total_steps > 0
-            ), "Total steps must be set for lr scheduler"
+            assert total_steps is not None and total_steps > 0, (
+                "Total steps must be set for lr scheduler"
+            )
             logger.info(
                 f"[Policy] Building lr schedulers for total steps {total_steps}"
             )

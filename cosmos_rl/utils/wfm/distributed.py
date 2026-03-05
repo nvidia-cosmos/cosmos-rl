@@ -462,9 +462,9 @@ def rank0_only(func: Callable) -> Callable:
 
 
 def is_tp_cp_pp_rank0():
-    assert (
-        _COSMOS_GLOBAL_PARALLEL_DIMS is not None
-    ), "global_parallelism not initialized"
+    assert _COSMOS_GLOBAL_PARALLEL_DIMS is not None, (
+        "global_parallelism not initialized"
+    )
     tp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.tp_coord
     cp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.cp_coord
     pp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.pp_coord
@@ -479,9 +479,9 @@ def initialize_global_parallelism(config: CosmosVisionGenConfig):
     cp_size = config.model_parallel.context_parallel_size
     model_size = tp_size * pp_size * cp_size
     world_size = dist.get_world_size()
-    assert (
-        world_size % model_size == 0
-    ), f"world_size must be divisible by model_size, got: {world_size} % {model_size} != 0"
+    assert world_size % model_size == 0, (
+        f"world_size must be divisible by model_size, got: {world_size} % {model_size} != 0"
+    )
     dp_shard_size = config.model.fsdp_shard_size
     dp_replicate_size = world_size // (model_size * dp_shard_size)
     _COSMOS_GLOBAL_PARALLEL_DIMS = ParallelDims(
@@ -497,9 +497,9 @@ def initialize_global_parallelism(config: CosmosVisionGenConfig):
 
 
 def get_global_parallel_dims():
-    assert (
-        _COSMOS_GLOBAL_PARALLEL_DIMS is not None
-    ), "Global parallelism is not initialized"
+    assert _COSMOS_GLOBAL_PARALLEL_DIMS is not None, (
+        "Global parallelism is not initialized"
+    )
     return _COSMOS_GLOBAL_PARALLEL_DIMS
 
 

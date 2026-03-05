@@ -131,9 +131,9 @@ class ControllerDataFetcher(DataFetcherBase):
         self.data_fetched_for_each_policy_at_step = {}
 
         if self.config.train.train_policy.type == "sft":
-            assert (
-                self.config.train.train_policy.dataloader_batch_size
-            ), "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            assert self.config.train.train_policy.dataloader_batch_size, (
+                "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            )
             # Set n_generation to 1 for SFT policy to avoid duplicated data counting when calculating the related value.
             self.config.rollout.n_generation = 1
 
@@ -347,9 +347,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     or self.config.validation.batch_size
                     or self.rollout_batch_size
                 )
-                assert (
-                    self.val_batch_size > 0
-                ), "[DataFetcher] val_batch_size should be greater than 0."
+                assert self.val_batch_size > 0, (
+                    "[DataFetcher] val_batch_size should be greater than 0."
+                )
                 if self.val_dataset is not None:
                     assert isinstance(self.val_dataset, Dataset) or isinstance(
                         self.val_dataset, datasets.arrow_dataset.Dataset
@@ -445,9 +445,9 @@ class ControllerDataFetcher(DataFetcherBase):
         self.remain_samples_num = remain_samples_num
 
     def validate_after_resume(self, ckpt_extra_info: dict):
-        assert (
-            ckpt_extra_info == self.ckpt_extra_info
-        ), "The keys in the checkpoint extra info should be consistent with the initial ckpt extra info. Please check the checkpoint path and config."
+        assert ckpt_extra_info == self.ckpt_extra_info, (
+            "The keys in the checkpoint extra info should be consistent with the initial ckpt extra info. Please check the checkpoint path and config."
+        )
 
     def get_batched_prompt(
         self,
@@ -507,9 +507,9 @@ class ControllerDataFetcher(DataFetcherBase):
             First use the fetched_data_buffer to fill the payloads_list.
             Then fetch new data from the iterator until we have n payloads or the iterator is exhausted.
             """
-            assert (
-                rank_in_mesh is not None
-            ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            assert rank_in_mesh is not None, (
+                "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            )
             while n - len(payloads_list) > 0:
                 found = False
                 for index, data in enumerate(fetched_data_buffer):
@@ -579,9 +579,9 @@ class ControllerDataFetcher(DataFetcherBase):
                             # For non-multi-turn rollout, we set reference answer to None.
                             payload.reference_answer = None
                     if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-                        assert (
-                            rank_in_mesh is not None
-                        ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        assert rank_in_mesh is not None, (
+                            "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        )
                         if (
                             idx % self.rollout_global_mesh_size == rank_in_mesh
                             and (
