@@ -19,7 +19,7 @@ import os
 import pickle
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # Prevent transitive imports through cosmos_rl.__init__ (needs timm, etc.)
 if "cosmos_rl" not in sys.modules:
@@ -36,11 +36,16 @@ from PIL import Image
 # Config (mirrors cosmos-policy PolicyEvalConfig fields used in test.py)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PolicyTestConfig:
     ckpt_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
-    dataset_stats_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
-    t5_text_embeddings_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
+    dataset_stats_path: str = (
+        "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
+    )
+    t5_text_embeddings_path: str = (
+        "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
+    )
     observation_pkl: str = ""
     suite: str = "libero"
     use_wrist_image: bool = True
@@ -78,6 +83,7 @@ def resolve_hf_path(path: str) -> str:
         parts = path.split("/")
         if len(parts) == 2:
             from huggingface_hub import snapshot_download
+
             local_dir = snapshot_download(repo_id=path, resume_download=True)
             model_dir = os.path.join(local_dir, "model")
             if os.path.exists(model_dir):
@@ -88,9 +94,12 @@ def resolve_hf_path(path: str) -> str:
             return local_dir
         elif len(parts) >= 3:
             from huggingface_hub import hf_hub_download
+
             repo_id = f"{parts[0]}/{parts[1]}"
             filename = "/".join(parts[2:])
-            return hf_hub_download(repo_id=repo_id, filename=filename, resume_download=True)
+            return hf_hub_download(
+                repo_id=repo_id, filename=filename, resume_download=True
+            )
     return path
 
 
@@ -106,7 +115,9 @@ def load_t5_embeddings(path: str) -> dict:
     with open(path, "rb") as f:
         data = pickle.load(f)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    return {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()
+    }
 
 
 def rescale_proprio(proprio: np.ndarray, dataset_stats: dict) -> np.ndarray:
@@ -146,9 +157,12 @@ def resize_images(images: np.ndarray, target_size: int) -> np.ndarray:
 def apply_image_transforms(images: np.ndarray) -> np.ndarray:
     """90%-area center crop + resize back (matches cosmos-policy train-time augmentation)."""
     _, H, W, C = images.shape
-    crop_size = int(H * 0.9 ** 0.5)
+    crop_size = int(H * 0.9**0.5)
     images_tensor = torch.from_numpy(images).permute(0, 3, 1, 2)
-    results = [TF.resize(TF.center_crop(img, crop_size), [H, W], antialias=True) for img in images_tensor]
+    results = [
+        TF.resize(TF.center_crop(img, crop_size), [H, W], antialias=True)
+        for img in images_tensor
+    ]
     return torch.stack(results).permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
 
 
@@ -171,6 +185,7 @@ def duplicate_array(arr: np.ndarray, total_num_copies: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # get_action – builds data batch and runs inference (mirrors cosmos_utils.get_action)
 # ---------------------------------------------------------------------------
+
 
 def get_action(
     cfg: PolicyTestConfig,
@@ -204,7 +219,9 @@ def get_action(
 
         primary_image = all_camera_images[1]
         blank_image = np.zeros_like(primary_image)
-        blank_dup = duplicate_array(blank_image.copy(), COSMOS_TEMPORAL_COMPRESSION_FACTOR)
+        blank_dup = duplicate_array(
+            blank_image.copy(), COSMOS_TEMPORAL_COMPRESSION_FACTOR
+        )
 
         image_sequence = []
         seq_idx = 0
@@ -265,32 +282,72 @@ def get_action(
         raw_image_sequence = np.expand_dims(raw_image_sequence, axis=0)
         raw_image_sequence = np.tile(raw_image_sequence, (batch_size, 1, 1, 1, 1))
         raw_image_sequence = np.transpose(raw_image_sequence, (0, 4, 1, 2, 3))
-        raw_image_sequence = torch.from_numpy(raw_image_sequence).to(dtype=torch.uint8).cuda()
+        raw_image_sequence = (
+            torch.from_numpy(raw_image_sequence).to(dtype=torch.uint8).cuda()
+        )
 
         proprio_tensor = None
         if cfg.use_proprio:
-            proprio_tensor = torch.from_numpy(proprio).reshape(batch_size, -1).to(dtype=torch.bfloat16).cuda()
+            proprio_tensor = (
+                torch.from_numpy(proprio)
+                .reshape(batch_size, -1)
+                .to(dtype=torch.bfloat16)
+                .cuda()
+            )
 
         data_batch = {
             "dataset_name": "video_data",
             "video": raw_image_sequence,
-            "t5_text_embeddings": text_embedding.repeat(batch_size, 1, 1).to(dtype=torch.bfloat16).cuda(),
+            "t5_text_embeddings": text_embedding.repeat(batch_size, 1, 1)
+            .to(dtype=torch.bfloat16)
+            .cuda(),
             "fps": torch.tensor([16] * batch_size, dtype=torch.bfloat16).cuda(),
-            "padding_mask": torch.zeros((batch_size, 1, COSMOS_IMAGE_SIZE, COSMOS_IMAGE_SIZE), dtype=torch.bfloat16).cuda(),
+            "padding_mask": torch.zeros(
+                (batch_size, 1, COSMOS_IMAGE_SIZE, COSMOS_IMAGE_SIZE),
+                dtype=torch.bfloat16,
+            ).cuda(),
             "num_conditional_frames": model.config.min_num_conditional_frames,
             "proprio": proprio_tensor,
-            "current_proprio_latent_idx": torch.tensor([current_proprio_latent_idx] * batch_size, dtype=torch.int64).cuda() if cfg.use_proprio else torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "current_wrist_image_latent_idx": torch.tensor([current_wrist_image_latent_idx] * batch_size, dtype=torch.int64).cuda(),
-            "current_wrist_image2_latent_idx": torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "current_image_latent_idx": torch.tensor([current_image_latent_idx] * batch_size, dtype=torch.int64).cuda(),
-            "current_image2_latent_idx": torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "action_latent_idx": torch.tensor([action_latent_idx] * batch_size, dtype=torch.int64).cuda(),
-            "future_proprio_latent_idx": torch.tensor([future_proprio_latent_idx] * batch_size, dtype=torch.int64).cuda() if cfg.use_proprio else torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "future_wrist_image_latent_idx": torch.tensor([future_wrist_image_latent_idx] * batch_size, dtype=torch.int64).cuda(),
-            "future_wrist_image2_latent_idx": torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "future_image_latent_idx": torch.tensor([future_image_latent_idx] * batch_size, dtype=torch.int64).cuda(),
-            "future_image2_latent_idx": torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
-            "value_latent_idx": torch.tensor([value_latent_idx] * batch_size, dtype=torch.int64).cuda(),
+            "current_proprio_latent_idx": torch.tensor(
+                [current_proprio_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda()
+            if cfg.use_proprio
+            else torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
+            "current_wrist_image_latent_idx": torch.tensor(
+                [current_wrist_image_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "current_wrist_image2_latent_idx": torch.tensor(
+                [-1] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "current_image_latent_idx": torch.tensor(
+                [current_image_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "current_image2_latent_idx": torch.tensor(
+                [-1] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "action_latent_idx": torch.tensor(
+                [action_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "future_proprio_latent_idx": torch.tensor(
+                [future_proprio_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda()
+            if cfg.use_proprio
+            else torch.tensor([-1] * batch_size, dtype=torch.int64).cuda(),
+            "future_wrist_image_latent_idx": torch.tensor(
+                [future_wrist_image_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "future_wrist_image2_latent_idx": torch.tensor(
+                [-1] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "future_image_latent_idx": torch.tensor(
+                [future_image_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "future_image2_latent_idx": torch.tensor(
+                [-1] * batch_size, dtype=torch.int64
+            ).cuda(),
+            "value_latent_idx": torch.tensor(
+                [value_latent_idx] * batch_size, dtype=torch.int64
+            ).cuda(),
         }
 
         generated_latent, orig_clean_latent_frames = model.generate_samples_from_batch(
@@ -304,11 +361,18 @@ def get_action(
         )
 
         action_indices = torch.full(
-            (batch_size,), action_latent_idx, dtype=torch.int64, device=generated_latent.device
+            (batch_size,),
+            action_latent_idx,
+            dtype=torch.int64,
+            device=generated_latent.device,
         )
         actions = (
-            extract_action_chunk(generated_latent, (cfg.chunk_size, ACTION_DIM), action_indices)
-            .to(torch.float32).cpu().numpy()
+            extract_action_chunk(
+                generated_latent, (cfg.chunk_size, ACTION_DIM), action_indices
+            )
+            .to(torch.float32)
+            .cpu()
+            .numpy()
         )
         if cfg.unnormalize_actions:
             actions = unnormalize_actions(actions, dataset_stats)
@@ -323,19 +387,29 @@ def get_action(
             decoded = ((model.decode(sample) + 1.0) * 127.5).clamp(0, 255)
             decoded = decoded.permute(0, 2, 3, 4, 1).to(torch.uint8).cpu().numpy()
 
-            fw_raw = (future_wrist_image_latent_idx - 1) * COSMOS_TEMPORAL_COMPRESSION_FACTOR + 1
-            fi_raw = (future_image_latent_idx - 1) * COSMOS_TEMPORAL_COMPRESSION_FACTOR + 1
+            fw_raw = (
+                future_wrist_image_latent_idx - 1
+            ) * COSMOS_TEMPORAL_COMPRESSION_FACTOR + 1
+            fi_raw = (
+                future_image_latent_idx - 1
+            ) * COSMOS_TEMPORAL_COMPRESSION_FACTOR + 1
             future_image_predictions["future_wrist_image"] = decoded[:, fw_raw]
             future_image_predictions["future_image"] = decoded[:, fi_raw]
 
-            v_indices = torch.full((batch_size,), -1, dtype=torch.int64, device=generated_latent.device)
+            v_indices = torch.full(
+                (batch_size,), -1, dtype=torch.int64, device=generated_latent.device
+            )
             value_prediction = extract_value(generated_latent, v_indices)
             value_prediction = torch.clamp((value_prediction + 1) / 2, 0, 1)
 
         actions = actions[0]
         actions = [actions[i] for i in range(len(actions))]
-        future_image_predictions = {k: v[0] for k, v in future_image_predictions.items() if v is not None}
-        value_prediction = value_prediction[0].item() if value_prediction is not None else None
+        future_image_predictions = {
+            k: v[0] for k, v in future_image_predictions.items() if v is not None
+        }
+        value_prediction = (
+            value_prediction[0].item() if value_prediction is not None else None
+        )
 
         return dict(
             actions=actions,
@@ -348,9 +422,10 @@ def get_action(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def run_inference(cfg: PolicyTestConfig):
     """Load model, run inference on sample observation, print results."""
-    from cosmos_rl.policy.model.wfm.cosmos_policy import CosmosPolicy, CosmosPolicyConfig
+    from cosmos_rl.policy.model.wfm.cosmos_policy import CosmosPolicy
 
     print("Loading dataset stats...")
     dataset_stats = load_dataset_stats(cfg.dataset_stats_path)
@@ -361,7 +436,6 @@ def run_inference(cfg: PolicyTestConfig):
     print("Loading model...")
     cosmos_policy = CosmosPolicy.from_pretrained(None, cfg.ckpt_path)
     model = cosmos_policy.generative_model
-    model_config = model.config
 
     print("Loading observation...")
     with open(cfg.observation_pkl, "rb") as f:
@@ -376,7 +450,12 @@ def run_inference(cfg: PolicyTestConfig):
 
     print("\nRunning inference...")
     result = get_action(
-        cfg, model, dataset_stats, observation, task_description, t5_cache,
+        cfg,
+        model,
+        dataset_stats,
+        observation,
+        task_description,
+        t5_cache,
         seed=cfg.seed,
         num_denoising_steps_action=cfg.num_denoising_steps_action,
         generate_future_state_and_value_in_parallel=True,
@@ -393,11 +472,27 @@ def run_inference(cfg: PolicyTestConfig):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Cosmos Policy robot inference test (cosmos-rl)")
-    parser.add_argument("--ckpt-path", type=str, default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B")
-    parser.add_argument("--observation-pkl", type=str, default="../cosmos-policy/cosmos_policy/experiments/robot/libero/sample_libero_10_observation.pkl")
-    parser.add_argument("--t5-embeddings-pkl", type=str, default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl")
-    parser.add_argument("--dataset-stats-path", type=str, default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json")
+    parser = argparse.ArgumentParser(
+        description="Cosmos Policy robot inference test (cosmos-rl)"
+    )
+    parser.add_argument(
+        "--ckpt-path", type=str, default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
+    )
+    parser.add_argument(
+        "--observation-pkl",
+        type=str,
+        default="../cosmos-policy/cosmos_policy/experiments/robot/libero/sample_libero_10_observation.pkl",
+    )
+    parser.add_argument(
+        "--t5-embeddings-pkl",
+        type=str,
+        default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl",
+    )
+    parser.add_argument(
+        "--dataset-stats-path",
+        type=str,
+        default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-denoising-steps", type=int, default=5)
     args = parser.parse_args()

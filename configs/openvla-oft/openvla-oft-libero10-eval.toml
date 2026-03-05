@@ -1,0 +1,39 @@
+# OpenVLA-OFT LIBERO-10 evaluation (same script: tests/eval_cosmos_policy_libero.py)
+# Single GPU:  MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py --config configs/openvla-oft/openvla-oft-libero10-eval.toml
+# Multi-GPU:   MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/eval_cosmos_policy_libero.py --config configs/openvla-oft/openvla-oft-libero10-eval.toml --trials 50
+
+mode = "colocated"
+
+[train]
+output_dir = "./outputs/openvla-oft-libero10-eval"
+
+[policy]
+model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
+
+[logging]
+logger = ['console']
+project_name = "cosmos-rl-openvla-oft"
+experiment_name = "openvla-oft-libero10-eval"
+
+[rollout]
+backend = "vla"
+n_generation = 1
+
+[validation]
+enable = true
+dataset.name = "libero"
+dataset.subset = "libero_10"
+
+[vla]
+vla_type = "openvla-oft"
+use_proprio = false
+num_envs = 8
+proprio_dim = 7
+num_images_in_input = 1
+training_chunk_size = 16
+save_video = true
+max_steps = 520
+unnorm_key = "libero_10_no_noops"
+
+[custom]
+trials_per_task = 50

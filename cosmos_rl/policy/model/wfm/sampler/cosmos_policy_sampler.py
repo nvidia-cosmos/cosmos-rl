@@ -64,24 +64,35 @@ class CosmosPolicySampler:
         assert is_multistep or is_rk
 
         solver_cfg = SolverConfig(
-            s_churn=0, s_t_max=float("inf"), s_t_min=0, s_noise=1,
-            is_multi=is_multistep, rk=solver_option, multistep=solver_option,
+            s_churn=0,
+            s_t_max=float("inf"),
+            s_t_min=0,
+            s_noise=1,
+            is_multi=is_multistep,
+            rk=solver_option,
+            multistep=solver_option,
         )
 
         effective_steps = max(num_steps - 1, 1) if num_steps > 1 else num_steps
         solver_order = 1 if solver_cfg.is_multi else int(solver_cfg.rk[0])
         num_timestamps = effective_steps // solver_order
-        sigmas_L = get_rev_ts(sigma_min, sigma_max, num_timestamps, rho).to(x_sigma_max.device)
+        sigmas_L = get_rev_ts(sigma_min, sigma_max, num_timestamps, rho).to(
+            x_sigma_max.device
+        )
 
         if num_steps > 1:
-            denoised = differential_equation_solver(float64_x0_fn, sigmas_L, solver_cfg)(
-                x_sigma_max.to(torch.float64)
+            denoised = differential_equation_solver(
+                float64_x0_fn, sigmas_L, solver_cfg
+            )(x_sigma_max.to(torch.float64))
+            ones = torch.ones(
+                denoised.size(0), device=denoised.device, dtype=denoised.dtype
             )
-            ones = torch.ones(denoised.size(0), device=denoised.device, dtype=denoised.dtype)
             denoised = float64_x0_fn(denoised, sigmas_L[-1] * ones)
         else:
             denoised = x_sigma_max.to(torch.float64)
-            ones = torch.ones(denoised.size(0), device=denoised.device, dtype=denoised.dtype)
+            ones = torch.ones(
+                denoised.size(0), device=denoised.device, dtype=denoised.dtype
+            )
             denoised = float64_x0_fn(denoised, sigmas_L[0] * ones)
 
         return denoised.to(in_dtype)

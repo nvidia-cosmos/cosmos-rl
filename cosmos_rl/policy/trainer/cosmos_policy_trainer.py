@@ -86,7 +86,9 @@ class CosmosPolicyTrainer(Trainer):
     def step_validation(self, *args, **kwargs):
         return {}
 
-    def export_safetensors(self, output_dir, rel_path, trainable_only=False, is_final=False, dtype=None):
+    def export_safetensors(
+        self, output_dir, rel_path, trainable_only=False, is_final=False, dtype=None
+    ):
         pass
 
     def model_load_from_hf(self):

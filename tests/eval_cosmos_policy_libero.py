@@ -2,20 +2,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Single entry point for CosmosPolicy LIBERO evaluation via OpenVLARollout.evaluate().
+Single entry point for VLA LIBERO evaluation via OpenVLARollout.evaluate().
 
-CLI-only (single GPU):
-    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \
-        --ckpt-path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \
-        --task-suite libero_10 \
-        --trials 3
+Supports cosmos-policy and openvla-oft (and other vla_type from config).
 
-TOML config (optional overrides):
-    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \
+CosmosPolicy (CLI):
+    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
+        --vla-type cosmos-policy --ckpt-path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \\
+        --task-suite libero_10 --trials 3
+
+OpenVLA-OFT (CLI):
+    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
+        --vla-type openvla-oft --ckpt-path Haozhan72/Openvla-oft-SFT-libero10-trajall \\
+        --task-suite libero_10 --trials 3
+
+TOML config (vla_type and model from config):
+    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
         --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml
 
-Multi-GPU (tasks split across ranks):
-    MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/eval_cosmos_policy_libero.py \
+Multi-GPU (tasks×trials split across ranks):
+    MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/eval_cosmos_policy_libero.py \\
         --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml --trials 50
 """
 
@@ -54,17 +60,10 @@ def _build_config_from_args(args: argparse.Namespace):
     from cosmos_rl.policy.config import Config
 
     ckpt = args.ckpt_path
-    return Config.model_validate({
+    vla_type = getattr(args, "vla_type", "cosmos-policy")
+
+    base = {
         "mode": "colocated",
-        "custom": {
-            "ckpt_path": ckpt,
-            "dataset_stats_path": f"{ckpt}/libero_dataset_statistics.json",
-            "t5_text_embeddings_path": f"{ckpt}/libero_t5_embeddings.pkl",
-            "task_suite_name": args.task_suite,
-            "num_denoising_steps": 5,
-            "chunk_size": 16,
-            "seed": 1,
-        },
         "train": {"output_dir": args.output_dir},
         "policy": {"model_name_or_path": ckpt},
         "rollout": {"backend": "vla", "n_generation": 1},
@@ -73,20 +72,40 @@ def _build_config_from_args(args: argparse.Namespace):
             "dataset": {"name": "libero", "subset": args.task_suite},
         },
         "vla": {
-            "vla_type": "cosmos-policy",
-            "use_proprio": True,
+            "vla_type": vla_type,
             "num_envs": args.num_envs,
-            "proprio_dim": 9,
-            "num_images_in_input": 2,
             "training_chunk_size": 16,
             "save_video": args.save_video,
             "max_steps": args.max_steps,
         },
-    })
+    }
+
+    if vla_type == "cosmos-policy":
+        base["custom"] = {
+            "ckpt_path": ckpt,
+            "dataset_stats_path": f"{ckpt}/libero_dataset_statistics.json",
+            "t5_text_embeddings_path": f"{ckpt}/libero_t5_embeddings.pkl",
+            "task_suite_name": args.task_suite,
+            "num_denoising_steps": 5,
+            "chunk_size": 16,
+            "seed": 1,
+        }
+        base["vla"]["use_proprio"] = True
+        base["vla"]["proprio_dim"] = 9
+        base["vla"]["num_images_in_input"] = 2
+    else:
+        # openvla-oft / openvla
+        base["vla"]["use_proprio"] = True
+        base["vla"]["proprio_dim"] = 9
+        base["vla"]["num_images_in_input"] = 2
+
+    return Config.model_validate(base)
 
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="CosmosPolicy LIBERO evaluation")
+    p = argparse.ArgumentParser(
+        description="VLA LIBERO evaluation (cosmos-policy, openvla-oft, etc.)"
+    )
     p.add_argument("--config", type=str, default=None, help="TOML config (optional)")
     p.add_argument("--ckpt-path", default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B")
     p.add_argument("--task-suite", default="libero_10")
@@ -96,7 +115,11 @@ def _parse_args():
     p.add_argument("--task-ids", type=int, nargs="*", default=None)
     p.add_argument("--save-video", action="store_true", default=True)
     p.add_argument("--no-save-video", dest="save_video", action="store_false")
-    p.add_argument("--no-video", action="store_true", help="Alias for --no-save-video when using --config")
+    p.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Alias for --no-save-video when using --config",
+    )
     p.add_argument("--output-dir", default="./outputs/cosmos-policy-eval")
     return p.parse_args()
 
@@ -111,7 +134,9 @@ def main():
     if args.config:
         raw = _load_toml(args.config)
         if args.task_suite != "libero_10":
-            raw.setdefault("validation", {}).setdefault("dataset", {})["subset"] = args.task_suite
+            raw.setdefault("validation", {}).setdefault("dataset", {})["subset"] = (
+                args.task_suite
+            )
             raw.setdefault("custom", {})["task_suite_name"] = args.task_suite
         if args.num_envs != 1:
             raw.setdefault("vla", {})["num_envs"] = args.num_envs
@@ -130,22 +155,36 @@ def main():
     from cosmos_rl.simulators.libero.utils import get_benchmark_overridden
 
     suite = get_benchmark_overridden(task_suite)()
-    all_task_ids = args.task_ids if args.task_ids is not None else list(range(suite.n_tasks))
-    my_task_ids = all_task_ids[rank::world_size]
+    all_task_ids = (
+        args.task_ids if args.task_ids is not None else list(range(suite.n_tasks))
+    )
+    all_pairs = [
+        (tid, trial) for tid in all_task_ids for trial in range(trials_per_task)
+    ]
+    # Group by (task_id, trial_id) so each rank's first batches are same-task (same description length).
+    all_pairs = sorted(all_pairs, key=lambda p: (p[0], p[1]))
+    # Assign contiguous chunks to ranks so rollout enqueue gets same-task batches.
+    chunk_size = (len(all_pairs) + world_size - 1) // world_size
+    start = rank * chunk_size
+    my_payload_pairs = all_pairs[start : start + chunk_size]
 
     if rank == 0:
         logger.info(
             f"Evaluation: suite={task_suite}, tasks={len(all_task_ids)}, "
-            f"trials/task={trials_per_task}, ranks={world_size}"
+            f"trials/task={trials_per_task}, total jobs={len(all_pairs)}, ranks={world_size}"
         )
-    logger.info(f"[Rank {rank}] {len(my_task_ids)} tasks: {my_task_ids}")
+    logger.info(f"[Rank {rank}] {len(my_payload_pairs)} jobs (task×trial pairs)")
 
     local_successes, local_total = 0, 0
-    if my_task_ids:
+    rollout_obj = None
+    if my_payload_pairs:
         from cosmos_rl.rollout.vla_rollout import OpenVLARollout
 
-        rollout = OpenVLARollout(config=config, parallel_dims=None, device=torch.device("cuda"))
-        result = rollout.evaluate(task_ids=my_task_ids, trials_per_task=trials_per_task)
+        rollout = OpenVLARollout(
+            config=config, parallel_dims=None, device=torch.device("cuda")
+        )
+        rollout_obj = rollout
+        result = rollout.evaluate(payload_pairs=my_payload_pairs)
 
         local_successes = result["n_success"]
         local_total = result["n_total"]
@@ -153,11 +192,6 @@ def main():
         per_task: dict[int, list[bool]] = {}
         for r in result["per_task"]:
             per_task.setdefault(r["task_id"], []).append(r["complete"])
-        for tid in sorted(per_task):
-            results = per_task[tid]
-            logger.info(f"[Rank {rank}]   task {tid}: {sum(results)}/{len(results)}")
-
-        rollout.env_manager.stop_simulator()
 
     if world_size > 1:
         dev = torch.device("cuda")
@@ -168,6 +202,9 @@ def main():
         global_successes, global_total = s_t.item(), t_t.item()
     else:
         global_successes, global_total = local_successes, local_total
+
+    if rollout_obj is not None:
+        rollout_obj.env_manager.stop_simulator()
 
     if rank == 0:
         sr = global_successes / global_total * 100 if global_total else 0

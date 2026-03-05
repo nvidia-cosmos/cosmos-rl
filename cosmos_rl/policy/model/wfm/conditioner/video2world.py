@@ -102,14 +102,18 @@ class MutableVid2VidCondition(MutableT2VCondition):
         kwargs["gt_frames"] = gt_frames
 
         B, _, T, H, W = gt_frames.shape
-        mask = torch.zeros(B, 1, T, H, W, dtype=gt_frames.dtype, device=gt_frames.device)
+        mask = torch.zeros(
+            B, 1, T, H, W, dtype=gt_frames.dtype, device=gt_frames.device
+        )
 
         if T == 1:
             ncf_B = torch.zeros(B, dtype=torch.int32)
         else:
             if num_conditional_frames is not None:
                 if isinstance(num_conditional_frames, torch.Tensor):
-                    ncf_B = torch.ones(B, dtype=torch.int32) * num_conditional_frames.cpu()
+                    ncf_B = (
+                        torch.ones(B, dtype=torch.int32) * num_conditional_frames.cpu()
+                    )
                 else:
                     ncf_B = torch.ones(B, dtype=torch.int32) * num_conditional_frames
             else:
@@ -164,7 +168,9 @@ class Video2WorldCondition(MutableVid2VidCondition):
             kwargs = self.to_dict(skip_underscore=False)
             kwargs["gt_frames"] = gt_frames
             _, _, T, H, W = gt_frames.shape
-            mask = torch.zeros(B, 1, T, H, W, dtype=gt_frames.dtype, device=gt_frames.device)
+            mask = torch.zeros(
+                B, 1, T, H, W, dtype=gt_frames.dtype, device=gt_frames.device
+            )
             ncf_B = torch.tensor(sampled, dtype=torch.int32)
             for idx in range(B):
                 mask[idx, :, : ncf_B[idx], :, :] += 1
@@ -191,7 +197,9 @@ class Video2WorldConditionV2(Video2WorldCondition):
         num_conditional_frames: Optional[int] = None,
         conditional_frames_probs: Optional[Dict[int, float]] = None,
     ) -> "Video2WorldConditionV2":
-        num_conditional_frames = 0 if not self.use_video_condition else num_conditional_frames
+        num_conditional_frames = (
+            0 if not self.use_video_condition else num_conditional_frames
+        )
         return super().set_video_condition(
             gt_frames=gt_frames,
             random_min_num_conditional_frames=random_min_num_conditional_frames,

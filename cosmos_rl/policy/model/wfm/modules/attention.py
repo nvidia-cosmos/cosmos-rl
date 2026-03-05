@@ -15,7 +15,6 @@
 
 # From Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
-from functools import partial
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel

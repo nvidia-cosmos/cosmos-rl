@@ -69,8 +69,10 @@ from cosmos_rl.utils.wfm.utils import DataType, DenoisePrediction
 # model repos whose config.json has "model_type": "cosmos-policy")
 # ---------------------------------------------------------------------------
 
+
 class CosmosPolicyHFConfig(PretrainedConfig):
     model_type = "cosmos-policy"
+
 
 AutoConfig.register("cosmos-policy", CosmosPolicyHFConfig)
 
@@ -86,6 +88,7 @@ class CosmosPolicyWeightMapper(WeightMapper):
 
     def rollout_split_local_key_n_param_to_hf_key_n_param(self, name, param):
         return [(self.rollout_map_local_key_to_hf_key(name), param)]
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -136,18 +139,50 @@ class CosmosPolicyConfig:
         "hf://nvidia/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth"
     )
     vae_fp32: bool = False
-    conditioner: List[ConditionerConfig] = field(default_factory=lambda: [
-        ConditionerConfig(name="fps", type="remap_key", input_key="fps", output_key="fps", dropout_rate=0.0),
-        ConditionerConfig(name="padding_mask", type="remap_key", input_key="padding_mask", output_key="padding_mask", dropout_rate=0.0),
-        ConditionerConfig(name="text", type="text_attr", input_key=["t5_text_embeddings"], output_key="crossattn_emb", dropout_rate=0.0),
-        ConditionerConfig(name="use_video_condition", type="boolean_flag", input_key="fps", output_key="use_video_condition", dropout_rate=0.0),
-    ])
-    net: NetConfig = field(default_factory=lambda: NetConfig(atten_backend="minimal_a2a"))
+    conditioner: List[ConditionerConfig] = field(
+        default_factory=lambda: [
+            ConditionerConfig(
+                name="fps",
+                type="remap_key",
+                input_key="fps",
+                output_key="fps",
+                dropout_rate=0.0,
+            ),
+            ConditionerConfig(
+                name="padding_mask",
+                type="remap_key",
+                input_key="padding_mask",
+                output_key="padding_mask",
+                dropout_rate=0.0,
+            ),
+            ConditionerConfig(
+                name="text",
+                type="text_attr",
+                input_key=["t5_text_embeddings"],
+                output_key="crossattn_emb",
+                dropout_rate=0.0,
+            ),
+            ConditionerConfig(
+                name="use_video_condition",
+                type="boolean_flag",
+                input_key="fps",
+                output_key="use_video_condition",
+                dropout_rate=0.0,
+            ),
+        ]
+    )
+    net: NetConfig = field(
+        default_factory=lambda: NetConfig(atten_backend="minimal_a2a")
+    )
 
     # -- evaluation / assets ------------------------------------------------
     ckpt_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
-    dataset_stats_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
-    t5_text_embeddings_path: str = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
+    dataset_stats_path: str = (
+        "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
+    )
+    t5_text_embeddings_path: str = (
+        "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
+    )
     num_denoising_steps: int = 5
     chunk_size: int = 16
     seed: int = 1
@@ -170,9 +205,9 @@ class CosmosPolicyConfig:
 def arch_invariant_rand(shape, dtype, device, seed=None):
     """GPU-architecture-invariant random tensor (matches cosmos-policy)."""
     rng = np.random.RandomState(seed)
-    return torch.from_numpy(
-        rng.standard_normal(shape).astype(np.float32)
-    ).to(dtype=dtype, device=device)
+    return torch.from_numpy(rng.standard_normal(shape).astype(np.float32)).to(
+        dtype=dtype, device=device
+    )
 
 
 def _replace_latent_with_flat(
@@ -223,6 +258,7 @@ def _resolve_hf_path(path: str) -> str:
         parts = path.split("/")
         if len(parts) == 2:
             from huggingface_hub import snapshot_download
+
             local_dir = snapshot_download(repo_id=path, resume_download=True)
             for candidate in ("model",):
                 d = os.path.join(local_dir, candidate)
@@ -234,6 +270,7 @@ def _resolve_hf_path(path: str) -> str:
             return local_dir
         elif len(parts) >= 3:
             from huggingface_hub import hf_hub_download
+
             repo_id = f"{parts[0]}/{parts[1]}"
             filename = "/".join(parts[2:])
             return hf_hub_download(
@@ -263,7 +300,7 @@ def _resize_images(images: np.ndarray, size: int) -> np.ndarray:
 def _apply_image_transforms(images: np.ndarray) -> np.ndarray:
     """90%-area center crop + resize back."""
     _, H, W, _ = images.shape
-    crop = int(H * 0.9 ** 0.5)
+    crop = int(H * 0.9**0.5)
     t = torch.from_numpy(images).permute(0, 3, 1, 2)
     out = torch.stack(
         [TF.resize(TF.center_crop(x, crop), [H, W], antialias=True) for x in t]
@@ -315,8 +352,10 @@ class _GenerativeModel(nn.Module):
         self.tensor_kwargs = {"device": "cuda", "dtype": self.precision}
 
         self.sde = EDMSDE(
-            p_mean=math.log(4.0), p_std=1.2,
-            sigma_max=config.sigma_max, sigma_min=config.sigma_min,
+            p_mean=math.log(4.0),
+            p_std=1.2,
+            sigma_max=config.sigma_max,
+            sigma_min=config.sigma_min,
         )
         self.scaling = (
             RectifiedFlowScaling(
@@ -426,15 +465,15 @@ class _GenerativeModel(nn.Module):
                 cond_input = cond_input * 0
 
             _, C, _, _, _ = xt_B_C_T_H_W.shape
-            cond_mask = (
-                condition.condition_video_input_mask_B_C_T_H_W
-                .repeat(1, C, 1, 1, 1)
-                .type_as(net_input)
-            )
+            cond_mask = condition.condition_video_input_mask_B_C_T_H_W.repeat(
+                1, C, 1, 1, 1
+            ).type_as(net_input)
 
             net_input = cond_input * cond_mask + net_input * (1 - cond_mask)
             if not self.config.use_rf_ckpts:
-                sigma_cond = torch.ones_like(sigma_B_1_T_1_1) * self.config.sigma_conditional
+                sigma_cond = (
+                    torch.ones_like(sigma_B_1_T_1_1) * self.config.sigma_conditional
+                )
                 _, _, _, c_noise_cond = self.scaling(sigma=sigma_cond)
                 mask_avg = cond_mask.mean(dim=[1, 3, 4], keepdim=True)
                 c_noise = c_noise_cond * mask_avg + c_noise * (1 - mask_avg)
@@ -447,9 +486,8 @@ class _GenerativeModel(nn.Module):
 
         x0_pred = c_skip * xt_B_C_T_H_W + c_out * net_out
         if condition.is_video and self.config.denoise_replace_gt_frames:
-            x0_pred = (
-                condition.gt_frames.type_as(x0_pred) * cond_mask
-                + x0_pred * (1 - cond_mask)
+            x0_pred = condition.gt_frames.type_as(x0_pred) * cond_mask + x0_pred * (
+                1 - cond_mask
             )
 
         eps_pred = (xt_B_C_T_H_W - x0_pred) / sigma_B_1_T_1_1
@@ -587,14 +625,18 @@ class _GenerativeModel(nn.Module):
 
         if return_orig_clean_latent_frames:
             x0_fn, orig_clean = self.get_x0_fn_from_batch(
-                data_batch, guidance, is_negative_prompt,
+                data_batch,
+                guidance,
+                is_negative_prompt,
                 skip_vae_encoding=skip_vae_encoding,
                 previous_generated_latent=previous_generated_latent,
                 return_orig_clean_latent_frames=True,
             )
         else:
             x0_fn = self.get_x0_fn_from_batch(
-                data_batch, guidance, is_negative_prompt,
+                data_batch,
+                guidance,
+                is_negative_prompt,
                 skip_vae_encoding=skip_vae_encoding,
                 previous_generated_latent=previous_generated_latent,
             )
@@ -615,7 +657,8 @@ class _GenerativeModel(nn.Module):
         )
 
         samples = self.sampler(
-            x0_fn, x_sigma_max,
+            x0_fn,
+            x_sigma_max,
             num_steps=num_steps,
             sigma_max=self.sde.sigma_max * sigma_max_scale,
             sigma_min=self.sde.sigma_min * sigma_min_scale,
@@ -678,8 +721,9 @@ class CosmosPolicy(BaseModel):
     def get_position_ids(self, **kwargs):
         return torch.empty(0), torch.empty(0), 0
 
-    def load_hf_weights(self, model_name_or_path, parallel_dims=None,
-                        device=None, revision=None):
+    def load_hf_weights(
+        self, model_name_or_path, parallel_dims=None, device=None, revision=None
+    ):
         pass
 
     def separate_model_parts(self):
@@ -733,15 +777,11 @@ class CosmosPolicy(BaseModel):
         elif isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
 
-        missing, unexpected = generative_model.load_state_dict(
-            state_dict, strict=False
-        )
+        missing, unexpected = generative_model.load_state_dict(state_dict, strict=False)
         if missing:
             logger.info(f"[CosmosPolicy] Missing keys (first 10): {missing[:10]}")
         if unexpected:
-            logger.info(
-                f"[CosmosPolicy] Unexpected keys (first 10): {unexpected[:10]}"
-            )
+            logger.info(f"[CosmosPolicy] Unexpected keys (first 10): {unexpected[:10]}")
         generative_model.eval()
         generative_model.to("cuda")
 
@@ -793,15 +833,32 @@ class CosmosPolicy(BaseModel):
             blank4 = dup(blank)
 
             seq, idx = [], 0
-            seq.append(blank[None]); idx += 1
-            seq.append(blank4.copy()); proprio_idx = idx; idx += 1
-            seq.append(dup(wrist)); wrist_idx = idx; idx += 1
-            seq.append(dup(primary)); image_idx = idx; idx += 1
-            seq.append(blank4.copy()); action_idx = idx; idx += 1
-            seq.append(blank4.copy()); fut_proprio_idx = idx; idx += 1
-            seq.append(dup(wrist)); fut_wrist_idx = idx; idx += 1
-            seq.append(dup(primary)); fut_image_idx = idx; idx += 1
-            seq.append(blank4.copy()); value_idx = idx; idx += 1
+            seq.append(blank[None])
+            idx += 1
+            seq.append(blank4.copy())
+            proprio_idx = idx
+            idx += 1
+            seq.append(dup(wrist))
+            wrist_idx = idx
+            idx += 1
+            seq.append(dup(primary))
+            image_idx = idx
+            idx += 1
+            seq.append(blank4.copy())
+            action_idx = idx
+            idx += 1
+            seq.append(blank4.copy())
+            fut_proprio_idx = idx
+            idx += 1
+            seq.append(dup(wrist))
+            fut_wrist_idx = idx
+            idx += 1
+            seq.append(dup(primary))
+            fut_image_idx = idx
+            idx += 1
+            seq.append(blank4.copy())
+            value_idx = idx
+            idx += 1
 
             video = np.transpose(np.concatenate(seq), (3, 0, 1, 2))
             videos.append(video)
@@ -848,8 +905,12 @@ class CosmosPolicy(BaseModel):
             ),
             "fps": torch.full((B,), 16, dtype=torch.bfloat16, device="cuda"),
             "padding_mask": torch.zeros(
-                B, 1, COSMOS_IMAGE_SIZE, COSMOS_IMAGE_SIZE,
-                dtype=torch.bfloat16, device="cuda",
+                B,
+                1,
+                COSMOS_IMAGE_SIZE,
+                COSMOS_IMAGE_SIZE,
+                dtype=torch.bfloat16,
+                device="cuda",
             ),
             "num_conditional_frames": self.generative_model.config.min_num_conditional_frames,
             "proprio": torch.from_numpy(np.stack(proprios))
@@ -857,13 +918,9 @@ class CosmosPolicy(BaseModel):
             .to(dtype=torch.bfloat16, device="cuda"),
         }
         for key, val in idx_map.items():
-            data_batch[key] = torch.full(
-                (B,), val, dtype=torch.int64, device="cuda"
-            )
+            data_batch[key] = torch.full((B,), val, dtype=torch.int64, device="cuda")
         for key in unused_keys:
-            data_batch[key] = torch.full(
-                (B,), -1, dtype=torch.int64, device="cuda"
-            )
+            data_batch[key] = torch.full((B,), -1, dtype=torch.int64, device="cuda")
 
         return data_batch
 

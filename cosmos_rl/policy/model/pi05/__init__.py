@@ -1306,6 +1306,7 @@ class PI05(BaseModel):
             s = inputs["states"][i]
             if s.shape[-1] == 9:
                 from cosmos_rl.simulators.libero.utils import quat2axisangle
+
                 s = np.concatenate([s[:3], quat2axisangle(s[3:7]), s[7:]])
             raw_states.append(s)
         state = torch.stack(

@@ -18,7 +18,7 @@ import time
 from types import SimpleNamespace
 import torch
 import numpy as np
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from transformers import AutoConfig
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
@@ -145,7 +145,8 @@ class OpenVLARollout(RolloutBase):
             self.hf_config = model_cls.preprocess_hf_config(self.config)
         else:
             self.hf_config = util.retry(AutoConfig.from_pretrained)(
-                self.config.policy.model_name_or_path
+                self.config.policy.model_name_or_path,
+                trust_remote_code=True,
             )
 
         # Determine which environment wrapper to use based on simulator type
@@ -215,7 +216,13 @@ class OpenVLARollout(RolloutBase):
         self.pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
 
         pfn, _ = self.model.parallelize_fn
-        pfn(self.model, self.parallel_dims, self.config)
+        if self.parallel_dims is not None:
+            pfn(self.model, self.parallel_dims, self.config)
+        else:
+            # Eval/standalone with no parallel_dims: no DDP/FSDP/TP (each rank has full replica).
+            # CosmosPolicy uses a no-op parallelize_fn; OpenVLA/PI05 require parallel_dims to avoid
+            # building mesh and collectives, so we skip the call when it is None.
+            pass
 
         if self.config.mode != "colocated":
             self.model.load_hf_weights(
@@ -650,6 +657,7 @@ class OpenVLARollout(RolloutBase):
         self,
         task_ids: Optional[List[int]] = None,
         trials_per_task: int = 1,
+        payload_pairs: Optional[List[Tuple[int, int]]] = None,
     ) -> Dict[str, Any]:
         """Run standalone evaluation over the configured sim environment.
 
@@ -658,7 +666,12 @@ class OpenVLARollout(RolloutBase):
 
         Args:
             task_ids: Which task indices to evaluate.  ``None`` → all tasks.
-            trials_per_task: Number of trials per task.
+                Ignored if ``payload_pairs`` is provided.
+            trials_per_task: Number of trials per task. Ignored if
+                ``payload_pairs`` is provided.
+            payload_pairs: Optional list of (task_id, trial_id) to run.
+                If set, tasks × trials are taken from this list instead of
+                building from task_ids and trials_per_task.
 
         Returns:
             Dict with ``success_rate``, ``n_success``, ``n_total``,
@@ -667,27 +680,42 @@ class OpenVLARollout(RolloutBase):
         if not self._engine_initialized:
             self.init_engine()
 
-        sim_type = get_simulator_type(self.config)
-        if task_ids is None:
-            if sim_type == "libero":
-                from cosmos_rl.simulators.libero.utils import get_benchmark_overridden
-                suite = get_benchmark_overridden(
-                    self.config.validation.dataset.subset
-                )()
-                task_ids = list(range(suite.n_tasks))
-            else:
-                task_ids = [0]
+        if payload_pairs is not None:
+            # Group by task_id so each inference batch has same-length task descriptions
+            # (matches rollout_generation/validation where dataset order is by task).
+            payload_pairs = sorted(payload_pairs, key=lambda p: (p[0], p[1]))
+            payloads = [
+                SimpleNamespace(prompt={"task_id": tid, "trial_id": trial})
+                for tid, trial in payload_pairs
+            ]
+        else:
+            sim_type = get_simulator_type(self.config)
+            if task_ids is None:
+                if sim_type == "libero":
+                    from cosmos_rl.simulators.libero.utils import (
+                        get_benchmark_overridden,
+                    )
 
-        payloads = [
-            SimpleNamespace(prompt={"task_id": tid, "trial_id": trial})
-            for tid in task_ids
-            for trial in range(trials_per_task)
-        ]
+                    suite = get_benchmark_overridden(
+                        self.config.validation.dataset.subset
+                    )()
+                    task_ids = list(range(suite.n_tasks))
+                else:
+                    task_ids = [0]
+
+            payloads = [
+                SimpleNamespace(prompt={"task_id": tid, "trial_id": trial})
+                for tid in task_ids
+                for trial in range(trials_per_task)
+            ]
         payload_indices = np.arange(len(payloads))
 
         rollout_start = time.time()
         task_records = self._do_rollout(
-            payloads, payload_indices, is_validation=True, continuous=False,
+            payloads,
+            payload_indices,
+            is_validation=True,
+            continuous=False,
         )
         rollout_end = time.time()
 
