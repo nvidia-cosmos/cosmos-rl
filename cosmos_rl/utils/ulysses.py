@@ -479,7 +479,7 @@ def ulysses_attn_func(
 ):
     return partial(
         ulysses_wrapper_of_attn_func,
-        module=None,
+        None,  # Binded first positional argument: `module` in `ulysses_wrapper_of_attn_func`.
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
