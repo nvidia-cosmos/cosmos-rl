@@ -205,7 +205,7 @@ class HFVLMDataPacker(DataPacker):
         video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
         if (
-            self.use_qwen_vl_process
+            (self.use_qwen_vl_process or self.use_siglip2_process)
             and len(image_inputs) == 0
             and len(video_inputs) == 0
         ):

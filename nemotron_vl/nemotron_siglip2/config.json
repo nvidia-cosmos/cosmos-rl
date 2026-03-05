@@ -74,7 +74,8 @@
     "hidden_size": 1152,
     "intermediate_size": 4304,
     "num_attention_heads": 16,
-    "num_hidden_layers": 27
+    "num_hidden_layers": 27,
+    "model_type": "siglip2"
   },
   "projector_config":{
     "input_hidden_size": 1152,

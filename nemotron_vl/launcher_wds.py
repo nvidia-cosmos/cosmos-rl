@@ -16,11 +16,6 @@
 import json
 from typing import Optional
 import os, sys
-os.environ["USE_QWEN_VL_PROCESS"] = "1"
-if os.environ.get("APPLY_SIGLIP2_PATCH"):
-    os.environ["USE_SIGLIP2_PROCESS"] = "1"
-# Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
-os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
 import webdataset as wds
 from torch.utils.data import IterableDataset
 from PIL import Image
@@ -45,6 +40,44 @@ from webdataset.tariterators import (
     url_opener as _wds_url_opener,
     tar_file_expander as _wds_tar_file_expander,
 )
+
+from pathlib import Path
+from typing import Optional, Union
+
+from huggingface_hub import snapshot_download
+
+
+def resolve_model_dir(
+    model_id_or_path: Union[str, Path],
+    *,
+    revision: Optional[str] = None,
+    cache_dir: Optional[Union[str, Path]] = None,
+    local_files_only: bool = False,
+) -> str:
+    """
+    Resolve either:
+      - a local directory containing model files, OR
+      - a Hugging Face Hub repo id (optionally with revision)
+
+    Returns an absolute path to a local directory.
+    """
+    p = Path(model_id_or_path).expanduser()
+
+    # If it's an existing local directory, return it.
+    if p.exists():
+        if p.is_dir():
+            return str(p.resolve())
+        # If they passed a file inside the dir, treat its parent as model dir.
+        return str(p.parent.resolve())
+
+    # Otherwise treat as Hub repo id and download snapshot -> local dir.
+    return snapshot_download(
+        repo_id=str(model_id_or_path),
+        revision=revision,
+        cache_dir=str(Path(cache_dir).expanduser()) if cache_dir else None,
+        local_files_only=local_files_only,
+    )
+
 
 try:
     import decord
@@ -735,7 +768,7 @@ class CustomWebDatasetDataset(Dataset):
         self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
 
         # SigLIP2 mode: fixed patch-count pixel budget with dynamic overflow cap
-        self.siglip2_mode = bool(os.environ.get("APPLY_SIGLIP2_PATCH"))
+        self.siglip2_mode = bool(os.environ.get("USE_SIGLIP2_PROCESS"))
         if self.siglip2_mode:
             self.scale_factor = (16 * 2) ** 2  # 1024
             self.max_num_patches = int(custom.get('single_image_max_num_patches', 256))
@@ -1000,31 +1033,40 @@ def get_dataset(config: CosmosConfig):
     return CustomWebDatasetDataset()
 
 if __name__ == "__main__":
-    import cosmos_rl
+    import cosmos_rl, argparse, toml
 
-    if os.environ.get("APPLY_QWEN3VL_PATCH") and os.environ.get("APPLY_SIGLIP2_PATCH"):
-        raise RuntimeError(
-            "APPLY_QWEN3VL_PATCH and APPLY_SIGLIP2_PATCH cannot both be set. "
-            "Please set exactly one to select the model-specific patches."
-        )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_known_args()[0]
+    with open(args.config, "r") as f:
+        config = toml.load(f)
+    config = CosmosConfig.from_dict(config)
 
-    if os.environ.get("APPLY_QWEN3VL_PATCH"):
-        # Qwen3VL: skip NemotronH-specific overrides, apply Qwen3VL-specific patches
-        # from qwen3_vl_patches import apply_qwen3vl_patches
-        # apply_qwen3vl_patches()
-        pass
-    elif os.environ.get("APPLY_SIGLIP2_PATCH"):
-        # SigLIP2: uses NemotronH as LLM backbone, same monkey patches apply
-        cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
-        cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
-        cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
-        cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    model_path = os.path.join(resolve_model_dir(config.policy.model_name_or_path), "config.json")
+    config_json = json.load(open(model_path, "r"))
+    model_arch = config_json["architectures"][0]
+    text_config = config_json if "text_config" not in config_json else config_json["text_config"]
+    vision_config = {} if "vision_config" not in config_json else config_json["vision_config"]
+
+    if "qwen" in vision_config.get("model_type", "").lower():
+        os.environ["USE_QWEN_VL_PROCESS"] = "1"
+    elif "siglip2" in vision_config.get("model_type", "").lower():
+        # IDK why this is such complicated.
+        os.environ["USE_QWEN_VL_PROCESS"] = "1"
+        os.environ["USE_SIGLIP2_PROCESS"] = "1"
+   
+    if model_arch in ["NemotronHForCausalLM", "NemotronVLForConditionCausalLM"]:
+        if text_config.get("n_routed_experts", 0) > 0:
+            # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
+            os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
+            # This only applies to Nemotron Hybrid model with MoE enabled
+            cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
+            cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
+            cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
+            cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
     else:
-        # NemotronH: monkey patching for EP parallelization, weight conversion, etc.
-        cosmos_rl.policy.model.hf_models.HFModel.parallelize_fn = property(patched_parallelize_fn)
-        cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
-        cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
-        cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+        # For other model types, no custom dataset or monkey patches are applied.
+        pass
 
     # Launch the worker
     cosmos_rl.launcher.worker_entry.main(

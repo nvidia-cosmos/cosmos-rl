@@ -27,11 +27,15 @@ from typing import Generator, Optional, List
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import ParallelismConfig
+from functools import lru_cache
 
 
-TP_EP_INTERCHANGABLE_WITH_DP_FUSED = os.environ.get(
-    "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
-).lower() in ["1", "true"]
+@lru_cache(maxsize=1)
+def is_tp_ep_interchangeable_with_dp_fused():
+    TP_EP_INTERCHANGABLE_WITH_DP_FUSED = os.environ.get(
+        "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
+    ).lower() in ["1", "true"]
+    return TP_EP_INTERCHANGABLE_WITH_DP_FUSED
 
 
 def train_context(enable_compiled_autograd: bool):
@@ -268,7 +272,10 @@ class ParallelDims:
             mp_mesh_dim_names.append("tp")
             pp_cp_tp_mesh_dim_names.append("tp")
             weight_loading_mesh_dim_names.append("tp")
-            if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
+            if is_tp_ep_interchangeable_with_dp_fused():
+                print(
+                    "TP_EP_INTERCHANGABLE_WITH_DP_FUSED is enabled, adding tp to dp mesh and dp_cp_mesh."
+                )
                 dp_mesh_dim_names.append("tp")
                 dp_cp_mesh_dim_names.append("tp")
                 loss_parallel_mesh_dim_names.append("tp")
@@ -350,7 +357,7 @@ class ParallelDims:
         return (
             self.dp_replicate > 1
             or self.dp_shard > 1
-            or (TP_EP_INTERCHANGABLE_WITH_DP_FUSED and self.tp > 1)
+            or (is_tp_ep_interchangeable_with_dp_fused() and self.tp > 1)
         )
 
     @property
