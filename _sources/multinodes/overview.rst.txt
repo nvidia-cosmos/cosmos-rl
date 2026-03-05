@@ -81,4 +81,3 @@ Cosmos slurm Job takes care of the number of GPU required by each policy and rol
 Total `8*8 + 4*4 = 64` GPUs are used. (8 `8xH100` nodes will be allocated for this job)
 
 For more details about Slurm job submission, please refer to :doc:`../multinodes/slurm`
-

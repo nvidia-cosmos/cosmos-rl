@@ -19,4 +19,3 @@ To enable asynchronous rollout, you need to set the fields of ``rollout`` sectio
 
 For now, tested backend are:
 - vllm_async
-

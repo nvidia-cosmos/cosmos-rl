@@ -98,7 +98,7 @@ All users need to do is to return the row of dataset as either:
 - ``Conversation List``: data packer will convert the conversation list into a raw text prompt by applying the pre-defined chat template.
 
     .. code-block:: python
-       
+
        [
             {
                 "role": "user",
@@ -115,7 +115,7 @@ We also add a `qwen2_5_vlm_packer.py <#>`_ for `Qwen2.5-VL <https://github.com/Q
 This data packer requires the data row returned by dataset to be specific format:
 
 .. code-block:: python
-       
+
     [
         {
             "role": "user",
@@ -131,4 +131,4 @@ This data packer requires the data row returned by dataset to be specific format
 
 Rollout and Policy would transform the above data row into the format required by the rollout and policy model.
 
-For implementation details, check `qwen2_5_vlm_packer.py <#>`_. 
+For implementation details, check `qwen2_5_vlm_packer.py <#>`_.
