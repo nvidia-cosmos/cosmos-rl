@@ -60,9 +60,11 @@ export WANDB_GIT_REMOTE_URL="[[WANDB_GIT_REMOTE_URL]]"
 # --- Node configuration ---
 export NUM_POLICY_NODES=[[NUM_POLICY_NODES]]
 export NUM_ROLLOUT_NODES=[[NUM_ROLLOUT_NODES]]
+export NUM_REFERENCE_NODES=[[NUM_REFERENCE_NODES]]
 export TOTAL_NODES=[[TOTAL_NODES]]
 export NODE_LAUNCH_METADATA_POLICY='[[NODE_LAUNCH_METADATA_POLICY]]'
 export NODE_LAUNCH_METADATA_ROLLOUT='[[NODE_LAUNCH_METADATA_ROLLOUT]]'
+export NODE_LAUNCH_METADATA_REFERENCE='[[NODE_LAUNCH_METADATA_REFERENCE]]'
 
 # --- Container configuration ---
 export CONTAINER_IMAGE="[[CONTAINER]]"
@@ -275,7 +277,7 @@ handle_auto_retry() {
 # --- 3a. Job Info & Directory Setup ----------------------------------------
 
 echo "JOBID $SLURM_JOB_ID"
-echo "Using ${NUM_POLICY_NODES} policy nodes and ${NUM_ROLLOUT_NODES} rollout nodes, TOTAL_NODES: ${TOTAL_NODES}"
+echo "Using ${NUM_POLICY_NODES} policy nodes, ${NUM_ROLLOUT_NODES} rollout nodes, and ${NUM_REFERENCE_NODES} reference nodes, TOTAL_NODES: ${TOTAL_NODES}"
 log "Job started on $(hostname)"
 log "User: ${USER}, Submit User: ${SUBMIT_USER}"
 
@@ -347,12 +349,17 @@ export CONTROLLER_NODE=$(echo $POLICY_NODES | cut -d' ' -f1)
 export COSMOS_CONTROLLER_HOST="${CONTROLLER_NODE}:${CONTROLLER_PORT}"
 
 if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
-    export ROLLOUT_NODES=$(echo $NODELIST | cut -d' ' -f$((NUM_POLICY_NODES+1))-$((TOTAL_NODES)))
+    export ROLLOUT_NODES=$(echo $NODELIST | cut -d' ' -f$((NUM_POLICY_NODES+1))-$((TOTAL_NODES-NUM_REFERENCE_NODES)))
+fi
+
+if [[ ${NUM_REFERENCE_NODES} -gt 0 ]]; then
+    export REFERENCE_NODES=$(echo $NODELIST | cut -d' ' -f$((TOTAL_NODES-NUM_REFERENCE_NODES+1))-$((TOTAL_NODES)))
 fi
 
 log "Controller node: ${CONTROLLER_NODE}"
 log "Policy nodes: ${POLICY_NODES}"
 log "Rollout nodes: ${ROLLOUT_NODES:-none}"
+log "Reference nodes: ${REFERENCE_NODES:-none}"
 
 # --- 3e. Launch Processes ---------------------------------------------------
 
@@ -433,6 +440,33 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         &
     pid_rollout=$!
     log "Rollout started with PID: ${pid_rollout}"
+fi
+
+# Reference nodes (if any)
+if [[ ${NUM_REFERENCE_NODES} -gt 0 ]]; then
+    export LOCAL_NODE_LIST=${REFERENCE_NODES}
+    srun \
+        --nodes="${NUM_REFERENCE_NODES}" \
+        --nodelist="${LOCAL_NODE_LIST}" \
+        --container-image "${CONTAINER_IMAGE}" \
+        --container-mounts "${MOUNTS}" \
+        --no-container-mount-home \
+        --export=ALL,USER=${USER} \
+        -o ${new_run_dir}/reference_%t.out \
+        -e ${new_run_dir}/reference_%t.err \
+        bash -c '
+        python -c "import cosmos_rl; print(f\"cosmos_rl location: {cosmos_rl.__file__}\"); print(f\"cosmos_rl version: {cosmos_rl.__version__}\")" 2>/dev/null || true
+        cosmos_dir=$(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))" 2>/dev/null | tail -1)
+        if [[ -z "${cosmos_dir}" ]] || [[ ! -d "${cosmos_dir}" ]]; then
+            echo "ERROR: Cannot find cosmos_rl package directory" >&2
+            exit 1
+        fi
+        cd "${cosmos_dir}"
+        python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type reference --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
+        ' \
+        &
+    pid_reference=$!
+    log "Reference started with PID: ${pid_reference}"
 fi
 
 log "All processes launched. Waiting for completion..."

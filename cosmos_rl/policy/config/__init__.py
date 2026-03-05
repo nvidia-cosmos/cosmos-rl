@@ -1547,7 +1547,7 @@ class DistillationConfig(BaseModel):
     )
 
     batch_size_per_replica: int = Field(
-        default=1, description="Batch size for teacher model per replica."
+        default=8, description="Batch size for teacher model per replica."
     )
 
     max_token_len_per_mini_batch: Optional[int] = Field(
@@ -1561,7 +1561,7 @@ class DistillationConfig(BaseModel):
     )
 
     mini_batch: int = Field(
-        default=2,
+        default=1,
         description="mini batch size for teacher model in each replica.",
     )
 
