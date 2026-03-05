@@ -16,7 +16,7 @@
 """This script is launched by slurm job on each node.
 
 It reads the node launch metadata from environment variables and launches
-the appropriate cosmos-rl replicas (policy or rollout) on this node.
+the appropriate cosmos-rl replicas (policy or rollout or reference) on this node.
 
 This version is designed to work with pip-installed cosmos-rl package,
 using the installed console scripts instead of referencing the source tree.
@@ -86,7 +86,7 @@ def build_replica_command(
 
     Args:
         launcher_path: Path to launch_replica.sh or None to use python module
-        replica_type: "policy" or "rollout"
+        replica_type: "policy", "rollout", or "reference"
         rdzv_endpoint: Rendezvous endpoint (host:port)
         ngpus: Number of GPUs for this replica
         nnodes: Number of nodes for this replica
@@ -148,14 +148,14 @@ if __name__ == "__main__":
         "--type",
         type=str,
         required=True,
-        choices=["policy", "rollout"],
+        choices=["policy", "rollout", "reference"],
         help="Type of replica to launch",
     )
     parser.add_argument(
         "--config",
         type=str,
         default=None,
-        help="Path to the config file for the policy or rollout script.",
+        help="Path to the config file for the policy, rollout, or reference script.",
     )
     parser.add_argument(
         "script",
