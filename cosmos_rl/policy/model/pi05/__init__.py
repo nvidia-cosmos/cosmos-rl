@@ -1279,7 +1279,9 @@ class PI05(BaseModel):
             raw = json.load(f)
         return raw["norm_stats"]
 
-    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def process_input(
+        self, inputs: Dict[str, Any], unnorm_key: str = ""
+    ) -> Dict[str, torch.Tensor]:
         batch_size = inputs["full_images"].shape[0]  # [H, W, C], values in [0, 255]
 
         base_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]

@@ -4,21 +4,15 @@
 """
 Single entry point for VLA LIBERO evaluation via OpenVLARollout.evaluate().
 
-Supports cosmos-policy and openvla-oft (and other vla_type from config).
-
-CosmosPolicy (CLI):
-    MUJOCO_GL=egl python tests/test_vla_libero.py \\
-        --vla-type cosmos-policy --ckpt-path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \\
-        --task-suite libero_10 --trials 3
-
-OpenVLA-OFT (CLI):
-    MUJOCO_GL=egl python tests/test_vla_libero.py \\
-        --vla-type openvla-oft --ckpt-path Haozhan72/Openvla-oft-SFT-libero10-trajall \\
-        --task-suite libero_10 --trials 3
+Supports cosmos-policy, openvla-oft, pi05 (and other vla_type from config).
 
 TOML config (vla_type and model from config):
     MUJOCO_GL=egl python tests/test_vla_libero.py \\
         --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml
+    MUJOCO_GL=egl python tests/test_vla_libero.py \\
+        --config configs/openvla-oft/openvla-oft-libero10-eval.toml
+    MUJOCO_GL=egl python tests/test_vla_libero.py \\
+        --config configs/pi05/pi05-libero10-eval.toml
 
 Multi-GPU (tasks×trials split across ranks):
     MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/test_vla_libero.py \\
@@ -92,6 +86,33 @@ def _build_config_from_args(args: argparse.Namespace):
         base["vla"]["use_proprio"] = True
         base["vla"]["proprio_dim"] = 9
         base["vla"]["num_images_in_input"] = 2
+    elif vla_type == "pi05":
+        base["vla"]["use_proprio"] = False
+        base["vla"]["proprio_dim"] = 7
+        base["vla"]["num_images_in_input"] = 3
+        base["train"]["train_policy"] = {
+            "type": "grpo",
+            "dataset": {"name": "libero"},
+        }
+        base["custom"] = {
+            "pi05": {
+                "num_steps": 10,
+                "action_chunk": 10,
+                "action_env_dim": 7,
+                "replan_steps": 5,
+                "noise_method": "flow_sde",
+                "noise_level": 0.5,
+                "noise_anneal": False,
+                "noise_params": [0.7, 0.3, 400.0],
+                "noise_logvar_range": [0.08, 0.16],
+                "joint_logprob": False,
+                "safe_get_logprob": False,
+                "ignore_last": False,
+                "train_expert_only": True,
+                "discrete_state_input": True,
+                "max_token_len": 200,
+            }
+        }
     else:
         # openvla-oft / openvla
         base["vla"]["use_proprio"] = False
@@ -103,7 +124,7 @@ def _build_config_from_args(args: argparse.Namespace):
 
 def _parse_args():
     p = argparse.ArgumentParser(
-        description="VLA LIBERO evaluation (cosmos-policy, openvla-oft, etc.)"
+        description="VLA LIBERO evaluation (cosmos-policy, openvla-oft, pi05, etc.)"
     )
     p.add_argument("--config", type=str, default=None, help="TOML config (optional)")
     p.add_argument("--ckpt-path", default="nvidia/Cosmos-Policy-LIBERO-Predict2-2B")
