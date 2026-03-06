@@ -107,9 +107,9 @@ class WeightResumeCommand(Command):
 
     @classmethod
     def trigger(cls, replica: Replica, redis_handler: RedisStreamHandler):
-        assert (
-            replica.role == Role.POLICY
-        ), "WeightResumeCommand can only be triggered on policy replicas"
+        assert replica.role == Role.POLICY, (
+            "WeightResumeCommand can only be triggered on policy replicas"
+        )
         cmd = cls(replica.name)
         redis_handler.publish_command(cmd.pack(), replica.name)
         # initial weight step
@@ -132,9 +132,9 @@ class BuildMeshCommand(Command):
     @classmethod
     def trigger(cls, replicas: List[Replica], redis_handler: RedisStreamHandler):
         index = 0
-        assert all(
-            replica.all_atoms_arrived for replica in replicas
-        ), "All replicas must have arrived"
+        assert all(replica.all_atoms_arrived for replica in replicas), (
+            "All replicas must have arrived"
+        )
         replicas_to_rank = {}
         for replica in replicas:
             replica.status.mesh_rank = index

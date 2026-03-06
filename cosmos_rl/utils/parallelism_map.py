@@ -314,12 +314,12 @@ class ParallelTopoMapper:
                     rank_info, dims[0]
                 ).__dict__
             elif len(dims) == 2:
-                assert (
-                    self.ordered_dims[2] not in dims
-                ), f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
-                assert (
-                    self.ordered_dims[0] in dims and self.ordered_dims[1] in dims
-                ), f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
+                assert self.ordered_dims[2] not in dims, (
+                    f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
+                )
+                assert self.ordered_dims[0] in dims and self.ordered_dims[1] in dims, (
+                    f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
+                )
                 shard_dim_info[idx] = self.merged_shard_info_at_dim(rank_info).__dict__
             else:
                 raise ValueError(
@@ -437,9 +437,9 @@ class ParallelTopoMapper:
             tensor_dim_to_parallel_map[v].append(k)
         p_rank = self.parallelism.pp_coord[0]
         for k, v in packed_modules_mapping.items():
-            assert (
-                dims_rank_info is None
-            ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
+            assert dims_rank_info is None, (
+                f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
+            )
             hf_name = name_to_hf(param_name)
             if k in hf_name:
                 for rename in v:
@@ -507,9 +507,9 @@ class ParallelTopoMapper:
                         else:
                             dim_slice = DimSliceInfo.from_dict(part_slice[dim])
                         if dim not in dims_rank_info:
-                            assert (
-                                len(global_shape) > dim
-                            ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                            assert len(global_shape) > dim, (
+                                f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                            )
                             local_part = DimSliceInfo(offset=0, total_size=1)
                         else:
                             local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
@@ -564,38 +564,38 @@ class ParallelTopoMapper:
         if "vllm" in self.backend:
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                assert any(
-                    [k in param_name for k in packed_modules_mapping.keys()]
-                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                assert any([k in param_name for k in packed_modules_mapping.keys()]), (
+                    f"QKVParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                )
                 tp_dim = output_dim
             elif isinstance(part, (MergedColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                assert any(
-                    [k in param_name for k in packed_modules_mapping.keys()]
-                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                assert any([k in param_name for k in packed_modules_mapping.keys()]), (
+                    f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                )
                 tp_dim = output_dim
             elif isinstance(part, (RowParallelLinear)):
                 input_dim = getattr(param, "input_dim", 1)
                 if not is_bias:
-                    assert (
-                        input_dim is not None
-                    ), f"RowParallelLinear {param_name} has no input_dim attribute."
+                    assert input_dim is not None, (
+                        f"RowParallelLinear {param_name} has no input_dim attribute."
+                    )
                     tp_dim = input_dim
             elif isinstance(part, (ColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 tp_dim = output_dim
             elif isinstance(part, VocabParallelEmbedding):
                 output_dim = getattr(param, "output_dim", 0)
-                assert (
-                    not is_bias
-                ), f"VocabParallelEmbedding {param_name} should not have bias."
+                assert not is_bias, (
+                    f"VocabParallelEmbedding {param_name} should not have bias."
+                )
                 tp_dim = output_dim
             else:
                 if "gpt_oss" in self.hf_config.model_type:
                     # special cases for gpt-oss model.
-                    assert hasattr(
-                        vllm_model_classes, "gpt_oss"
-                    ), "gpt-oss is not supported for this version of vllm."
+                    assert hasattr(vllm_model_classes, "gpt_oss"), (
+                        "gpt-oss is not supported for this version of vllm."
+                    )
                     from cosmos_rl.utils.mxfp4.quantizer import genereate_dim_rank_info
 
                     if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
@@ -610,16 +610,16 @@ class ParallelTopoMapper:
                             tp_dim = _tp_dim
                         packed_modules_mapping = {}
                     else:
-                        assert (
-                            "Parallel" not in part.__class__.__name__
-                        ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                        assert "Parallel" not in part.__class__.__name__, (
+                            f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                        )
                         logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
                 else:
-                    assert (
-                        "Parallel" not in part.__class__.__name__
-                    ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                    assert "Parallel" not in part.__class__.__name__, (
+                        f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                    )
                     logger.debug(
                         f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                     )
@@ -659,9 +659,9 @@ class ParallelTopoMapper:
         and extracts their detailed shard information from the parameters.
         This method updates a dictionary with parameter names as keys and their parallel dimensions with shard information as values.
         """
-        assert (
-            not self.is_policy
-        ), "parallelism_info_for_vllm_params should only be called for rollout model."
+        assert not self.is_policy, (
+            "parallelism_info_for_vllm_params should only be called for rollout model."
+        )
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}
@@ -1379,9 +1379,9 @@ class ParallelizedShardMapper:
                 raise ValueError(
                     f"[Rollout] No recv insts_for_group generated for parameter {dest_name} in rollout rank {r_rank}."
                 )
-        assert (
-            len(name_in_group) == 0
-        ), f"[Rollout] No recv instructions generated for parameters {name_in_group} in rollout rank {r_rank}."
+        assert len(name_in_group) == 0, (
+            f"[Rollout] No recv instructions generated for parameters {name_in_group} in rollout rank {r_rank}."
+        )
         # Pack the instructions into msgpack format for efficient serialization.
         return msgpack.packb(rollout_from_policy_insts)
 

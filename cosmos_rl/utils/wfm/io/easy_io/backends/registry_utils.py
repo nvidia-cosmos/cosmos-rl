@@ -49,7 +49,7 @@ def _register_backend(
     global backends, prefix_to_backends
 
     if not isinstance(name, str):
-        raise TypeError("the backend name should be a string, " f"but got {type(name)}")
+        raise TypeError(f"the backend name should be a string, but got {type(name)}")
 
     if not inspect.isclass(backend):
         raise TypeError(f"backend should be a class, but got {type(backend)}")

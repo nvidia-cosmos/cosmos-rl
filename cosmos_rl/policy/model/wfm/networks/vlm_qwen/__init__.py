@@ -247,9 +247,9 @@ class QwenModel(VLMBaseModel):
                     local_view = (
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
-                    assert (
-                        local_view.shape == sharded_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                    assert local_view.shape == sharded_weight.shape, (
+                        f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                    )
                     with torch.no_grad():
                         local_view.data.copy_(sharded_weight)
 
@@ -485,23 +485,23 @@ class QwenModel(VLMBaseModel):
         """
         The training step of the model, including the loss computation.
         """
-        assert (
-            "pixel_values" not in data_batch
-        ), "pixel_values should not be in data_batch, use images instead"
+        assert "pixel_values" not in data_batch, (
+            "pixel_values should not be in data_batch, use images instead"
+        )
         pixel_values = data_batch.get("images", None)
         image_grid_thw = data_batch.get("image_grid_thw", None)
         pixel_values_videos = data_batch.get("videos", None)
         video_grid_thw = data_batch.get("video_grid_thw", None)
         if image_grid_thw is not None:
-            assert (
-                len(image_grid_thw) == 1
-            ), "Only batch=1 is supported for now, due to `get_rope_index`"
+            assert len(image_grid_thw) == 1, (
+                "Only batch=1 is supported for now, due to `get_rope_index`"
+            )
             image_grid_thw = image_grid_thw[0]  # 1, N_img, 3 -> N_img, 3
             second_per_grid_ts = None
         if video_grid_thw is not None:
-            assert (
-                len(video_grid_thw) == 1
-            ), "Only batch=1 is supported for now, due to `get_rope_index`"
+            assert len(video_grid_thw) == 1, (
+                "Only batch=1 is supported for now, due to `get_rope_index`"
+            )
             video_grid_thw = video_grid_thw[0]  # 1, N_video, 3 -> N_video, 3
             if "second_per_grid_ts" in data_batch:  # only 2.5VL has fps
                 second_per_grid_ts = data_batch["second_per_grid_ts"][

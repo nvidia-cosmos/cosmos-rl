@@ -61,9 +61,9 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 "experts.w2_weight", "experts.down_proj"
             )
 
-        assert (
-            converted_name is not None
-        ), f"{rollout_weight_name} is not mapped successfully."
+        assert converted_name is not None, (
+            f"{rollout_weight_name} is not mapped successfully."
+        )
         return converted_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -72,9 +72,9 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             # split qkv weight for visual
             # weight has shape [3 * head_dim, hidden_dim]
             # kv head ratio is 1, so we can split it into q, k, v
-            assert (
-                weight.shape[0] % 3 == 0
-            ), "Weight shape is not compatible for splitting."
+            assert weight.shape[0] % 3 == 0, (
+                "Weight shape is not compatible for splitting."
+            )
             unit_dim = weight.shape[0] // 3  # for both weight and bias
             q_weight = weight[:unit_dim]
             k_weight = weight[unit_dim : unit_dim * 2]

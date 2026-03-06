@@ -69,9 +69,9 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         rollout_as_token_ids = isinstance(completion, list) and all(
             isinstance(c, int) for c in completion
         )
-        assert (
-            isinstance(completion, str) or rollout_as_token_ids
-        ), "Completion should be a string or a list of token ids"
+        assert isinstance(completion, str) or rollout_as_token_ids, (
+            "Completion should be a string or a list of token ids"
+        )
 
         if not self.config.rollout.multi_turn_config.enable:
             # Reuse the same logic as get_rollout_input to get raw text prompts
@@ -108,9 +108,9 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 tools=tool_schemas,
             )
 
-            assert any(
-                loss_mask
-            ), "Should not mask all tokens, this sample is not valid"
+            assert any(loss_mask), (
+                "Should not mask all tokens, this sample is not valid"
+            )
 
             return DecoderOnlyLLMDataPacker.RLPolicyInput(
                 input_ids=input_ids, logprob_masks=loss_mask
@@ -124,9 +124,9 @@ class DecoderOnlyLLMDataPacker(DataPacker):
     ) -> Dict[str, Any]:
         input_ids = [x.input_ids for x in processed_samples]
         logprob_masks = [x.logprob_masks for x in processed_samples]
-        assert len(input_ids) == len(
-            logprob_masks
-        ), "The length of input_ids, and logprob_masks should be the same"
+        assert len(input_ids) == len(logprob_masks), (
+            "The length of input_ids, and logprob_masks should be the same"
+        )
         device = torch.cuda.current_device()
 
         collated_dict = {}

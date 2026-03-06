@@ -47,7 +47,7 @@ Set up the required environment and dependencies:
 cosmos-rl-reward-prepare --config cosmos_rl_reward/configs/rewards.toml
 ```
 
-Since different reward calculations may have different dependencies, separate environment for each type of rewards might be needed if necessary. Virtual python environment is used to offer separate environments for different types of rewards. 
+Since different reward calculations may have different dependencies, separate environment for each type of rewards might be needed if necessary. Virtual python environment is used to offer separate environments for different types of rewards.
 
 This command will:
 - Initialize necessary directories
@@ -298,8 +298,8 @@ We have three `media_type` for the bytes. Detailed loading and processing can be
 # Video (Cosmos-Reason1, DanceGRPO)
 {
   "prompts": ["prompt text"],
-  "reward_fn": { 
-    "cosmos_reason1": 1.0, 
+  "reward_fn": {
+    "cosmos_reason1": 1.0,
     "dance_grpo": 1.0
   },
   "video_infos": [
@@ -320,7 +320,7 @@ We have three `media_type` for the bytes. Detailed loading and processing can be
   },
   "media_type": "image",
 }
- 
+
 # Image (HPSv3)
 {
   "prompts": [
@@ -342,7 +342,7 @@ We have three `media_type` for the bytes. Detailed loading and processing can be
   },
   "media_type": "image",
 }
- 
+
 # Image (OCR)
 {
   "prompts": ["New York Skyline with 'Hello World' written with fireworks"],
@@ -419,44 +419,44 @@ Inside each field of the response, the values are lists corresponding to the bat
 # Video (Cosmos-Reason1)
 {
     'scores': {
-        'prediction': ['Good'], 
-        'no_score': [0.9997965693473816], 
-        'yes_logit': [17.5], 
+        'prediction': ['Good'],
+        'no_score': [0.9997965693473816],
+        'yes_logit': [17.5],
         'no_logit': [26.0]
-    }, 
+    },
     'input_info': {
-        'shape': [1, 16, 24, 54, 96], 
-        'dtype': 'torch.bfloat16', 
-        'min': '0.000', 
-        'max': '1.000', 
+        'shape': [1, 16, 24, 54, 96],
+        'dtype': 'torch.bfloat16',
+        'min': '0.000',
+        'max': '1.000',
         'video_infos': [
             {'video_fps': 16.0}
         ]
-    }, 
-    'duration': '2.23', 
-    'decoded_duration': '2.02', 
+    },
+    'duration': '2.23',
+    'decoded_duration': '2.02',
     'type': 'cosmos_reason1'
 }
 
 # Video (DanceGRPO)
 {
     'scores': {
-        'vq_reward': [-0.5091875791549683], 
-        'mq_reward': [-1.1062785387039185], 
-        'ta_reward': [-2.6613192558288574], 
+        'vq_reward': [-0.5091875791549683],
+        'mq_reward': [-1.1062785387039185],
+        'ta_reward': [-2.6613192558288574],
         'overall_reward': [-4.276785373687744]
-    }, 
+    },
     'input_info': {
-        'shape': [1, 16, 24, 54, 96], 
-        'dtype': 'torch.bfloat16', 
-        'min': '0.000', 
-        'max': '1.000', 
+        'shape': [1, 16, 24, 54, 96],
+        'dtype': 'torch.bfloat16',
+        'min': '0.000',
+        'max': '1.000',
         'video_infos': [
             {'video_fps': 16.0}
         ]
-    }, 
-    'duration': '0.77', 
-    'decoded_duration': '2.02', 
+    },
+    'duration': '0.77',
+    'decoded_duration': '2.02',
     'type': 'dance_grpo'
 }
 
@@ -609,7 +609,7 @@ python -m build
 ls dist/
 ```
 
-Built package wheel and tar files can be found in `dist`. 
+Built package wheel and tar files can be found in `dist`.
 
 ## 7. Add New Reward Support
 
@@ -619,7 +619,7 @@ To add a new reward support, a reward handler class based on `BaseRewardHandler`
 @RewardRegistry.register()
 class NewReward(BaseRewardHandler):
     reward_name = "new_reward_type"
-  
+
     def __init__(
         self,
         model_path,

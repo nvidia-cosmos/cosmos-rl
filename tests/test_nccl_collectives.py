@@ -124,9 +124,9 @@ class TestNCCLBroadcast(unittest.TestCase):
                 expected = torch.arange(
                     tensor_size, dtype=dtype, device=f"cuda:{rank}"
                 ) * (root_rank + 1)
-                assert torch.allclose(
-                    tensor, expected
-                ), f"Broadcast from rank {root_rank} failed for dtype {dtype}"
+                assert torch.allclose(tensor, expected), (
+                    f"Broadcast from rank {root_rank} failed for dtype {dtype}"
+                )
 
     def test_nccl_broadcast(self):
         """Test NCCL broadcast operations between multiple processes with different CUDA devices."""

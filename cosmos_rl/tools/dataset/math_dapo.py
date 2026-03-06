@@ -67,13 +67,13 @@ class MathDapoDataset(Dataset):
         ]
         ```
         """
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), (
+            "`self.tokenizer` should be set by the launcher"
+        )
         conversation = self.dataset[idx]["prompt"]
-        assert isinstance(
-            conversation, list
-        ), f"Prompt should be a string, but got {type(conversation)}， {conversation}"
+        assert isinstance(conversation, list), (
+            f"Prompt should be a string, but got {type(conversation)}， {conversation}"
+        )
 
         # return the conversation to be converted into input_ids by the data packer
         return conversation

@@ -92,15 +92,15 @@ class Atom:
         self._replica = weakref.ref(replica)
 
     async def put_rollout(self, rollout: Rollout):
-        assert (
-            self.tp_rank() == 0 and self.cp_rank() == 0 and self.pp_rank() == 0
-        ), f"Atom {self} is not a dp_shard master atom, cannot put rollout"
+        assert self.tp_rank() == 0 and self.cp_rank() == 0 and self.pp_rank() == 0, (
+            f"Atom {self} is not a dp_shard master atom, cannot put rollout"
+        )
         self.rollout_queue.put_nowait(rollout)
 
     async def fetch_rollouts(self) -> List[Rollout]:
-        assert (
-            self.tp_rank() == 0 and self.cp_rank() == 0 and self.pp_rank() == 0
-        ), f"Atom {self} is not a dp_shard master atom, cannot fetch rollouts"
+        assert self.tp_rank() == 0 and self.cp_rank() == 0 and self.pp_rank() == 0, (
+            f"Atom {self} is not a dp_shard master atom, cannot fetch rollouts"
+        )
         rollouts = []
         while not self.rollout_queue.empty():
             rollouts.append(self.rollout_queue.get_nowait())
@@ -131,12 +131,12 @@ class Atom:
         return self.ranks[MESH_NAMES.index("dp_shard")]
 
     def __post_init__(self):
-        assert (
-            len(self.ranks) == len(self.group_size)
-        ), f"Ranks and group_size must have the same length, got {len(self.ranks)} and {len(self.group_size)}"
-        assert (
-            len(self.ranks) == len(MESH_NAMES)
-        ), f"Ranks must have the same length as MESH_NAMES, got {len(self.ranks)} and {len(MESH_NAMES)}"
+        assert len(self.ranks) == len(self.group_size), (
+            f"Ranks and group_size must have the same length, got {len(self.ranks)} and {len(self.group_size)}"
+        )
+        assert len(self.ranks) == len(MESH_NAMES), (
+            f"Ranks must have the same length as MESH_NAMES, got {len(self.ranks)} and {len(MESH_NAMES)}"
+        )
 
     def __str__(self):
         return f"{self.replica_name}_{self.global_rank}"
@@ -212,9 +212,9 @@ class Replica:
         return self.status.mesh_rank >= 0
 
     def get_atom(self, ranks: List[int]) -> Atom:
-        assert (
-            len(ranks) == len(MESH_NAMES)
-        ), f"Ranks must have the same length as MESH_NAMES, got {len(ranks)} and {len(MESH_NAMES)}"
+        assert len(ranks) == len(MESH_NAMES), (
+            f"Ranks must have the same length as MESH_NAMES, got {len(ranks)} and {len(MESH_NAMES)}"
+        )
         return self.atoms[str(ranks)]
 
     def arrive(self, atom: Atom):
@@ -222,9 +222,9 @@ class Replica:
         # Verify group size is consistent with existing atoms
         if len(self.atoms) > 0:
             existing_atom = next(iter(self.atoms.values()))
-            assert (
-                atom.group_size == existing_atom.group_size
-            ), f"Atom {atom} has inconsistent group size"
+            assert atom.group_size == existing_atom.group_size, (
+                f"Atom {atom} has inconsistent group size"
+            )
         self.atoms[str(atom)] = atom
         if self.role == Role.POLICY and self.all_atoms_arrived:
             # Check out all the dp_shard atoms
@@ -235,9 +235,9 @@ class Replica:
             #    4. tp rank is 0
             any_atom = next(iter(self.atoms.values()))
             group_sizes = any_atom.group_size
-            assert (
-                len(group_sizes) == len(MESH_NAMES)
-            ), f"Group sizes must have the same length as MESH_NAMES, got {len(group_sizes)} and {len(MESH_NAMES)}"
+            assert len(group_sizes) == len(MESH_NAMES), (
+                f"Group sizes must have the same length as MESH_NAMES, got {len(group_sizes)} and {len(MESH_NAMES)}"
+            )
             tp_size, cp_size, dp_shard_size, pp_size = 1, 1, 1, 1
 
             for i in range(len(MESH_NAMES)):
@@ -251,9 +251,9 @@ class Replica:
                     dp_shard_size = group_sizes[i]
                 else:
                     raise ValueError(f"Unknown mesh name: {MESH_NAMES[i]}")
-            assert (
-                tp_size * cp_size * dp_shard_size * pp_size == len(self.atoms)
-            ), f"Group sizes must be consistent with the number of atoms, got {tp_size} * {cp_size} * {dp_shard_size} * {pp_size} = {tp_size * cp_size * dp_shard_size * pp_size} and {len(self.atoms)}"
+            assert tp_size * cp_size * dp_shard_size * pp_size == len(self.atoms), (
+                f"Group sizes must be consistent with the number of atoms, got {tp_size} * {cp_size} * {dp_shard_size} * {pp_size} = {tp_size * cp_size * dp_shard_size * pp_size} and {len(self.atoms)}"
+            )
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -272,12 +272,12 @@ class Replica:
         return len(self.atoms) == math.prod(atom.group_size)
 
     def put_rollout(self, rollout: Rollout, redis_handler: RedisStreamHandler):
-        assert (
-            self.role == Role.POLICY
-        ), f"Replica {self.name} is not a policy replica, cannot put rollout"
-        assert (
-            self.all_atoms_arrived
-        ), f"Replica {self.name} tries to put rollout but not all atoms have arrived"
+        assert self.role == Role.POLICY, (
+            f"Replica {self.name} is not a policy replica, cannot put rollout"
+        )
+        assert self.all_atoms_arrived, (
+            f"Replica {self.name} tries to put rollout but not all atoms have arrived"
+        )
         # Check which atom should handle this rollout
         # Publish the rollout to the redis stream to be consumed by policy replicas
         redis_handler.publish_rollout(msgpack.packb(rollout.model_dump()), self.name)

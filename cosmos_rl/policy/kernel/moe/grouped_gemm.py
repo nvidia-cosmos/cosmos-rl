@@ -54,9 +54,9 @@ class FallbackGroupedGemmImpl(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, batch_sizes, trans_b):
         assert backend is not None, "grouped_gemm is not available."
-        assert (
-            torch.count_nonzero(batch_sizes) != 0
-        ), "Input batch_sizes should not be all zeros!"
+        assert torch.count_nonzero(batch_sizes) != 0, (
+            "Input batch_sizes should not be all zeros!"
+        )
         ctx.save_for_backward(a, b, batch_sizes)
         ctx.trans_b = trans_b
         return backend.gmm(a, b, batch_sizes, trans_a=False, trans_b=trans_b)

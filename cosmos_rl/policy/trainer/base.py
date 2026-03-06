@@ -204,9 +204,9 @@ class TrainerRegistry:
         allow_override: bool = False,
     ):
         def decorator(cls: Type) -> Type:
-            assert issubclass(
-                cls, Trainer
-            ), "Registered trainer must be a subclass of Trainer."
+            assert issubclass(cls, Trainer), (
+                "Registered trainer must be a subclass of Trainer."
+            )
             assert isinstance(trainer_type, str), "trainer_type must be a string."
             if (
                 not allow_override

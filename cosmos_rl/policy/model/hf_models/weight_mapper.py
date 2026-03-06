@@ -103,9 +103,9 @@ class HFModelWeightMapper(WeightMapper):
             # split qkv weight for visual
             # weight has shape [3 * head_dim, hidden_dim]
             # kv head ratio is 1, so we can split it into q, k, v
-            assert (
-                weight.shape[0] % 3 == 0
-            ), "Weight shape is not compatible for splitting."
+            assert weight.shape[0] % 3 == 0, (
+                "Weight shape is not compatible for splitting."
+            )
             unit_dim = weight.shape[0] // 3  # for both weight and bias
             q_weight = weight[:unit_dim]
             k_weight = weight[unit_dim : unit_dim * 2]
@@ -346,9 +346,9 @@ class HFModelWeightMapper(WeightMapper):
     ):
         tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
         if self.config.model_type == "gpt_oss" and "down_proj_bias" in inst_dest_name:
-            assert (
-                "parallel_dims" in kwargs
-            ), "parallel_dims is required for update_tensor_view"
+            assert "parallel_dims" in kwargs, (
+                "parallel_dims is required for update_tensor_view"
+            )
             tp_rank, _ = kwargs["parallel_dims"].tp_coord
             if tp_rank != 0:
                 tmp_recv_tensor.zero_()

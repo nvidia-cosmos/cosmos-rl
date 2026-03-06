@@ -53,7 +53,7 @@ if [ ! -s "${OUT_FILE}" ]; then
   echo "[hpsv2 setup] Downloading HPSv2 checkpoint..."
   wget "https://huggingface.co/xswu/HPSv2/resolve/main/HPS_v2.1_compressed.pt" \
     -O "${OUT_FILE}"
-  
+
   if [ ! -s "${OUT_FILE}" ]; then
     echo "[hpsv2 setup] ERROR: Download failed!"
     exit 1
@@ -74,5 +74,3 @@ echo "[hpsv2 setup] Installing Python dependencies into venv..."
 echo "[hpsv2 setup] Done."
 echo "[hpsv2 setup] Checkpoint path: ${OUT_FILE}"
 echo "[hpsv2 setup] Service derives ckpt from download_path → ${OUT_FILE}"
-
-

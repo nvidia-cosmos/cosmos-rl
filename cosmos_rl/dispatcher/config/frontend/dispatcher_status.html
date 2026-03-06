@@ -11,7 +11,7 @@
             --background-color: #f8f9fa;
             --card-background: #ffffff;
         }
-        
+
         body {
             font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
             margin: 0;
@@ -19,7 +19,7 @@
             background-color: var(--background-color);
             color: var(--primary-color);
         }
-        
+
         h1 {
             text-align: center;
             color: var(--primary-color);
@@ -28,13 +28,13 @@
             padding-bottom: 10px;
             border-bottom: 2px solid var(--primary-color);
         }
-        
+
         h2 {
             color: var(--secondary-color);
             margin: 30px 0 20px;
             font-size: 1.8em;
         }
-        
+
         .replica {
             background: var(--card-background);
             border-radius: 10px;
@@ -43,17 +43,17 @@
             padding: 20px;
             transition: transform 0.2s ease;
         }
-        
+
         .replica:hover {
             transform: translateY(-2px);
         }
-        
+
         .replica h3 {
             color: var(--primary-color);
             margin: 0 0 15px;
             font-size: 1.4em;
         }
-        
+
         .status-badge {
             display: inline-block;
             padding: 6px 12px;
@@ -61,17 +61,17 @@
             font-weight: 500;
             font-size: 0.9em;
         }
-        
+
         .arrived {
             background-color: rgba(39, 174, 96, 0.2);
             color: var(--success-color);
         }
-        
+
         .not-arrived {
             background-color: rgba(231, 76, 60, 0.2);
             color: var(--warning-color);
         }
-        
+
         .atom {
             background: rgba(44, 62, 80, 0.05);
             border-radius: 8px;
@@ -81,26 +81,26 @@
             gap: 20px;
             align-items: center;
         }
-        
+
         .atom-info {
             display: flex;
             gap: 20px;
             flex: 1;
             font-size: 0.95em;
         }
-        
+
         .atom-detail {
             display: flex;
             align-items: center;
             gap: 6px;
             color: var(--secondary-color);
         }
-        
+
         .atom-label {
             font-weight: 600;
             color: var(--primary-color);
         }
-        
+
         .role-badge {
             display: inline-block;
             background: var(--secondary-color);
@@ -110,12 +110,12 @@
             font-size: 0.9em;
             margin-bottom: 10px;
         }
-        
+
         #status {
             max-width: 1200px;
             margin: 0 auto;
         }
-        
+
         .replica-info {
             display: flex;
             gap: 15px;
@@ -123,7 +123,7 @@
             margin-bottom: 15px;
             flex-wrap: wrap;
         }
-        
+
         .group-size {
             display: inline-flex;
             align-items: center;
@@ -132,20 +132,20 @@
             border-radius: 8px;
             font-size: 0.9em;
         }
-        
+
         .group-size-label {
             font-weight: 600;
             color: var(--primary-color);
             margin-right: 6px;
         }
-        
+
         .atoms-container {
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
             margin-top: 15px;
         }
-        
+
         .atom {
             background: rgba(44, 62, 80, 0.05);
             border-radius: 8px;
@@ -154,37 +154,37 @@
             align-items: center;
             gap: 8px;
         }
-        
+
         .atom-label {
             font-weight: 600;
             color: var(--primary-color);
         }
-        
+
         .atom-value {
             color: var(--secondary-color);
         }
-        
+
         @media (max-width: 768px) {
             body {
                 padding: 10px;
             }
-            
+
             .replica {
                 margin: 15px 0;
                 padding: 15px;
             }
-            
+
             .atom {
                 flex-direction: column;
                 align-items: flex-start;
                 gap: 8px;
             }
-            
+
             .atom-info {
                 flex-direction: column;
                 gap: 8px;
             }
-            
+
             .atoms-container {
                 flex-direction: column;
             }
@@ -202,15 +202,15 @@
                 .then(data => {
                     const statusDiv = document.getElementById('status');
                     let html = '';
-                    
+
                     // Policy Replicas
                     html += '<h2>Policy Replicas</h2>';
                     html += renderReplicas(data.policy_replicas, data.mesh_names);
-                    
+
                     // Rollout Replicas
                     html += '<h2>Rollout Replicas</h2>';
                     html += renderReplicas(data.rollout_replicas, data.mesh_names);
-                    
+
                     statusDiv.innerHTML = html;
                 });
         }
@@ -220,7 +220,7 @@
             for (const replica of replicas) {
                 // Get group size from the first atom (since they're all the same)
                 const groupSize = replica.atoms.length > 0 ? replica.atoms[0].group_size : [];
-                
+
                 html += `
                     <div class="replica">
                         <h3>Replica: ${replica.name}</h3>
@@ -241,11 +241,11 @@
                                 </div>` : ''
                             }
                         </div>
-                        
+
                         <h4>Atoms:</h4>
                         <div class="atoms-container">
                 `;
-                
+
                 for (const atom of replica.atoms) {
                     html += `
                         <div class="atom">

@@ -265,9 +265,9 @@ class DanceGRPOVideoReward(BaseRewardHandler):
         Outputs:
             Rewards: List[dict], N + 1 rewards of the B videos.
         """
-        assert (
-            fps is None or num_frames is None
-        ), "fps and num_frames cannot be set at the same time."
+        assert fps is None or num_frames is None, (
+            "fps and num_frames cannot be set at the same time."
+        )
 
         batch_size = 1
         images_batched = torch.chunk(

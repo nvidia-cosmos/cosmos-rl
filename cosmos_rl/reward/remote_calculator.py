@@ -71,9 +71,9 @@ class RemoteRewardCalculator:
             )
             return
         self.config = config.train.train_policy.remote_reward
-        assert (
-            len(self.config.reward_fn.keys()) == 1
-        ), "[RemoteRewardCalculator] Currently only support single reward function for remote reward calculation."
+        assert len(self.config.reward_fn.keys()) == 1, (
+            "[RemoteRewardCalculator] Currently only support single reward function for remote reward calculation."
+        )
         # We use wan2pt1 VAE tokenizer to encode the images/videos into latents.
         try:
             self.tokenizer = Wan2pt1VAEInterface(
@@ -377,9 +377,9 @@ class RemoteRewardCalculator:
                 break
 
         # Convert the rewards results to RLPayloads
-        assert all(
-            payload.prompt_idx >= 0 for payload in valid_payloads
-        ), "[Reward] All payloads should have a valid prompt index"
+        assert all(payload.prompt_idx >= 0 for payload in valid_payloads), (
+            "[Reward] All payloads should have a valid prompt index"
+        )
         payload_list: List[RLPayload] = []
         for i, payload in enumerate(valid_payloads):
             rewards = valid_results[i]

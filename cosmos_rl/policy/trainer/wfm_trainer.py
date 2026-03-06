@@ -668,12 +668,12 @@ class CosmosVisionGenTrainer(ABC):
             and hasattr(model_ddp.config, "rl")
             and model_ddp.config.rl.enabled
         ):
-            assert (
-                model_ddp.config.rl.sample_steps > 0
-            ), "GRPO sample steps must be greater than 0"
-            assert (
-                len(model_ddp.config.rl.train_on) > 0
-            ), "GRPO train on must be set to a non-empty list"
+            assert model_ddp.config.rl.sample_steps > 0, (
+                "GRPO sample steps must be greater than 0"
+            )
+            assert len(model_ddp.config.rl.train_on) > 0, (
+                "GRPO train on must be set to a non-empty list"
+            )
             effective_grad_accum_iter *= len(model_ddp.config.rl.train_on)
 
         # Only let DDP sync gradient at the last iteration of the gradient accumulation window
@@ -892,9 +892,9 @@ class CosmosVisionGenTrainer(ABC):
                     }
                     trajs.append(data)
 
-                assert not self.model.is_image_batch(
-                    data_batch
-                ), "GRPO only supports video data"
+                assert not self.model.is_image_batch(data_batch), (
+                    "GRPO only supports video data"
+                )
                 x_sigma = arch_invariant_rand(
                     x0_B_C_T_H_W.shape,
                     torch.float32,

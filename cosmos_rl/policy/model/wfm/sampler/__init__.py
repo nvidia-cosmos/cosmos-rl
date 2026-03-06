@@ -220,12 +220,12 @@ def res_x0_rk2_step(
     m = -torch.log(s1)
 
     dt = t - s
-    assert not torch.any(
-        torch.isclose(dt, torch.zeros_like(dt), atol=1e-6)
-    ), "Step size is too small"
-    assert not torch.any(
-        torch.isclose(m - s, torch.zeros_like(dt), atol=1e-6)
-    ), "Step size is too small"
+    assert not torch.any(torch.isclose(dt, torch.zeros_like(dt), atol=1e-6)), (
+        "Step size is too small"
+    )
+    assert not torch.any(torch.isclose(m - s, torch.zeros_like(dt), atol=1e-6)), (
+        "Step size is too small"
+    )
 
     c2 = (m - s) / dt
     phi1_val, phi2_val = phi1(-dt), phi2(-dt)
@@ -723,9 +723,9 @@ class Sampler(torch.nn.Module):
 
         is_multistep = is_multi_step_fn_supported(solver_option)
         is_rk = is_runge_kutta_fn_supported(solver_option)
-        assert (
-            is_multistep or is_rk
-        ), f"Only support multistep or Runge-Kutta method, got {solver_option}"
+        assert is_multistep or is_rk, (
+            f"Only support multistep or Runge-Kutta method, got {solver_option}"
+        )
 
         solver_cfg = SolverConfig(
             s_churn=S_churn,
@@ -848,9 +848,9 @@ class RectifiedFlowScaling:
         t_scaling_factor: float = 1.0,
         loss_weight_uniform: bool = True,
     ):
-        assert (
-            abs(sigma_data - 1.0) < 1e-6
-        ), "sigma_data must be 1.0 for RectifiedFlowScaling"
+        assert abs(sigma_data - 1.0) < 1e-6, (
+            "sigma_data must be 1.0 for RectifiedFlowScaling"
+        )
         self.t_scaling_factor = t_scaling_factor
         self.loss_weight_uniform = loss_weight_uniform
         if loss_weight_uniform is False:

@@ -52,7 +52,7 @@ PI0.5 is a diffusion-based VLA model that uses flow-based action prediction for 
 
    [policy]
    model_name_or_path = "sunshk/pi05_libero_pytorch"
-   
+
    [vla]
    vla_type = "pi05"
    training_chunk_size = 16
@@ -116,7 +116,7 @@ BEHAVIOR-1K is a large-scale benchmark built on OmniGibson/IsaacSim for househol
 - 1000+ diverse household tasks
 - Photorealistic rendering
 - Task descriptions from BEHAVIOR benchmark
-- Action space in B1K Neurips'25 challenge: 23-DoF 
+- Action space in B1K Neurips'25 challenge: 23-DoF
 
 **Configuration:**
 
@@ -125,7 +125,7 @@ BEHAVIOR-1K is a large-scale benchmark built on OmniGibson/IsaacSim for househol
    [validation]
    dataset.name = "b1k"
    dataset.subset = "b1k"
-   
+
    [vla]
    num_envs = 4
    height = 256

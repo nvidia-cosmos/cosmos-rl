@@ -522,7 +522,7 @@ class TestEnvManagerLibero(unittest.TestCase):
         )
         async_start_time = time.time() - start_time
         print(
-            f"✓ Async reset initiated in {async_start_time*1000:.2f}ms (non-blocking)"
+            f"✓ Async reset initiated in {async_start_time * 1000:.2f}ms (non-blocking)"
         )
 
         # Task 2: While reset is happening, step the other environments multiple times
@@ -537,7 +537,9 @@ class TestEnvManagerLibero(unittest.TestCase):
             print(f"  - Step {step_num + 1}/{num_concurrent_steps} completed")
 
         step_duration = time.time() - step_start_time
-        print(f"✓ Completed {num_concurrent_steps} steps in {step_duration*1000:.2f}ms")
+        print(
+            f"✓ Completed {num_concurrent_steps} steps in {step_duration * 1000:.2f}ms"
+        )
 
         # Verify stepped environments advanced
         step_env_states = self.env_manager.get_env_states(step_env_ids)
@@ -555,7 +557,7 @@ class TestEnvManagerLibero(unittest.TestCase):
             env_ids=reset_env_ids
         )
         wait_duration = time.time() - wait_start_time
-        print(f"✓ Async reset completed in {wait_duration*1000:.2f}ms (wait time)")
+        print(f"✓ Async reset completed in {wait_duration * 1000:.2f}ms (wait time)")
 
         # Verify reset results structure
         self.assertIsInstance(images_and_states, dict)
@@ -615,16 +617,16 @@ class TestEnvManagerLibero(unittest.TestCase):
         print("\n" + "-" * 80)
         print("PERFORMANCE SUMMARY:")
         print(
-            f"  - Async reset initiation: {async_start_time*1000:.2f}ms (non-blocking)"
+            f"  - Async reset initiation: {async_start_time * 1000:.2f}ms (non-blocking)"
         )
         print(
             f"  - Concurrent stepping ({num_concurrent_steps} steps): "
-            f"{step_duration*1000:.2f}ms"
+            f"{step_duration * 1000:.2f}ms"
         )
-        print(f"  - Reset wait time: {wait_duration*1000:.2f}ms")
+        print(f"  - Reset wait time: {wait_duration * 1000:.2f}ms")
         print(
             f"  - Total time: "
-            f"{(async_start_time + step_duration + wait_duration)*1000:.2f}ms"
+            f"{(async_start_time + step_duration + wait_duration) * 1000:.2f}ms"
         )
         print(
             "  - Note: Steps executed concurrently with environment "

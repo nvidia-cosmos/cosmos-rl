@@ -90,16 +90,90 @@ class SFTDataset(Dataset):
             if cache_obj is not None:
                 return cache_obj
 
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if not self.is_user_dataset and self.column_name
-            else self.dataset[idx]
-        )
+        max_retries = 50
+        for attempt in range(max_retries):
+            raw_item = (
+                self.dataset[idx][self.column_name]
+                if not self.is_user_dataset and self.column_name
+                else self.dataset[idx]
+            )
 
-        if isinstance(idx, list):  # a batch of items
-            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
-        else:
-            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+            try:
+                if isinstance(idx, list):  # a batch of items
+                    item = [self.data_packer.sft_process_sample(x) for x in raw_item]
+                else:
+                    item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+                break
+            except Exception as e:
+                if attempt >= max_retries - 1:
+                    raise
+                print(
+                    f"WARNING: sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                continue
+
+        if self.cache is not None:
+            self.cache.set(idx, item)
+        return item
+
+
+class DPODataset(Dataset):
+    """Dataset wrapper for DPO: yields processed {'chosen': dict, 'rejected': dict}."""
+
+    def __init__(
+        self,
+        config: SFTDataConfig,
+        dataset: Dataset,
+        data_packer: BaseDataPacker,
+        is_user_dataset: bool = False,
+    ):
+        self.config = config
+        self.column_name = config.conversation_column_name
+        self.dataset = dataset
+        self.data_packer = data_packer
+        self.is_user_dataset = is_user_dataset
+        self.cache = None
+        if self.config.enable_dataset_cache:
+            cache_folder = os.path.join(
+                os.environ.get(
+                    "COSMOS_CACHE",
+                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
+                ),
+                "datasets_cache",
+                f"dpo-{self.config.dataset.name}-{config_hash(config)}",
+            )
+            logger.info(f"DPODataset Cache folder: {cache_folder}")
+            self.cache = cache.DiskCache(cache_folder)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        if self.cache is not None:
+            cache_obj = self.cache.get(idx)
+            if cache_obj is not None:
+                return cache_obj
+
+        max_retries = 50
+        for attempt in range(max_retries):
+            raw_item = (
+                self.dataset[idx][self.column_name]
+                if not self.is_user_dataset and self.column_name
+                else self.dataset[idx]
+            )
+            try:
+                if hasattr(self.data_packer, "dpo_process_sample"):
+                    item = self.data_packer.dpo_process_sample(raw_item)
+                else:
+                    raise ValueError("DPO requires data_packer with dpo_process_sample")
+                break
+            except Exception as e:
+                if attempt >= max_retries - 1:
+                    raise
+                print(
+                    f"WARNING: dpo_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                continue
 
         if self.cache is not None:
             self.cache.set(idx, item)
@@ -168,13 +242,15 @@ def construct_dataset(
 
         test_dataset = EmptyDataset()
 
-    train_sft_dataset = SFTDataset(
+    trainer_type = cosmos_config.train.train_policy.trainer_type
+    DatasetCls = DPODataset if trainer_type == "dpo" else SFTDataset
+    train_sft_dataset = DatasetCls(
         config,
         dataset=train_dataset,
         data_packer=data_packer,
         is_user_dataset=user_provided_dataset is not None,
     )
-    test_sft_dataset = SFTDataset(
+    test_sft_dataset = DatasetCls(
         config,
         dataset=test_dataset,
         data_packer=val_data_packer,
@@ -845,6 +921,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler.set_epoch(cur_epoch)
             if hasattr(self.train_batch_sampler, "set_epoch"):
                 self.train_batch_sampler.set_epoch(cur_epoch)
+            if hasattr(self.train_data_loader, "dataset") and hasattr(
+                self.train_data_loader.dataset, "set_epoch"
+            ):
+                self.train_data_loader.dataset.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
 
             data_arrival_event = torch.cuda.Event(enable_timing=True)

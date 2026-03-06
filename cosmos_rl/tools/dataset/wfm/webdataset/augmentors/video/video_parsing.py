@@ -42,9 +42,9 @@ class VideoParsing(Augmentor):
         args: Optional[dict] = None,
     ) -> None:
         super().__init__(input_keys, output_keys, args)
-        assert (
-            len(input_keys) == 2
-        ), "VideoParsing augmentor only supports two input keys"
+        assert len(input_keys) == 2, (
+            "VideoParsing augmentor only supports two input keys"
+        )
         self.meta_key = input_keys[0]
         self.video_key = input_keys[1]
 
@@ -62,9 +62,9 @@ class VideoParsing(Augmentor):
             "use_random_consecutive_frames", False
         )
         if self.use_native_fps:
-            assert (
-                self.num_frames > 0
-            ), "num_frames must be greater than 0 when use_native_fps is True"
+            assert self.num_frames > 0, (
+                "num_frames must be greater than 0 when use_native_fps is True"
+            )
         if self.num_frames > 0:
             self.sampler = UniformTemporalSubsample(self.num_frames)
         self.video_decode_num_threads = args["video_decode_num_threads"]
@@ -140,9 +140,9 @@ class VideoParsing(Augmentor):
                     _end_frame = _start_frame + self.num_frames
                     frame_indices = np.arange(_start_frame, _end_frame).tolist()
 
-                    assert (
-                        len(frame_indices) == self.num_frames
-                    ), f"frame_indices length {len(frame_indices)} should be == {self.num_frames}"
+                    assert len(frame_indices) == self.num_frames, (
+                        f"frame_indices length {len(frame_indices)} should be == {self.num_frames}"
+                    )
                 else:
                     # take mid self.num_frames frames from start frame to end frame.
                     total_frames = end_frame - start_frame
@@ -154,9 +154,9 @@ class VideoParsing(Augmentor):
                     frame_indices = np.arange(
                         _start_frame, _end_frame, num_multiplier
                     ).tolist()
-                    assert (
-                        len(frame_indices) == self.num_frames
-                    ), "frame_indices length is not equal to num_frames"
+                    assert len(frame_indices) == self.num_frames, (
+                        "frame_indices length is not equal to num_frames"
+                    )
 
                 video_frames = video_reader.get_batch(frame_indices).asnumpy()
                 video_frames = torch.from_numpy(video_frames).permute(
@@ -173,9 +173,9 @@ class VideoParsing(Augmentor):
 
                 # online hot-fix for alpamayo data. Skip the first 5 frames as there is chance that the first five frames contain black frames.
                 if "alpamayo" in data_dict["__url__"].root:
-                    assert (
-                        len(frame_indices) >= 5
-                    ), "Getting less than 5 frames for alpamayo videos. There is no way to skip the first five frames."
+                    assert len(frame_indices) >= 5, (
+                        "Getting less than 5 frames for alpamayo videos. There is no way to skip the first five frames."
+                    )
                     frame_indices = frame_indices[5:]
                     start_frame += 5
                 video_frames = video_reader.get_batch(frame_indices).asnumpy()

@@ -41,6 +41,7 @@ from cosmos_rl.policy.kernel.megatron_moe.moe_utils import (
 from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
+    MoEAlltoAllTokenDispatcher,
 )
 from transformers.activations import ACT2FN
 
@@ -87,6 +88,7 @@ class MoEArgs:
     enable_router_bias: bool = False
     enable_glu: bool = True
     act_fn: Optional[str] = None
+    moe_enable_deepep: bool = True
 
     def __post_init__(self):
         if self.shared_inter_dim is None:
@@ -210,9 +212,9 @@ class GroupedExperts(nn.Module):
             ep_size = 1
             ep_rank = 0
 
-        assert (
-            self.n_routed_experts % ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
+        assert self.n_routed_experts % ep_size == 0, (
+            f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
+        )
 
         # Replicate the tensor to all experts. This is sub-optimal but is
         # used by this implementation for correctness.
@@ -334,9 +336,9 @@ class GroupedExpertsDeepEP(nn.Module):
             from transformers.activations import ACT2FN
 
             self.act_fn = ACT2FN[args.act_fn]
-            assert (
-                not self.enable_glu
-            ), "enable_glu must be False when act_fn is not None."
+            assert not self.enable_glu, (
+                "enable_glu must be False when act_fn is not None."
+            )
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
         self.ep_size = ep_mesh.size()
@@ -357,13 +359,21 @@ class GroupedExpertsDeepEP(nn.Module):
         local_expert_indices = [
             local_expert_indices_offset + i for i in range(num_local_experts)
         ]
-
-        self.token_dispatcher = MoEFlexTokenDispatcher(
-            num_local_experts=num_local_experts,
-            local_expert_indices=local_expert_indices,
-            config=config,
-            ep_group=ep_mesh.get_group(),
-        )
+        self.using_deepep = self.args.moe_enable_deepep
+        if self.using_deepep:
+            self.token_dispatcher = MoEFlexTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
+        else:
+            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
 
     def forward(
         self,
@@ -389,8 +399,9 @@ class GroupedExpertsDeepEP(nn.Module):
                 Shape is [num_tokens, model_dim]
         """
         assert not isinstance(x, DTensor)
-
-        indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
+        if self.using_deepep:
+            # This a feature for deepep, it can filter out padding token for dispatching
+            indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(
@@ -418,7 +429,7 @@ class GroupedExpertsDeepEP(nn.Module):
 
             output2 = ops.gmm(
                 output1_,
-                self.down_projs.to_local(),
+                ScaleGrad.apply(self.down_projs.to_local(), self.moe_weight_scale),
                 tokens_per_expert,
                 trans_b=True,
             )
@@ -528,9 +539,9 @@ class Gate(nn.Module):
         self.aux_loss_coeff = args.aux_loss_coeff
 
         if self.bias_update_factor > 0:
-            assert (
-                self.train_gate
-            ), "Require train_gate to be set to True to apply the bias update"
+            assert self.train_gate, (
+                "Require train_gate to be set to True to apply the bias update"
+            )
 
         self.weight = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim), requires_grad=self.train_gate
@@ -636,14 +647,14 @@ class Gate(nn.Module):
         This encourages the model to route tokens to less popular experts, promoting
         better load balance.
         """
-        assert (
-            self.train_gate and self.bias_update_factor > 0
-        ), "Gate bias update is disabled"
+        assert self.train_gate and self.bias_update_factor > 0, (
+            "Gate bias update is disabled"
+        )
 
         assert self.training, "Gate bias update is only supported during training"
-        assert (
-            self._cumulative_expert_load is not None
-        ), "Score correction bias cannot be updated without the current expert load"
+        assert self._cumulative_expert_load is not None, (
+            "Score correction bias cannot be updated without the current expert load"
+        )
 
         # 1) Compute the expert load across all DP ranks.
         # Copy the cumulative load into a local variable, and set the stored load to None.

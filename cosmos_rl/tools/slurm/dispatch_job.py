@@ -162,9 +162,9 @@ def compute_nodes(
 
     node_launch_metadata = []
     if n_gpu_per_replica >= n_gpu_per_node:
-        assert (
-            n_gpu_per_replica % n_gpu_per_node == 0
-        ), f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
+        assert n_gpu_per_replica % n_gpu_per_node == 0, (
+            f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
+        )
         n_policy_nodes = n_replicas * (n_gpu_per_replica // n_gpu_per_node)
 
         rendezvous_node = 0
@@ -191,9 +191,9 @@ def compute_nodes(
             if n_gpu_per_node % divisor == 0:
                 possible_gpu_per_replica.append(divisor)
 
-        assert (
-            n_gpu_per_replica in possible_gpu_per_replica
-        ), f"GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
+        assert n_gpu_per_replica in possible_gpu_per_replica, (
+            f"GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
+        )
         n_policy_nodes = math.ceil(n_replicas * n_gpu_per_replica / n_gpu_per_node)
 
         replica_counter = 0
@@ -251,6 +251,12 @@ def main():
         type=int,
         default=None,
         help="Number of rollout replicas to launch (default: use config value)",
+    )
+    parser.add_argument(
+        "--n-reference-replicas",
+        type=int,
+        default=None,
+        help="Number of reference replicas to launch, only used in on-policy distillation for teacher model (default: using config value)",
     )
     parser.add_argument(
         "--slurm-partition", type=str, default="pool0_av", help="SLURM partition to use"
@@ -406,6 +412,20 @@ def main():
             min_n_gpus_policy * config["policy"]["parallelism"]["dp_shard_size"]
         )
 
+    is_distillation = (
+        "distillation" in config
+        and "enable" in config["distillation"]
+        and config["distillation"]["enable"]
+    )
+    if is_distillation:
+        min_n_gpus_reference = (
+            config["distillation"]["parallelism"].get("tp_size", 1)
+            * config["distillation"]["parallelism"].get("pp_size", 1)
+            * config["distillation"]["parallelism"].get("cp_size", 1)
+            * config["distillation"]["parallelism"].get("dp_replicate_size", 1)
+            * config["distillation"]["parallelism"].get("dp_shard_size", 1)
+        )
+
     # Determine n_policy_replicas and n_rollout_replicas from args or config
     n_policy_replicas = args.n_policy_replicas
     if n_policy_replicas is None:
@@ -419,6 +439,13 @@ def main():
         else:
             n_rollout_replicas = 0  # SFT case
 
+    if is_distillation:
+        n_reference_replicas = args.n_reference_replicas
+        if n_reference_replicas is None:
+            n_reference_replicas = config["distillation"]["parallelism"].get(
+                "n_init_replicas", 1
+            )
+
     # Update the n_init_replicas in the config
     if (
         "policy" in config
@@ -429,6 +456,9 @@ def main():
     if "rollout" in config and "parallelism" in config["rollout"]:
         # Only available for RL.
         config["rollout"]["parallelism"]["n_init_replicas"] = n_rollout_replicas
+
+    if is_distillation:
+        config["distillation"]["parallelism"]["n_init_replicas"] = n_reference_replicas
 
     # update output dir and timestamps
     config["train"]["output_dir"] = os.path.join(output_dir, "outputs", timestamp)
@@ -456,6 +486,14 @@ def main():
         )
     n_rollout_nodes = len(rollout_node_launch_metadata)
 
+    if is_distillation:
+        reference_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
+            args.ngpu_per_node, min_n_gpus_reference, n_reference_replicas, "reference"
+        )
+    else:
+        reference_node_launch_metadata = []
+    n_reference_nodes = len(reference_node_launch_metadata)
+
     if args.launcher_args is not None:
         launcher_args = " ".join(args.launcher_args)
     else:
@@ -467,7 +505,7 @@ def main():
 
     # Template for the slurm script
     template_vars = {
-        "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
+        "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes + n_reference_nodes}",
         "OUTPUT_DIR": output_dir,
         "SLURM_DIR": slurm_dir,
         "WORKDIR": workdir,
@@ -492,11 +530,15 @@ def main():
         # Node configuration (explicit in template for cluster compatibility)
         "NUM_POLICY_NODES": str(n_policy_nodes),
         "NUM_ROLLOUT_NODES": str(n_rollout_nodes),
+        "NUM_REFERENCE_NODES": str(n_reference_nodes),
         "NODE_LAUNCH_METADATA_POLICY": json.dumps(
             [x.to_json() for x in policy_node_launch_metadata]
         ),
         "NODE_LAUNCH_METADATA_ROLLOUT": json.dumps(
             [x.to_json() for x in rollout_node_launch_metadata]
+        ),
+        "NODE_LAUNCH_METADATA_REFERENCE": json.dumps(
+            [x.to_json() for x in reference_node_launch_metadata]
         ),
         "REPO_ROOT_PATH": args.repo_root_path
         if args.repo_root_path is not None

@@ -50,9 +50,9 @@ class FastEmaModelUpdater:
         for tgt_params, src_params in zip(
             tgt_model.parameters(), src_model.parameters()
         ):
-            assert (
-                tgt_params.dtype == torch.float32
-            ), f"EMA model only works in FP32 dtype, got {tgt_params.dtype} instead."
+            assert tgt_params.dtype == torch.float32, (
+                f"EMA model only works in FP32 dtype, got {tgt_params.dtype} instead."
+            )
             target_list.append(tgt_params)
             source_list.append(src_params.data)
         torch._foreach_mul_(target_list, beta)
@@ -70,9 +70,9 @@ class FastEmaModelUpdater:
         Args:
             parameters (iterable): Iterable of torch.nn.Parameter to be temporarily stored.
         """
-        assert (
-            self.is_cached is False
-        ), "EMA cache is already taken. Did you forget to restore it?"
+        assert self.is_cached is False, (
+            "EMA cache is already taken. Did you forget to restore it?"
+        )
         device = "cpu" if is_cpu else "cuda"
         self.collected_params = [param.clone().to(device) for param in parameters]
         self.is_cached = True
@@ -123,9 +123,9 @@ class DTensorFastEmaModelUpdater:
         for tgt_params, src_params in zip(
             tgt_model.parameters(), src_model.parameters()
         ):
-            assert (
-                tgt_params.dtype == torch.float32
-            ), f"EMA model only works in FP32 dtype, got {tgt_params.dtype} instead."
+            assert tgt_params.dtype == torch.float32, (
+                f"EMA model only works in FP32 dtype, got {tgt_params.dtype} instead."
+            )
             target_list.append(tgt_params.to_local())
             source_list.append(src_params.to_local().data)
         torch._foreach_mul_(target_list, beta)
@@ -133,9 +133,9 @@ class DTensorFastEmaModelUpdater:
 
     @torch.no_grad()
     def cache(self, parameters: Any, is_cpu: bool = False) -> None:
-        assert (
-            self.is_cached is False
-        ), "EMA cache is already taken. Did you forget to restore it?"
+        assert self.is_cached is False, (
+            "EMA cache is already taken. Did you forget to restore it?"
+        )
         device = "cpu" if is_cpu else "cuda"
         self.collected_params = [
             param.to_local().clone().to(device) for param in parameters
@@ -219,9 +219,9 @@ class EMAModelTracker(torch.nn.Module):
             if param.requires_grad:
                 buffer_name = get_buffer_name(name, self.torch_compile_buffer_renaming)
                 buffer = ema_buffers[buffer_name]
-                assert (
-                    buffer.dtype == torch.float32
-                ), f"EMA model only works in FP32 dtype, got {buffer.dtype} instead."
+                assert buffer.dtype == torch.float32, (
+                    f"EMA model only works in FP32 dtype, got {buffer.dtype} instead."
+                )
                 target_list.append(buffer)
                 source_list.append(param.data)
         torch._foreach_mul_(target_list, self.beta)
@@ -241,9 +241,9 @@ class EMAModelTracker(torch.nn.Module):
         Args:
             parameters (iterable): Iterable of torch.nn.Parameter to be temporarily stored.
         """
-        assert (
-            self.is_cached is False
-        ), "EMA cache is already taken. Did you forget to restore it?"
+        assert self.is_cached is False, (
+            "EMA cache is already taken. Did you forget to restore it?"
+        )
         device = "cpu" if is_cpu else "cuda"
         self.collected_params = [param.clone().to(device) for param in parameters]
         self.is_cached = True

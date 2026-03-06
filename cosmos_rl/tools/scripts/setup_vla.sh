@@ -160,4 +160,3 @@ ok "Libero default path configured"
 # ── Done ───────────────────────────────────────────────────────────────────────
 echo ""
 ok "VLA environment setup complete"
-

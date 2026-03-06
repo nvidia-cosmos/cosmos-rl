@@ -240,9 +240,9 @@ class Dataset:
         for decoder in decoder_list:
             # If the specified decoder is a string, use the webdataset decoder
             # If its a callable function, use the defined function to decode data
-            assert isinstance(decoder, str) or callable(
-                decoder
-            ), "Decoder should either be callable or a str"
+            assert isinstance(decoder, str) or callable(decoder), (
+                "Decoder should either be callable or a str"
+            )
             decoder_functions.append(decoder)
         dataset.append(wds.decode(*decoder_functions))
 
@@ -328,9 +328,9 @@ class WebDataLoaderDataset(Dataset):
         for decoder in decoder_list:
             # If the specified decoder is a string, use the webdataset decoder
             # If its a callable function, use the defined function to decode data
-            assert isinstance(decoder, str) or callable(
-                decoder
-            ), "Decoder should either be callable or a str"
+            assert isinstance(decoder, str) or callable(decoder), (
+                "Decoder should either be callable or a str"
+            )
             decoder_functions.append(decoder)
         dataset.append(wds.decode(*decoder_functions, handler=self.decoder_handler))
 

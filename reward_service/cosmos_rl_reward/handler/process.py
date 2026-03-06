@@ -23,7 +23,16 @@ import cosmos_rl_reward.model  # noqa: F401 to register all reward models
 
 
 class RewardProcessHandler:
-    def __init__(self, reward_name, model_path, dtype, device, download_path, endpoint_url="", endpoint_api_key=""):
+    def __init__(
+        self,
+        reward_name,
+        model_path,
+        dtype,
+        device,
+        download_path,
+        endpoint_url="",
+        endpoint_api_key="",
+    ):
         """
         Initialize the RewardProcessHandler with necessary attributes for launching the reward process.
         Args:

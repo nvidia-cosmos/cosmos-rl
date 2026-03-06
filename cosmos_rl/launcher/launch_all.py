@@ -457,13 +457,13 @@ def main():
     logger.info(f"Using rollout backend: {backend}")
 
     if args.p2r_ratio is not None:
-        assert (
-            args.num_workers is not None
-        ), "When using --p2r-ratio, --num-workers must be specified"
+        assert args.num_workers is not None, (
+            "When using --p2r-ratio, --num-workers must be specified"
+        )
         p2r_ratio = args.p2r_ratio.split(":")
-        assert (
-            len(p2r_ratio) == 2
-        ), "Invalid --p2r-ratio format. Use 'policy:rollout' format."
+        assert len(p2r_ratio) == 2, (
+            "Invalid --p2r-ratio format. Use 'policy:rollout' format."
+        )
         p_ratio = int(p2r_ratio[0])
         r_ratio = int(p2r_ratio[1])
 
@@ -539,12 +539,12 @@ def main():
     if rl_mode == "colocated":
         # Only in strict colocated mode, we want min_n_gpus_policy == min_n_gpus_rollout
         # In colocated-separated mode, we allow min_n_gpus_policy != min_n_gpus_rollout
-        assert (
-            n_policy == n_rollouts
-        ), "Colocated mode only supports equal number of policy and rollout replicas"
-        assert (
-            min_n_gpus_policy == min_n_gpus_rollout
-        ), "Colocated mode requires policy and rollout to have the same GPU requirements"
+        assert n_policy == n_rollouts, (
+            "Colocated mode only supports equal number of policy and rollout replicas"
+        )
+        assert min_n_gpus_policy == min_n_gpus_rollout, (
+            "Colocated mode requires policy and rollout to have the same GPU requirements"
+        )
 
     # Handle Lepton mode
     if args.lepton_mode:
@@ -774,7 +774,9 @@ cosmos-rl --config config.toml"""
         >= min_n_gpus_policy * n_policy
         + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)
         + min_n_gpus_reference * n_reference
-    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts) + min_n_gpus_reference * n_reference}, Available: {len(available_gpus)}"
+    ), (
+        f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts) + min_n_gpus_reference * n_reference}, Available: {len(available_gpus)}"
+    )
 
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         prefix = os.environ.get(
@@ -850,9 +852,9 @@ cosmos-rl --config config.toml"""
     ):
         command_collections = global_launch_settings[cur_work_idx]
 
-        assert (
-            command_collections.global_worker_idx == cur_work_idx
-        ), f"Global worker index {command_collections.global_worker_idx} does not match current worker index {cur_work_idx}"
+        assert command_collections.global_worker_idx == cur_work_idx, (
+            f"Global worker index {command_collections.global_worker_idx} does not match current worker index {cur_work_idx}"
+        )
 
         # Combine all commands
         logger.info(

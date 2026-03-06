@@ -83,14 +83,16 @@ class TextTransformForVideo(Augmentor):
             "medium": f"{self.caption_type}_medium",
             "user": f"{self.caption_type}_user",
         }
-        assert (
-            self.caption_probs.keys() == self.caption_style_mapping.keys()
-        ), "The keys for caption_probs, caption_style_mapping, and embedding_style_mapping should match"
+        assert self.caption_probs.keys() == self.caption_style_mapping.keys(), (
+            "The keys for caption_probs, caption_style_mapping, and embedding_style_mapping should match"
+        )
 
         if self._load_embeddings:
             assert (
                 self.caption_style_mapping.keys() == self.embedding_style_mapping.keys()
-            ), "The keys for caption_style_mapping and embedding_style_mapping should match"
+            ), (
+                "The keys for caption_style_mapping and embedding_style_mapping should match"
+            )
 
     def __call__(self, data_dict: dict) -> dict:
         r"""Performs text transformation.

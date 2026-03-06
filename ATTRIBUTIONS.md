@@ -1823,7 +1823,7 @@ For more information, please refer to <https://unlicense.org>
 
 ```
 BSD 2-CLAUSE LICENSE
-Copyright 2024 LinkedIn Corporation 
+Copyright 2024 LinkedIn Corporation
 All Rights Reserved.
 Redistribution and use in source and binary forms, with or
 without modification, are permitted provided that the following

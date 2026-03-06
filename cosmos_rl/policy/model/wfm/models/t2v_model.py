@@ -150,9 +150,9 @@ class WorldFoundationalModel(nn.Module):
                     "S3_TRAINING_CREDENTIAL_PATH", "credentials/s3_training.secret"
                 ),
             )
-            assert (
-                self.tokenizer.latent_ch == self.config.state_ch
-            ), f"latent_ch {self.tokenizer.latent_ch} != state_shape {self.config.state_ch}"
+            assert self.tokenizer.latent_ch == self.config.state_ch, (
+                f"latent_ch {self.tokenizer.latent_ch} != state_shape {self.config.state_ch}"
+            )
 
         # 4. Set up loss options, including loss masking, loss reduce and loss scaling
         self.loss_reduce = getattr(config, "loss_reduce", "mean")
@@ -234,9 +234,9 @@ class WorldFoundationalModel(nn.Module):
             if self.fsdp_device_mesh:
                 broadcast_dtensor_model_states(net, self.fsdp_device_mesh)
                 for name, param in net.named_parameters():
-                    assert isinstance(
-                        param, DTensor
-                    ), f"param should be DTensor, {name} got {type(param)}"
+                    assert isinstance(param, DTensor), (
+                        f"param should be DTensor, {name} got {type(param)}"
+                    )
         return net
 
     @timer("WorldFoundationalModel: set_up_model")
@@ -285,9 +285,9 @@ class WorldFoundationalModel(nn.Module):
 
     @timer("WorldFoundationalModel: set_up_text_encoder")
     def set_up_text_encoder(self):
-        assert self.config.text_encoder_class.startswith(
-            "reason1"
-        ), "Only reason1 online computation is supported"
+        assert self.config.text_encoder_class.startswith("reason1"), (
+            "Only reason1 online computation is supported"
+        )
 
         qwen_vl_processor = build_tokenizer(
             self.config.text_encoder_config.tokenizer_type
@@ -428,9 +428,9 @@ class WorldFoundationalModel(nn.Module):
         my_dp_rank, dp_world_size = (
             self.parallel_dims.dp_coord
         )  # Number of model instances
-        assert (
-            dp_world_size % self.config.rl.num_rollout == 0
-        ), f"dp_world_size {dp_world_size} must be divisible by num_rollout {self.config.rl.num_rollout}"
+        assert dp_world_size % self.config.rl.num_rollout == 0, (
+            f"dp_world_size {dp_world_size} must be divisible by num_rollout {self.config.rl.num_rollout}"
+        )
 
         # Create a mapping from data parallel rank to all global ranks in that model instance
         # We'll collect this information across all ranks
@@ -526,9 +526,9 @@ class WorldFoundationalModel(nn.Module):
 
         is_multistep = is_multi_step_fn_supported(self.config.rl.solver_option)
         is_rk = is_runge_kutta_fn_supported(self.config.rl.solver_option)
-        assert (
-            is_multistep or is_rk
-        ), f"Only support multistep or Runge-Kutta method, got {self.config.rl.solver_option}"
+        assert is_multistep or is_rk, (
+            f"Only support multistep or Runge-Kutta method, got {self.config.rl.solver_option}"
+        )
 
         solver_cfg = SolverConfig(
             s_churn=self.config.rl.s_churn,
@@ -964,7 +964,9 @@ class WorldFoundationalModel(nn.Module):
             # TODO: (qsh 2025-01-21) to_tp???
             pass
         else:
-            assert not self.net.is_context_parallel_enabled, "parallel_dims is not initialized, context parallel should be turned off."
+            assert not self.net.is_context_parallel_enabled, (
+                "parallel_dims is not initialized, context parallel should be turned off."
+            )
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             cond_x0 = self.denoise(noise_x, sigma, condition).x0
@@ -972,9 +974,9 @@ class WorldFoundationalModel(nn.Module):
             raw_x0 = cond_x0 + guidance * (cond_x0 - uncond_x0)
             if "guided_image" in data_batch:
                 # replacement trick that enables inpainting with base model
-                assert (
-                    "guided_mask" in data_batch
-                ), "guided_mask should be in data_batch if guided_image is present"
+                assert "guided_mask" in data_batch, (
+                    "guided_mask should be in data_batch if guided_image is present"
+                )
                 guide_image = data_batch["guided_image"]
                 guide_mask = data_batch["guided_mask"]
                 raw_x0 = guide_mask * guide_image + (1 - guide_mask) * raw_x0
@@ -1085,17 +1087,19 @@ class WorldFoundationalModel(nn.Module):
                 IS_PREPROCESSED_KEY in data_batch
                 and data_batch[IS_PREPROCESSED_KEY] is True
             ):
-                assert torch.is_floating_point(
-                    data_batch[input_key]
-                ), "Video data is not in float format."
+                assert torch.is_floating_point(data_batch[input_key]), (
+                    "Video data is not in float format."
+                )
                 assert torch.all(
                     (data_batch[input_key] >= -1.0001)
                     & (data_batch[input_key] <= 1.0001)
-                ), f"Video data is not in the range [-1, 1]. get data range [{data_batch[input_key].min()}, {data_batch[input_key].max()}]"
+                ), (
+                    f"Video data is not in the range [-1, 1]. get data range [{data_batch[input_key].min()}, {data_batch[input_key].max()}]"
+                )
             else:
-                assert (
-                    data_batch[input_key].dtype == torch.uint8
-                ), "Video data is not in uint8 format."
+                assert data_batch[input_key].dtype == torch.uint8, (
+                    "Video data is not in uint8 format."
+                )
                 data_batch[input_key] = (
                     data_batch[input_key].to(**self.tensor_kwargs) / 127.5 - 1.0
                 )
@@ -1125,9 +1129,9 @@ class WorldFoundationalModel(nn.Module):
                 IS_PREPROCESSED_KEY in data_batch
                 and data_batch[IS_PREPROCESSED_KEY] is True
             ):
-                assert (
-                    data_batch[input_key].shape[2] == 1
-                ), f"Image data is claimed be augmented while its shape is {data_batch[input_key].shape}"
+                assert data_batch[input_key].shape[2] == 1, (
+                    f"Image data is claimed be augmented while its shape is {data_batch[input_key].shape}"
+                )
                 return
             else:
                 data_batch[input_key] = rearrange(
@@ -1286,9 +1290,9 @@ class WorldFoundationalModel(nn.Module):
         """
         is_image = self.input_image_key in data_batch
         is_video = self.input_data_key in data_batch
-        assert (
-            is_image != is_video
-        ), "Only one of the input_image_key or input_data_key should be present in the data_batch."
+        assert is_image != is_video, (
+            "Only one of the input_image_key or input_data_key should be present in the data_batch."
+        )
         return is_image
 
     def denoise(

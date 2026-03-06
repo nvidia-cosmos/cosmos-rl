@@ -305,8 +305,8 @@ def _run_test_main(
                 for with_topk in (False, True):
                     if local_rank == 0:
                         print(
-                            f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
-                            f'{"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...',
+                            f"[testing] Running with {'FP8' if isinstance(current_x, tuple) else 'BF16'}, "
+                            f"{'with' if with_topk else 'without'} top-k (async={async_mode}, previous={previous_mode}) ...",
                             flush=True,
                             end="",
                         )
@@ -347,9 +347,9 @@ def _run_test_main(
 
                     # Checks
                     rank_prefix_matrix = handle[0]
-                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
-                        0
-                    ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), (
+                        f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+                    )
                     assert (
                         gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist()
                         == recv_num_tokens_per_expert_list
@@ -375,9 +375,9 @@ def _run_test_main(
                         recv_topk_weights_clone = recv_topk_weights.clone()
                         if current_x is not x_pure_rand:
                             recv_topk_weights[recv_topk_idx.eq(-1)] = (
-                                recv_topk_weights.amax(
-                                    dim=1, keepdim=True
-                                ).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
+                                recv_topk_weights.amax(dim=1, keepdim=True).expand_as(
+                                    recv_topk_weights
+                                )[recv_topk_idx.eq(-1)]
                             )
                             check_data(recv_topk_weights, rank_prefix_matrix)
 
@@ -507,15 +507,15 @@ def _run_test_main(
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
             if local_rank == 0:
                 print(
-                    f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                    f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us',
+                    f"[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else 'default'}: "
+                    f"{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us",
                     flush=True,
                 )
         if local_rank == 0:
             print(
-                f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): '
-                f'SMs {best_results[0]}, NVL chunk {best_results[1]}, '
-                f'{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us',
+                f"[tuning] Best dispatch ({'FP8' if isinstance(current_x, tuple) else 'BF16'}): "
+                f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
+                f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us",
                 flush=True,
             )
             print("", flush=True)
@@ -560,8 +560,8 @@ def _run_test_main(
         t = bench(lambda: buffer.combine(**tune_args))[0]  # noqa: B023
         if local_rank == 0:
             print(
-                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us',
+                f"[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else 'default'}: "
+                f"{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us",
                 flush=True,
             )
             if t < best_time and nvl_chunk_size > 0:

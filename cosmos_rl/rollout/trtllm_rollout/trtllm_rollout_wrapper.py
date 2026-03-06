@@ -119,9 +119,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if self.config.validation.enable:
             self.val_batch_size = self.config.validation.batch_size or self.batch_size
-            assert (
-                self.val_batch_size > 0
-            ), "[Rollout] val_batch_size should be greater than 0."
+            assert self.val_batch_size > 0, (
+                "[Rollout] val_batch_size should be greater than 0."
+            )
         else:
             self.val_batch_size = None
 
@@ -258,9 +258,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
         payloads, is_validation, _, empty = self.report_rollouts(block=True)
-        assert (
-            not is_validation and payloads is None and empty
-        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
+        assert not is_validation and payloads is None and empty, (
+            f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
+        )
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             payloads=[],
@@ -271,9 +271,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
     @torch.no_grad()
     def main_loop(self):
-        assert (
-            not self.rollout.rollout_config.multi_turn_config.enable
-        ), "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
+        assert not self.rollout.rollout_config.multi_turn_config.enable, (
+            "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
+        )
         while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
             while not self.rollout_wrapper_event.is_set():
                 # this means that inside trtllmwoker, the weight is not synced yet.
@@ -333,13 +333,14 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         block=True
                     )
                     assert (
-                        (is_validation and payloads is not None or payloads is None)
-                        and not empty
-                    ), "Validation report should be handled in the broadcast command."
+                        is_validation and payloads is not None or payloads is None
+                    ) and not empty, (
+                        "Validation report should be handled in the broadcast command."
+                    )
                     while not empty:
-                        assert (
-                            is_validation or payloads is None
-                        ), "Validation report should be handled in the broadcast command."
+                        assert is_validation or payloads is None, (
+                            "Validation report should be handled in the broadcast command."
+                        )
                         if payloads is not None:
                             response = ValidationReportRequest(
                                 src_replica_name=self.replica_name,
@@ -354,9 +355,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 self.validation_event.clear()
 
             _, is_validation, _, _ = self.report_rollouts()
-            assert (
-                not is_validation
-            ), "Validation report should be handled in the broadcast command."
+            assert not is_validation, (
+                "Validation report should be handled in the broadcast command."
+            )
             # 2. Rollout Generation
             if not self.state.prompt_fetch_end():
                 # query new prompts
@@ -374,9 +375,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         self.send_end_signal()
 
             if self.state.prompt_consume_end():
-                assert (
-                    self._prompt_queue.empty() and self.state.prompt_fetch_end()
-                ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                assert self._prompt_queue.empty() and self.state.prompt_fetch_end(), (
+                    "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                )
                 continue
             elif self._prompt_queue.empty():
                 continue
@@ -430,9 +431,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         for i, payload in enumerate(payloads)
                         if i not in prompt_indices_to_remove
                     ]
-                    assert (
-                        len(payloads) == len(valid_completions)
-                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+                    assert len(payloads) == len(valid_completions), (
+                        "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+                    )
 
                 logger.debug("[Rollout] generate end!")
 

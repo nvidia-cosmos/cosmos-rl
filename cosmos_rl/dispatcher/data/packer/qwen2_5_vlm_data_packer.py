@@ -480,17 +480,17 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         pixel_values = [x["pixel_values"] for x in processed_samples]
         image_grid_thw = [x["image_grid_thw"] for x in processed_samples]
         if all([x is not None for x in pixel_values_videos]):
-            assert all(
-                [x is not None for x in pixel_values_videos]
-            ), "pixel_values_videos should not be None"
+            assert all([x is not None for x in pixel_values_videos]), (
+                "pixel_values_videos should not be None"
+            )
             pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
             video_grid_thw = torch.cat(video_grid_thw, dim=0)
             second_per_grid_ts = torch.cat(second_per_grid_ts, dim=0)
         else:
             # TODO(jiaxin): handle the case when there is mixed input: some with video, some without video
-            assert all(
-                [x is None for x in pixel_values_videos]
-            ), "pixel_values_videos should be None"
+            assert all([x is None for x in pixel_values_videos]), (
+                "pixel_values_videos should be None"
+            )
             pixel_values_videos = None
             video_grid_thw = None
             second_per_grid_ts = None
@@ -548,9 +548,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             dtype=torch.bool,
         )
 
-        assert len(batch["input_ids"]) == len(
-            batch["logprob_masks"]
-        ), "The length of input_ids, logprob_masks should be the same"
+        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
+            "The length of input_ids, logprob_masks should be the same"
+        )
 
         padded_tensors = []
         for sample in processed_samples:

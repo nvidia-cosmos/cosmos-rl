@@ -407,7 +407,9 @@ class RolloutTaskScheduler:
 
         try:
             # we must initialize the rollout engine in the worker thread to avoid binding event_loop to the main thread's event_loop.
-            assert not self.rollout_engine.is_engine_initialized(), "Rollout engine should not be initialized before starting the scheduler worker loop"
+            assert not self.rollout_engine.is_engine_initialized(), (
+                "Rollout engine should not be initialized before starting the scheduler worker loop"
+            )
             init_engine_hook(self.rollout_engine)
 
             # mark the scheduler as running after the rollout engine is initialized.
@@ -455,9 +457,9 @@ class RolloutTaskScheduler:
         Raises:
             AssertionError: If start_async() was already called (async mode is active)
         """
-        assert (
-            self._worker_task is None
-        ), "Not support to start the scheduler worker loop both in thread and async mode"
+        assert self._worker_task is None, (
+            "Not support to start the scheduler worker loop both in thread and async mode"
+        )
 
         if self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
@@ -524,9 +526,9 @@ class RolloutTaskScheduler:
         Raises:
             AssertionError: If start() was already called (thread mode is active)
         """
-        assert (
-            self._worker_thread is None
-        ), "Not support to start the scheduler worker loop both in thread and async mode"
+        assert self._worker_thread is None, (
+            "Not support to start the scheduler worker loop both in thread and async mode"
+        )
 
         if self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")

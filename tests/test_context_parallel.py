@@ -164,9 +164,9 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    assert (
-        world_size == CP_SIZE * DP_SIZE * TP_SIZE
-    ), f"world_size: {world_size} != CP_SIZE * DP_SIZE * TP_SIZE: {CP_SIZE * DP_SIZE * TP_SIZE}"
+    assert world_size == CP_SIZE * DP_SIZE * TP_SIZE, (
+        f"world_size: {world_size} != CP_SIZE * DP_SIZE * TP_SIZE: {CP_SIZE * DP_SIZE * TP_SIZE}"
+    )
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
@@ -226,9 +226,9 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
         input_ids = inputs_id_list_each_rank[0]
     input_ids = input_ids[0].to(device)  # change cpu tensor to cuda tensor
 
-    assert (
-        input_ids.shape[1] % (CP_SIZE * TP_SIZE) == 0
-    ), "Input sequence length must be multiple of CP_SIZE * TP_SIZE"
+    assert input_ids.shape[1] % (CP_SIZE * TP_SIZE) == 0, (
+        "Input sequence length must be multiple of CP_SIZE * TP_SIZE"
+    )
 
     # 1. CP part.
     # Only DP and CP to simpify test. So each rank will load all the model weights.

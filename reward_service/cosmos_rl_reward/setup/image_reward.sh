@@ -46,5 +46,3 @@ echo "INFO: Installing ImageReward dependencies into $VENV_DIR ..."
 
 
 echo "INFO: ImageReward setup completed."
-
-

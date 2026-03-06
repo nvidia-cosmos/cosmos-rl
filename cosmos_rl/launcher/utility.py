@@ -122,9 +122,9 @@ def set_lepton_job(args: argparse.Namespace, job_spec):
         _get_valid_node_ids,
     )
 
-    assert isinstance(
-        job_spec, LeptonJobUserSpec
-    ), "job_spec must be a LeptonJobUserSpec object"
+    assert isinstance(job_spec, LeptonJobUserSpec), (
+        "job_spec must be a LeptonJobUserSpec object"
+    )
     # Handle node groups, queue priority and preemption flags
     if (
         args.lepton_node_group
@@ -290,9 +290,9 @@ def launch_lepton_job(
     from leptonai.api.v1.types.deployment import ReservationConfig
     from leptonai.api.v2.client import APIClient
 
-    assert isinstance(
-        job_spec, LeptonJobUserSpec
-    ), "job_spec must be a LeptonJobUserSpec object"
+    assert isinstance(job_spec, LeptonJobUserSpec), (
+        "job_spec must be a LeptonJobUserSpec object"
+    )
     # Handle workers and communication
     if num_workers > 0:
         job_spec.completions = num_workers
@@ -420,7 +420,9 @@ class SingleWorkerCommands:
         )
         assert (
             len(commands) == len(gpu_devices) == len(control_urls) == len(output_files)
-        ), "The number of commands, gpu devices, control URLs, and output files must be the same"
+        ), (
+            "The number of commands, gpu devices, control URLs, and output files must be the same"
+        )
         envs = envs or [None] * len(commands)
         for command, gpu_device, control_url, output_file, env in zip(
             commands, gpu_devices, control_urls, output_files, envs

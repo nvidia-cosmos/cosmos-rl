@@ -115,9 +115,9 @@ class TestProcessFlow(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
     def test_process_exit_sft(self):
         """Test sft all processes exit cleanly."""
@@ -183,9 +183,9 @@ class TestProcessFlow(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestValidationFlow(unittest.TestCase):
@@ -219,9 +219,9 @@ class TestValidationFlow(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestRewardFlow(unittest.TestCase):
@@ -255,9 +255,9 @@ class TestRewardFlow(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestSFTDDPLoadFlow(unittest.TestCase):
@@ -291,9 +291,9 @@ class TestSFTDDPLoadFlow(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestMultiReplicaSFT(unittest.TestCase):
@@ -372,9 +372,9 @@ class TestMultiReplicaSFT(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 if __name__ == "__main__":

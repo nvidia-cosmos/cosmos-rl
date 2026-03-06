@@ -52,9 +52,9 @@ class ReflectionPadding(Augmentor):
         orig_w, orig_h = obtain_image_size(data_dict, self.input_keys)
         target_size = obtain_augmentation_size(data_dict, self.args)
 
-        assert isinstance(
-            target_size, (tuple, list)
-        ), "Please specify target size as tuple"
+        assert isinstance(target_size, (tuple, list)), (
+            "Please specify target size as tuple"
+        )
         target_w, target_h = target_size
 
         target_w = int(target_w)

@@ -25,6 +25,7 @@ def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
+
 """
 Cosmos-Reason1, DanceGRPO VQ and MQ reward functions are supported currently.
 """
@@ -56,6 +57,7 @@ def make_headers(replica_id: str | None = None, extra: dict | None = None) -> di
     if extra:
         headers.update(extra)
     return headers
+
 
 # The folllowing code is an example of how to generate encoded latents from video using the Wan2pt1TokenizerHelper.
 # The generated latents can be sent to the "/api/reward/enqueue" endpoint for calculating rewards.

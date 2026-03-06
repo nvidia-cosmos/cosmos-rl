@@ -79,10 +79,10 @@ class TestB1KEnvWrapper(unittest.TestCase):
         """Set up test fixtures once for all test methods."""
         cls.config = MockB1KConfig()
         print(
-            f"\n{'='*80}\n"
+            f"\n{'=' * 80}\n"
             f"Initializing B1K environment with {cls.config.num_envs} environments...\n"
             f"This will be REUSED across all tests for efficiency.\n"
-            f"{'='*80}"
+            f"{'=' * 80}"
         )
         cls.env = B1KEnvWrapper(cfg=cls.config)
 
@@ -90,7 +90,7 @@ class TestB1KEnvWrapper(unittest.TestCase):
         cls.test_task_id = 0
         cls.test_task_name = cls.env.task_names[cls.test_task_id]
         print(f"Test task ID: {cls.test_task_id}, Task: {cls.test_task_name}")
-        print(f"✓ B1KEnvWrapper initialized once for all tests\n{'='*80}\n")
+        print(f"✓ B1KEnvWrapper initialized once for all tests\n{'=' * 80}\n")
 
     @classmethod
     def tearDownClass(cls):

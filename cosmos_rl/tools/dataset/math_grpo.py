@@ -47,13 +47,13 @@ class MathDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), (
+            "`self.tokenizer` should be set by the launcher"
+        )
         question = self.dataset[idx]["problem"]
-        assert isinstance(
-            question, str
-        ), f"Prompt should be a string, but got {type(question)}, {question}"
+        assert isinstance(question, str), (
+            f"Prompt should be a string, but got {type(question)}, {question}"
+        )
         # Convert to templated prompt
         conversation = [
             {

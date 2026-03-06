@@ -57,9 +57,9 @@ class QwenVL25WeightMapper(WeightMapper):
             # split qkv weight for visual
             # weight has shape [3 * head_dim, hidden_dim]
             # kv head ratio is 1, so we can split it into q, k, v
-            assert (
-                weight.shape[0] % 3 == 0
-            ), "Weight shape is not compatible for splitting."
+            assert weight.shape[0] % 3 == 0, (
+                "Weight shape is not compatible for splitting."
+            )
             unit_dim = weight.shape[0] // 3  # for both weight and bias
             q_weight = weight[:unit_dim]
             k_weight = weight[unit_dim : unit_dim * 2]
