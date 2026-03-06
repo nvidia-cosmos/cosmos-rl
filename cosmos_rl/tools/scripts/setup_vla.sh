@@ -93,12 +93,8 @@ install_egl_packages() {
 
     # 1e. Install libnvidia-gl (with optional confirmation)
     info "Will install: ${install_version}"
-<<<<<<< HEAD
     if [ "${AUTO_CONFIRM:-0}" != "1" ] && [ -t 0 ]; then
         # Only prompt when running interactively (skip in Docker / CI)
-=======
-    if [ "${AUTO_CONFIRM:-0}" != "1" ]; then
->>>>>>> dc3f998 (fix env setup & verify)
         read -rp "Continue? [y/N] " ans
         if [[ ! "$ans" =~ ^[Yy]$ ]]; then
             warn "Skipped libnvidia-gl installation"
