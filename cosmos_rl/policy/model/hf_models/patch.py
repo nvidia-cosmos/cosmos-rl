@@ -45,6 +45,10 @@ def pre_hf_models_patch(hf_config: AutoConfig):
             # Qwen3.5 models can encounter illegal memory access errors when using Flash Attention with transformers versions earlier than 5.4.0.
             # This was resolved in transformers PR #44399, so for older versions we force the use of SDPA.
             hf_config._attn_implementation = "sdpa"
+            logger.warning(
+                "Qwen3.5/Qwen3.5-MoE models can encounter illegal memory access errors when using Flash Attention with transformers versions earlier than 5.4.0. "
+                "So for older versions we force the use of SDPA."
+            )
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):
