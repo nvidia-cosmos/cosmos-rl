@@ -105,6 +105,10 @@ def modify_messages(messages, max_pixels = None, max_num_patches = None, max_fra
                         content['max_pixels'] = max_num_patches * scale_factor
                     else:
                         content['max_pixels'] = max_frame_num_patches * scale_factor
+            elif content['type'] == 'video_frames':
+                content['fps'] = 1
+                content['max_frames'] = 30
+                content['max_pixels'] = max_frame_num_patches * scale_factor
             elif content['type'] == 'video':
                 content['fps'] = 1
                 content['max_frames'] = 30
