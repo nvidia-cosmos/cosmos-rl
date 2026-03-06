@@ -6,10 +6,10 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
-      files: ^(cosmos_rl|scripts|tests|tools|reward_service)/
+      files: ^(cosmos_rl|scripts|tests|tools|reward_service|docs)/
     # Run the formatter.
     - id: ruff-format
-      files: ^(cosmos_rl|scripts|tests|tools|reward_service)/
+      files: ^(cosmos_rl|scripts|tests|tools|reward_service|docs)/
 - repo: https://github.com/pocc/pre-commit-hooks
   rev: v1.3.5
   hooks:
