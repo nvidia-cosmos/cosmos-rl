@@ -4949,7 +4949,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="43"><ul class="simple">
+<tr class="row-even"><td rowspan="53"><ul class="simple">
 <li><p>VLAConfig</p></li>
 </ul>
 </td>
@@ -4966,7 +4966,7 @@
 </td>
 <td colspan="5"><p><em>Vla Type</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>VLA type, could be ‘openvla-oft’ or ‘openvla’</p></td>
+<tr class="row-even"><td colspan="5"><p>VLA type: openvla-oft, openvla, or cosmos-policy</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>string</em></p></td>
@@ -5099,6 +5099,42 @@
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>libero_10_no_noops</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>max_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Max Steps</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Override max steps per episode. None uses the simulator default.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>use_subprocess</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Use Subprocess</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Run simulator in a subprocess. None = default per simulator (True for LIBERO/RoboTwin). Set False to run in-process and avoid subprocess hangs (e.g. multi-rank eval).</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
 <tr class="row-odd"><td rowspan="57"><ul class="simple">
 <li><p>ValidationConfig</p></li>
