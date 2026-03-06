@@ -7,21 +7,21 @@ Single entry point for VLA LIBERO evaluation via OpenVLARollout.evaluate().
 Supports cosmos-policy and openvla-oft (and other vla_type from config).
 
 CosmosPolicy (CLI):
-    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
+    MUJOCO_GL=egl python tests/test_vla_libero.py \\
         --vla-type cosmos-policy --ckpt-path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \\
         --task-suite libero_10 --trials 3
 
 OpenVLA-OFT (CLI):
-    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
+    MUJOCO_GL=egl python tests/test_vla_libero.py \\
         --vla-type openvla-oft --ckpt-path Haozhan72/Openvla-oft-SFT-libero10-trajall \\
         --task-suite libero_10 --trials 3
 
 TOML config (vla_type and model from config):
-    MUJOCO_GL=egl python tests/eval_cosmos_policy_libero.py \\
+    MUJOCO_GL=egl python tests/test_vla_libero.py \\
         --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml
 
 Multi-GPU (tasks×trials split across ranks):
-    MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/eval_cosmos_policy_libero.py \\
+    MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/test_vla_libero.py \\
         --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml --trials 50
 """
 
