@@ -138,7 +138,6 @@ EJSON
 
 install_egl_packages
 
-<<<<<<< HEAD
 # ── 2. Detect pip/python commands ─────────────────────────────────────────────
 PIP_CMD="pip"
 PYTHON_CMD="python"
@@ -148,23 +147,14 @@ if command -v uv &> /dev/null; then
 fi
 
 # ── 3. Libero first-run setup ─────────────────────────────────────────────────
-=======
-# ── 2. Libero first-run setup ─────────────────────────────────────────────────
->>>>>>> dc3f998 (fix env setup & verify)
 banner "Configuring Libero"
 
 mkdir -p ~/.libero
 touch ~/.libero/config.yaml
-<<<<<<< HEAD
 
 ROBOSUITE_PATH=$($PIP_CMD show robosuite | grep 'Location' | awk '{print $2}')/robosuite
 $PYTHON_CMD "$ROBOSUITE_PATH/scripts/setup_macros.py"
 $PYTHON_CMD -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
-=======
-ROBOSUITE_PATH=$(uv pip show robosuite | grep 'Location' | awk '{print $2}')/robosuite
-uv run python $ROBOSUITE_PATH/scripts/setup_macros.py
-uv run python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
->>>>>>> dc3f998 (fix env setup & verify)
 ok "Libero default path configured"
 
 # ── Done ───────────────────────────────────────────────────────────────────────
