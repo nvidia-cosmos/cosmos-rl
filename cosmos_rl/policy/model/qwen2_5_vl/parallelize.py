@@ -186,13 +186,11 @@ def parallelize(
             == 0
         ), "train_batch must be divisible by pp_micro_batch_size"
         assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            config.train.train_batch_per_replica
+            // config.policy.parallelism.pp_micro_batch_size
+        ) % pp_size == 0, (
+            "train_batch / pp_micro_batch_size must be divisible by pp_size"
+        )
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
@@ -205,13 +203,11 @@ def parallelize(
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
-                (
-                    config.validation.batch_size
-                    // config.policy.parallelism.pp_micro_batch_size
-                )
-                % pp_size
-                == 0
-            ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+                config.validation.batch_size
+                // config.policy.parallelism.pp_micro_batch_size
+            ) % pp_size == 0, (
+                "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
             n_val_microbatches = (
                 config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size

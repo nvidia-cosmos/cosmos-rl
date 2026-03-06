@@ -92,18 +92,18 @@ The following figure illustrates differenting dropping strategies in MCore:
 <!-- ![Token Droppling Strategies](../../../../docs/source/images/moe/token_drop.png) -->
 
 1. The default dropless strategy will not drop or pad any token.
-2. By setting `--moe-expert-capacity-factor`, the tokens exceed the capacity of expert will be dropped based on their selected probabilities. 
-   The dropping is performed before the token exchange operation between EP ranks when EP > 1. 
+2. By setting `--moe-expert-capacity-factor`, the tokens exceed the capacity of expert will be dropped based on their selected probabilities.
+   The dropping is performed before the token exchange operation between EP ranks when EP > 1.
    The formula of capacity is `capacity = num_tokens_per_rank * topk * capacity_factor / num_experts`.
 3. By setting `--moe-pad-expert-input-to-capacity`, the experts with tokens less than capacity will be padded to the capacity.
 
 ### Fine-tuning Mixtral Models
-Megatron-Core has full support for Mixtral MoE models, and we provide the checkpoint converter for Mixtral models from huggingface format to MCore format. 
+Megatron-Core has full support for Mixtral MoE models, and we provide the checkpoint converter for Mixtral models from huggingface format to MCore format.
 <!-- See more details in the [mixtral example](../../../../examples/mixtral/README.md). -->
 
 ### Distributed Checkpointing
-MCore v0.7 introduced fully parallel and asynchronous saving capabilities to distributed checkpointing, 
-which addresses the issues of low efficiency in the traditional checkpoint saving methods. 
+MCore v0.7 introduced fully parallel and asynchronous saving capabilities to distributed checkpointing,
+which addresses the issues of low efficiency in the traditional checkpoint saving methods.
 It also solved the problem of incompatibility between checkpoints of different parallel mappings in the traditional format.
 With the new distributed checkpointing solution, MCore can achieve flexible parallelism configurations by saving and loading the unified format checkpoints.
 Compared to native PyTorch solution, MCore achieves up to 50x reduction in checkpointing overhead.
@@ -120,24 +120,24 @@ Usage
 
 Checkpoint compatibility across SequentialMLP, GroupedMLP, and TEGroupedMLP:
 ```text
-    ┌───────────────┐          ┌───────────────┐          ┌───────────────┐     
-    │   GroupedMLP  │          │ SequentialMLP │          │ TEGroupedMLP  │     
-    │               │          │               │          │               │     
-    │               │          │               │          │               │     
-    │ ┌───────────┐ │          │ ┌───────────┐ │          │ ┌───────────┐ │     
-    │ │legacy ckpt│ │          │ │legacy ckpt│ │          │ │legacy ckpt│ │     
-    │ └─────┬─────┘ │          │ └─────┬─────┘ │          │ └─────┬─────┘ │     
-    │       ▼       │          │       ▼       │          │       ▼       │     
-    │  ┌─────────┐  │          │  ┌─────────┐  │          │  ┌─────────┐  │     
-    │  │dist ckpt│  │          │  │dist ckpt│  │          │  │dist ckpt│  │     
-┌──►│  │ weight  │  │◄────────►│  │ weight  │  │◄────────►│  │ weight  │  │◄──┐ 
-│   │  └─────────┘  │          │  └─────────┘  │          │  └─────────┘  │   │ 
-└───┼───────────────┼──────────┼───────────────┼──────────┼───────────────┼───┘ 
-    │┌─────────────┐│          │┌─────────────┐│          │┌─────────────┐│     
-    ││  dist ckpt  ││          ││  dist ckpt  ││          ││  dist ckpt  ││     
-    ││optim states ││          ││optim states ││◄────────►││optim states ││     
-    │└─────────────┘│          │└─────────────┘│          │└─────────────┘│     
-    └───────────────┘          └───────────────┘          └───────────────┘     
+    ┌───────────────┐          ┌───────────────┐          ┌───────────────┐  
+    │   GroupedMLP  │          │ SequentialMLP │          │ TEGroupedMLP  │  
+    │               │          │               │          │               │  
+    │               │          │               │          │               │  
+    │ ┌───────────┐ │          │ ┌───────────┐ │          │ ┌───────────┐ │  
+    │ │legacy ckpt│ │          │ │legacy ckpt│ │          │ │legacy ckpt│ │  
+    │ └─────┬─────┘ │          │ └─────┬─────┘ │          │ └─────┬─────┘ │  
+    │       ▼       │          │       ▼       │          │       ▼       │  
+    │  ┌─────────┐  │          │  ┌─────────┐  │          │  ┌─────────┐  │  
+    │  │dist ckpt│  │          │  │dist ckpt│  │          │  │dist ckpt│  │  
+┌──►│  │ weight  │  │◄────────►│  │ weight  │  │◄────────►│  │ weight  │  │◄──┐
+│   │  └─────────┘  │          │  └─────────┘  │          │  └─────────┘  │   │
+└───┼───────────────┼──────────┼───────────────┼──────────┼───────────────┼───┘
+    │┌─────────────┐│          │┌─────────────┐│          │┌─────────────┐│  
+    ││  dist ckpt  ││          ││  dist ckpt  ││          ││  dist ckpt  ││  
+    ││optim states ││          ││optim states ││◄────────►││optim states ││  
+    │└─────────────┘│          │└─────────────┘│          │└─────────────┘│  
+    └───────────────┘          └───────────────┘          └───────────────┘  
 ```
 
 Best practices for distributed checkpointing:
@@ -349,7 +349,7 @@ LOGGING_ARGS=(
 if [ -n "${WANDB_API_KEY}" ]; then
     LOGGING_ARGS+=(
         --wandb-project ${WANDB_PROJECT:-"Mixtral-Finetuning"}
-        --wandb-exp-name ${WANDB_NAME:-"Mixtral_8x7B"} 
+        --wandb-exp-name ${WANDB_NAME:-"Mixtral_8x7B"}
     )
 fi
 
@@ -379,8 +379,8 @@ To find a good parallel mapping that help you achieve a high throughput of a new
 
 For a specific model, the best parallel mapping varies based on the model architecture, trained sequence length and the hardware platform.
 Here we provide some general rules to get better performance:
-1. Keep the model parallism size as small as possible. 
-    - For the large language models, model parallism is often required to prevent OOM, but it will bring communication overhead and hurt performance. 
+1. Keep the model parallism size as small as possible.
+    - For the large language models, model parallism is often required to prevent OOM, but it will bring communication overhead and hurt performance.
     - With distributed optimizer, master weights and optimizer states will be sharded across all DP ranks with slight communication overhead.
     So try to reduce the model parallism size and increase data parallism size when there are lots of free GPU memory during training.
 2. Ensure the EPxTP communication winthin the NVLink domain.
@@ -395,7 +395,7 @@ Here we provide some general rules to get better performance:
     - Simplify the computation graph of MoE layers, more convenient for performing potential comm-computation overlapping.
     - In practice, EP8TP1 is better than EP4TP2 for 8x7B.
 5. Enable Context Parallelism for long context training.
-    - The efficiency of CP largely depends on whether its communication can be overlapped with computation. 
+    - The efficiency of CP largely depends on whether its communication can be overlapped with computation.
     - Empirically, use CP when sequence length >= 8K.
 
 ### MoE Parallel Folding
@@ -435,7 +435,7 @@ By setting `--expert-tensor-parallel-size`, we can set MoE-specific TP size.
 - Recommend to use the TE version of Grouped GEMM (by upgrading to MCore v0.8 and TE v1.9), which support Gradient Accumulation Fusion and FP8 Training.
 
 **OOM Caused by Token Distribution Imbalance when Training From Scratch**  
-MoE suffers from a severe load imbalance issue when the router is under-trained, leading to the model easily running out of memory (OOM), which typically occurs in the first 100~300 steps when training from scratch. 
+MoE suffers from a severe load imbalance issue when the router is under-trained, leading to the model easily running out of memory (OOM), which typically occurs in the first 100~300 steps when training from scratch.
 Therefore, there are two recommended ways during the first 200 steps to avoid the OOM problem, which can be removed after the token distribution is more stable:
 1. Increase the `expert-tensor-parallel-size` and decrease `expert-model-parallel-size` to replace EP with TP in MoELayer, this can prevent the load imbalancing between EP ranks. Since current ETP implementation has some memeory overhead, you can further enable activation recomputation only for MoE Layer by adding `--moe-layer-recompute`.
 2. Setting capacity factor to a relatively small number like 1.0 by adding `--moe-token-capacity-factor 1.0`.
@@ -459,7 +459,7 @@ Here are the reference parallel mappings of MCore v0.8 for Mixtral 8x7B and 8x22
 
 Detailed Benchmark Information:  
 Server:
-- 8xH100 80GB HBM3 
+- 8xH100 80GB HBM3
 - NVLink 4th Generation
 - InfiniBand 8x400 Gbit/s
 

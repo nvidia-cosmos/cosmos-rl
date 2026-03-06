@@ -61,9 +61,9 @@ def decode_base64_to_image(
             new_image_inputs.append(image_input)
             continue
         else:
-            assert isinstance(
-                image_input, str
-            ), f"image_input should be a string, but got {type(image_input)}"
+            assert isinstance(image_input, str), (
+                f"image_input should be a string, but got {type(image_input)}"
+            )
             if os.path.isfile(image_input):
                 continue
             else:
@@ -303,17 +303,17 @@ class HFVLMDataPacker(DataPacker):
                             assistant_contents.append(new_content)
                             new_content = pad_token * pad_run_length
                         elif isinstance(new_content, dict):
-                            assert (
-                                "text" in new_content
-                            ), f"text not in content: {content}"
+                            assert "text" in new_content, (
+                                f"text not in content: {content}"
+                            )
                             assistant_contents.append(new_content["text"])
                             new_content["text"] = pad_token * pad_run_length
                         elif isinstance(content, list):
                             for i, item in enumerate(content):
                                 if isinstance(item, dict):
-                                    assert (
-                                        "text" in item
-                                    ), f"text not in content: {item}"
+                                    assert "text" in item, (
+                                        f"text not in content: {item}"
+                                    )
                                     assistant_contents.append(item["text"])
                                     new_content[i]["text"] = pad_token * pad_run_length
                                 else:
@@ -350,9 +350,9 @@ class HFVLMDataPacker(DataPacker):
                             assistant_contents.append(content["text"])
                         elif isinstance(content, list):
                             for _, item in enumerate(content):
-                                assert (
-                                    "text" in item
-                                ), f"text not in content of assistant: {item}"
+                                assert "text" in item, (
+                                    f"text not in content of assistant: {item}"
+                                )
                                 assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
@@ -624,9 +624,9 @@ class HFVLMDataPacker(DataPacker):
             dtype=torch.bool,
         )
 
-        assert len(batch["input_ids"]) == len(
-            batch["logprob_masks"]
-        ), "The length of input_ids, logprob_masks should be the same"
+        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
+            "The length of input_ids, logprob_masks should be the same"
+        )
 
         return batch
 

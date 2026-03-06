@@ -140,19 +140,19 @@ class TestHFModel(unittest.TestCase):
                 torch.cuda.empty_cache()
 
                 for name, cosmos_hf_buffer in cosmos_named_buffers.items():
-                    assert (
-                        name in hf_named_buffers
-                    ), f"Buffer {name} not found in hf model"
+                    assert name in hf_named_buffers, (
+                        f"Buffer {name} not found in hf model"
+                    )
                     hf_buffer = hf_named_buffers[name]
-                    assert (
-                        cosmos_hf_buffer.shape == hf_buffer.shape
-                    ), f"Shape mismatch: {cosmos_hf_buffer.shape} != {hf_buffer.shape} for {name}"
-                    assert (
-                        cosmos_hf_buffer.dtype == hf_buffer.dtype
-                    ), f"Dtype mismatch: {cosmos_hf_buffer.dtype} != {hf_buffer.dtype} for {name}"
-                    assert torch.equal(
-                        cosmos_hf_buffer, hf_buffer
-                    ), f"Buffer {name} is not equal to the one in hf model"
+                    assert cosmos_hf_buffer.shape == hf_buffer.shape, (
+                        f"Shape mismatch: {cosmos_hf_buffer.shape} != {hf_buffer.shape} for {name}"
+                    )
+                    assert cosmos_hf_buffer.dtype == hf_buffer.dtype, (
+                        f"Dtype mismatch: {cosmos_hf_buffer.dtype} != {hf_buffer.dtype} for {name}"
+                    )
+                    assert torch.equal(cosmos_hf_buffer, hf_buffer), (
+                        f"Buffer {name} is not equal to the one in hf model"
+                    )
 
                 print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
                 del hf_named_buffers
@@ -294,12 +294,12 @@ class TestHFModel(unittest.TestCase):
                 cosmos_hf_logits = test_cosmos_hf_model(
                     cosmos_hf_model, copy.deepcopy(inputs)
                 )
-                assert torch.equal(
-                    hf_generate_logits, hf_forward_logits
-                ), f"{hf_generate_logits} != {hf_forward_logits}"
-                assert torch.equal(
-                    hf_generate_logits, cosmos_hf_logits
-                ), f"{hf_generate_logits} != {cosmos_hf_logits}"
+                assert torch.equal(hf_generate_logits, hf_forward_logits), (
+                    f"{hf_generate_logits} != {hf_forward_logits}"
+                )
+                assert torch.equal(hf_generate_logits, cosmos_hf_logits), (
+                    f"{hf_generate_logits} != {cosmos_hf_logits}"
+                )
 
                 print(f"{model_id} forward test passed.")
                 del cosmos_hf_model

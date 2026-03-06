@@ -151,9 +151,9 @@ class RandomJointDataLoader(webdataset.WebLoader):
             )
             self.data_ratios.append(dataloader_data["ratio"])
 
-        assert np.isclose(
-            sum(self.data_ratios), 1.0
-        ), "Sum of sample probabilities should be equal to 1."
+        assert np.isclose(sum(self.data_ratios), 1.0), (
+            "Sum of sample probabilities should be equal to 1."
+        )
 
         self.data_len = 0
         self.dataloaders = [iter(dataloader) for dataloader in self.dataloader_list]

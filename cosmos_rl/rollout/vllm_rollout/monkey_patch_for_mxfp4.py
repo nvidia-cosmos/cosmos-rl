@@ -62,9 +62,9 @@ def cache_weight_of_quantized_module(
         if quant_method is None:
             continue
         elif isinstance(quant_method, Mxfp4MoEMethod):
-            assert isinstance(
-                module, FusedMoE
-            ), "Mxfp4MoEMethod should be used with FusedMoE"
+            assert isinstance(module, FusedMoE), (
+                "Mxfp4MoEMethod should be used with FusedMoE"
+            )
             # w13 and w2
             w13_weight_name = "w13_weight"
             w13_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(

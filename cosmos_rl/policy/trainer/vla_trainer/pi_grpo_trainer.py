@@ -185,7 +185,7 @@ class PI05GRPOTrainer(GRPOTrainer):
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
                     logger.info(
-                        f"[PI05 Train] Task {task_id}_{trial_id} Chunk {chunk_idx+1}/{num_training_chunks}: "
+                        f"[PI05 Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
                         f"loss={loss.item():.6f}, ratio [{ratio.min().item():.3f},{ratio.max().item():.3f}], "
                         f"clipfrac={pg_clipfrac.item():.4f}, ppo_kl={ppo_kl.item():.6f}, "
                         f"mask_sum={loss_mask_count}"
@@ -215,7 +215,7 @@ class PI05GRPOTrainer(GRPOTrainer):
             logger.exception(e)
             raise
         logger.info(
-            f"[PI05 Train] Step {current_step} training time: {iter_time_s:.2f}s (wall={time.time()-wall_t0:.2f}s)"
+            f"[PI05 Train] Step {current_step} training time: {iter_time_s:.2f}s (wall={time.time() - wall_t0:.2f}s)"
         )
         logger.info(
             f"[PI05 Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}"

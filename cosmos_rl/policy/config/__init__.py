@@ -616,9 +616,9 @@ class GrpoConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
-        assert (
-            len(self.reward_function) > 0
-        ), "reward_function must be a dict of reward functions"
+        assert len(self.reward_function) > 0, (
+            "reward_function must be a dict of reward functions"
+        )
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
         if self.dataloader_batch_size is not None and self.dataloader_batch_size <= 0:
@@ -637,9 +637,9 @@ class GrpoConfig(BaseModel):
             logger.warning(
                 "use_rollout_logprobs_for_loss is enabled, so collect_rollout_logprobs is set to True."
             )
-        assert not (
-            self.use_rollout_logprobs_for_loss and self.use_decoupled_loss
-        ), "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
+        assert not (self.use_rollout_logprobs_for_loss and self.use_decoupled_loss), (
+            "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
+        )
         if self.variant == "dapo":
             if self.outdated_rollout_fetch_batch_size <= 0:
                 self.outdated_rollout_fetch_batch_size = 128
@@ -904,9 +904,9 @@ class TrainingConfig(BaseModel):
 
         if isinstance(self.train_policy, GrpoConfig):
             if self.train_policy.on_policy:
-                assert (
-                    self.sync_weight_interval == 1
-                ), "sync_weight_interval must be 1 when on_policy is enabled"
+                assert self.sync_weight_interval == 1, (
+                    "sync_weight_interval must be 1 when on_policy is enabled"
+                )
                 self.train_policy.allowed_outdated_steps = 0
                 logger.warning(
                     "on_policy is enabled, so allowed_outdated_steps is set to 0."
@@ -1017,9 +1017,9 @@ class LoraConfig(BaseModel):
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.target_modules, str):
-            assert (
-                self.target_modules == "all-linear"
-            ), "target_modules must be a list of strings or 'all-linear'"
+            assert self.target_modules == "all-linear", (
+                "target_modules must be a list of strings or 'all-linear'"
+            )
         return self
 
 
@@ -1188,9 +1188,9 @@ class PolicyConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_params_value(self):
-        assert (
-            self.model_name_or_path is not None and self.model_name_or_path != ""
-        ), "model_name_or_path is required"
+        assert self.model_name_or_path is not None and self.model_name_or_path != "", (
+            "model_name_or_path is required"
+        )
         assert self.parallelism.tp_size > 0, "tp_size must be greater than 0"
         assert self.parallelism.ep_size > 0, "ep_size must be greater than 0"
         assert self.parallelism.cp_size > 0, "cp_size must be greater than 0"
@@ -1198,9 +1198,9 @@ class PolicyConfig(BaseModel):
         assert (
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
-        assert (
-            self.trainable_pattern is None or self.freeze_pattern is None
-        ), "trainable_pattern and freeze_pattern cannot be set at the same time"
+        assert self.trainable_pattern is None or self.freeze_pattern is None, (
+            "trainable_pattern and freeze_pattern cannot be set at the same time"
+        )
         return self
 
 
@@ -1245,7 +1245,9 @@ class MultiTurnRolloutConfig(BaseModel):
     def check_params_value(self):
         if self.enable_tools:
             if self.add_generation_prompt:
-                assert not self.continue_final_message, "continue_final_message must be False when add_generation_prompt is True"
+                assert not self.continue_final_message, (
+                    "continue_final_message must be False when add_generation_prompt is True"
+                )
         return self
 
 
@@ -1309,9 +1311,9 @@ class ValidationConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
-        assert isinstance(
-            self.reward_function, dict
-        ), "reward_function must be a dict of reward functions"
+        assert isinstance(self.reward_function, dict), (
+            "reward_function must be a dict of reward functions"
+        )
         return self
 
 
@@ -1606,9 +1608,9 @@ class DistillationConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_params_value(self):
-        assert (
-            self.model_name_or_path is not None and self.model_name_or_path != ""
-        ), "model_name_or_path is required"
+        assert self.model_name_or_path is not None and self.model_name_or_path != "", (
+            "model_name_or_path is required"
+        )
         assert self.parallelism.tp_size > 0, "tp_size must be greater than 0"
         assert self.parallelism.ep_size > 0, "ep_size must be greater than 0"
         assert self.parallelism.cp_size > 0, "cp_size must be greater than 0"
@@ -1700,9 +1702,9 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def check_params_value(self):
         if self.policy.parallelism.pp_size > 1:
-            assert (
-                self.policy.parallelism.pp_micro_batch_size > 0
-            ), "pp_micro_batch_size must be greater than 0"
+            assert self.policy.parallelism.pp_micro_batch_size > 0, (
+                "pp_micro_batch_size must be greater than 0"
+            )
             assert (
                 self.train.train_batch_per_replica
                 % self.policy.parallelism.pp_micro_batch_size
@@ -1714,13 +1716,11 @@ class Config(BaseModel):
             #   - 1F1B
             # But not correct for those `InterleavedXXX` style schedule
             assert (
-                (
-                    self.train.train_batch_per_replica
-                    // self.policy.parallelism.pp_micro_batch_size
-                )
-                % self.policy.parallelism.pp_size
-                == 0
-            ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+                self.train.train_batch_per_replica
+                // self.policy.parallelism.pp_micro_batch_size
+            ) % self.policy.parallelism.pp_size == 0, (
+                "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
 
         # Validate constraints for GRPO with LoRA
         if (

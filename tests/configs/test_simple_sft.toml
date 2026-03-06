@@ -23,7 +23,7 @@ sync_weight_interval = 1
 
 [policy]
 model_name_or_path = "Qwen/Qwen2.5-3B-Instruct"
-model_max_length = 1024 
+model_max_length = 1024
 model_gradient_checkpointing = true
 
 [train.train_policy]
@@ -53,4 +53,3 @@ cp_size = 1
 dp_shard_size = -1
 pp_size = 1
 dp_replicate_size = 1
-

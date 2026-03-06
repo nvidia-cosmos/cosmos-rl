@@ -268,9 +268,9 @@ class Qwen3MoE(nn.Module):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
@@ -353,9 +353,9 @@ class Qwen3VLMoeModel(BaseModel):
             vision_embeds, deepstack_image_embeds = self.visual(
                 pixel_values, grid_thw=grid_thw
             )
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), f"vision_embeds.shape[0] must be equal to n_tokens, but got {vision_embeds.shape[0]} != {n_tokens}"
+            assert vision_embeds.shape[0] == n_tokens, (
+                f"vision_embeds.shape[0] must be equal to n_tokens, but got {vision_embeds.shape[0]} != {n_tokens}"
+            )
             mask = input_ids == pad_token_id
             mask_unsqueezed = mask.unsqueeze(-1)
             mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
@@ -568,9 +568,9 @@ class Qwen3VLMoeModel(BaseModel):
             # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}")
             # get vision embeddings as tokens for next phase
             if n_image_tokens > 0:
-                assert (
-                    image_grid_thw is not None
-                ), "image_grid_thw must be provided if there are image tokens"
+                assert image_grid_thw is not None, (
+                    "image_grid_thw must be provided if there are image tokens"
+                )
                 inputs_embeds, deepstack_image_embeds, image_mask = (
                     self._process_vision_embeddings(
                         inputs_embeds,
@@ -582,9 +582,9 @@ class Qwen3VLMoeModel(BaseModel):
                 )
 
             if n_video_tokens > 0:
-                assert (
-                    video_grid_thw is not None
-                ), "video_grid_thw must be provided if there are video tokens"
+                assert video_grid_thw is not None, (
+                    "video_grid_thw must be provided if there are video tokens"
+                )
                 inputs_embeds, deepstack_video_embeds, video_mask = (
                     self._process_vision_embeddings(
                         inputs_embeds,
@@ -616,9 +616,9 @@ class Qwen3VLMoeModel(BaseModel):
                 visual_pos_masks = video_mask
                 deepstack_visual_embeds = deepstack_video_embeds
         else:
-            assert (
-                input_ids.is_floating_point()
-            ), "input of pipeline stage > 0 must be of floating point type"
+            assert input_ids.is_floating_point(), (
+                "input of pipeline stage > 0 must be of floating point type"
+            )
             inputs_embeds = input_ids
         # For GRPO, we can pass in the logprob_masks to the model
         # to avoid computing the logits which are not needed for the model
@@ -783,9 +783,9 @@ class Qwen3VLMoeModel(BaseModel):
                 dest_name,
             ):
                 tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
-                assert (
-                    n_experts % tp_ep_size == 0
-                ), "n_experts must be divisible by tp_ep_size"
+                assert n_experts % tp_ep_size == 0, (
+                    "n_experts must be divisible by tp_ep_size"
+                )
 
                 if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
                     dp_shard_rank = parallel_dims.mesh[
@@ -854,9 +854,9 @@ class Qwen3VLMoeModel(BaseModel):
                             local_view = local_view[expert_id]
                             expert_weight = expert_weight.transpose(0, 1)
 
-                            assert (
-                                local_view.shape == expert_weight.shape
-                            ), f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                            assert local_view.shape == expert_weight.shape, (
+                                f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                            )
                             with torch.no_grad():
                                 local_view.data.copy_(expert_weight)
                     else:
@@ -876,9 +876,9 @@ class Qwen3VLMoeModel(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
 
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -907,9 +907,9 @@ class Qwen3VLMoeModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight)
 

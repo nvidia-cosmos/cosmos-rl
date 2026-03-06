@@ -268,9 +268,9 @@ class QwenVLBaseModel(QwenModel):
         """
         The training step of the model, including the loss computation.
         """
-        assert (
-            "pixel_values" not in data_batch
-        ), "pixel_values should not be in data_batch, use images instead"
+        assert "pixel_values" not in data_batch, (
+            "pixel_values should not be in data_batch, use images instead"
+        )
         pixel_values = data_batch.get("images", None)
         image_grid_thw = data_batch.get("image_grid_thw", None)
         pixel_values_videos = data_batch.get("videos", None)
@@ -280,14 +280,14 @@ class QwenVLBaseModel(QwenModel):
         )  # TODO (mins): check if the attention mask is correct
 
         if image_grid_thw is not None:
-            assert (
-                len(image_grid_thw) == 1
-            ), "Only batch=1 is supported for now, due to `get_rope_index`"
+            assert len(image_grid_thw) == 1, (
+                "Only batch=1 is supported for now, due to `get_rope_index`"
+            )
             image_grid_thw = image_grid_thw[0]  # 1, N_img, 3 -> N_img, 3
         if video_grid_thw is not None:
-            assert (
-                len(video_grid_thw) == 1
-            ), "Only batch=1 is supported for now, due to `get_rope_index`"
+            assert len(video_grid_thw) == 1, (
+                "Only batch=1 is supported for now, due to `get_rope_index`"
+            )
             video_grid_thw = video_grid_thw[0]  # 1, N_video, 3 -> N_video, 3
         logits, outputs = self._forward(
             input_ids=tokens,

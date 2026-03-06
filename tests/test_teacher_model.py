@@ -151,10 +151,11 @@ class TestTeacherModel(unittest.TestCase):
         uuids = redis_controller.publish_teacher_request(data, "test_client")
         for uuid in uuids:
             teacher_result = msgpack.unpackb(redis_controller.get_teacher_result(uuid))
-            assert (
-                len(teacher_result["teacher_logprobs"]) + 1
-                == len(tokenizer_prompt) + len(tokenizer_reference_answer)
-            ), f"Teacher logprobs + 1 must be the same length as the prompt and reference answer, got {len(teacher_result['teacher_logprobs'])} != {len(tokenizer_prompt) + len(tokenizer_reference_answer)}"
+            assert len(teacher_result["teacher_logprobs"]) + 1 == len(
+                tokenizer_prompt
+            ) + len(tokenizer_reference_answer), (
+                f"Teacher logprobs + 1 must be the same length as the prompt and reference answer, got {len(teacher_result['teacher_logprobs'])} != {len(tokenizer_prompt) + len(tokenizer_reference_answer)}"
+            )
 
         data["is_end"] = True
         redis_controller.publish_teacher_request(data, "test_client")
@@ -162,9 +163,9 @@ class TestTeacherModel(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 class TestDistillationFlow(unittest.TestCase):
@@ -205,9 +206,7 @@ class TestDistillationFlow(unittest.TestCase):
 [validation]
 temperature = 0.0
 max_response_length = 2048
-dataset.name = "{os.path.join(
-            cur_dir, "data_fixtures", "test_dataset"
-        )}"
+dataset.name = "{os.path.join(cur_dir, "data_fixtures", "test_dataset")}"
 dataset.subset = ""
 dataset.split = "train"
 enable = true
@@ -261,9 +260,9 @@ dp_replicate_size = 1
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
 
 if __name__ == "__main__":

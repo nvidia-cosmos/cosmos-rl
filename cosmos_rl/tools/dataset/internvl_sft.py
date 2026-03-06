@@ -348,9 +348,9 @@ class InternVL_DataPacker(DataPacker):
             ],
             dtype=torch.bool,
         )
-        assert len(batch["input_ids"]) == len(
-            batch["logprob_masks"]
-        ), "The length of input_ids, logprob_masks should be the same"
+        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
+            "The length of input_ids, logprob_masks should be the same"
+        )
         return batch
 
     def get_policy_input(

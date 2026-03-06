@@ -414,17 +414,17 @@ class Qwen3_VL_DataPacker(DataPacker):
                             assistant_contents.append(new_content)
                             new_content = pad_token * pad_run_length
                         elif isinstance(new_content, dict):
-                            assert (
-                                "text" in new_content
-                            ), f"text not in content: {content}"
+                            assert "text" in new_content, (
+                                f"text not in content: {content}"
+                            )
                             assistant_contents.append(new_content["text"])
                             new_content["text"] = pad_token * pad_run_length
                         elif isinstance(content, list):
                             for i, item in enumerate(content):
                                 if isinstance(item, dict):
-                                    assert (
-                                        "text" in item
-                                    ), f"text not in content: {item}"
+                                    assert "text" in item, (
+                                        f"text not in content: {item}"
+                                    )
                                     assistant_contents.append(item["text"])
                                     new_content[i]["text"] = pad_token * pad_run_length
                                 else:
@@ -459,9 +459,9 @@ class Qwen3_VL_DataPacker(DataPacker):
                             assistant_contents.append(content["text"])
                         elif isinstance(content, list):
                             for _, item in enumerate(content):
-                                assert (
-                                    "text" in item
-                                ), f"text not in content of assistant: {item}"
+                                assert "text" in item, (
+                                    f"text not in content of assistant: {item}"
+                                )
                                 assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
@@ -589,17 +589,17 @@ class Qwen3_VL_DataPacker(DataPacker):
         if all([x is not None for x in pixel_values_videos]):
             pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
         else:
-            assert all(
-                [x is None for x in pixel_values_videos]
-            ), "pixel_values_videos should be None"
+            assert all([x is None for x in pixel_values_videos]), (
+                "pixel_values_videos should be None"
+            )
             pixel_values_videos = None
 
         if all([x is not None for x in video_grid_thw]):
             video_grid_thw = torch.cat(video_grid_thw, dim=0)
         else:
-            assert all(
-                [x is None for x in video_grid_thw]
-            ), "video_grid_thw should be None"
+            assert all([x is None for x in video_grid_thw]), (
+                "video_grid_thw should be None"
+            )
             video_grid_thw = None
 
         if all([x is not None for x in pixel_values]):
@@ -611,9 +611,9 @@ class Qwen3_VL_DataPacker(DataPacker):
         if all([x is not None for x in image_grid_thw]):
             image_grid_thw = torch.cat(image_grid_thw, dim=0)
         else:
-            assert all(
-                [x is None for x in image_grid_thw]
-            ), "image_grid_thw should be None"
+            assert all([x is None for x in image_grid_thw]), (
+                "image_grid_thw should be None"
+            )
             image_grid_thw = None
 
         # Shape description:
@@ -664,9 +664,9 @@ class Qwen3_VL_DataPacker(DataPacker):
             dtype=torch.bool,
         )
 
-        assert len(batch["input_ids"]) == len(
-            batch["logprob_masks"]
-        ), "The length of input_ids, logprob_masks should be the same"
+        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
+            "The length of input_ids, logprob_masks should be the same"
+        )
 
         padded_tensors = []
         for sample in processed_samples:

@@ -119,8 +119,7 @@ def launch_controller(config: str, port: int = 8010):
     """
     print("launch controller")
     p = subprocess.Popen(
-        "python -m cosmos_rl.dispatcher.run_web_panel "
-        f"--port {port} --config {config}",
+        f"python -m cosmos_rl.dispatcher.run_web_panel --port {port} --config {config}",
         shell=True,
         stdout=sys.stdout,
         stderr=sys.stderr,

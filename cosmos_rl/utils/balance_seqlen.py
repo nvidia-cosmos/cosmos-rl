@@ -98,9 +98,9 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     sorted_seqlen_list = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)])
     states_pq = []
     if equal_size:
-        assert (
-            len(seqlen_list) % k_partitions == 0
-        ), f"{len(seqlen_list)} % {k_partitions} != 0"
+        assert len(seqlen_list) % k_partitions == 0, (
+            f"{len(seqlen_list)} % {k_partitions} != 0"
+        )
         for offset in range(0, len(sorted_seqlen_list), k_partitions):
             items = []
             for i in range(k_partitions):
@@ -122,9 +122,9 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     partitions = final_state.get_partitions()
     if equal_size:
         for i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(
-                seqlen_list
-            ), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
+            assert len(partition) * k_partitions == len(seqlen_list), (
+                f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
+            )
     return partitions
 
 
@@ -157,9 +157,9 @@ def get_seqlen_balanced_partitions(
         AssertionError: If equal_size is True and len(seqlen_list) is not divisible by k_partitions.
         AssertionError: If any resulting partition is empty.
     """
-    assert (
-        len(seqlen_list) >= k_partitions
-    ), f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
+    assert len(seqlen_list) >= k_partitions, (
+        f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
+    )
 
     def _check_and_sort_partitions(partitions):
         assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"

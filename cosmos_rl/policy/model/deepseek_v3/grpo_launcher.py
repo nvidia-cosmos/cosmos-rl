@@ -63,9 +63,9 @@ class DeepSeekV3GRPODataset(Dataset):
         ]
         ```
         """
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), (
+            "`self.tokenizer` should be set by the launcher"
+        )
         question = self.dataset[idx]["question"]
         assert isinstance(question, str), "Question should be a string"
         # Convert to templated prompt

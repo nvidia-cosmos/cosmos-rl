@@ -199,13 +199,11 @@ def parallelize(
             == 0
         ), "train_batch must be divisible by pp_micro_batch_size"
         assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            config.train.train_batch_per_replica
+            // config.policy.parallelism.pp_micro_batch_size
+        ) % pp_size == 0, (
+            "train_batch / pp_micro_batch_size must be divisible by pp_size"
+        )
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
@@ -218,13 +216,11 @@ def parallelize(
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
-                (
-                    config.validation.batch_size
-                    // config.policy.parallelism.pp_micro_batch_size
-                )
-                % pp_size
-                == 0
-            ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+                config.validation.batch_size
+                // config.policy.parallelism.pp_micro_batch_size
+            ) % pp_size == 0, (
+                "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
             n_val_microbatches = (
                 config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size
@@ -488,9 +484,9 @@ def pipeline_parallelize(
     config: CosmosConfig,
 ):
     # TODO(huik): support pipeline parallelism for InternVL
-    assert (
-        not parallel_dims.pp_enabled
-    ), "Pipeline parallelism is not supported for InternVL currently."
+    assert not parallel_dims.pp_enabled, (
+        "Pipeline parallelism is not supported for InternVL currently."
+    )
     if parallel_dims.pp_enabled:
         pp_rank, pp_size = parallel_dims.pp_coord
         model.apply_pipeline_split(pp_rank, pp_size)

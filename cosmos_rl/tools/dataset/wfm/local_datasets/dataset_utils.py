@@ -117,9 +117,9 @@ class ResizeSmallestSideAspectPreserving(Augmentor):
             int(scaling_ratio * orig_w + 0.5),
         )
 
-        assert (
-            target_size[0] >= img_h and target_size[1] >= img_w
-        ), f"Resize error. orig {(orig_w, orig_h)} desire {(img_w, img_h)} compute {target_size}"
+        assert target_size[0] >= img_h and target_size[1] >= img_w, (
+            f"Resize error. orig {(orig_w, orig_h)} desire {(img_w, img_h)} compute {target_size}"
+        )
 
         for inp_key, out_key in zip(self.input_keys, self.output_keys):
             data_dict[out_key] = transforms_F.resize(  # noqa: F821

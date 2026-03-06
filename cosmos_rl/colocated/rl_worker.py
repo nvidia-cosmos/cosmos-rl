@@ -64,9 +64,9 @@ class ColocatedRLControlWorker(WorkerBase):
         # Setting up rollout parallel dims
         rollout_parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
         rollout_parallel_dims.build_mesh(device_type=cosmos_device_type)
-        assert (
-            rollout_parallel_dims.world_size == parallel_dims.world_size
-        ), "Rollout and Policy parallel dims must have the same world size in colocated mode."
+        assert rollout_parallel_dims.world_size == parallel_dims.world_size, (
+            "Rollout and Policy parallel dims must have the same world size in colocated mode."
+        )
 
         self.rollout = ColocatedRolloutControlWorker(
             config,
@@ -153,7 +153,9 @@ class ColocatedRLControlWorker(WorkerBase):
                 % self.config.rollout.n_generation
                 % self.rollout.parallel_dims.mesh["dp"].size()
                 == 0
-            ), f"train_batch_per_replica {self.config.train.train_batch_per_replica} must be divisible by n_generation {self.config.rollout.n_generation} and data parallel size {self.rollout.parallel_dims.mesh['dp'].size()}."
+            ), (
+                f"train_batch_per_replica {self.config.train.train_batch_per_replica} must be divisible by n_generation {self.config.rollout.n_generation} and data parallel size {self.rollout.parallel_dims.mesh['dp'].size()}."
+            )
             n_prompts_per_train = (
                 self.config.train.train_batch_per_replica
                 // self.config.rollout.n_generation

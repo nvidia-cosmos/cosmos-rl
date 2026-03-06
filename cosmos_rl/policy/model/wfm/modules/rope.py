@@ -164,9 +164,9 @@ def _apply_rotary_pos_emb_base(
     # `start_positions` is only supported for `cp_size=1` and inference.
     if start_positions is not None:
         max_offset = torch.max(start_positions)
-        assert (
-            max_offset + cur_seq_len <= max_seq_len
-        ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
+        assert max_offset + cur_seq_len <= max_seq_len, (
+            f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
+        )
 
         # Stack staggered rope embeddings along the batch dimension
         freqs = torch.concatenate(
@@ -177,9 +177,9 @@ def _apply_rotary_pos_emb_base(
 
     # Only apply the rotary embeddings up to the sequence length of the running
     # input.
-    assert (
-        cur_seq_len <= max_seq_len
-    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    assert cur_seq_len <= max_seq_len, (
+        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    )
     freqs = freqs[:cur_seq_len]
 
     # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
@@ -284,13 +284,13 @@ def apply_rotary_pos_emb(
     """
 
     # `start_positions` is only supported for `cp_size=1` and inference.
-    assert not (
-        cp_size > 1 and start_positions is not None
-    ), """start_positions != None with CP SIZE > 1 is not supported!"""
+    assert not (cp_size > 1 and start_positions is not None), (
+        """start_positions != None with CP SIZE > 1 is not supported!"""
+    )
 
-    assert (
-        tensor_format != "thd" or cu_seqlens is not None
-    ), "cu_seqlens must not be None when tensor_format is 'thd'."
+    assert tensor_format != "thd" or cu_seqlens is not None, (
+        "cu_seqlens must not be None when tensor_format is 'thd'."
+    )
 
     if fused:
         raise NotImplementedError(

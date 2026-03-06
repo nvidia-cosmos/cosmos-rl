@@ -28,8 +28,3 @@ For now, tested models are:
 
 .. note::
     We just support rollout replica within a single node now.
-
-
-
-
-

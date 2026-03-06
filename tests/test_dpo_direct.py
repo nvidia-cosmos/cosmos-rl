@@ -247,9 +247,9 @@ def run_dpo_direct(
     destroy_distributed()
 
     if global_rank == 0:
-        assert (
-            len(losses) == num_train_steps
-        ), f"Expected {num_train_steps} steps, got {len(losses)}"
+        assert len(losses) == num_train_steps, (
+            f"Expected {num_train_steps} steps, got {len(losses)}"
+        )
         logger.info(f"[Test] DPO direct run completed. Losses: {losses}")
 
 

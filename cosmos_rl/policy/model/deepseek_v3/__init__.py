@@ -76,9 +76,9 @@ class DeepseekV3MoEModel(BaseModel):
         if hf_config.model_type not in cls.supported_model_types():
             raise ValueError(f"Unsupported model type: {hf_config.model_type}")
 
-        assert (
-            "deepseek-v3" in model_name_or_path.lower()
-        ), f"Unsupported model {model_name_or_path}"
+        assert "deepseek-v3" in model_name_or_path.lower(), (
+            f"Unsupported model {model_name_or_path}"
+        )
 
         if hf_config.num_hidden_layers == 4:
             deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=4)
@@ -155,9 +155,9 @@ class DeepseekV3MoEModel(BaseModel):
             return CosmosModelOutput(logits=logits, aux_loss=final_aux_loss)
 
         else:
-            assert (
-                initial_aux_loss is None
-            ), "initial_aux_loss must be None when aux_loss_coeff = 0"
+            assert initial_aux_loss is None, (
+                "initial_aux_loss must be None when aux_loss_coeff = 0"
+            )
             assert aux_loss is None, "aux_loss must be None when aux_loss_coeff = 0"
             return CosmosModelOutput(logits=logits)
 
@@ -299,14 +299,14 @@ class DeepseekV3MoEModel(BaseModel):
                 target_tensor = target_tensor[expert_id]
 
             if slice_range is not None:
-                assert (
-                    target_tensor.shape[0] == 2 * self.config.moe_inter_dim
-                ), f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.config.moe_inter_dim} for {dest_name}"
+                assert target_tensor.shape[0] == 2 * self.config.moe_inter_dim, (
+                    f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.config.moe_inter_dim} for {dest_name}"
+                )
                 target_tensor = target_tensor[slice_range]
 
-            assert (
-                target_tensor.shape == sharded_weight.shape
-            ), f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"
+            assert target_tensor.shape == sharded_weight.shape, (
+                f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"
+            )
 
             with torch.no_grad():
                 target_tensor.data.copy_(sharded_weight)
@@ -337,9 +337,9 @@ class DeepseekV3MoEModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight)
 
@@ -375,9 +375,9 @@ class DeepseekV3MoEModel(BaseModel):
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
             transform_or_view = param.to_local() if is_dist_tensor else param
 
-            assert (
-                hf_name not in transforms
-            ), f"Duplicate key found in transforms: {hf_name}"
+            assert hf_name not in transforms, (
+                f"Duplicate key found in transforms: {hf_name}"
+            )
             transforms[hf_name] = transform_or_view
 
         return sorted(transforms.items())

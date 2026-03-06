@@ -210,9 +210,9 @@ class NFTTrainer(DiffusersTrainer):
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
         if not self.lr_schedulers_updated:
-            assert (
-                total_steps is not None and total_steps > 0
-            ), "Total steps must be set for lr scheduler"
+            assert total_steps is not None and total_steps > 0, (
+                "Total steps must be set for lr scheduler"
+            )
             logger.info(
                 f"[Policy] Building lr schedulers for total steps {total_steps}"
             )
@@ -361,9 +361,9 @@ class NFTTrainer(DiffusersTrainer):
             A dictionary of training metrics used for logging and reporting.
         """
         logger.debug(f"Starting training step {current_step}/{total_steps}")
-        assert (
-            self.config.train.train_policy.kl_beta > 0.0
-        ), "KL beta must be greater than 0 for diffusion NFT training."
+        assert self.config.train.train_policy.kl_beta > 0.0, (
+            "KL beta must be greater than 0 for diffusion NFT training."
+        )
         if current_step == 1:
             self.set_neg_prompt_embed()
         # Pack the list of rollouts into a batch for training

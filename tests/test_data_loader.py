@@ -93,9 +93,9 @@ class TestDataLoaderBroadcast(unittest.TestCase):
         for batch in inst.get_batch_from_dataloader(data_loader):
             if parallel_dims.mesh["pp_cp_tp"].get_local_rank() != 0:
                 ref = next(iterator)
-                assert util.recursive_check_equal(
-                    batch, ref
-                ), f"Broadcast batch does not match dataloader batch for non-zero rank {batch} {ref}"
+                assert util.recursive_check_equal(batch, ref), (
+                    f"Broadcast batch does not match dataloader batch for non-zero rank {batch} {ref}"
+                )
 
 
 if __name__ == "__main__":

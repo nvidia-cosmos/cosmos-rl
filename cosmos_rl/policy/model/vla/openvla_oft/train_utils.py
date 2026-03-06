@@ -78,9 +78,9 @@ def find_checkpoint_file(pretrained_checkpoint, file_pattern):
     Raises:
         AssertionError: If no files or multiple files match the pattern
     """
-    assert os.path.isdir(
-        pretrained_checkpoint
-    ), f"Checkpoint path must be a directory: {pretrained_checkpoint}"
+    assert os.path.isdir(pretrained_checkpoint), (
+        f"Checkpoint path must be a directory: {pretrained_checkpoint}"
+    )
 
     checkpoint_files = []
     for filename in os.listdir(pretrained_checkpoint):
@@ -88,9 +88,9 @@ def find_checkpoint_file(pretrained_checkpoint, file_pattern):
             full_path = os.path.join(pretrained_checkpoint, filename)
             checkpoint_files.append(full_path)
 
-    assert (
-        len(checkpoint_files) == 1
-    ), f"Expected exactly 1 {file_pattern} checkpoint but found {len(checkpoint_files)} in directory: {pretrained_checkpoint}"
+    assert len(checkpoint_files) == 1, (
+        f"Expected exactly 1 {file_pattern} checkpoint but found {len(checkpoint_files)} in directory: {pretrained_checkpoint}"
+    )
 
     return checkpoint_files[0]
 

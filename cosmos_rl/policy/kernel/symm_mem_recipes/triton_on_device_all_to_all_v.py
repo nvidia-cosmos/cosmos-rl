@@ -231,9 +231,9 @@ class OnDeviceAllToAllV(torch.autograd.Function):
 
         # Initialize grad_output buffer (one time only)
         if OnDeviceAllToAllV.grad_output_buf is None:
-            assert (
-                OnDeviceAllToAllV.max_output_len is not None
-            ), "`max_output_len` not set"
+            assert OnDeviceAllToAllV.max_output_len is not None, (
+                "`max_output_len` not set"
+            )
             OnDeviceAllToAllV.grad_output_buf = symm_mem.empty(
                 OnDeviceAllToAllV.max_output_len,
                 *grad_output.shape[1:],

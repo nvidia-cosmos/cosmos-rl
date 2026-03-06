@@ -520,12 +520,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
-                assert (
-                    self.rank_in_rollout_repicas >= 0
-                ), "[Rollout] rank in rollout replicas should be set before broadcast."
-                assert (
-                    len(dst_replica_names) == len(self.replica_name_to_rank)
-                ), "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                assert self.rank_in_rollout_repicas >= 0, (
+                    "[Rollout] rank in rollout replicas should be set before broadcast."
+                )
+                assert len(dst_replica_names) == len(self.replica_name_to_rank), (
+                    "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                )
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
 

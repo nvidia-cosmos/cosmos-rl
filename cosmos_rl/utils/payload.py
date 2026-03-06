@@ -117,9 +117,9 @@ def extract_rollouts(
                         rollout.extra_info[key] = value[idx]
                     else:
                         rollout.extra_info[key] = value
-        assert all(
-            rollout.prompt_idx >= 0 for rollout in rollouts
-        ), "All rollouts should have a valid prompt index"
+        assert all(rollout.prompt_idx >= 0 for rollout in rollouts), (
+            "All rollouts should have a valid prompt index"
+        )
 
         rollouts_list.append(rollouts)
     return rollouts_list

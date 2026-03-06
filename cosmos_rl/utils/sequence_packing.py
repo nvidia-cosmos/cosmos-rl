@@ -99,9 +99,9 @@ def pack_sequences_info_collect(
         # Create mask: True where not padding
         valid_input_len = compute_valid_lengths(input_ids, pad_token_id)
         if label_ids is not None:
-            assert (
-                input_ids.shape == label_ids.shape
-            ), "Input IDs and label IDs must have the same shape"
+            assert input_ids.shape == label_ids.shape, (
+                "Input IDs and label IDs must have the same shape"
+            )
             valid_label_len = compute_valid_lengths(label_ids, ignore_label_id)
             # Ensure label length does not exceed input length
             valid_input_len = torch.max(valid_label_len, valid_input_len)

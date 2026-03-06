@@ -20,7 +20,7 @@ If you already have access to the **DGX Cloud Lepton Platform**, you can launch 
 4. Push it to your container registry (e.g., NVIDIA NGC, Docker Hub).
 
 5. Go to **DGX Lepton workspace dashboard → Settings** to configure your container **registries** and **secrets**.
-   
+
    You can also quickly create a secret in your workspace using the CLI:
    ::
 
@@ -71,7 +71,7 @@ For more available options, scroll down to [**Option Reference for `cosmos-rl` c
 Valid Resource Shapes
 ----------------------
 
-Please use the command `lep node list --detail` to view the available GPUs in the node group. 
+Please use the command `lep node list --detail` to view the available GPUs in the node group.
 Note: It is allowed to use CPU resource shapes within a GPU node group.
 
 
@@ -111,7 +111,7 @@ GPU Instances
 Option Reference for `cosmos-rl` command
 --------------------------------------
 
-.. list-table:: 
+.. list-table::
    :header-rows: 1
 
    * - Option (long)
@@ -170,10 +170,10 @@ Option Reference for `cosmos-rl` command
      - `False`
      - Enable Lepton remote-execution mode.
    * - **Lepton-specific options**
-     - 
-     - 
-     - 
-     - 
+     -
+     -
+     -
+     -
    * - `--lepton-job-name`
      - `-n`
      - `str` (required)

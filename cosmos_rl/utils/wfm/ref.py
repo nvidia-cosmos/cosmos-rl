@@ -49,9 +49,9 @@ class FastRefModelUpdater:
             parameters (iterable): Iterable of torch.nn.Parameter to be temporarily stored.
             is_cpu (bool): Whether to store the cache on CPU.
         """
-        assert (
-            self.is_cached is False
-        ), "Ref cache is already taken. Did you forget to restore it?"
+        assert self.is_cached is False, (
+            "Ref cache is already taken. Did you forget to restore it?"
+        )
         device = "cpu" if is_cpu else "cuda"
         self.collected_params = [param.clone().to(device) for param in parameters]
         self.is_cached = True
@@ -95,9 +95,9 @@ class DTensorFastRefModelUpdater:
     @torch.no_grad()
     def cache(self, parameters: Any, is_cpu: bool = False) -> None:
         """Cache current parameters using DTensor local views."""
-        assert (
-            self.is_cached is False
-        ), "Ref cache is already taken. Did you forget to restore it?"
+        assert self.is_cached is False, (
+            "Ref cache is already taken. Did you forget to restore it?"
+        )
         device = "cpu" if is_cpu else "cuda"
         self.collected_params = [
             param.to_local().clone().to(device) for param in parameters

@@ -106,9 +106,9 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
                     if bmcmd:
-                        assert isinstance(
-                            bmcmd, BuildMeshCommand
-                        ), "Only buildmesh command is supported"
+                        assert isinstance(bmcmd, BuildMeshCommand), (
+                            "Only buildmesh command is supported"
+                        )
                         self.is_master_replica = (
                             bmcmd.replica_name_to_rank[self.replica_name] == 0
                         )

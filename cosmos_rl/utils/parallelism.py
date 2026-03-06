@@ -150,9 +150,9 @@ class ParallelDims:
             )
 
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
-        assert (
-            dp_shard >= 1
-        ), f"dp_shard of size {dp_shard} is not valid, should be equal or greater than 1"
+        assert dp_shard >= 1, (
+            f"dp_shard of size {dp_shard} is not valid, should be equal or greater than 1"
+        )
 
         assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
@@ -166,9 +166,9 @@ class ParallelDims:
 
         # Checks for MoE weights. Note that dp_shard is only used for the non-MoE weights.
         if ep > 1:
-            assert (
-                dp_shard_with_ep == -1 or dp_shard_with_ep >= 1
-            ), " dp_shard_with_ep must -1 or >=1."
+            assert dp_shard_with_ep == -1 or dp_shard_with_ep >= 1, (
+                " dp_shard_with_ep must -1 or >=1."
+            )
             if dp_shard_with_ep < 0:
                 logger.info(
                     "dp_shard_with_ep is set to -1, will be automatically determined based "
@@ -178,9 +178,9 @@ class ParallelDims:
                     pp * ep * tp
                 )
                 logger.info(f"dp_shard_with_ep is set to {dp_shard_with_ep}.")
-            assert (
-                dp_shard_with_ep >= 1
-            ), f"WORLD_SIZE({self.world_size}) is not a multiple of pp({pp}) * ep({ep}) * tp({tp})"
+            assert dp_shard_with_ep >= 1, (
+                f"WORLD_SIZE({self.world_size}) is not a multiple of pp({pp}) * ep({ep}) * tp({tp})"
+            )
 
             if tp > 1:
                 raise ValueError(
@@ -209,9 +209,9 @@ class ParallelDims:
                 valid_dims.append(dim)
                 valid_names.append(name)
 
-        assert (
-            math.prod(valid_dims) == self.world_size
-        ), f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+        assert math.prod(valid_dims) == self.world_size, (
+            f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+        )
 
         logger.info(
             f"Building {len(valid_dims)}-D device mesh with {valid_names}, {valid_dims}"

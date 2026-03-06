@@ -279,9 +279,9 @@ class EMAModelCallback(Callback):
     def on_train_start(self, model, iteration: int = 0) -> None:
         # Set up the EMA model weight tracker.
         if model.config.ema.enabled:
-            assert hasattr(
-                model, "ema"
-            ), "EMA should be initialized from CosmosVisionGenModel"
+            assert hasattr(model, "ema"), (
+                "EMA should be initialized from CosmosVisionGenModel"
+            )
             # EMA model must be kept in FP32 precision.
             model.ema = model.ema.to(dtype=torch.float32)
         else:
@@ -328,9 +328,9 @@ class ProgressBarCallback(Callback):
             num_iter = self.config.trainer.max_val_iter
         else:
             num_iter = len(dataloader_val)
-        assert (
-            num_iter is not None and num_iter > 0
-        ), f"Invalid number of validation iterations: {num_iter}"
+        assert num_iter is not None and num_iter > 0, (
+            f"Invalid number of validation iterations: {num_iter}"
+        )
         self.val_pbar = tqdm.trange(
             num_iter, desc="Validating", position=1, leave=False
         )
@@ -561,9 +561,9 @@ class WandbCallback(Callback):
 
         self.logging_iter_multipler = logging_iter_multipler
         self.save_logging_iter_multipler = save_logging_iter_multipler
-        assert (
-            self.logging_iter_multipler > 0
-        ), "logging_iter_multipler should be greater than 0"
+        assert self.logging_iter_multipler > 0, (
+            "logging_iter_multipler should be greater than 0"
+        )
         self.save_s3 = save_s3
         self.wandb_extra_tag = (
             f"@{logging_iter_multipler}" if logging_iter_multipler > 1 else ""
@@ -1908,7 +1908,9 @@ class EveryNDrawSample(EveryN):
             assert (
                 data_batch["neg_t5_text_embeddings"].shape
                 == data_batch["t5_text_embeddings"].shape
-            ), f"{data_batch['neg_t5_text_embeddings'].shape} != {data_batch['t5_text_embeddings'].shape}"
+            ), (
+                f"{data_batch['neg_t5_text_embeddings'].shape} != {data_batch['t5_text_embeddings'].shape}"
+            )
             data_batch["neg_t5_text_mask"] = data_batch["t5_text_mask"]
 
         to_show = []
@@ -2154,9 +2156,9 @@ class RewardCallback(BaseWandBCallback):
 
         self.logging_iter_multiplier = logging_iter_multipler
         self.save_logging_iter_multiplier = save_logging_iter_multipler
-        assert (
-            self.logging_iter_multiplier > 0
-        ), "logging_iter_multiplier should be greater than 0"
+        assert self.logging_iter_multiplier > 0, (
+            "logging_iter_multiplier should be greater than 0"
+        )
         self.save_s3 = save_s3
         self.wandb_extra_tag = (
             f"@{self.logging_iter_multiplier}"
@@ -2275,9 +2277,9 @@ class CallBackGroup:
                         f"Callback {current_callback_cfg.name} is not defined in CALLBACK_CLS_MAPPING."
                     )
                 _callback = _callback_cls(**current_callback_cfg.args)
-                assert isinstance(
-                    _callback, Callback
-                ), f"{current_callback_cfg.model_dump()} is not a valid callback."
+                assert isinstance(_callback, Callback), (
+                    f"{current_callback_cfg.model_dump()} is not a valid callback."
+                )
                 _callback.config = config
                 _callback.trainer = trainer
                 self._callbacks.append(_callback)

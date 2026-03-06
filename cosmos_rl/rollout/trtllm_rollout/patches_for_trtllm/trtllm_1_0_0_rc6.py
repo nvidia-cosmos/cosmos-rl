@@ -135,9 +135,9 @@ def extend_create_py_executor_instance():
                 # Route to appropriate loader based on checkpoint source
                 load_torch_lora(lora_config)
             else:
-                assert (
-                    len(lora_config.lora_target_modules) >= 1
-                ), "Expecting at least one lora target module"
+                assert len(lora_config.lora_target_modules) >= 1, (
+                    "Expecting at least one lora target module"
+                )
                 if not bool(lora_config.trtllm_modules_to_hf_modules):
                     lora_config.trtllm_modules_to_hf_modules = (
                         get_default_trtllm_modules_to_hf_modules()
