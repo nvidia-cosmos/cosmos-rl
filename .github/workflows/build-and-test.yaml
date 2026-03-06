@@ -47,7 +47,7 @@ jobs:
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
           ${DOCKER_RUN} python tests/test_env_manager_libero.py
           ${DOCKER_RUN} python tests/test_vla_libero.py
-        
+
       - name: Run tests
         id: tests
         run: |
