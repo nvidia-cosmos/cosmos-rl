@@ -324,9 +324,9 @@ class HFModel(BaseModel):
                 vision_model = safe_deep_getattr(self.model, path, None)
                 if vision_model is not None:
                     break
-            assert (
-                vision_model is not None
-            ), f"Can not get vision model from {self.model}"
+            assert vision_model is not None, (
+                f"Can not get vision model from {self.model}"
+            )
         return vision_model
 
     @property
