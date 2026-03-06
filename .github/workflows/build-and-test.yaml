@@ -38,6 +38,7 @@ jobs:
             --gpus all \
             --shm-size=24G \
             -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
+            -v ${{ github.workspace }}/configs:/workspace/cosmos-rl/configs:ro \
             -v /tmp/cache:/root/.cache \
             -e PYTHONPYCACHEPREFIX=/tmp/pycache \
             -w /workspace/cosmos-rl \
