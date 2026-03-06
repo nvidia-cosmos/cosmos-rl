@@ -696,6 +696,8 @@ class ModelRegistry:
             ):
                 # VLA models with TIMM vision backbone, use CUDA for initialization
                 return torch.device("cuda")
+            elif hf_config.model_type == "cosmos-policy":
+                return torch.device("cuda")
             else:
                 return init_on_device("meta", include_buffers=False)
 

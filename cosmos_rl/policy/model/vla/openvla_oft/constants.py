@@ -94,7 +94,7 @@ def detect_robot_platform():
     elif "aloha_6chunk" in cmd_args:
         return "ALOHA_6"
     elif "libero" in cmd_args:
-        return "ALOHA"
+        return "LIBERO"
     elif "aloha" in cmd_args:
         return "ALOHA"
     elif "bridge" in cmd_args:

@@ -1279,7 +1279,9 @@ class PI05(BaseModel):
             raw = json.load(f)
         return raw["norm_stats"]
 
-    def process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def process_input(
+        self, inputs: Dict[str, Any], unnorm_key: str = ""
+    ) -> Dict[str, torch.Tensor]:
         batch_size = inputs["full_images"].shape[0]  # [H, W, C], values in [0, 255]
 
         base_imgs = [np_to_pi05_img(img[..., :3]) for img in inputs["full_images"]]
@@ -1301,10 +1303,18 @@ class PI05(BaseModel):
                 [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
             )
 
+        raw_states = []
+        for i in range(batch_size):
+            s = inputs["states"][i]
+            if s.shape[-1] == 9:
+                from cosmos_rl.simulators.libero.utils import quat2axisangle
+
+                s = np.concatenate([s[:3], quat2axisangle(s[3:7]), s[7:]])
+            raw_states.append(s)
         state = torch.stack(
             [
                 torch.as_tensor(
-                    self._normalize_pi05_state(inputs["states"][i]),
+                    self._normalize_pi05_state(raw_states[i]),
                     dtype=torch.float32,
                 )
                 for i in range(batch_size)
@@ -1386,8 +1396,9 @@ class PI05(BaseModel):
             :, : self.hf_config.action_horizon, : self.hf_config.action_env_dim
         ].to(torch.float32)
         actions_np = actions.detach().cpu().numpy()
-        outputs["action"] = torch.tensor(
+        unnormed = torch.tensor(
             self._unnormalize_pi05_actions(actions_np), device=actions.device
         )
-        # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
+        unnormed[..., -1] = -torch.sign(2.0 * unnormed[..., -1] - 1.0)
+        outputs["action"] = unnormed
         return outputs

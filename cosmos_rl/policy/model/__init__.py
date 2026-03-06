@@ -100,6 +100,37 @@ def _auto_import_models():
                         f"  [Model] Warning: Could not import Diffusers module {module_name}: {e}"
                     )
 
+    # ============================================================================
+    # WFM imports (from wfm/models/ subdirectory)
+    # only cosmos-policy for now, models under this folder are implemented in i4 fashion
+    # ============================================================================
+    print("Auto-discovering wfm subclasses...")
+    wfm_dir = model_dir / "wfm" / "models"
+    if wfm_dir.exists():
+        for item in wfm_dir.iterdir():
+            if (
+                item.is_file()
+                and item.suffix == ".py"
+                and item.stem in ["cosmos_policy"]
+            ):
+                module_name = f"wfm.models.{item.stem}"
+                try:
+                    module = importlib.import_module(
+                        f"cosmos_rl.policy.model.{module_name}"
+                    )
+                    classes = _discover_model_classes(module, BaseModel)
+                    for class_name in classes:
+                        if hasattr(module, class_name):
+                            globals()[class_name] = getattr(module, class_name)
+                            __all__.append(class_name)
+                            print(
+                                f"  [Model] Imported BaseModel: {class_name} from {module_name}"
+                            )
+                except ImportError as e:
+                    print(
+                        f"  [Model] Warning: Could not import WFM module {module_name}: {e}"
+                    )
+
 
 # Run auto-import on module load
 _auto_import_models()

@@ -30,6 +30,9 @@ from cosmos_rl.policy.trainer.diffusers_trainer.sft_trainer import (
 from cosmos_rl.policy.trainer.diffusers_trainer.nft_trainer import (
     NFTTrainer,
 )
+from cosmos_rl.policy.trainer.cosmos_policy_trainer import (
+    CosmosPolicyTrainer,
+)
 
 __all__ = [
     "OpenVLAGRPOTrainer",
@@ -43,4 +46,5 @@ __all__ = [
     "Diffusers_SFTTrainer",
     "PISFTTrainer",
     "NFTTrainer",
+    "CosmosPolicyTrainer",
 ]

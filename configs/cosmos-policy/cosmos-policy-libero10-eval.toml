@@ -1,0 +1,45 @@
+mode = "colocated"
+
+[train]
+output_dir = "./outputs/cosmos-policy-libero10-eval"
+
+[policy]
+model_name_or_path = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
+
+[logging]
+logger = ['console']
+project_name = "cosmos-rl-cosmos-policy"
+experiment_name = "cosmos-policy-libero10-eval"
+
+[rollout]
+backend = "vla"
+n_generation = 1
+
+[validation]
+enable = true
+dataset.name = "libero"
+dataset.subset = "libero_10"
+
+[vla]
+vla_type = "cosmos-policy"
+use_proprio = true
+num_envs = 8
+proprio_dim = 9
+num_images_in_input = 2
+training_chunk_size = 16
+save_video = false
+max_steps = 520
+
+[custom]
+task_suite_name = "libero_10"
+trials_per_task = 50
+ckpt_path = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
+dataset_stats_path = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
+t5_text_embeddings_path = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
+num_denoising_steps = 5
+chunk_size = 16
+seed = 1
+use_jpeg_compression = true
+trained_with_image_aug = true
+use_variance_scale = false
+vae_fp32 = false

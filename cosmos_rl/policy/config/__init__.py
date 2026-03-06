@@ -1447,8 +1447,8 @@ class LoggingConfig(BaseModel):
 class VLAConfig(BaseModel):
     vla_type: str = Field(
         default="openvla-oft",
-        description="VLA type, could be 'openvla-oft' or 'openvla'",
-        choices=["openvla-oft", "openvla"],
+        description="VLA type: openvla-oft, openvla, or cosmos-policy",
+        choices=["openvla-oft", "openvla", "cosmos-policy"],
     )
 
     num_envs: int = Field(default=1, description="Number of environments to rollout.")
@@ -1485,6 +1485,16 @@ class VLAConfig(BaseModel):
     unnorm_key: str = Field(
         default="libero_10_no_noops",
         description="The unnormalized key for the dataset.",
+    )
+
+    max_steps: Optional[int] = Field(
+        default=None,
+        description="Override max steps per episode. None uses the simulator default.",
+    )
+
+    use_subprocess: Optional[bool] = Field(
+        default=None,
+        description="Run simulator in a subprocess. None = default per simulator (True for LIBERO/RoboTwin). Set False to run in-process and avoid subprocess hangs (e.g. multi-rank eval).",
     )
 
     @model_validator(mode="after")
