@@ -26,22 +26,22 @@ class SkippingSampler(Sampler[int]):
     def __init__(self, base_sampler: Sampler[int], skip_samples: int = 0):
         self.base = base_sampler
         self._initial_skip = max(0, int(skip_samples))
-        self._remaining_skip = self._initial_skip
         self._used_once = False
 
     def __iter__(self) -> Iterator[int]:
+        """
+        Lazy iterator that skips the first `skip_samples` samples.
+        """
         it = iter(self.base)
-        if self._remaining_skip > 0:
-            for _ in range(self._remaining_skip):
+        if not self._used_once:
+            for _ in range(self._initial_skip):
                 try:
                     next(it)
                 except StopIteration:
-                    self._remaining_skip = 0
                     self._used_once = True
-                    return iter(())
-            self._remaining_skip = 0
-        self._used_once = True
-        return it
+                    return
+            self._used_once = True
+        yield from it
 
     def __len__(self) -> int:
         base_len = len(self.base)

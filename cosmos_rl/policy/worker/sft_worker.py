@@ -921,6 +921,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler.set_epoch(cur_epoch)
             if hasattr(self.train_batch_sampler, "set_epoch"):
                 self.train_batch_sampler.set_epoch(cur_epoch)
+            if hasattr(self.train_data_loader, "dataset") and hasattr(
+                self.train_data_loader.dataset, "set_epoch"
+            ):
+                self.train_data_loader.dataset.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
 
             data_arrival_event = torch.cuda.Event(enable_timing=True)
