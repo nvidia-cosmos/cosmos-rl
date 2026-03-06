@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
@@ -239,6 +240,9 @@ def main():
 
     if world_size > 1:
         dist.destroy_process_group()
+
+    if rank == 0 and global_total > 0 and global_successes == 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
