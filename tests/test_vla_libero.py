@@ -182,9 +182,7 @@ def main():
         # Use explicit cuda:local_rank so model weights load on the correct GPU (avoids all ranks allocating on GPU 0).
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         device = torch.device(f"cuda:{local_rank}")
-        rollout = OpenVLARollout(
-            config=config, parallel_dims=None, device=device
-        )
+        rollout = OpenVLARollout(config=config, parallel_dims=None, device=device)
         rollout_obj = rollout
         result = rollout.evaluate(payload_pairs=my_payload_pairs)
 

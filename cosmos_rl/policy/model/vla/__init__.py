@@ -346,9 +346,6 @@ class OpenVLA(BaseModel):
         for key, value in override_hf_config_kwargs.items():
             setattr(hf_config, key, value)
 
-        if hasattr(hf_config, "vla_type"):
-            logger.info(f"hf_config.vla_type: {hf_config.vla_type}")
-
         return hf_config
 
     @classmethod

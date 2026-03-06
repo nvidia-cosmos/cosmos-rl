@@ -15,6 +15,7 @@
 
 # From Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
+from functools import partial
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -164,7 +165,6 @@ def attention(
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
                 SDPBackend.EFFICIENT_ATTENTION,
-                SDPBackend.MATH,
             ]
             BEST_SDPA_BACKEND = SDPBackend.CUDNN_ATTENTION
         else:
@@ -172,7 +172,6 @@ def attention(
                 SDPBackend.FLASH_ATTENTION,
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.EFFICIENT_ATTENTION,
-                SDPBackend.MATH,
             ]
             BEST_SDPA_BACKEND = (
                 SDPBackend.FLASH_ATTENTION
@@ -194,7 +193,17 @@ def attention(
         k = k.transpose(1, 2).to(dtype)
         v = v.transpose(1, 2).to(dtype)
 
-        with sdpa_kernel(backends=SDPA_BACKENDS):
+        # Torch 2.6 and later allows priorities for backends, but for older versions
+        # we can only run with a specific backend. As long as we pick ones we're certain
+        # will work on that device, it should be fine.
+        try:
+            sdpa_kernel(backends=SDPA_BACKENDS, set_priority_order=True)
+            sdpa_kernel_ = partial(sdpa_kernel, set_priority_order=True)
+        except TypeError:
+            sdpa_kernel_ = sdpa_kernel
+            SDPA_BACKENDS = [BEST_SDPA_BACKEND]
+
+        with sdpa_kernel_(backends=SDPA_BACKENDS):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
