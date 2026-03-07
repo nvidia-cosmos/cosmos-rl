@@ -1811,6 +1811,12 @@ class Config(BaseModel):
                 f"Try setting pp_micro_batch_size to a factor of {batch}."
             )
 
+            # TODO: test FSDP CPU offload with PP and remove this restriction if it works
+            assert not self.train.fsdp_offload, (
+                "FSDP CPU offload (fsdp_offload=True) is not yet validated with "
+                "pipeline parallelism (pp_size > 1). Disable fsdp_offload or pp."
+            )
+
             # Validate mini_batch <= train_batch_per_replica for SFT
             if hasattr(self.train.train_policy, "mini_batch"):
                 mb = self.train.train_policy.mini_batch
