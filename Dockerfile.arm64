@@ -1,0 +1,192 @@
+# Usage:
+#   docker build -t cosmos-rl:arm64 -f Dockerfile.arm64 .
+#   docker build -t cosmos-rl:arm64-efa -f Dockerfile.arm64 --build-arg COSMOS_RL_BUILD_MODE=efa .
+#   docker build -t cosmos-rl:arm64-vla -f Dockerfile.arm64 --build-arg COSMOS_RL_EXTRAS=vla .
+
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
+
+FROM ${BASE_IMAGE} AS base
+ARG TARGET_ARCH=arm64
+ENV TZ=Etc/UTC
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_CONSTRAINT=""
+SHELL ["/bin/bash", "-c"]
+
+# Ensure the image architecture matches the expected target
+RUN HOST_ARCH="$(dpkg --print-architecture)" && \
+    if [[ "${TARGET_ARCH}" != "arm64" ]]; then \
+      echo "Error: this Dockerfile only supports TARGET_ARCH=arm64"; exit 1; \
+    fi && \
+    if [[ "${HOST_ARCH}" != "arm64" ]]; then \
+      echo "Error: base image arch is ${HOST_ARCH}, expected arm64"; exit 1; \
+    fi
+
+# System dependencies
+RUN apt-get update -y && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends --allow-unauthenticated \
+      curl git gpg lsb-release tzdata wget dnsutils software-properties-common \
+      ca-certificates build-essential tcl pkg-config cmake libibverbs-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+FROM base AS redis-layer
+ARG REDIS_VERSION=8.6.1
+
+# Redis (self-build, MALLOC=libc)
+RUN echo "Installing Redis (self-build, MALLOC=libc)..." && \
+        \
+        apt-get update -qq && \
+        apt-get remove -qq -y redis-server redis-tools || true && \
+        \
+        apt-get install -qq -y --no-install-recommends \
+            ca-certificates curl git build-essential tcl pkg-config
+        # \
+        # rm -rf /tmp/redis-src && \
+        # git clone --branch ${REDIS_VERSION} --depth 1 https://github.com/redis/redis.git /tmp/redis-src && \
+        # cd /tmp/redis-src && \
+        # make -j"$(nproc)" MALLOC=libc && \
+        # make install && \
+        # cd - && \
+        # rm -rf /tmp/redis-src
+
+###################################################
+## Install redis
+# Download and add Redis GPG key, Redis APT repository
+RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \
+    chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb  $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
+
+# Update package list
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
+
+FROM redis-layer AS python-layer
+
+# Python packages from setup.sh
+RUN unset PIP_CONSTRAINT && \
+    pip install -U pip setuptools packaging psutil && \
+    pip install vllm==0.12.0 && \
+    pip install -U torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu129 && \
+    pip install -U flashinfer-python==0.6.1 && \
+    pip install -U https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl && \
+    pip install -U transformer_engine[pytorch] --no-build-isolation && \
+    APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2 && \
+    pip install nvidia-nvshmem-cu12==3.4.5 && \
+    TORCH_CUDA_ARCH_LIST="10.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation
+
+FROM python-layer AS deepep-layer
+
+# DeepEP
+RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep && \
+    cd /tmp/deepep && \
+    TORCH_CUDA_ARCH_LIST="10.0+PTX" python setup.py build && \
+    TORCH_CUDA_ARCH_LIST="10.0+PTX" python setup.py install && \
+    cd / && rm -rf /tmp/deepep
+
+FROM deepep-layer AS efa-layer
+ARG COSMOS_RL_BUILD_MODE=no-efa
+ARG EFA_INSTALLER_VERSION=1.42.0
+ARG AWS_OFI_NCCL_VERSION=v1.16.0
+
+# Optional EFA stack
+RUN if [[ "${COSMOS_RL_BUILD_MODE}" == "efa" ]]; then \
+      rm -rf /opt/hpcx /usr/local/mpi && \
+      rm -f /etc/ld.so.conf.d/hpcx.conf && ldconfig && \
+      apt-get remove -y --purge --allow-change-held-packages \
+        ibverbs-utils libibverbs-dev libibverbs1 libmlx5-1 || true && \
+      cd /root && \
+      curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+      tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+      cd aws-efa-installer && \
+      ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify && \
+      cd /root && rm -rf aws-efa-installer aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+      apt-get update && apt-get install -y libhwloc-dev && \
+      cd /root && \
+      curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz && \
+      tar -xf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz && \
+      cd aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} && \
+      ./configure --prefix=/opt/aws-ofi-nccl/install \
+        --with-mpi=/opt/amazon/openmpi \
+        --with-libfabric=/opt/amazon/efa \
+        --with-cuda=/usr/local/cuda \
+        --enable-platform-aws && \
+      make -j "$(nproc)" && make install && \
+      cd /root && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz; \
+    fi
+
+ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:${LD_LIBRARY_PATH}
+ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:${PATH}
+
+FROM efa-layer AS package-layer
+ARG COSMOS_RL_EXTRAS=""
+
+# Install cosmos-rl from local source
+WORKDIR /workspace/cosmos_rl
+COPY . /workspace/cosmos_rl
+
+RUN rm -rf /tmp/pip_local_wheel && mkdir -p /tmp/pip_local_wheel && \
+    pip wheel --no-deps --no-build-isolation -w /tmp/pip_local_wheel /workspace/cosmos_rl && \
+    python3 - <<'PY'
+import glob, zipfile, re, os
+from packaging.requirements import Requirement
+from packaging.markers import default_environment
+
+selected_extras = set(filter(None, os.environ.get("COSMOS_RL_EXTRAS", "").split(",")))
+exclude = re.compile(r"(?i)^(tensordict|torchao)(\s|$|==|>=|<=|~=|!=|\[)")
+
+wheels = sorted(glob.glob("/tmp/pip_local_wheel/*.whl"), key=os.path.getmtime)
+wheel = wheels[-1]
+with zipfile.ZipFile(wheel) as z:
+    meta = [n for n in z.namelist() if n.endswith('.dist-info/METADATA')][0]
+    lines = z.read(meta).decode('utf-8', 'replace').splitlines()
+
+reqs = []
+for line in lines:
+    if not line.startswith('Requires-Dist: '):
+        continue
+    spec = line[len('Requires-Dist: '):].strip()
+    if exclude.match(spec):
+        continue
+    r = Requirement(spec)
+    if r.name.lower() in {'cosmos-rl', 'cosmos_rl'}:
+        continue
+    if r.marker is None:
+        reqs.append(str(r).split(';')[0].strip())
+        continue
+    marker_str = str(r.marker)
+    env = default_environment()
+    if 'extra' in marker_str:
+        ok = any(r.marker.evaluate({**env, 'extra': e}) for e in selected_extras)
+    else:
+        ok = r.marker.evaluate({**env, 'extra': ''})
+    if ok:
+        reqs.append(str(r).split(';')[0].strip())
+
+with open('/tmp/local-requires-filtered.txt', 'w') as f:
+    f.write('\n'.join(reqs) + '\n')
+print('Wrote', len(reqs), 'requirements')
+PY
+
+RUN pip install -r /tmp/local-requires-filtered.txt && \
+    pip install tensordict && \
+    pip install -U torchao==0.14.1 && \
+    pip install 'nvidia-nccl-cu12>=2.26.2' && \
+    if [[ -n "${COSMOS_RL_EXTRAS}" ]]; then \
+      pip install "/workspace/cosmos_rl[${COSMOS_RL_EXTRAS}]" --no-deps; \
+    else \
+      pip install /workspace/cosmos_rl --no-deps; \
+    fi && \
+    if [[ ",${COSMOS_RL_EXTRAS}," == *,vla,* ]]; then \
+      bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \
+    fi && \
+    pip uninstall -y xformers || true
+
+# Final cleanup
+RUN apt-get autoremove -y || true && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip cache purge || true && \
+    rm -rf /root/.cache/pip /tmp/pip_local_wheel /tmp/local-requires-filtered.txt
+ENV PATH=/usr/local/bin:$PATH
+
+FROM package-layer AS final
+WORKDIR /workspace/cosmos_rl
