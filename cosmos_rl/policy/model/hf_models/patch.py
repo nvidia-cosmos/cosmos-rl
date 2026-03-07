@@ -40,6 +40,15 @@ def pre_hf_models_patch(hf_config: AutoConfig):
         hf_config.vision_config.num_hidden_layers = 32
         # Set video pruning rate to 0 for training
         hf_config.video_pruning_rate = 0.0
+    elif hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        if transformers.__version__ < "5.4.0":
+            # Qwen3.5 models can encounter illegal memory access errors when using Flash Attention with transformers versions earlier than 5.4.0.
+            # This was resolved in transformers PR #44399, so for older versions we force the use of SDPA.
+            hf_config._attn_implementation = "sdpa"
+            logger.warning(
+                "Qwen3.5/Qwen3.5-MoE models can encounter illegal memory access errors when using Flash Attention with transformers versions earlier than 5.4.0. "
+                "So for older versions we force the use of SDPA."
+            )
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):

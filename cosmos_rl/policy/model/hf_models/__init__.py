@@ -93,11 +93,15 @@ class HFModel(BaseModel):
         # cosmos_default_dtype is config.train.master_dtype
         # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
         self.model = self.model.to(dtype=torch.get_default_dtype())
+        attn_implementation = getattr(
+            self.hf_config, "_attn_implementation", "flash_attention_2"
+        )
         try:
-            self.model.set_attn_implementation("flash_attention_2")
+            self.model.set_attn_implementation(attn_implementation)
+            logger.info(f"Set attn_implementation to {attn_implementation}")
         except Exception as e:
             logger.warning(
-                f"Set attn_implementation to flash_attention_2 failed with error: {e}"
+                f"Set attn_implementation to {attn_implementation} failed with error: {e}"
             )
         self.model_class = model_class
         self.is_vlm = is_vlm
@@ -201,6 +205,7 @@ class HFModel(BaseModel):
             "layers",
             "model.layers",
             "backbone.layers",  # NemotronH_Nano_VL_V2
+            "language_model.layers",  # Qwen3-5
         ]:
             lm_layers = safe_deep_getattr(self.language_model, path, None)
             if lm_layers is not None:
@@ -296,6 +301,7 @@ class HFModel(BaseModel):
             "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
             "model.embeddings",
+            "language_model.embed_tokens",  # Qwen3-5
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
             if embed_tokens is not None:
@@ -309,14 +315,18 @@ class HFModel(BaseModel):
         vision_model = None
         if self.is_vlm:
             # Extract vision model from various possible attribute names
-            if hasattr(self.model, "vision_tower"):
-                vision_model = self.model.vision_tower
-            elif hasattr(self.model, "visual"):
-                vision_model = self.model.visual
-            elif hasattr(self.model, "vision_model"):
-                vision_model = self.model.vision_model
-            else:
-                raise ValueError(f"Can not get vision model from {self.model}")
+            for path in [
+                "vision_tower",
+                "vision_model",
+                "visual",
+                "model.visual",
+            ]:
+                vision_model = safe_deep_getattr(self.model, path, None)
+                if vision_model is not None:
+                    break
+            assert vision_model is not None, (
+                f"Can not get vision model from {self.model}"
+            )
         return vision_model
 
     @property
@@ -352,7 +362,24 @@ class HFModel(BaseModel):
                 "vision_model.radio_model.input_conditioner.norm_mean",
                 "vision_model.radio_model.input_conditioner.norm_std",
             ]
+        elif self.hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+            # Skip loading multi token prediction layer for Qwen3-5
+            filter_list = [
+                "mtp.*",
+            ]
         return filter_list
+
+    def _should_skip_tensor(self, name: str) -> bool:
+        """Check if tensor name matches any pattern in tensor_names_to_skip (supports regex)."""
+        for pattern in self.tensor_names_to_skip:
+            # Treat as regex if pattern contains regex metacharacters
+            if re.search(r"[*+?\[\](){}|^$\\]", pattern):
+                if re.fullmatch(pattern, name):
+                    return True
+            else:
+                if re.fullmatch(re.escape(pattern), name):
+                    return True
+        return False
 
     @property
     def delay_cp_slice_inputs(self):
@@ -458,7 +485,7 @@ class HFModel(BaseModel):
             device,
         ):
             # Skip tensors in the skip list
-            if name in self.tensor_names_to_skip:
+            if self._should_skip_tensor(name):
                 logger.info(f"Skipping {name} because it is in the skip list")
                 continue
 
@@ -589,7 +616,7 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
-            if name in self.tensor_names_to_skip:
+            if self._should_skip_tensor(name):
                 logger.info(f"Skipping {name} because it is in the skip list")
                 continue
             tp_slice_dim = None

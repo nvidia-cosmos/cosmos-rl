@@ -17,6 +17,7 @@ import os
 import copy
 import torch
 import unittest
+import transformers
 from contextlib import contextmanager
 from PIL import Image
 from qwen_vl_utils import process_vision_info
@@ -26,6 +27,12 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
 from accelerate import init_on_device
+
+
+def check_transformers_version(model_id) -> bool:
+    if model_id == "Qwen/Qwen3.5-4B":
+        return transformers.__version__ >= "5.2.0"
+    return True
 
 
 @contextmanager
@@ -66,12 +73,16 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen/Qwen3.5-4B",
             # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
             # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
             # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
+            if not check_transformers_version(model_id):
+                continue
+
             for dtype in [torch.bfloat16, torch.float32]:
                 # To avoid out-of-memory issues, bypass float32 precision for models which have more than 10B parameters
                 if (
@@ -85,6 +96,7 @@ class TestHFModel(unittest.TestCase):
                     and dtype == torch.float32
                 ):
                     continue
+
                 max_position_embeddings = 1024
                 device = torch.device("cuda:0")
                 # Load config
@@ -152,12 +164,16 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen/Qwen3.5-4B",
             # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
             # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
             # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
+            if not check_transformers_version(model_id):
+                continue
+
             dtype = torch.bfloat16
             max_position_embeddings = 4096
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
@@ -174,6 +190,7 @@ class TestHFModel(unittest.TestCase):
                         model_id,
                         max_position_embeddings=max_position_embeddings,
                     )
+
             cosmos_hf_model._apply(
                 lambda t: torch.empty_like(t, device=device)
                 if t.device.type == "meta"
@@ -187,6 +204,12 @@ class TestHFModel(unittest.TestCase):
                 model_id, parallel_dims, device, revision=None
             )
             cosmos_hf_model.eval()
+
+            # NOTE:
+            # Qwen3.5 models can encounter illegal memory access errors when using Flash Attention with transformers versions earlier than 5.4.0.
+            # This was resolved in transformers PR #44399, so for older versions we force the use of SDPA.
+            if model_id == "Qwen/Qwen3.5-4B" and transformers.__version__ < "5.4.0":
+                config._attn_implementation = "sdpa"
 
             hf_model = (
                 cosmos_hf_model.model_class.from_pretrained(
