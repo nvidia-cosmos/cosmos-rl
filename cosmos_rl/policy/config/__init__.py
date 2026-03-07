@@ -1010,12 +1010,11 @@ class ParallelismConfig(BaseModel):
         description=(
             "Pipeline parallelism schedule. "
             "Single-stage (1 stage per rank): '1F1B', 'GPipe'. "
-            "Multi-stage (>=2 virtual stages per rank): 'Interleaved1F1B', 'LoopedBFS', "
-            "'InterleavedZeroBubble', 'ZBVZeroBubble'. "
+            "Multi-stage (>=2 virtual stages per rank): 'Interleaved1F1B'. "
             "1F1B releases activations earlier than GPipe, reducing peak memory. "
             "Multi-stage schedules reduce pipeline bubbles but use more memory."
         ),
-        choices=["1F1B", "GPipe", "Interleaved1F1B", "LoopedBFS", "InterleavedZeroBubble", "ZBVZeroBubble"],
+        choices=["1F1B", "GPipe", "Interleaved1F1B"],
     )
     pp_layers_per_stage: int = Field(
         default=2,
