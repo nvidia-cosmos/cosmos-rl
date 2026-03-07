@@ -35,6 +35,13 @@ try:
 except ImportError:
     print("torch.distributed.fsdp is not available. DeepSeek model will not work.")
 
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
+from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_model import (
+    pipeline_model,
+)
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
+from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -64,11 +71,6 @@ def importlib_metadata_version_context():
 
 with importlib_metadata_version_context():
     from transformer_engine.pytorch.attention import DotProductAttention
-
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
-from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
-from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 
 
 def _get_dp_mesh(
@@ -130,8 +132,10 @@ def _apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims
             block.self_attn.attn_func = attn_func_with_cp
 
         if _model.lm_head is not None:
-            # Apply CP to the lm_head to get the logits for all tokens.
-            swizzle_cp_forward(_model.lm_head, parallel_dims)
+            # Register the CP gather hook on the outer model so the hook
+            # receives CosmosModelOutput (with .logits), not a plain Tensor
+            # from nn.Linear.
+            swizzle_cp_forward(model, parallel_dims)
 
 
 class _ExpertParallel(ParallelStyle):
@@ -263,12 +267,14 @@ def _init_meshes(
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
     device_module.set_device(device)
+
     meshes = parallel_dims.build_meshes_with_ep(device_type=device_type)
+
     return meshes
 
 
 @pre_parallelize_sanity_check
-def parallelize_model(
+def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
     config: CosmosConfig,
@@ -286,8 +292,6 @@ def parallelize_model(
         nn.Module: The parallelized DeepSeek model.
     """
     meshes = _init_meshes(parallel_dims)
-    del config
-    del pp_loss_fn
 
     assert model.config.n_routed_experts % parallel_dims.ep == 0, (
         f"n_routed_experts {model.config.n_routed_experts} must be divisible by "
@@ -295,15 +299,69 @@ def parallelize_model(
     )
     assert parallel_dims.tp == 1, "Tensor parallelism not support for DeepSeek model"
 
-    if parallel_dims.cp_enabled:
-        _apply_cp(model, meshes["default"]["cp"], parallel_dims)
+    if parallel_dims.pp_enabled:
+        local_rank = int(os.getenv("LOCAL_RANK", 0))
+        device_type, _ = _get_device_info()
+        device = torch.device(f"{device_type}:{local_rank}")
 
-    if parallel_dims.ep_enabled:
-        assert "moe" in meshes
-        _apply_ep(model, meshes["moe"]["ep"])
+        model_parts = pipeline_model(model, meshes, parallel_dims, device)
+        model.model_parts = model_parts
+        # Flag each model part so forward() returns plain tensors for PP infrastructure
+        for mp in model_parts:
+            mp._pp_enabled = True
+    else:
+        model_parts = [model]
 
-    _apply_ac(model)
+    for model_part in model_parts:
+        if parallel_dims.cp_enabled:
+            _apply_cp(model_part, meshes["default"]["cp"], parallel_dims)
 
-    _apply_fsdp(model, meshes, parallel_dims)
+        if parallel_dims.ep_enabled:
+            assert "moe" in meshes
+            _apply_ep(model_part, meshes["moe"]["ep"])
+
+        _apply_ac(model_part)
+
+        _apply_fsdp(model_part, meshes, parallel_dims)
+
+    if parallel_dims.pp_enabled:
+        from cosmos_rl.utils.pipelining.pipelining_utils import (
+            build_pipeline_schedule,
+            generate_split_points,
+        )
+
+        pp_mesh = meshes["default"]["pp"]
+        num_dense_layers = model.config.n_dense_layers
+        num_moe_layers = model.config.n_layers - num_dense_layers
+        splits = generate_split_points(
+            schedule_str=parallel_dims.pp_schedule,
+            pp_size=parallel_dims.pp,
+            num_layers_per_stage=parallel_dims.pp_layers_per_stage,
+            num_moe_layers=num_moe_layers,
+            num_dense_layers=num_dense_layers,
+        )
+        num_stages = len(splits) - 1
+
+        pp_scheduler = build_pipeline_schedule(
+            pp_mesh=pp_mesh,
+            batch_size=config.train.train_batch_per_replica,
+            num_stages=num_stages,
+            schedule_str=parallel_dims.pp_schedule,
+            microbatch_size=config.policy.parallelism.pp_micro_batch_size,
+            model_parts=model_parts,
+            device=device,
+            loss_fn=pp_loss_fn,
+        )
+        pp_scheduler_val = build_pipeline_schedule(
+            pp_mesh=pp_mesh,
+            batch_size=config.train.train_batch_per_replica,
+            num_stages=num_stages,
+            schedule_str=parallel_dims.pp_schedule,
+            microbatch_size=config.policy.parallelism.pp_micro_batch_size,
+            model_parts=model_parts,
+            device=device,
+            loss_fn=pp_loss_fn,
+        )
+        return pp_scheduler, pp_scheduler_val
 
     return None, None
