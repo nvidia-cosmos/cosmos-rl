@@ -873,21 +873,58 @@ class HFVLMDataPacker(DataPacker):
                 del x["label_ids"]
         return self._collate_fn(processed_samples, computed_max_len)
 
+    @staticmethod
+    def _detect_media_types(sample: "HFVLMDataPacker.Payload") -> str:
+        """Classify a conversation sample as 'text', 'image', 'video', or 'mixed'."""
+        types_found: set = set()
+        if isinstance(sample, list):
+            for msg in sample:
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict):
+                            t = c.get("type", "text")
+                            if t in ("image", "video"):
+                                types_found.add(t)
+                elif isinstance(content, str):
+                    types_found.add("text")
+        if not types_found:
+            return "unknown"
+        if len(types_found) > 1:
+            return "mixed(" + "+".join(sorted(types_found)) + ")"
+        return next(iter(types_found))
+
     def sft_process_sample(self, sample: "HFVLMDataPacker.Payload") -> Dict[str, Any]:
         """
         Accepts either raw text or conversation format.
         """
         result = self.get_policy_input(sample, add_generation_prompt=False)
 
-        # Safety check: if the sequence still exceeds model_max_length after
-        # upstream pixel-budget control, raise so the caller can skip and retry
-        # with the next sample rather than hitting a token/feature mismatch
-        # inside the model forward pass.
         max_len = getattr(self.config.policy, "model_max_length", None)
         if max_len is not None and len(result["input_ids"]) > max_len:
-            raise ValueError(
-                f"Sample exceeds model_max_length after tokenization "
-                f"({len(result['input_ids'])} > {max_len}), skipping."
+            media_type = self._detect_media_types(sample)
+            has_vision = (
+                result.get("pixel_values") is not None
+                or result.get("pixel_values_videos") is not None
+            )
+            if has_vision:
+                # Vision samples cannot be safely truncated because input_ids
+                # contain vision placeholder tokens that must stay aligned with
+                # pixel tensors.  Raise so the caller can retry with another sample.
+                raise ValueError(
+                    f"[{media_type}] Sample exceeds model_max_length after tokenization "
+                    f"({len(result['input_ids'])} > {max_len}), skipping."
+                )
+            # Text-only: safe to truncate since there are no vision tensors.
+            orig_len = len(result["input_ids"])
+            result["input_ids"] = result["input_ids"][:max_len]
+            if "label_ids" in result:
+                result["label_ids"] = result["label_ids"][:max_len]
+            if "logprob_masks" in result:
+                result["logprob_masks"] = result["logprob_masks"][:max_len]
+            print(
+                f"WARNING: [{media_type}] Truncated sample from {orig_len} to "
+                f"{max_len} tokens."
             )
 
         return result

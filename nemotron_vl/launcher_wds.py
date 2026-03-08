@@ -19,6 +19,7 @@ import webdataset as wds
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombWarning for large images
 import io
+import struct
 from typing import Any, Iterator, Union, List, Optional, Sequence
 import glob
 import torch, re
@@ -581,6 +582,25 @@ def _decode_video_from_bytes(blob: bytes, ele: dict,
         return _decode_video_decord(blob, ele, decoding_timeout)
 
 
+def _unpack_frames(blob: bytes) -> list[Image.Image]:
+    """Decode a packed-JPEG blob back into a list of PIL Images.
+
+    Binary format: [N uint32] ([len_i uint32] [jpeg_bytes_i])*
+    """
+    if isinstance(blob, (memoryview, bytearray)):
+        blob = bytes(blob)
+    offset = 0
+    (n,) = struct.unpack_from(">I", blob, offset)
+    offset += 4
+    frames = []
+    for _ in range(n):
+        (length,) = struct.unpack_from(">I", blob, offset)
+        offset += 4
+        frames.append(Image.open(io.BytesIO(blob[offset:offset + length])).convert("RGB"))
+        offset += length
+    return frames
+
+
 def _attach_media_from_sample(messages: list[dict], sample: dict,
                                video_sample_fps: float = 1.0,
                                default_max_frames: int = 768) -> list[dict] | None:
@@ -612,6 +632,17 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
         # infer from c["type"] if present
         kind = c.get("type", None)
 
+        # Fix mislabelled media: if kind says "video" but the field name or
+        # orig_path clearly points to an image file, treat it as an image.
+        if kind == "video":
+            _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff")
+            orig_path = c.get("orig_path", "")
+
+            if orig_path.lower().endswith(_IMAGE_EXTS):
+                assert field.startswith(("jpg", "jpeg", "png", "bmp", "webp", "tiff")), f"field={field} should start with (jpg, jpeg, png, bmp, webp, tiff)"
+                kind = "image"
+                c["type"] = "image"
+
         if kind == "image":
             try:
                 img = Image.open(io.BytesIO(blob)).convert("RGB")
@@ -619,6 +650,35 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
                 print(f"WARNING: Failed to decode image (field={field}): {e}")
                 return None
             c["image"] = img  # IMPORTANT: this matches many VLM preprocessors
+        elif kind == "video_frames":
+            # Pre-extracted frames packed as JPEG blob — no video decoding needed.
+            try:
+                pil_frames = _unpack_frames(blob)
+            except Exception as e:
+                print(f"WARNING: Failed to unpack video frames (field={field}): {e}")
+                return None
+
+            extracted_fps = c.get("extracted_fps", 1.0)
+            total_frames = len(pil_frames)
+
+            c.setdefault("fps", video_sample_fps)
+            c.setdefault("max_frames", default_max_frames)
+
+            start_frame, end_frame, subsamp_total = calculate_video_frame_range(
+                c, total_frames, extracted_fps)
+            nframes = smart_nframes(c, total_frames=subsamp_total, video_fps=extracted_fps)
+            idx = torch.linspace(start_frame, end_frame, nframes).round().long().tolist()
+            idx = [min(max(i, start_frame), end_frame) for i in idx]
+
+            pil_frames = [pil_frames[i] for i in idx]
+
+            c["type"] = "video"
+            c["video"] = pil_frames
+            c["sample_fps"] = extracted_fps
+            c["raw_fps"] = extracted_fps
+
+            for extra_key in ("ext", "orig_path"):
+                c.pop(extra_key, None)
         elif kind == "video":
             # Ensure defaults so smart_nframes / calculate_video_frame_range
             # see the same keys that qwen_vl_utils._read_video_decord would.
@@ -629,7 +689,7 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
                 pil_frames, sample_fps, video_fps = _decode_video_from_bytes(
                     blob, ele=c)
             except Exception as e:
-                print(f"WARNING: Failed to decode video (field={field}): {e}")
+                print(f"WARNING: Failed to decode video (field={field}, orig_path={c.get('orig_path', '?')}): {e}")
                 return None  # signals preprocess_sample to skip
 
             c["video"] = pil_frames
@@ -862,7 +922,7 @@ class CustomWebDatasetDataset(Dataset):
                 content = msg.get("content", [])
                 if isinstance(content, list):
                     for c in content:
-                        if isinstance(c, dict) and c.get("type") == "video":
+                        if isinstance(c, dict) and c.get("type") in ("video", "video_frames"):
                             has_video = True
                             break
                 if has_video:
@@ -986,6 +1046,49 @@ def step_hook(self, step: int) -> Optional[dict]:
         self._stateful_expert_load_per_layer = {}
     return report_data
 
+def custom_qwen3vl_separate_model_parts(self):
+    """Fine-grained model parts for Qwen3VL: return merger separately instead of the whole vision_model."""
+    from typing import List
+    import torch.nn as nn
+
+    if not self.is_vlm:
+        return [self.model]
+
+    parts: List[nn.Module] = [self.language_model]
+
+    vision_model = self.vision_model
+    merger = getattr(vision_model, 'merger', None)
+    if merger is not None:
+        parts.append(merger)
+    deepstack = getattr(vision_model, 'deepstack_merger_list', None)
+    if deepstack is not None and len(deepstack) > 0:
+        parts.append(deepstack)
+
+    if merger is None:
+        parts.append(vision_model)
+
+    all_params = set()
+    for part in parts:
+        all_params.update(set(part.parameters()))
+
+    modules_to_check = list(self.model.children())
+    while modules_to_check:
+        module = modules_to_check.pop(0)
+        if any(module is part for part in parts):
+            continue
+        elif not any(part in module.modules() for part in parts):
+            module_params = set(module.parameters())
+            if not module_params or module_params <= all_params:
+                continue
+            if not any(p.requires_grad for p in module.parameters()):
+                continue
+            all_params.update(module_params)
+            parts.append(module)
+        else:
+            modules_to_check.extend(module.children())
+
+    return parts
+
 def get_dataset(config: CosmosConfig):
     return CustomWebDatasetDataset()
 
@@ -1020,6 +1123,9 @@ if __name__ == "__main__":
             cosmos_rl.policy.model.hf_models.convert_weight_from_hf = convert_weight_from_hf
             cosmos_rl.policy.model.hf_models.HFModel.step_hook = step_hook
             cosmos_rl.policy.model.hf_models.weight_mapper.HFModelWeightMapper.policy_map_local_key_for_export_tensor = policy_map_local_key_for_export_tensor
+    elif model_arch == "Qwen3VLForConditionalGeneration":
+        # Qwen3VL: use fine-grained optimizer groups
+        cosmos_rl.policy.model.hf_models.HFModel.separate_model_parts = custom_qwen3vl_separate_model_parts
     else:
         # For other model types, no custom dataset or monkey patches are applied.
         pass
