@@ -959,6 +959,13 @@ class TrainingConfig(BaseModel):
             logger.warning("Seed is negative, setting to 42")
             self.seed = 42
 
+        # If optm_lr is a dict, ensure `global` key is present for default learning rate
+        # Otherwise, some uncovered params will be left `requires_grad=True` but with no optimizer updating them, which can cause confusion.
+        if isinstance(self.optm_lr, dict):
+            assert (
+                "global" in self.optm_lr
+            ), "optm_lr dict must contain a 'global' key for default learning rate"
+
         return self
 
 

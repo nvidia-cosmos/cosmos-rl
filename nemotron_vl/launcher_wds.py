@@ -14,10 +14,8 @@
 # limitations under the License.
 
 import json
-from typing import Optional
 import os, sys
 import webdataset as wds
-from torch.utils.data import IterableDataset
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombWarning for large images
 import io
@@ -31,52 +29,15 @@ from qwen_vl_utils.vision_process import smart_nframes, calculate_video_frame_ra
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from nemotron_parallelize import parallelize
 from weight_converter import convert_weight_from_hf
+from launcher import resolve_model_dir
 from torch.utils.data import Dataset
 from cosmos_rl.policy.config import Config as CosmosConfig
-
 from webdataset.tariterators import (
     base_plus_ext as _wds_base_plus_ext,
     valid_sample as _wds_valid_sample,
     url_opener as _wds_url_opener,
     tar_file_expander as _wds_tar_file_expander,
 )
-
-from pathlib import Path
-from typing import Optional, Union
-
-from huggingface_hub import snapshot_download
-
-
-def resolve_model_dir(
-    model_id_or_path: Union[str, Path],
-    *,
-    revision: Optional[str] = None,
-    cache_dir: Optional[Union[str, Path]] = None,
-    local_files_only: bool = False,
-) -> str:
-    """
-    Resolve either:
-      - a local directory containing model files, OR
-      - a Hugging Face Hub repo id (optionally with revision)
-
-    Returns an absolute path to a local directory.
-    """
-    p = Path(model_id_or_path).expanduser()
-
-    # If it's an existing local directory, return it.
-    if p.exists():
-        if p.is_dir():
-            return str(p.resolve())
-        # If they passed a file inside the dir, treat its parent as model dir.
-        return str(p.parent.resolve())
-
-    # Otherwise treat as Hub repo id and download snapshot -> local dir.
-    return snapshot_download(
-        repo_id=str(model_id_or_path),
-        revision=revision,
-        cache_dir=str(Path(cache_dir).expanduser()) if cache_dir else None,
-        local_files_only=local_files_only,
-    )
 
 
 try:
@@ -1051,8 +1012,7 @@ if __name__ == "__main__":
         os.environ["USE_QWEN_VL_PROCESS"] = "1"
         os.environ["USE_SIGLIP2_PROCESS"] = "1"
 
-    if model_arch in ["NemotronHForCausalLM", "NemotronVLForConditionCausalLM"]:
-        if text_config.get("n_routed_experts", 0) > 0:
+    if model_arch in ["NemotronHForCausalLM", "NemotronVLForConditionCausalLM"] and text_config.get("n_routed_experts", 0) > 0:
             # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
             os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
             # This only applies to Nemotron Hybrid model with MoE enabled

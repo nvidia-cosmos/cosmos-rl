@@ -175,7 +175,7 @@ class NemotronHConfig(PretrainedConfig):
         mamba_proj_bias=False,
         mamba_chunk_size=128,
         rescale_prenorm_residual=True,
-        n_routed_experts=8,
+        n_routed_experts=0,
         n_shared_experts=1,
         moe_intermediate_size=7688,
         moe_shared_expert_intermediate_size=7688,
