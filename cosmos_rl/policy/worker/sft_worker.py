@@ -948,10 +948,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
                                 f"[SFT] Error calling custom logger function: {e}"
                             )
 
-                if self.train_step >= self.total_steps:
-                    stop_training = True
-                    break  # break outer epoch loop
-
                 val_avg_loss = self.validate(
                     current_epoch=cur_epoch, is_last_step=False
                 )
@@ -967,6 +963,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
 
                 self.profiler.step()
+
+                if self.train_step >= self.total_steps:
+                    stop_training = True
+                    break  # break outer epoch loop
 
             if stop_training:
                 break
