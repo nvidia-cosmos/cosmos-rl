@@ -28,7 +28,9 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.wfm.tokenizer.base import VideoTokenizerInterface
 from cosmos_rl.utils.wfm.distributed import (
     broadcast,
+    get_global_parallel_dims,
     get_rank,
+    get_world_size,
     sync_model_states,
 )
 from cosmos_rl.utils.wfm.io.easy_io import easy_io
@@ -803,6 +805,25 @@ def _video_vae(
                     torch.randn(1, 16, 32, 1, 1, device=device),
                     torch.randn(1, 16, 32, 1, 1, device=device),
                 )
+    global_rank = get_rank()
+    local_rank = int(os.getenv("LOCAL_RANK", -1))
+    world_size = get_world_size()
+    num_param_tensors = len(list(model.parameters()))
+    worker_role = os.getenv("COSMOS_ROLE", "unknown")
+    tp_rank = "uninitialized"
+    pp_rank = "uninitialized"
+    try:
+        parallel_dims = get_global_parallel_dims()
+        tp_rank = str(parallel_dims.tp_coord[0])
+        pp_rank = str(parallel_dims.pp_coord[0])
+    except Exception:
+        pass
+    logger.warning(
+        "[_video_vae] before sync_model_states | "
+        f"global_rank={global_rank}, local_rank={local_rank}, world_size={world_size}, "
+        f"num_param_tensors={num_param_tensors}, role={worker_role}, "
+        f"pp_stage={pp_rank}, tp_rank={tp_rank}"
+    )
     sync_model_states(model)
 
     if load_mean_std:
