@@ -2105,8 +2105,9 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         # TODO(jiaxinc): Hardcode here since it is not consistent between `config.json` and `tokenizer_config.json`
-        pad_token_id = 11
-        padding_mask = extract_padding_mask(input_ids, pad_token_id)
+        # pad_token_id = 11
+        padding_mask = None
+        # padding_mask = extract_padding_mask(input_ids, pad_token_id)
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)

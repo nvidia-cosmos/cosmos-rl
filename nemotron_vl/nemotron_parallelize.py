@@ -243,8 +243,8 @@ def parallelize(
             n_expert_groups=language_model_config.n_group,
             n_limited_groups=language_model_config.topk_group,
             train_gate=gate_training_enabled,
-            gate_bias_update_factor=1e-3 if gate_training_enabled else 0.0,
-            aux_loss_coeff=1e-4 if gate_training_enabled else 0.0,
+            gate_bias_update_factor=config.custom.get("moe_gate_bias_update_factor", 1e-3) if gate_training_enabled else 0.0,
+            aux_loss_coeff=config.custom.get("moe_aux_loss_coeff", 1e-4) if gate_training_enabled else 0.0,
             score_func="sigmoid", # TODO(jiaxinc): hardcoded to be consistent with the original implementation
             route_scale=language_model_config.routed_scaling_factor,
             dim=language_model_config.hidden_size,
