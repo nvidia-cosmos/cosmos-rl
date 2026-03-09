@@ -951,6 +951,8 @@ class HFVLMDataPacker(DataPacker):
                 for i, tok in enumerate(input_ids):
                     if tok in vision_ids:
                         last_vision_pos = i
+                        if last_vision_pos >= max_len:
+                            break
                 if last_vision_pos >= max_len:
                     raise ValueError(
                         f"[{media_type}] Sample exceeds model_max_length after tokenization "
