@@ -118,6 +118,8 @@ class SFTTrainer(DiffusersTrainer):
         ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             if self.config.train.ckpt.enable_checkpoint:
                 logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                if self.config.train.ema_enable and self.ema is not None:
+                    self.ema.copy_ema_to(self.model.trainable_params, store_temp=True)
                 model_state_dict = self.model.get_trained_model_state_dict()
                 self.ckpt_manager.save_checkpoint(
                     model=model_state_dict,
@@ -127,15 +129,25 @@ class SFTTrainer(DiffusersTrainer):
                     total_steps=total_steps,
                     is_final=is_last_step,
                 )
-                # TODO(yy): support save safetensor
-                # self.ckpt_manager.save_check(
-                #     step=train_step,
-                #     val_score=val_score,
-                #     pp_enabled=self.parallel_dims.pp_enabled,
-                #     pp_last_stage=pp_last_stage,
-                #     pp_master_rank=self.parallel_dims.world_size
-                #     - self.parallel_dims.world_size / self.parallel_dims.pp,
-                # )
+                self.ckpt_manager.save_check(step=train_step)
+                # Restore current weights after saving ema weights to checkpoint
+                if self.config.train.ema_enable and self.ema is not None:
+                    self.ema.copy_temp_to(self.model.trainable_params)
+
+            if self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{train_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=is_last_step,
+                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                )
 
     def step_training(self, global_batch, total_steps, train_step, save_freq):
         if self.lr_schedulers is None:
@@ -184,6 +196,8 @@ class SFTTrainer(DiffusersTrainer):
 
         self.optimizers.step()
         self.lr_schedulers.step()
+        if self.config.train.ema_enable and self.ema is not None:
+            self.ema.step(self.trainable_params, train_step)
 
         end_event.record()
 

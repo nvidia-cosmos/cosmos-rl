@@ -37,9 +37,12 @@ from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
+from cosmos_rl.utils.util import (
+    copy_weights_with_decay,
+    is_master_rank,
+    str2torch_dtype,
+)
 from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
 
@@ -109,15 +112,6 @@ class NFTTrainer(DiffusersTrainer):
             src_params=self.trainable_params,
             tgt_params=self.old_trainable_params,
         )
-
-        # Create ema if needed
-        if self.config.train.ema_enable:
-            self.ema = EMAModuleWrapper(
-                parameters=self.trainable_params,
-                decay=self.config.train.ema_decay,
-                update_step_interval=self.config.train.ema_update_step_interval,
-                device=self.device,
-            )
 
         self.grpo_config = self.config.train.train_policy
 
@@ -822,6 +816,20 @@ class NFTTrainer(DiffusersTrainer):
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):
+            if self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{current_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=current_step == total_steps,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
+                )
             self.save_checkpoint(
                 current_step=current_step,
                 total_steps=total_steps,
