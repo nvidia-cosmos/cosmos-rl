@@ -519,7 +519,6 @@ class HFVLMDataPacker(DataPacker):
                 kwarg["video_metadata"] = video_metadatas
                 kwarg["do_resize"] = False
 
-
                 if self.use_siglip2_process:
                     # Read max_pixels from content dicts (set by modify_messages
                     # in launcher_wds.py); the processor converts to max_num_patches.
