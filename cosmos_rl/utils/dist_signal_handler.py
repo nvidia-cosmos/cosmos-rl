@@ -13,73 +13,98 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import signal
-import torch
-
-
-def get_world_size():
-    assert torch.distributed.is_initialized(), "Torch Distributed is not initialized"
-    return torch.distributed.get_world_size()
-
-
-def get_device(local_rank=None):
-    backend = torch.distributed.get_backend()
-    if "nccl" in backend:
-        if local_rank is None:
-            device = torch.device("cuda")
-        else:
-            device = torch.device(f"cuda:{local_rank}")
-    elif "gloo" in backend:
-        device = torch.device("cpu")
-    else:
-        raise RuntimeError
-    return device
-
-
-def all_gather_item(
-    item, dtype, group=None, async_op=False, local_rank=None
-) -> list[bool]:
-    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
-        return [item]
-
-    device = get_device(local_rank)
-
-    if group is not None:
-        group_size = group.size()
-    else:
-        group_size = get_world_size()
-
-    tensor = torch.tensor([item], device=device, dtype=dtype)
-    output_tensors = [
-        torch.zeros(1, dtype=tensor.dtype, device=tensor.device)
-        for _ in range(group_size)
-    ]
-    torch.distributed.all_gather(output_tensors, tensor, group, async_op)
-    output = [elem.item() for elem in output_tensors]
-    return output
+from typing import List
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.distributed import all_gather_object_cpu
 
 
 class DistributedSignalHandler:
-    def __init__(self, sig: signal.Signals = signal.SIGTERM):
-        self.sig = sig
+    @classmethod
+    def get_instance(
+        cls, sig: List[str] = None, processes=None
+    ) -> "DistributedSignalHandler":
+        if not hasattr(DistributedSignalHandler, "_instance"):
+            assert sig is not None, (
+                "Signal list must be provided for the first time to initialize the DistributedSignalHandler instance."
+            )
+            DistributedSignalHandler._instance = DistributedSignalHandler(
+                sig, processes
+            )
+        return DistributedSignalHandler._instance
 
+    def __init__(self, sig: List[str], processes=None):
+        self.sig = sig
         self._signal_received = False
         self.released = False
-        self.original_handler = signal.getsignal(self.sig)
+        self.original_handler = {
+            signal.Signals[s.upper()]: signal.getsignal(signal.Signals[s.upper()])
+            for s in self.sig
+        }
+        self.processes = processes
 
-        def handler(signum, frame):
+        def handler_default(signum, frame):
+            logger.info(
+                f"Signal {signum} received, setting signal_received to True in handler_default at {os.getpid()}"
+            )
             self._signal_received = True
 
-        signal.signal(self.sig, handler)
+        def handler(signum, frame):
+            import psutil
+
+            logger.info(
+                f"Signal {signum} received, forwarding to subprocesses at {os.getpid()}"
+            )
+            # forward to the entire subprocess group except for itself to avoid the risk of killing itself before forwarding the signal
+            for p in self.processes:  # skip the controller process if it exists
+                p = psutil.Process(p.pid)
+                for c in p.children(recursive=False):
+                    try:
+                        cmd = c.cmdline()  # list[str]
+                        cmd_str = " ".join(cmd).lower()
+                        logger.info(f"Process name: cmdline: {cmd_str} {c.pid}")
+                        if "torchrun" in cmd_str:
+                            tp = psutil.Process(c.pid)
+                            for tp_c in tp.children(recursive=False):
+                                cmd = tp_c.cmdline()
+                                cmd_str = " ".join(cmd).lower()
+                                logger.info(
+                                    f"Process name in torchrun: cmdline: {cmd_str} {tp_c.pid}"
+                                )
+                                if "python" in cmd[0] and "torchrun" not in cmd_str:
+                                    logger.info(
+                                        f"Sending signal {signum} to process in torchrun {tp_c.pid} with cmdline: {cmd_str}"
+                                    )
+                                    os.kill(tp_c.pid, signum)
+                        elif "python" in cmd[0] and "torchrun" not in cmd_str:
+                            logger.info(
+                                f"Sending signal {signum} to process {c.pid} with cmdline: {cmd_str}"
+                            )
+                            os.kill(c.pid, signum)
+                    except ProcessLookupError as e:
+                        logger.warning(
+                            f"Process {c.pid} does not exist anymore when sending signal: {e}"
+                        )
+            logger.info(
+                f"Finished forwarding signal {signum} to subprocesses at {os.getpid()}"
+            )
+
+        for s in self.original_handler.keys():
+            signal.signal(s, handler if self.processes is not None else handler_default)
+            logger.info(
+                f"Signal handler for signal {s} is set to {handler if self.processes is not None else handler_default}, pid {os.getpid()}"
+            )
 
     def signals_received(self):
-        all_received = all_gather_item(self._signal_received, dtype=torch.int32)
+        all_received = all_gather_object_cpu(self._signal_received)
         return all_received
 
     def release(self):
         if self.released:
             return False
 
-        signal.signal(self.sig, self.original_handler)
+        for s, handler in self.original_handler.items():
+            signal.signal(s, handler)
         self.released = True
         return True

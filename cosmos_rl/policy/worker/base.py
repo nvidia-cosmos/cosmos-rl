@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import signal
 import torch
 
 from transformers import AutoConfig
@@ -86,9 +85,9 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
 
         self.signal_handler = None
         if self.config.train.save_ckpt_at_exit:
-            sig = signal.Signals[self.config.train.signal_to_handle.upper()]
-            logger.info(f"Setting up signal handler for signal: {sig}.")
-            self.signal_handler = DistributedSignalHandler(sig)
+            self.signal_handler = DistributedSignalHandler.get_instance(
+                self.config.train.signal_to_handle
+            )
 
     def check_config(self):
         mini_batch = 1

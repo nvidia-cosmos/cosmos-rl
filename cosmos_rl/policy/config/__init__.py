@@ -889,13 +889,13 @@ class TrainingConfig(BaseModel):
     )
 
     save_ckpt_at_exit: bool = Field(
-        default=False,
-        description="Whether to save checkpoint at exit. If set to True, the checkpoint will be saved when the process receives a specified signal.",
+        default=True,
+        description="Whether to save checkpoint at exit. If set to True, the checkpoint will be saved when the process receives a specified signal, normally specified as SIGUSR1.",
     )
 
-    signal_to_handle: str = Field(
-        default="SIGTERM",
-        description="The signal to handle. If set to SIGTERM, the checkpoint will be saved when the process receives a SIGTERM signal.",
+    signal_to_handle: List[str] = Field(
+        default_factory=lambda: ["SIGUSR1"],
+        description="The signal to handle. When the process receives any of these signals, it will trigger a checkpoint save if `save_ckpt_at_exit` is True. Specified as SIGUSR1.",
     )
 
     @model_validator(mode="after")

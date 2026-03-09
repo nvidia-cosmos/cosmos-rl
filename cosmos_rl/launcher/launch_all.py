@@ -42,6 +42,7 @@ from cosmos_rl.launcher.utility import (
     NodesManager,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
@@ -863,6 +864,17 @@ cosmos-rl --config config.toml"""
 
         # Launch all processes
         processes.extend(launch_processes(command_collections))
+
+    policy_processes = []
+    for p in processes:
+        if "--type policy" in p.args:
+            policy_processes.append(p)
+            logger.info(
+                f"Registering policy process {p.pid} for signal handling {p.args}"
+            )
+
+    # SIGUSR1 used for slurm jop timeout case ckpt saving therefore register signal handler for processing the ckpt handling.
+    DistributedSignalHandler.get_instance(["SIGUSR1"], policy_processes)
 
     # Wait for all processes to complete without blocking
     while len(processes) > 0:
