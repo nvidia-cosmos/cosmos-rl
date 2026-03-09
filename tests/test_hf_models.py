@@ -29,7 +29,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
 from accelerate import init_on_device
 
 
-def check_transformers_version(model_id) -> bool:
+def is_transformers_version_compatible(model_id) -> bool:
     if model_id == "Qwen/Qwen3.5-4B":
         return transformers.__version__ >= "5.2.0"
     return True
@@ -80,7 +80,7 @@ class TestHFModel(unittest.TestCase):
             # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
             # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
-            if not check_transformers_version(model_id):
+            if not is_transformers_version_compatible(model_id):
                 continue
 
             for dtype in [torch.bfloat16, torch.float32]:
@@ -171,7 +171,7 @@ class TestHFModel(unittest.TestCase):
             # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
             # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
-            if not check_transformers_version(model_id):
+            if not is_transformers_version_compatible(model_id):
                 continue
 
             dtype = torch.bfloat16
