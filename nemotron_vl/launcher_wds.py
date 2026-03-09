@@ -680,10 +680,36 @@ class CustomWebDatasetDataset(Dataset):
         custom = config.custom if hasattr(config, "custom") and config.custom is not None else {}
         self.include_video = bool(custom.get("include_video", False))
         self.video_sample_fps = float(custom.get("video_sample_fps", 1.0))
-        self.shuffle_buf = int(custom.get("wds_shuffle", 2000))  # 0 disables
+        self.shuffle_buf = int(custom.get("wds_shuffle", 100))  # 0 disables
 
         self.n_shards_to_skip = 0
         self.n_samples_to_skip_in_shard = 0
+
+        webdataset_root_paths = custom["webdataset_root_paths"]
+        if isinstance(webdataset_root_paths, str):
+            webdataset_root_paths = [webdataset_root_paths]
+
+        total_items = 0
+        rows_per_shard = None
+        # Check `meta.json` inside each path
+        for root_path in webdataset_root_paths:
+            meta_json_path = os.path.join(root_path, "meta.json")
+            if not os.path.exists(meta_json_path):
+                raise FileNotFoundError(f"meta.json not found in {root_path}")
+            with open(meta_json_path, "r") as f:
+                meta_json = json.load(f)
+            total_items += meta_json["total_items"]
+            local_rows_per_shard = meta_json["rows_per_shard"]
+            if rows_per_shard is None:
+                rows_per_shard = local_rows_per_shard
+            elif rows_per_shard != local_rows_per_shard:
+                print(f"Rows per shard mismatch: previously {rows_per_shard}, but {root_path} has {local_rows_per_shard}. Using the first one: {rows_per_shard}.")
+            
+
+        # Optional length hint (only used if someone calls len())
+        self._length_hint = total_items
+        self.urls = _expand_wds_urls(webdataset_root_paths)
+
         resume_path = config.train.resume
         if resume_path and isinstance(resume_path, str) and os.path.exists(resume_path):
             # Check the current step from the resume checkpoint to determine 
@@ -693,10 +719,9 @@ class CustomWebDatasetDataset(Dataset):
                 extra_info = torch.load(rank_0_state_path, map_location="cpu", weights_only=False)
                 resume_step = extra_info.get("step", 0)
 
-                # TODO(jiaxinc): 50000 is a rough number for all tar files.
                 # Get worker number, the more workers, the more steps per shard
                 num_workers = self.cosmos_config.train.train_policy.dataloader_num_workers or 1
-                n_steps_per_shard = 50000 * num_workers // self.cosmos_config.train.train_batch_per_replica
+                n_steps_per_shard = rows_per_shard * num_workers // self.cosmos_config.train.train_batch_per_replica
                 self.n_shards_to_skip = resume_step // n_steps_per_shard
                 self.n_samples_to_skip_in_shard = (resume_step % n_steps_per_shard) * self.cosmos_config.train.train_batch_per_replica // num_workers
                 self.n_samples_to_skip_in_shard += int(self.shuffle_buf * 0.5)
@@ -707,23 +732,6 @@ class CustomWebDatasetDataset(Dataset):
         if self.n_shards_to_skip > 0 or self.n_samples_to_skip_in_shard > 0:
             print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
 
-        webdataset_root_paths = custom["webdataset_root_paths"]
-        if isinstance(webdataset_root_paths, str):
-            webdataset_root_paths = [webdataset_root_paths]
-
-        total_items = 0
-        # Check `meta.json` inside each path
-        for root_path in webdataset_root_paths:
-            meta_json_path = os.path.join(root_path, "meta.json")
-            if not os.path.exists(meta_json_path):
-                raise FileNotFoundError(f"meta.json not found in {root_path}")
-            with open(meta_json_path, "r") as f:
-                meta_json = json.load(f)
-            total_items += meta_json["total_items"]
-
-        # Optional length hint (only used if someone calls len())
-        self._length_hint = total_items
-        self.urls = _expand_wds_urls(webdataset_root_paths)
 
         # Per-sample pixel budget is computed dynamically in modify_messages()
         # using approx_max_pixels(), so we only store max_seq_len here.
