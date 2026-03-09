@@ -236,6 +236,7 @@ _tarfile_to_samples_tolerant = wds.filters.pipelinefilter(
 # Per-image pixel cap: at most ~1960 vision tokens per image.
 # 1960 * (patch_size * merge_size)^2 = 1960 * 32 * 32
 IMAGE_MAX_PIXELS = 1960 * 32 * 32
+VIDEO_MAX_PIXELS = 196 * 30 * 32 * 32
 
 
 def approx_max_pixels(messages, max_seq_len):
@@ -275,12 +276,6 @@ def modify_messages(messages, max_seq_len=None):
     * Returns **None** when the sample cannot fit any vision content,
       signalling the caller to drop it.
     """
-    max_pixels = None
-    if max_seq_len is not None:
-        max_pixels = approx_max_pixels(messages, max_seq_len)
-        if max_pixels is None:
-            return None  # text alone already fills the context
-
     # Count total vision items so we can split the budget fairly.
     n_vision_items = 0
     for message in messages:
@@ -289,11 +284,6 @@ def modify_messages(messages, max_seq_len=None):
             for c in content:
                 if isinstance(c, dict) and c.get('type') in ('image', 'video'):
                     n_vision_items += 1
-
-    # Per-item pixel share of the total budget.
-    per_item_pixels = None
-    if max_pixels is not None and n_vision_items > 0:
-        per_item_pixels = int(max_pixels / n_vision_items)
 
     for message in messages:
         if isinstance(message['content'], str):
@@ -306,13 +296,9 @@ def modify_messages(messages, max_seq_len=None):
             continue
         for content in message['content']:
             if content.get('type') == 'image':
-                pixel_cap = IMAGE_MAX_PIXELS
-                if per_item_pixels is not None:
-                    pixel_cap = min(pixel_cap, per_item_pixels)
-                content['max_pixels'] = pixel_cap
+                content['max_pixels'] = IMAGE_MAX_PIXELS
             elif content.get('type') == 'video':
-                if per_item_pixels is not None:
-                    content['total_pixels'] = per_item_pixels
+                content['total_pixels'] = VIDEO_MAX_PIXELS
     return messages
 
 def modify_messages_siglip2(messages, max_num_patches=256, max_frame_num_patches=196,
@@ -332,25 +318,6 @@ def modify_messages_siglip2(messages, max_num_patches=256, max_frame_num_patches
 
     Returns None if text alone fills the context (signals caller to drop sample).
     """
-    # Step 1: Dynamic overflow cap (optional)
-    dynamic_per_item = None
-    if max_seq_len is not None:
-        dynamic_max = approx_max_pixels(messages, max_seq_len)
-        if dynamic_max is None:
-            return None  # text alone fills the context
-
-        # Count vision items for fair sharing of the dynamic budget
-        n_vision = 0
-        for message in messages:
-            content = message.get('content')
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get('type') in ('image', 'video'):
-                        n_vision += 1
-        if n_vision > 0:
-            dynamic_per_item = int(dynamic_max / n_vision)
-
-    # Step 2: Apply fixed budgets per message, capped by dynamic budget
     for message in messages:
         if isinstance(message['content'], str):
             if message.get('role') in ('system', 'assistant'):
@@ -359,30 +326,13 @@ def modify_messages_siglip2(messages, max_num_patches=256, max_frame_num_patches
         if not isinstance(message['content'], list):
             continue
 
-        # Count images in this message for the <4 / >=4 threshold
-        num_images = 0
-        for content in message['content']:
-            if isinstance(content, dict) and content.get('type') == 'image':
-                num_images += 1
-
         for content in message['content']:
             if content.get('type') == 'image':
-                if num_images < 4:
-                    fixed_px = max_num_patches * scale_factor
-                else:
-                    fixed_px = max_frame_num_patches * scale_factor
-                if dynamic_per_item is not None:
-                    content['max_pixels'] = min(fixed_px, dynamic_per_item)
-                else:
-                    content['max_pixels'] = fixed_px
+                content['max_pixels'] = max_num_patches * scale_factor
             elif content.get('type') == 'video':
                 # fps/max_frames are already set during decoding in
                 # _attach_media_from_sample — only the pixel budget matters here.
-                fixed_px = max_frame_num_patches * video_max_frames * scale_factor
-                if dynamic_per_item is not None:
-                    content['total_pixels'] = min(fixed_px, dynamic_per_item)
-                else:
-                    content['total_pixels'] = fixed_px
+                content['total_pixels'] = max_frame_num_patches * video_max_frames * scale_factor
     return messages
 
 

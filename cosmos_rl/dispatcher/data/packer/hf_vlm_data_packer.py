@@ -36,33 +36,49 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
-from qwen_vl_utils import fetch_image,  fetch_video
+from qwen_vl_utils import fetch_image, fetch_video
 from qwen_vl_utils.vision_process import smart_nframes
 
 IGNORE_LABEL_ID = -100
 
+
 def fetch_video_frames(vision_info, image_patch_size, return_video_metadata):
     FRAME_FACTOR = 2
-    frame_dir = vision_info.get('frame_dir', None)
-    frames = sorted(filter(lambda x: 'json' not in x, glob(os.path.join(frame_dir, "*"))))
-    max_pixels = vision_info.get('max_pixels', 196*(16*2)**2)
-    extracted_fps = vision_info.get('extracted_fps') if 'metadata' not in vision_info else vision_info['metadata'].get('extracted_fps')
+    frame_dir = vision_info.get("frame_dir", None)
+    frames = sorted(
+        filter(lambda x: "json" not in x, glob(os.path.join(frame_dir, "*")))
+    )
+    max_pixels = vision_info.get("max_pixels", 196 * (16 * 2) ** 2)
+    extracted_fps = (
+        vision_info.get("extracted_fps")
+        if "metadata" not in vision_info
+        else vision_info["metadata"].get("extracted_fps")
+    )
     total_frames = len(frames)
     if total_frames == 0:
         raise ValueError(f"No frames found in {frame_dir}")
     if total_frames < FRAME_FACTOR:
         nframes = FRAME_FACTOR
-        idx = list(range(total_frames)) + [total_frames - 1] * (FRAME_FACTOR - total_frames)
+        idx = list(range(total_frames)) + [total_frames - 1] * (
+            FRAME_FACTOR - total_frames
+        )
         sample_fps = extracted_fps
     else:
-        nframes = smart_nframes(vision_info, total_frames=total_frames, video_fps=extracted_fps)
+        nframes = smart_nframes(
+            vision_info, total_frames=total_frames, video_fps=extracted_fps
+        )
         idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
         sample_fps = nframes / max(total_frames, 1e-6) * extracted_fps
-    sampled_frames = [fetch_image({'image':frames[i], 'max_pixels': max_pixels}, image_patch_size = image_patch_size) for i in idx]
-    video = torch.stack([
-        torch.from_numpy(np.array(img).transpose(2, 0, 1))
-        for img in sampled_frames
-    ]).float()
+    sampled_frames = [
+        fetch_image(
+            {"image": frames[i], "max_pixels": max_pixels},
+            image_patch_size=image_patch_size,
+        )
+        for i in idx
+    ]
+    video = torch.stack(
+        [torch.from_numpy(np.array(img).transpose(2, 0, 1)) for img in sampled_frames]
+    ).float()
     if return_video_metadata:
         video_metadata = dict(
             fps=extracted_fps,
@@ -73,7 +89,9 @@ def fetch_video_frames(vision_info, image_patch_size, return_video_metadata):
     return video, sample_fps
 
 
-def extract_vision_info(conversations: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
+def extract_vision_info(
+    conversations: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]],
+) -> List[Dict[str, Any]]:
     vision_infos = []
     if isinstance(conversations[0], dict):
         conversations = [conversations]
@@ -86,7 +104,8 @@ def extract_vision_info(conversations: Union[List[Dict[str, Any]], List[List[Dic
                         or "image_url" in ele
                         or "video" in ele
                         or "frame_dir" in ele
-                        or ele.get("type", "text") in ("image", "image_url", "video", "video_frames")
+                        or ele.get("type", "text")
+                        in ("image", "image_url", "video", "video_frames")
                     ):
                         vision_infos.append(ele)
     return vision_infos
@@ -97,8 +116,11 @@ def qwen_vl_process_vision_info(
     return_video_kwargs: bool = False,
     return_video_metadata: bool = False,
     image_patch_size: int = 14,
-) -> Tuple[Optional[List[Image.Image]], Optional[List[Union[torch.Tensor, List[Image.Image]]]], Optional[Dict[str, Any]]]:
-
+) -> Tuple[
+    Optional[List[Image.Image]],
+    Optional[List[Union[torch.Tensor, List[Image.Image]]]],
+    Optional[Dict[str, Any]],
+]:
     vision_infos = extract_vision_info(conversations)
     ## Read images or videos
     image_inputs = []
@@ -106,14 +128,24 @@ def qwen_vl_process_vision_info(
     video_sample_fps_list = []
     for vision_info in vision_infos:
         if "image" in vision_info or "image_url" in vision_info:
-            image_inputs.append(fetch_image(vision_info, image_patch_size=image_patch_size))
+            image_inputs.append(
+                fetch_image(vision_info, image_patch_size=image_patch_size)
+            )
         elif "video" in vision_info:
-            video_input, video_sample_fps = fetch_video(vision_info, return_video_sample_fps=True,
-                        image_patch_size=image_patch_size, return_video_metadata=return_video_metadata)
+            video_input, video_sample_fps = fetch_video(
+                vision_info,
+                return_video_sample_fps=True,
+                image_patch_size=image_patch_size,
+                return_video_metadata=return_video_metadata,
+            )
             video_sample_fps_list.append(video_sample_fps)
             video_inputs.append(video_input)
         elif "frame_dir" in vision_info:
-            video_input, video_sample_fps = fetch_video_frames(vision_info, image_patch_size=image_patch_size, return_video_metadata=return_video_metadata)
+            video_input, video_sample_fps = fetch_video_frames(
+                vision_info,
+                image_patch_size=image_patch_size,
+                return_video_metadata=return_video_metadata,
+            )
             video_sample_fps_list.append(video_sample_fps)
             video_inputs.append(video_input)
         else:
@@ -123,13 +155,14 @@ def qwen_vl_process_vision_info(
     if len(video_inputs) == 0:
         video_inputs = None
 
-    video_kwargs = {'do_sample_frames': False}
-    if not return_video_metadata: # BC for qwen2.5vl
-        video_kwargs.update({'fps': video_sample_fps_list})
+    video_kwargs = {"do_sample_frames": False}
+    if not return_video_metadata:  # BC for qwen2.5vl
+        video_kwargs.update({"fps": video_sample_fps_list})
 
     if return_video_kwargs:
         return image_inputs, video_inputs, video_kwargs
     return image_inputs, video_inputs
+
 
 def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
     image_inputs = []
@@ -908,24 +941,38 @@ class HFVLMDataPacker(DataPacker):
                 or result.get("pixel_values_videos") is not None
             )
             if has_vision:
-                # Vision samples cannot be safely truncated because input_ids
-                # contain vision placeholder tokens that must stay aligned with
-                # pixel tensors.  Raise so the caller can retry with another sample.
-                raise ValueError(
-                    f"[{media_type}] Sample exceeds model_max_length after tokenization "
-                    f"({len(result['input_ids'])} > {max_len}), skipping."
-                )
-            # Text-only: safe to truncate since there are no vision tensors.
+                # Truncation is safe only if every vision placeholder token
+                # falls within the kept prefix (indices 0..max_len-1).  If so,
+                # only trailing text tokens are removed and pixel tensor
+                # alignment is preserved.
+                input_ids = result["input_ids"]
+                vision_ids = {v for v in self.vision_ids if v is not None}
+                last_vision_pos = -1
+                for i, tok in enumerate(input_ids):
+                    if tok in vision_ids:
+                        last_vision_pos = i
+                if last_vision_pos >= max_len:
+                    raise ValueError(
+                        f"[{media_type}] Sample exceeds model_max_length after tokenization "
+                        f"({len(result['input_ids'])} > {max_len}) and truncation would "
+                        f"break vision token alignment, skipping."
+                    )
             orig_len = len(result["input_ids"])
             result["input_ids"] = result["input_ids"][:max_len]
             if "label_ids" in result:
                 result["label_ids"] = result["label_ids"][:max_len]
             if "logprob_masks" in result:
                 result["logprob_masks"] = result["logprob_masks"][:max_len]
-            print(
-                f"WARNING: [{media_type}] Truncated sample from {orig_len} to "
-                f"{max_len} tokens."
-            )
+            if has_vision:
+                print(
+                    f"WARNING: [{media_type}] Truncated vision sample from {orig_len} to "
+                    f"{max_len} tokens (trailing text only, vision tokens preserved)."
+                )
+            else:
+                print(
+                    f"WARNING: [{media_type}] Truncated sample from {orig_len} to "
+                    f"{max_len} tokens."
+                )
 
         return result
 
