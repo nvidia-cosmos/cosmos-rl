@@ -233,9 +233,11 @@ _tarfile_to_samples_tolerant = wds.filters.pipelinefilter(
 )
 
 
-# Per-image pixel cap: at most ~1960 vision tokens per image.
+# Per-image pixel cap: at most ~1960 vision tokens per image (when <4 images).
 # 1960 * (patch_size * merge_size)^2 = 1960 * 32 * 32
 IMAGE_MAX_PIXELS = 1960 * 32 * 32
+# Reduced per-image cap when >=4 images in a message (matches siglip2 strategy).
+IMAGE_MAX_PIXELS_MULTI = 196 * 32 * 32
 VIDEO_MAX_PIXELS = 196 * 30 * 32 * 32
 
 
@@ -266,25 +268,14 @@ def approx_max_pixels(messages, max_seq_len):
     return max_pixels
 
 
-def modify_messages(messages, max_seq_len=None):
+def modify_messages(messages, image_max_pixels, image_max_pixels_multi,
+                    video_total_pixels):
     """Set per-content pixel budgets and normalise content format.
 
-    * Computes a *per-sample* pixel budget from the remaining token capacity
-      so that vision tokens + text tokens ≤ model_max_length.
-    * Divides the budget across all vision items (images + videos) in the
-      sample, and additionally caps each image at IMAGE_MAX_PIXELS.
-    * Returns **None** when the sample cannot fit any vision content,
-      signalling the caller to drop it.
+    - Images (<4 per message): image_max_pixels
+    - Images (>=4 per message): image_max_pixels_multi
+    - Videos: video_total_pixels
     """
-    # Count total vision items so we can split the budget fairly.
-    n_vision_items = 0
-    for message in messages:
-        content = message.get('content')
-        if isinstance(content, list):
-            for c in content:
-                if isinstance(c, dict) and c.get('type') in ('image', 'video'):
-                    n_vision_items += 1
-
     for message in messages:
         if isinstance(message['content'], str):
             # Only normalize user messages to list format; system/assistant
@@ -294,45 +285,20 @@ def modify_messages(messages, max_seq_len=None):
             message['content'] = [{'type': 'text', 'text': message['content']}]
         if not isinstance(message['content'], list):
             continue
-        for content in message['content']:
-            if content.get('type') == 'image':
-                content['max_pixels'] = IMAGE_MAX_PIXELS
-            elif content.get('type') == 'video':
-                content['total_pixels'] = VIDEO_MAX_PIXELS
-    return messages
 
-def modify_messages_siglip2(messages, max_num_patches=256, max_frame_num_patches=196,
-                            scale_factor=1024, max_seq_len=None, video_max_frames=30):
-    """Hybrid SigLIP2 pixel budget: fixed patch counts + dynamic overflow cap.
-
-    Computes fixed per-item budgets from patch counts, then optionally caps
-    with a dynamic budget derived from remaining context length.
-
-    - Images (<4 per message): max_num_patches * scale_factor pixels
-    - Images (>=4 per message): max_frame_num_patches * scale_factor pixels
-    - Videos: fps=1, max_frames=video_max_frames,
-              total_pixels = max_frame_num_patches * video_max_frames * scale_factor
-
-    If max_seq_len is set, computes a dynamic cap via approx_max_pixels() and
-    takes min(fixed_budget, dynamic_share) per item to prevent context overflow.
-
-    Returns None if text alone fills the context (signals caller to drop sample).
-    """
-    for message in messages:
-        if isinstance(message['content'], str):
-            if message.get('role') in ('system', 'assistant'):
-                continue
-            message['content'] = [{'type': 'text', 'text': message['content']}]
-        if not isinstance(message['content'], list):
-            continue
+        # Count images in this message to decide per-image budget.
+        n_images = sum(1 for c in message['content']
+                       if isinstance(c, dict) and c.get('type') == 'image')
+        img_pixels = image_max_pixels if n_images < 4 else image_max_pixels_multi
 
         for content in message['content']:
             if content.get('type') == 'image':
-                content['max_pixels'] = max_num_patches * scale_factor
+                content['max_pixels'] = img_pixels
             elif content.get('type') == 'video':
                 # fps/max_frames are already set during decoding in
                 # _attach_media_from_sample — only the pixel budget matters here.
-                content['total_pixels'] = max_frame_num_patches * video_max_frames * scale_factor
+                # TODO (simonz): here we use the max_video_pixels for total_pixels
+                content['total_pixels'] = video_total_pixels
     return messages
 
 
@@ -624,7 +590,7 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
 
             c["type"] = "video"
             c["video"] = pil_frames
-            c["sample_fps"] = extracted_fps
+            c["sample_fps"] = nframes / max(total_frames, 1) * extracted_fps
             c["raw_fps"] = extracted_fps
 
             for extra_key in ("ext", "orig_path"):
@@ -733,20 +699,16 @@ class CustomWebDatasetDataset(Dataset):
             print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
 
 
-        # Per-sample pixel budget is computed dynamically in modify_messages()
-        # using approx_max_pixels(), so we only store max_seq_len here.
         self.max_seq_len = config.policy.model_max_length
 
-        # Max video frames: use config value (consistent with modify_messages_siglip2),
+        # Max video frames: use config value,
         # falling back to 30 to match launcher.py's hardcoded default.
         self.max_video_frames = int(custom.get('video_max_frames', 30))
 
-        # SigLIP2 mode: fixed patch-count pixel budget with dynamic overflow cap
-        self.siglip2_mode = bool(os.environ.get("USE_SIGLIP2_PROCESS"))
-        if self.siglip2_mode:
-            self.scale_factor = (16 * 2) ** 2  # 1024
-            self.max_num_patches = int(custom.get('single_image_max_num_patches', 256))
-            self.max_frame_num_patches = int(custom.get('single_frame_max_num_patches', 196))
+        # Pixel budgets for vision content (configurable, with sensible defaults).
+        self.image_max_pixels = int(custom.get('image_max_pixels', IMAGE_MAX_PIXELS))
+        self.image_max_pixels_multi = int(custom.get('image_max_pixels_multi', IMAGE_MAX_PIXELS_MULTI))
+        self.video_total_pixels = int(custom.get('video_total_pixels', VIDEO_MAX_PIXELS))
         self.setup_wds_dataset()
 
     def setup_wds_dataset(self):
@@ -900,18 +862,12 @@ class CustomWebDatasetDataset(Dataset):
         # Apply per-sample pixel budget (max_pixels for images, total_pixels for videos).
         # Video frame selection (fps, max_frames) was already applied during decoding in
         # _attach_media_from_sample — the functions below only set pixel budgets.
-        # Both modify_messages variants return None when the text alone fills the context → skip.
-        if self.siglip2_mode:
-            messages = modify_messages_siglip2(
-                messages,
-                max_num_patches=self.max_num_patches,
-                max_frame_num_patches=self.max_frame_num_patches,
-                scale_factor=self.scale_factor,
-                max_seq_len=self.max_seq_len,
-                video_max_frames=self.max_video_frames,
-            )
-        else:
-            messages = modify_messages(messages, self.max_seq_len)
+        messages = modify_messages(
+            messages,
+            image_max_pixels=self.image_max_pixels,
+            image_max_pixels_multi=self.image_max_pixels_multi,
+            video_total_pixels=self.video_total_pixels,
+        )
         if messages is None:
             return None
         assert isinstance(messages, list), "messages should be a list of dicts"

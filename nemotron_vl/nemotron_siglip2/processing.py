@@ -34,7 +34,7 @@ logger = logging.get_logger(__name__)
 
 
 class NemotronImagesKwargs(ImagesKwargs, total=False):
-    max_num_patches: Optional[int]
+    max_pixels: Optional[int]
 
 
 class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
@@ -52,9 +52,22 @@ class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
 class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
     def __init__(self, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]):
         super().__init__(**kwargs)
-    
+
     @auto_docstring
     def preprocess(self, images: ImageInput, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]) -> BatchFeature:
+        # Extract max_pixels before the base class validates kwargs (it only
+        # knows about max_num_patches).  Convert to max_num_patches so the
+        # rest of the pipeline uses a single unified parameter.
+        max_pixels = kwargs.pop("max_pixels", None)
+        if max_pixels is not None:
+            scale_factor = (self.patch_size * self.merge_size) ** 2
+            kwargs["max_num_patches"] = int(max_pixels) // scale_factor
+        else:
+            logger.warning(
+                "max_pixels was not provided to Siglip2ImageProcessorCustom; "
+                f"falling back to default max_num_patches={self.max_num_patches}. "
+                "This may cause shape mismatches for large images with do_resize=False."
+            )
         return super().preprocess(images, **kwargs)
 
     def _preprocess(
@@ -72,6 +85,7 @@ class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
         return_tensors: Optional[Union[str, TensorType]],
         **kwargs,
     ) -> BatchFeature:
+
         pixel_masks = []
         pixel_values = []
         spatial_shapes = []

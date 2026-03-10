@@ -119,35 +119,7 @@ def report_moe_load_to_wandb(step: int, loads_by_layer: dict, prefix="moe", log_
 
 ########################################################
 
-def modify_messages(messages, max_pixels = None, max_num_patches = None, max_frame_num_patches = None, scale_factor = 1):
-    for message in messages:
-        if isinstance(message['content'], str):
-            message['content'] = [{'type': 'text', 'text': message['content']}]
-        # check number of images and videos
-        num_images = 0
-        for content in message['content']:
-            if content['type'] == 'image':
-                num_images += 1
-
-        for content in message['content']:
-            if content['type'] == 'image':
-                if max_pixels is not None:
-                    content['max_pixels'] = max_pixels
-                if max_num_patches is not None:
-                    if num_images < 4:
-                        content['max_pixels'] = max_num_patches * scale_factor
-                    else:
-                        content['max_pixels'] = max_frame_num_patches * scale_factor
-            elif content['type'] == 'video_frames':
-                content['fps'] = 1
-                content['max_frames'] = 30
-                content['max_pixels'] = max_frame_num_patches * scale_factor
-            elif content['type'] == 'video':
-                content['fps'] = 1
-                content['max_frames'] = 30
-                if max_frame_num_patches is not None:
-                    content['total_pixels'] = max_frame_num_patches * content['max_frames'] * scale_factor
-    return messages
+from launcher_wds import modify_messages, IMAGE_MAX_PIXELS, IMAGE_MAX_PIXELS_MULTI, VIDEO_MAX_PIXELS
 
 class CustomDataset(Dataset):
     '''
@@ -168,17 +140,16 @@ class CustomDataset(Dataset):
                     line = line.strip()
                     if line:
                         self.data_list.append(json.loads(line)['messages'])
-        self.scale_factor = (16 * 2) ** 2
-        self.max_pixels = None
-        self.max_num_patches = config.custom.get('single_image_max_num_patches',256)
-        self.max_frame_num_patches = config.custom.get('single_frame_max_num_patches',196)
+        self.image_max_pixels = int(config.custom.get('image_max_pixels', IMAGE_MAX_PIXELS))
+        self.image_max_pixels_multi = int(config.custom.get('image_max_pixels_multi', IMAGE_MAX_PIXELS_MULTI))
+        self.video_total_pixels = int(config.custom.get('video_total_pixels', VIDEO_MAX_PIXELS))
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, idx: int) -> list[dict]:
         sample = self.data_list[idx]
         sample = copy.deepcopy(sample)
-        sample = modify_messages(sample, self.max_pixels, self.max_num_patches, self.max_frame_num_patches, self.scale_factor)
+        sample = modify_messages(sample, self.image_max_pixels, self.image_max_pixels_multi, self.video_total_pixels)
         return sample
 
     
