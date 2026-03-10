@@ -809,10 +809,6 @@ class TrainingConfig(BaseModel):
         description="NorMuon second beta for adaptive updates.",
     )
     # Dion
-    optm_rank: Optional[int] = Field(
-        default=None,
-        description="Dion (simple): low-rank dimension. Dion (full): use optm_rank_fraction.",
-    )
     optm_rank_fraction: Optional[float] = Field(
         default=None,
         description="Dion (full): r/d rank fraction (0 < rank_fraction <= 1).",
@@ -841,9 +837,6 @@ class TrainingConfig(BaseModel):
     optm_ef_decay: Optional[float] = Field(
         default=None,
         description="Dion2: error-feedback decay for selected submatrix.",
-    )
-    optm_verbose: Optional[bool] = Field(
-        default=None, description="Dion2: print debug info."
     )
 
     # --------- EMA ---------

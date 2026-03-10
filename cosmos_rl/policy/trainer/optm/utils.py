@@ -303,7 +303,6 @@ def build_orthonormal_optimizer(
                     kwargs[key] = val
     elif optimizer_name == "Dion":
         kwargs.setdefault("mu", _opt(getattr(train, "optm_mu", None), 0.95))
-        kwargs.setdefault("rank", _opt(getattr(train, "optm_rank", None), 768))
         for key, attr in (
             ("rank_fraction", "optm_rank_fraction"),
             ("rank_multiple_of", "optm_rank_multiple_of"),
@@ -324,7 +323,6 @@ def build_orthonormal_optimizer(
         for key, attr in (
             ("flatten", "optm_flatten"),
             ("use_triton", "optm_use_triton"),
-            ("verbose", "optm_verbose"),
         ):
             if key in init_params:
                 val = getattr(train, attr, None)
