@@ -17,7 +17,7 @@ ROBOTWIN_BRANCH="${ROBOTWIN_BRANCH:-RLinf_support}"
 
 # Cosmos-rl repo root (parent of tools/scripts containing this script)
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
-COSMOS_RL_ROOT="$(cd "$(dirname "$(dirname "$(dirname "$SCRIPT_PATH")")")" && pwd)"
+COSMOS_RL_ROOT="$(cd "$(dirname "$(dirname "$(dirname "$(dirname "$SCRIPT_PATH")")")")" && pwd)"
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
