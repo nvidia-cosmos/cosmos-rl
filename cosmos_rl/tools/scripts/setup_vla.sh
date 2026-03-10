@@ -218,7 +218,6 @@ EJSON
         cmake \
         build-essential \
         python3-dev \
-        pkg-config \
         unzip \
         libavformat-dev \
         libavcodec-dev \
@@ -294,7 +293,7 @@ setup_robotwin() {
     banner "Setting up RoboTwin Python environment"
     detect_nvcc || return 1
 
-    $PIP_CMD install mplib==0.2.1 gymnasium==0.29.1 av open3d zarr openai
+    $PIP_CMD install mplib==0.2.1 gymnasium==0.29.1 av open3d zarr openai sapien==3.0.0b1
     $PIP_CMD install git+${GITHUB_PREFIX}https://github.com/facebookresearch/pytorch3d.git@v0.7.9 --no-build-isolation
     $PIP_CMD install warp-lang==1.11.1
     # $PIP_CMD install git+${GITHUB_PREFIX}https://github.com/NVlabs/curobo.git --no-build-isolation
