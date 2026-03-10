@@ -4109,7 +4109,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="244"><ul class="simple">
+<tr class="row-even"><td rowspan="252"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -4948,6 +4948,35 @@
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>save_ckpt_at_exit</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Save Ckpt At Exit</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to save checkpoint at exit. If set to True, the checkpoint will be saved when the process receives a specified signal, normally specified as SIGUSR1.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>signal_to_handle</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Signal To Handle</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The signal to handle. When the process receives any of these signals, it will trigger a checkpoint save if <cite>save_ckpt_at_exit</cite> is True. Specified as SIGUSR1.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="53"><ul class="simple">
 <li><p>VLAConfig</p></li>
