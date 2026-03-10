@@ -321,7 +321,7 @@ setup_robotwin() {
     fi
     export ROBOTWIN_PATH
     ok "ROBOTWIN_PATH=${ROBOTWIN_PATH}"
-    source $COSMOS_RL_ROOT/bin/activate && cd "$ROBOTWIN_PATH" && bash scripts/_download_assets.sh
+    source $COSMOS_RL_ROOT/.venv/bin/activate && cd "$ROBOTWIN_PATH" && bash scripts/_download_assets.sh
 }
 
 # ── Main: pip/python commands then run all groups ──────────────────────────────
