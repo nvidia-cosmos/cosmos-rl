@@ -320,11 +320,16 @@ setup_robotwin() {
         git clone -b "$ROBOTWIN_BRANCH" "${GITHUB_PREFIX}${ROBOTWIN_REPO_URL}" "$ROBOTWIN_PATH"
     fi
     export ROBOTWIN_PATH
+    echo "export ROBOTWIN_PATH=\"$ROBOTWIN_PATH\"" > "$COSMOS_RL_ROOT/.robotwin_env"
     ok "ROBOTWIN_PATH=${ROBOTWIN_PATH}"
-    if command -v uv &> /dev/null && [ -d "$COSMOS_RL_ROOT/.venv" ]; then
+    if [ -d "$ROBOTWIN_PATH/assets" ]; then
+        ok "RoboTwin assets folder already present; skip download"
+    elif command -v uv &> /dev/null && [ -d "$COSMOS_RL_ROOT/.venv" ]; then
         uv run --directory "$COSMOS_RL_ROOT" bash -c "cd \"$ROBOTWIN_PATH\" && bash script/_download_assets.sh"
+    elif [ -f "$COSMOS_RL_ROOT/.venv/bin/activate" ]; then
+        source "$COSMOS_RL_ROOT/.venv/bin/activate" && cd "$ROBOTWIN_PATH" && bash script/_download_assets.sh
     else
-        cd "$ROBOTWIN_PATH" && bash script/_download_assets.sh
+        warn "No venv at $COSMOS_RL_ROOT/.venv and uv not in PATH; skip asset download. Run manually: uv run --directory $COSMOS_RL_ROOT bash -c \"cd \\\"\$ROBOTWIN_PATH\\\" && bash script/_download_assets.sh\""
     fi
 }
 
@@ -348,3 +353,7 @@ setup_robotwin
 
 echo ""
 ok "VLA environment setup complete"
+echo ""
+info "To set ROBOTWIN_PATH in your shell after this script exits, run:"
+echo "  source $COSMOS_RL_ROOT/.robotwin_env"
+echo ""

@@ -39,12 +39,14 @@ jobs:
             --shm-size=24G \
             -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
             -v ${{ github.workspace }}/configs:/workspace/cosmos-rl/configs:ro \
+            -v /tmp/RoboTwin:/workspace/RoboTwin:ro \
             -v /tmp/cache:/root/.cache \
             -e PYTHONPYCACHEPREFIX=/tmp/pycache \
             -w /workspace/cosmos-rl \
             ${{ steps.vars.outputs.image_tag }}-vla /bin/bash)
 
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
+          export ROBOTWIN_PATH=/tmp/RoboTwin
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
           ${DOCKER_RUN} python tests/test_env_manager_libero.py
           ${DOCKER_RUN} python tests/test_env_manager_robotwin.py
