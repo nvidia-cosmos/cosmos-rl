@@ -811,23 +811,23 @@ class TrainingConfig(BaseModel):
     # Dion
     optm_rank_fraction: Optional[float] = Field(
         default=None,
-        description="Dion (full): r/d rank fraction (0 < rank_fraction <= 1).",
+        description="Dion: r/d rank fraction (0 < rank_fraction <= 1).",
     )
     optm_rank_multiple_of: Optional[int] = Field(
         default=None,
-        description="Dion (full): round low-rank dimension to multiple of this.",
+        description="Dion: round low-rank dimension to multiple of this.",
     )
     optm_power_iters: Optional[int] = Field(
         default=None,
-        description="Dion (full): number of power iterations for low-rank approx.",
+        description="Dion: number of power iterations for low-rank approx.",
     )
     optm_qr_method: Optional[str] = Field(
         default=None,
-        description="Dion (full): QR method (e.g. rcqr).",
+        description="Dion: QR method (e.g. rcqr).",
     )
     optm_rcqr_oversample: Optional[float] = Field(
         default=None,
-        description="Dion (full): RCQR random sketch oversampling factor.",
+        description="Dion: RCQR random sketch oversampling factor.",
     )
     # Dion2
     optm_fraction: Optional[float] = Field(
