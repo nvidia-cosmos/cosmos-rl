@@ -33,6 +33,7 @@ from argparse import REMAINDER
 from typing import List
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 from util import NodeLaunchMetadata
 
 logging.basicConfig(level=logging.INFO)
@@ -244,6 +245,9 @@ if __name__ == "__main__":
 
     # Launch all replicas
     procs = [subprocess.Popen(cmd, env=env) for cmd, env in zip(cmds, envs)]
+    # SIGUSR1 used for slurm jop timeout case ckpt saving therefore register signal handler for processing the ckpt handling.
+    if args.type == "policy":
+        DistributedSignalHandler.get_instance(["SIGUSR1"], procs)
     logger.info(f"Launched {len(procs)} replica(s)")
 
     # Block until every process finishes, and propagate any non-zero exit codes

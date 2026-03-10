@@ -524,13 +524,24 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
+            do_save_checkpoint = command.do_save
+            if (
+                self.signal_handler is not None
+                and any(self.signal_handler.signals_received())
+                and not hasattr(self, "signal_handled")
+            ):
+                logger.info("Signal received, preparing to save checkpoint...")
+                do_save_checkpoint = True
+                self.signal_handler.release()
+                self.signal_handled = True
+
             self.trainer.update_lr_schedulers(command.total_steps)
             report_data = self.trainer.step_training(
                 rollouts=self.dispatch_rollouts(),
                 current_step=command.global_step,
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
-                do_save_checkpoint=command.do_save,
+                do_save_checkpoint=do_save_checkpoint,
                 inter_policy_nccl=self.inter_policy_nccl,
                 is_master_replica=self.is_master_replica,
             )
