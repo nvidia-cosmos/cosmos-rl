@@ -272,6 +272,10 @@ class DiffuserModel(BaseModel, ABC):
         # Different model may have different kind of text embedding output
         # Key of this dict will name of the corresponding args' names
         text_embedding_dict = self.text_embedding(prompt_list)
+        # Remove None item of the dict
+        text_embedding_dict = {
+            k: v for k, v in text_embedding_dict.items() if v is not None
+        }
         noised_latents, noise, timesteps = self.add_noise(
             latents, timestep=timestep, noise=noise
         )

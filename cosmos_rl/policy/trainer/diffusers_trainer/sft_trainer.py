@@ -152,7 +152,15 @@ class SFTTrainer(DiffusersTrainer):
             if self.config.train.ema_enable and self.ema is not None:
                 self.ema.copy_temp_to(self.model.trainable_params)
 
-    def step_training(self, global_batch, total_steps, train_step, save_freq):
+    def step_training(
+        self,
+        global_batch,
+        total_steps: int,
+        train_step: int,
+        save_freq: int,
+        inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
+        data_arrival_event: Optional[torch.cuda.Event] = None,
+    ):
         if self.lr_schedulers is None:
             assert train_step == 0, (
                 "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
@@ -228,7 +236,7 @@ class SFTTrainer(DiffusersTrainer):
                     "train/loss_avg": global_avg_loss,
                     "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                    "optimizer/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
                 # TODO (yy): support MFU calculation for diffusers

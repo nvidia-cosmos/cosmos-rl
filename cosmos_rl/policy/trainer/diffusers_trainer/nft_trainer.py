@@ -787,7 +787,7 @@ class NFTTrainer(DiffusersTrainer):
         # Only step lr scheduler when all the mini-batches are processed
         self.lr_schedulers.step()
 
-        # checkpointing
+        # Checkpointing
         if is_master_replica and (do_save_checkpoint):
             is_last_step = current_step == total_steps
             # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
