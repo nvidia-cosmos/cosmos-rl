@@ -333,7 +333,7 @@ if command -v uv &> /dev/null; then
     PYTHON_CMD="uv run python"
 fi
 
-setup_hosts_fqdn
+#setup_hosts_fqdn
 setup_egl
 setup_vulkan_and_sapien
 
