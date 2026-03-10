@@ -1829,7 +1829,7 @@ class Config(BaseModel):
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
 
-        # Enforce that only Dion supports Tensor Parallelism (TP) among the orthonormal optimizers.
+        # Only Dion supports Tensor Parallelism (TP) among the orthonormal optimizers.
         if self.policy.parallelism.tp_size > 1:
             # TODO: add support for Muon, NorMuon, Dion2 with TP.
             if self.train.optm_name in {"Muon", "NorMuon", "Dion2"}:
