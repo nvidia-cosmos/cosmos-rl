@@ -153,7 +153,6 @@ def get_orthonormal_optimizer_mesh(mesh_or_parallel_dims: Any) -> Any:
     try:
         key = ("dp_cp_tp",)
         sub = mesh[key]
-        logger.info(f"[Cosmos RL] Extracted {key} submesh: {sub}")
         return sub
     except (KeyError, TypeError, AttributeError) as e:
         logger.error(
