@@ -191,7 +191,7 @@ class RemoteRewardCalculator:
 
         uuid = response.json()["uuid"]
         replica_id = response.json().get("replica_id", None)
-        logger.info(f"[RemoteReward] Enqueued request with UUID: {uuid}")
+        logger.info(f"[RemoteRewardCalculator] Enqueued request with UUID: {uuid}")
         return (uuid, replica_id)
 
     def compute_rewards(
