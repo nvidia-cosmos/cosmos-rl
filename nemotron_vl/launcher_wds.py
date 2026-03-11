@@ -676,6 +676,13 @@ class CustomWebDatasetDataset(Dataset):
         self._length_hint = total_items
         self.urls = _expand_wds_urls(webdataset_root_paths)
 
+        self.sample_rate = config.custom.get("data_sample_ratio", 1.0) # This should only be used for ablation study using part of data
+        assert self.sample_rate > 0 and self.sample_rate < 1.0, "data_sample_ratio should be between 0.0 and 1.0"
+        if self.sample_rate < 1.0:
+            n_sampled_tar = int(len(self.urls) * self.sample_rate)
+            self.urls = self.urls[:n_sampled_tar]
+            self._length_hint = len(self.urls) * 10000
+
         resume_path = config.train.resume
         if resume_path and isinstance(resume_path, str) and os.path.exists(resume_path):
             # Check the current step from the resume checkpoint to determine 
@@ -698,6 +705,7 @@ class CustomWebDatasetDataset(Dataset):
         if self.n_shards_to_skip > 0 or self.n_samples_to_skip_in_shard > 0:
             print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
 
+        
 
         self.max_seq_len = config.policy.model_max_length
 

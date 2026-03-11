@@ -351,6 +351,7 @@ def parallelize(
         )
     
     train_layers = config.custom.get("train_layers", None)
+    freeze_gate = config.custom.get("freeze_gate")
     if train_layers is not None:
         logger.info(f"All trainable layers: {train_layers}")
         for name, parameters in model.named_parameters():
@@ -363,7 +364,11 @@ def parallelize(
                 for name, parameters in module.named_parameters():
                     # e_correction_bias always be not trainable
                     if 'e_correction_bias' not in name:
-                        parameters.requires_grad = True
+                        # TODO: rush impl, change later
+                        if freeze_gate and 'gate.weight' in name:
+                            continue
+                        else:
+                            parameters.requires_grad = True
         
         # make lm_head trainable
         if 'lm_head' in train_layers:

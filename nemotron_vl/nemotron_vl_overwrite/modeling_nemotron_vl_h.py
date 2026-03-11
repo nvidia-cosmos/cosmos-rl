@@ -165,7 +165,7 @@ def segment_sum(input_tensor):
     return tensor_segsum
 
 
-def apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx):
+def apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx=None):
     """
     Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
     """
@@ -437,7 +437,7 @@ class NemotronHMamba2Mixer(nn.Module):
             )
 
             # 3. SSM transformation
-            A = -torch.exp(self.A_log().float()) # (nheads,)
+            A = -torch.exp(self.A_log.float()) # (nheads,)
             A = A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
