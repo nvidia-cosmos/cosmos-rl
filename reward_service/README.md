@@ -369,7 +369,7 @@ We have three `media_type` for the bytes. Detailed loading and processing can be
 | Field | Type | Description |
 |-------|------|-------------|
 | `prompts` | List[str] | List of text prompts corresponding to the videos |
-| `reward_fn` | Dict | Reward types with their weights, can specify one or multiple reward types required for the videos |
+| `reward_fn` | Dict | Reward types with their weights, can specify one or multiple reward types. **If the weight<=0, the server will omit related reward_fn. The server will not weight the scores when weight>0, the user should do it on the client side** |
 | `video_infos` | List[Dict] | Video metadata, including fps, not used for images |
 | `media_type` | str | Default to `video`. The image reward should pass it as  `image`. |
 | `ocr_use_gpu` | bool | For OCR reward, whether to use GPU for OCR scorer. |

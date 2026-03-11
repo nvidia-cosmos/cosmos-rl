@@ -317,16 +317,45 @@ class OverlongRewardConfig(BaseModel):
     )
 
 
-class RemoteRewardConfig(BaseModel):
-    enabled: bool = True
-    score_key: str = "overall_reward"
-    scale: float = 1.0
-    reward_fn: Dict[str, float] = Field(
-        default_factory=lambda: {"dance_grpo": 1.0},
-        description="Dictionary of reward functions and their weights for remote reward calculation.",
+class RewardFunctionConfig(BaseModel):
+    name: str = Field(
+        description="Name of the reward function.",
     )
-    reward_clip_min: float = -5.0
-    reward_clip_max: float = 5.0
+    weight: float = Field(description="Weight of the reward function.", default=1.0)
+    score_key: Optional[str] = Field(
+        description="Score key of the reward function. If not specified, the name will be used as the score key. You can use '+' to add multiple score keys together, which will be added together as the final score. For example, 'vq_reward+mq_reward'.",
+        default=None,
+    )
+    clip_min: float = Field(
+        description="Clip minimum of the reward function.", default=-5.0
+    )
+    clip_max: float = Field(
+        description="Clip maximum of the reward function.", default=5.0
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.score_key is None:
+            self.score_key = self.name
+        return self
+
+
+class RemoteRewardConfig(BaseModel):
+    scale: float = Field(description="Scale of the total reward result.", default=1.0)
+    reward_fns: List[RewardFunctionConfig] = Field(
+        default_factory=lambda: [
+            RewardFunctionConfig(
+                name="dance_grpo", weight=1.0, score_key="overall_reward"
+            )
+        ],
+        description="List of reward functions for remote reward calculation.",
+    )
+    reward_clip_min: float = Field(
+        description="Clip minimum of the total reward result.", default=-5.0
+    )
+    reward_clip_max: float = Field(
+        description="Clip maximum of the total reward result.", default=5.0
+    )
 
 
 class GrpoConfig(BaseModel):

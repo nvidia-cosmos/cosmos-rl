@@ -84,11 +84,12 @@ advantage_high = 5.0
 advantage_low = -5.0
 
 [train.train_policy.remote_reward]
-score_key = "overall_reward"
 scale = 1.0
 
-[train.train_policy.remote_reward.reward_fn]
-dance_grpo = 1.0
+[[train.train_policy.remote_reward.reward_fns]]
+name = "dance_grpo"
+weight = 1.0
+score_key = "overall_reward"
 
 [train.ckpt]
 enable_checkpoint = true
@@ -104,12 +105,8 @@ dataset.split = "test"
 n_init_replicas = 1
 tp_size = 1
 dp_shard_size = 8
-pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
 dp_shard_size = 8
-pp_size = 1
-dp_replicate_size = 1
