@@ -12,27 +12,89 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
 import math
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import torch
 import torch.nn as nn
+import torch._dynamo
+
+from accelerate import init_on_device
+from transformers import AutoConfig, AutoProcessor
+
+from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
+from cosmos_rl.policy.model.hf_models import HFModel
+from cosmos_rl.utils.parallelism import ParallelDims
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# Configure torch.compile to handle dynamic shapes in Dion optimizer
+torch._dynamo.config.cache_size_limit = 64
+torch._dynamo.config.force_parameter_static_shapes = False
+
+QWEN3_VL_MODEL_ID = "Qwen/Qwen3-VL-8B-Thinking"
 
 
-class TinyModel(nn.Module):
-    """Minimal model with embed, linear (matrix + optional bias), and optional lm_head."""
+@contextmanager
+def _cosmos_default_dtype(dtype: torch.dtype):
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old)
 
-    def __init__(self, with_lm_head=True, with_bias=False):
+
+_cached_qwen3_vl_model = None
+_cached_qwen3_vl_device = None
+
+
+def get_qwen3_vl_cosmos_model():
+    global _cached_qwen3_vl_model, _cached_qwen3_vl_device
+    if _cached_qwen3_vl_model is not None:
+        return _cached_qwen3_vl_model, _cached_qwen3_vl_device
+    if not torch.cuda.is_available():
+        raise unittest.SkipTest("Qwen3-VL loader requires CUDA.")
+
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    max_position_embeddings = 1024
+    config = AutoConfig.from_pretrained(QWEN3_VL_MODEL_ID, trust_remote_code=True)
+    config.max_position_embeddings = max_position_embeddings
+    config.torch_dtype = dtype
+    with init_on_device("meta", include_buffers=False):
+        with _cosmos_default_dtype(dtype):
+            cosmos_hf_model = HFModel.from_pretrained(
+                config,
+                QWEN3_VL_MODEL_ID,
+                max_position_embeddings=max_position_embeddings,
+            )
+    cosmos_hf_model._apply(
+        lambda t: torch.empty_like(t, device=device)
+        if t.device.type == "meta"
+        else t.to(device),
+        recurse=True,
+    )
+    cosmos_hf_model.post_to_empty_hook(CosmosConfig())
+    parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
+    cosmos_hf_model.load_hf_weights(
+        QWEN3_VL_MODEL_ID, parallel_dims, device, revision=None
+    )
+    _cached_qwen3_vl_model = cosmos_hf_model
+    _cached_qwen3_vl_device = device
+    return cosmos_hf_model, device
+
+
+class NoLmHeadModel(nn.Module):
+    """Minimal model without lm_head; used only for test_no_lm_head (Qwen3-VL has lm_head)."""
+
+    def __init__(self):
         super().__init__()
         self.embed_tokens = nn.Embedding(10, 4)
-        self.linear = nn.Linear(4, 4, bias=with_bias)
-        if with_lm_head:
-            self.lm_head = nn.Linear(4, 10, bias=False)
+        self.linear = nn.Linear(4, 4, bias=True)
 
 
 class FakeMesh:
@@ -49,17 +111,12 @@ class FakeMesh:
 
 
 class FakeConfig:
-    """Minimal config with .train holding optimizer-related attributes."""
+    """Minimal config with .train holding optimizer-related attributes. Uses a plain object so unset attributes return None from getattr(..., default), not MagicMock (which would break real optimizer constructors e.g. Muon comparing mu < 0)."""
 
     def __init__(self, **train_kw):
-        self.train = MagicMock()
+        self.train = type("Train", (), {})()
         for k, v in train_kw.items():
             setattr(self.train, k, v)
-
-
-# ---------------------------------------------------------------------------
-# Tests for is_orthonormal_optimizer()
-# ---------------------------------------------------------------------------
 
 
 class TestIsOrthonormalOptimizer(unittest.TestCase):
@@ -76,11 +133,6 @@ class TestIsOrthonormalOptimizer(unittest.TestCase):
             self.assertFalse(is_orthonormal_optimizer(name))
 
 
-# ---------------------------------------------------------------------------
-# Tests for separate_param_groups_for_orthonormal_optim()
-# ---------------------------------------------------------------------------
-
-
 class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
     def _call(self, **kwargs):
         from cosmos_rl.policy.trainer.optm.utils import (
@@ -90,7 +142,7 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
         return separate_param_groups_for_orthonormal_optim(**kwargs)
 
     def test_basic_grouping(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model, base_lr=1e-3, scalar_opt="adamw", weight_decay=0.01
         )
@@ -103,24 +155,25 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
         self.assertEqual(groups[3]["weight_decay"], 0.0)
 
     def test_no_lm_head(self):
-        model = TinyModel(with_lm_head=False)
+        model = NoLmHeadModel()
         groups = self._call(
             model=model, base_lr=1e-3, scalar_opt="adamw", weight_decay=0.01
         )
         self.assertEqual(len(groups), 3)
 
     def test_auto_lm_head_lr(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         base_lr = 1e-3
         groups = self._call(
             model=model, base_lr=base_lr, scalar_opt="adamw", weight_decay=0.0
         )
         lm_head_group = groups[3]
-        expected_lr = base_lr / math.sqrt(4.0)
+        d_in = lm_head_group["params"][0].shape[-1]
+        expected_lr = base_lr / math.sqrt(float(d_in))
         self.assertAlmostEqual(lm_head_group["lr"], expected_lr)
 
     def test_explicit_lm_head_lr(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model,
             base_lr=1e-3,
@@ -128,10 +181,11 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
             weight_decay=0.0,
             lm_head_lr=5e-5,
         )
+        print(len(groups))
         self.assertAlmostEqual(groups[3]["lr"], 5e-5)
 
     def test_scalar_lr_and_embed_lr_overrides(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model,
             base_lr=1e-3,
@@ -144,7 +198,7 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
         self.assertAlmostEqual(groups[2]["lr"], 3e-4)
 
     def test_scalar_lr_defaults_embed_lr(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model,
             base_lr=1e-3,
@@ -155,7 +209,7 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
         self.assertAlmostEqual(groups[2]["lr"], 7e-4)
 
     def test_scalar_betas_and_eps(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model,
             base_lr=1e-3,
@@ -170,26 +224,26 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
             self.assertAlmostEqual(g["epsilon"], 1e-8)
 
     def test_requires_grad_false_skipped(self):
-        model = TinyModel()
-        for p in model.linear.parameters():
-            p.requires_grad = False
+        model, _ = get_qwen3_vl_cosmos_model()
+        # Disable one matrix param (first layer q_proj weight) so it is skipped from group 0.
+        first_q_proj = model.model.language_model.layers[0].self_attn.q_proj.weight
+        first_q_proj.requires_grad = False
         groups = self._call(
             model=model, base_lr=1e-3, scalar_opt="adamw", weight_decay=0.0
         )
-        self.assertEqual(len(groups[0]["params"]), 0)
+        matrix_params = groups[0]["params"]
+        # Use id() to avoid tensor comparison (in/== on parameters can raise RuntimeError).
+        matrix_param_ids = {id(p) for p in matrix_params}
+        self.assertNotIn(id(first_q_proj), matrix_param_ids)
+        self.assertGreater(len(matrix_params), 0)
 
     def test_bias_goes_to_vector_group(self):
-        model = TinyModel(with_bias=True)
+        model, _ = get_qwen3_vl_cosmos_model()
         groups = self._call(
             model=model, base_lr=1e-3, scalar_opt="adamw", weight_decay=0.0
         )
         vector_shapes = [p.shape for p in groups[1]["params"]]
         self.assertTrue(any(len(s) == 1 for s in vector_shapes))
-
-
-# ---------------------------------------------------------------------------
-# Tests for get_orthonormal_optimizer_mesh()
-# ---------------------------------------------------------------------------
 
 
 class TestGetOrthonormalOptimizerMesh(unittest.TestCase):
@@ -240,11 +294,6 @@ class TestGetOrthonormalOptimizerMesh(unittest.TestCase):
         self.assertIs(result, dp_shard_cp_mesh)
 
 
-# ---------------------------------------------------------------------------
-# Tests for build_orthonormal_optimizer()
-# ---------------------------------------------------------------------------
-
-
 class TestBuildOrthonormalOptimizer(unittest.TestCase):
     """Builder uses param groups, config, and get_orthonormal_optimizer_mesh."""
 
@@ -253,7 +302,7 @@ class TestBuildOrthonormalOptimizer(unittest.TestCase):
         from cosmos_rl.policy.trainer.optm import orthonormal_optimizers
 
         if model is None:
-            model = TinyModel()
+            model, _ = get_qwen3_vl_cosmos_model()
         config = FakeConfig(**config_dict)
 
         captured = {}
@@ -269,7 +318,6 @@ class TestBuildOrthonormalOptimizer(unittest.TestCase):
                 }
 
         with (
-            patch.object(orthonormal_optimizers, "_import_error", None),
             patch.object(orthonormal_optimizers, "Muon", FakeOpt),
             patch.object(orthonormal_optimizers, "NorMuon", FakeOpt),
             patch.object(orthonormal_optimizers, "Dion", FakeOpt),
@@ -281,7 +329,7 @@ class TestBuildOrthonormalOptimizer(unittest.TestCase):
         return result, captured
 
     def test_param_groups_structure(self):
-        model = TinyModel()
+        model, _ = get_qwen3_vl_cosmos_model()
         _, captured = self._build(
             "Muon",
             {"optm_lr": 1e-3, "optm_weight_decay": 0.01, "optm_betas": (0.9, 0.95)},
@@ -308,14 +356,92 @@ class TestBuildOrthonormalOptimizer(unittest.TestCase):
 
     def test_unknown_optimizer_raises(self):
         from cosmos_rl.policy.trainer.optm import utils as optm_utils
+
+        with self.assertRaises(ValueError) as ctx:
+            model, _ = get_qwen3_vl_cosmos_model()
+            optm_utils.build_orthonormal_optimizer(
+                "UnknownOpt", model, FakeConfig(optm_lr=1e-3)
+            )
+        self.assertIn("Unknown orthonormal optimizer", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Tests for backward + optimizer.step()
+# ---------------------------------------------------------------------------
+
+
+class TestOrthonormalOptimizerStep(unittest.TestCase):
+    """Run forward, backward, and optimizer.step() with Qwen3-VL."""
+
+    @unittest.skipIf(
+        not torch.cuda.is_available(),
+        "backward/step test uses CUDA.",
+    )
+    def test_backward_and_optimizer_step_muon(self):
+        """Forward -> loss -> backward -> optimizer.step() with Qwen3-VL and Muon."""
+        from PIL import Image
+
+        from qwen_vl_utils import process_vision_info
+
+        from cosmos_rl.policy.trainer.optm import utils as optm_utils
         from cosmos_rl.policy.trainer.optm import orthonormal_optimizers
 
-        with patch.object(orthonormal_optimizers, "_import_error", None):
-            with self.assertRaises(ValueError) as ctx:
-                optm_utils.build_orthonormal_optimizer(
-                    "UnknownOpt", TinyModel(), FakeConfig(optm_lr=1e-3)
-                )
-            self.assertIn("Unknown orthonormal optimizer", str(ctx.exception))
+        if orthonormal_optimizers.Muon is None:
+            self.skipTest(
+                "dion not installed; cannot build real orthonormal optimizer."
+            )
+
+        model, device = get_qwen3_vl_cosmos_model()
+        model.train()
+        config = FakeConfig(
+            optm_lr=1e-5,
+            optm_weight_decay=0.01,
+            optm_betas=(0.9, 0.999),
+            optm_scalar_opt="adamw",
+        )
+        optimizer = optm_utils.build_orthonormal_optimizer(
+            "Muon", model, config, distributed_mesh=None
+        )
+
+        processor = AutoProcessor.from_pretrained(
+            QWEN3_VL_MODEL_ID, trust_remote_code=True, use_fast=True
+        )
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        test_image_path = os.path.join(
+            os.path.dirname(current_dir), "data", "test_hf_model.jpg"
+        )
+        if not os.path.isfile(test_image_path):
+            self.skipTest(f"test image not found: {test_image_path}")
+        image = Image.open(test_image_path)
+        messages = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": "describe the image"},
+                    ],
+                }
+            ]
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = processor(
+            text=text,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(device)
+        logits = model(**inputs).logits
+        loss = logits[:, -1, :].sum()
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        self.assertTrue(loss.requires_grad)
+        self.assertIsInstance(loss.item(), float)
 
 
 if __name__ == "__main__":
