@@ -677,11 +677,11 @@ class CustomWebDatasetDataset(Dataset):
         self.urls = _expand_wds_urls(webdataset_root_paths)
 
         self.sample_rate = config.custom.get("data_sample_ratio", 1.0) # This should only be used for ablation study using part of data
-        assert self.sample_rate > 0 and self.sample_rate < 1.0, "data_sample_ratio should be between 0.0 and 1.0"
+        assert self.sample_rate > 0 and self.sample_rate <= 1.0, "data_sample_ratio should be between 0.0 and 1.0"
         if self.sample_rate < 1.0:
             n_sampled_tar = int(len(self.urls) * self.sample_rate)
             self.urls = self.urls[:n_sampled_tar]
-            self._length_hint = len(self.urls) * 10000
+            self._length_hint = len(self.urls) * rows_per_shard
 
         resume_path = config.train.resume
         if resume_path and isinstance(resume_path, str) and os.path.exists(resume_path):
