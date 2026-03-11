@@ -136,46 +136,28 @@ def separate_param_groups_for_orthonormal_optim(
 
 
 def get_orthonormal_optimizer_mesh(mesh_or_parallel_dims: Any) -> Any:
-    """Return the 1D mesh to pass to orthonormal optimizer for distributed training.
-
-    - None -> None.
-    - If already 1D mesh (ndim == 1) -> return as is.
-    - Cosmos RL: if mesh has submesh "dp_shard_cp", return mesh[("dp_shard_cp",)].
-    - Automodel-style 2D: try mesh[("dp_replicate", "dp_shard_cp")]["dp_shard_cp"]; on failure return original.
     """
-    if mesh_or_parallel_dims is None:
-        return None
+    Return the appropriate 1D mesh to pass to an orthonormal optimizer for distributed training.
+
+    - If input is None, return None.
+    - If possible, return the mesh[("dp_cp_tp",)] submesh.
+    - Otherwise, return the original mesh object.
+    """
 
     mesh = mesh_or_parallel_dims
     # If caller passed ParallelDims, use its built mesh.
     if hasattr(mesh_or_parallel_dims, "mesh"):
         mesh = mesh_or_parallel_dims.mesh
 
-    if not hasattr(mesh, "ndim"):
-        return mesh
-
-    if getattr(mesh, "ndim", None) == 1:
-        return mesh
-
-    # Cosmos RL: 1D submesh named "dp_shard_cp" (flattened dp_shard × cp).
+    # Cosmos RL: 1D submesh named "dp_cp_tp" (flattened dp × cp × tp).
     try:
-        key = ("dp_shard_cp",)
-        if hasattr(mesh, "__getitem__"):
-            sub = mesh[key]
-            if getattr(sub, "ndim", None) == 1:
-                return sub
+        key = ("dp_cp_tp",)
+        sub = mesh[key]
+        logger.info(f"[Cosmos RL] Extracted {key} submesh: {sub}")
+        return sub
     except (KeyError, TypeError, AttributeError) as e:
-        logger.debug("get_orthonormal_optimizer_mesh: no dp_shard_cp submesh: %s", e)
-
-    # Automodel-style 2D: ("dp_replicate", "dp_shard_cp") -> ["dp_shard_cp"].
-    try:
-        dp_2d = mesh[("dp_replicate", "dp_shard_cp")]
-        submesh = dp_2d["dp_shard_cp"]
-        if getattr(submesh, "ndim", None) == 1:
-            return submesh
-    except (KeyError, TypeError, AttributeError, RuntimeError) as e:
-        logger.debug(
-            "get_orthonormal_optimizer_mesh: Automodel-style lookup failed: %s", e
+        logger.error(
+            "get_orthonormal_optimizer_mesh failed to extract dp_cp_tp submesh: %s", e
         )
 
     return mesh
