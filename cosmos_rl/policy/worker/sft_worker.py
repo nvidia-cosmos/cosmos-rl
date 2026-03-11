@@ -124,7 +124,9 @@ class SFTDataset(Dataset):
                                 if isinstance(c, dict):
                                     item_d = {}
                                     for k, v in c.items():
-                                        if isinstance(v, (str, int, float, bool, type(None))):
+                                        if isinstance(
+                                            v, (str, int, float, bool, type(None))
+                                        ):
                                             item_d[k] = str(v)[:100]
                                         else:
                                             item_d[k] = type(v).__name__
@@ -133,7 +135,11 @@ class SFTDataset(Dataset):
                         elif isinstance(content, str):
                             msg_info.append(f"{role}:str({len(content)})")
                         else:
-                            msg_info.append(f"{role}:content={type(content).__name__}({repr(content)[:200]})" if content is not None else f"{role}:content=None")
+                            msg_info.append(
+                                f"{role}:content={type(content).__name__}({repr(content)[:200]})"
+                                if content is not None
+                                else f"{role}:content=None"
+                            )
                 except Exception as dbg_e:
                     msg_info.append(f"debug_err:{dbg_e}")
                 print(
