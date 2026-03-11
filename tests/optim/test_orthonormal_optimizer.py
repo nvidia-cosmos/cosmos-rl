@@ -181,7 +181,6 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
             weight_decay=0.0,
             lm_head_lr=5e-5,
         )
-        print(len(groups))
         self.assertAlmostEqual(groups[3]["lr"], 5e-5)
 
     def test_scalar_lr_and_embed_lr_overrides(self):
@@ -436,12 +435,34 @@ class TestOrthonormalOptimizerStep(unittest.TestCase):
         logits = model(**inputs).logits
         loss = logits[:, -1, :].sum()
 
+        # Snapshot one weight before step to assert it changes.
+        param_to_track = model.model.language_model.layers[0].self_attn.q_proj.weight
+        weight_before = param_to_track.data.clone()
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
         self.assertTrue(loss.requires_grad)
         self.assertIsInstance(loss.item(), float)
+        self.assertFalse(
+            torch.equal(weight_before, param_to_track.data),
+            "Weights should have been updated by optimizer.step()",
+        )
+        # Assert update is in a reasonable range (meaningful step, no explosion).
+        max_abs_diff = (param_to_track.data - weight_before).abs().max().item()
+        self.assertGreater(
+            max_abs_diff,
+            1e-12,
+            "Weight update too small; optimizer may not be stepping.",
+        )
+        # Loose upper bound: one step with lr=1e-5 gives small updates; 100 catches NaNs/explosion only.
+        max_allowed_update = 100.0
+        self.assertLess(
+            max_abs_diff,
+            max_allowed_update,
+            "Weight update too large; possible numerical instability.",
+        )
 
 
 if __name__ == "__main__":
