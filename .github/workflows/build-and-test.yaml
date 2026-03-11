@@ -47,6 +47,7 @@ jobs:
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
           ${DOCKER_RUN} python tests/test_env_manager_libero.py
+          # ${DOCKER_RUN} ROBOTWIN_PATH=/RoboTwin python tests/test_env_manager_robotwin.py
           ${DOCKER_RUN} python tests/test_vla_libero.py --config configs/openvla-oft/openvla-oft-libero10-eval.toml --trials 50 --task-ids 0
           ${DOCKER_RUN} python tests/test_vla_libero.py --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml --trials 50 --task-ids 0
 
