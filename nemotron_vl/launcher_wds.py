@@ -17,6 +17,7 @@ import json
 import os, sys
 import webdataset as wds
 from PIL import Image
+from cosmos_rl.utils.logging import logger
 Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombWarning for large images
 import io
 import struct
@@ -532,18 +533,26 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
 
     Returns None if any video decode fails (caller should skip the sample).
     """
+    sample_key = sample.get("__key__", "<unknown_key>")
+    shard_url = sample.get("__url__", "<unknown_shard>")
+
     for c in _iter_media_items(messages):
         field = c.pop("wds_field")
         if field not in sample:
-            # Missing blob — skip the entire sample rather than silently
-            # replacing media with empty text (which degrades training quality).
-            print(f"WARNING: Missing wds_field '{field}' in sample, skipping.")
+            available_fields = [k for k in sample if not k.startswith("__")]
+            logger.warning(
+                "Missing wds_field '%s' in sample — skipping. "
+                "shard=%s, key=%s, available_fields=%s",
+                field, shard_url, sample_key, available_fields,
+            )
             return None
 
         blob = sample[field]
         # blob may be memoryview/bytearray; normalize
         if isinstance(blob, (memoryview, bytearray)):
             blob = bytes(blob)
+
+        blob_size = len(blob)
 
         # infer from c["type"] if present
         kind = c.get("type", None)
@@ -563,7 +572,13 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
             try:
                 img = Image.open(io.BytesIO(blob)).convert("RGB")
             except Exception as e:
-                print(f"WARNING: Failed to decode image (field={field}): {e}")
+                logger.warning(
+                    "Failed to decode image — skipping sample. "
+                    "field=%s, shard=%s, key=%s, blob_size=%d bytes, "
+                    "orig_path=%s, error=%s",
+                    field, shard_url, sample_key, blob_size,
+                    c.get("orig_path", "N/A"), e,
+                )
                 return None
             c["image"] = img  # IMPORTANT: this matches many VLM preprocessors
         elif kind == "video_frames":
@@ -571,7 +586,13 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
             try:
                 pil_frames = _unpack_frames(blob)
             except Exception as e:
-                print(f"WARNING: Failed to unpack video frames (field={field}): {e}")
+                logger.warning(
+                    "Failed to unpack video frames — skipping sample. "
+                    "field=%s, shard=%s, key=%s, blob_size=%d bytes, "
+                    "orig_path=%s, error=%s",
+                    field, shard_url, sample_key, blob_size,
+                    c.get("orig_path", "N/A"), e,
+                )
                 return None
 
             extracted_fps = c.get("extracted_fps", 1.0)
@@ -605,7 +626,13 @@ def _attach_media_from_sample(messages: list[dict], sample: dict,
                 pil_frames, sample_fps, video_fps = _decode_video_from_bytes(
                     blob, ele=c)
             except Exception as e:
-                print(f"WARNING: Failed to decode video (field={field}, orig_path={c.get('orig_path', '?')}): {e}")
+                logger.warning(
+                    "Failed to decode video — skipping sample. "
+                    "field=%s, shard=%s, key=%s, blob_size=%d bytes, "
+                    "orig_path=%s, error=%s",
+                    field, shard_url, sample_key, blob_size,
+                    c.get("orig_path", "N/A"), e,
+                )
                 return None  # signals preprocess_sample to skip
 
             c["video"] = pil_frames
@@ -669,7 +696,7 @@ class CustomWebDatasetDataset(Dataset):
             if rows_per_shard is None:
                 rows_per_shard = local_rows_per_shard
             elif rows_per_shard != local_rows_per_shard:
-                print(f"Rows per shard mismatch: previously {rows_per_shard}, but {root_path} has {local_rows_per_shard}. Using the first one: {rows_per_shard}.")
+                logger.warning("Rows per shard mismatch: previously %d, but %s has %d. Using the first one: %d.", rows_per_shard, root_path, local_rows_per_shard, rows_per_shard)
             
 
         # Optional length hint (only used if someone calls len())
@@ -703,7 +730,7 @@ class CustomWebDatasetDataset(Dataset):
         # self.n_shards_to_skip = 5
         # self.n_samples_to_skip_in_shard = 100
         if self.n_shards_to_skip > 0 or self.n_samples_to_skip_in_shard > 0:
-            print(f"Resuming from previous checkpoint, skipping {self.n_shards_to_skip} shards and {self.n_samples_to_skip_in_shard} samples in the current shard.")
+            logger.info("Resuming from previous checkpoint, skipping %d shards and %d samples in the current shard.", self.n_shards_to_skip, self.n_samples_to_skip_in_shard)
 
         
 
@@ -806,7 +833,7 @@ class CustomWebDatasetDataset(Dataset):
                 self._wds_iter = iter(self.ds)
             except Exception as e:
                 retries += 1
-                print(f"WARNING: Failed to fetch sample (attempt {retries}/{max_retries}): {e}")
+                logger.warning("Failed to fetch sample (attempt %d/%d): %s", retries, max_retries, e)
                 if retries >= max_retries:
                     raise RuntimeError(
                         f"Failed to fetch a valid sample after {max_retries} consecutive attempts. "
@@ -959,7 +986,7 @@ def step_hook(self, step: int) -> Optional[dict]:
                         self._stateful_expert_load_per_layer[name] += local_expert_load
     elif not hasattr(self, "_warn_moe_load_balancing_training_once"):
         self._warn_moe_load_balancing_training_once = True
-        print("WARNING: MoE load balancing training is disabled. Please set enable_moe_load_balancing_training to True in the config['custom'] to enable it.")
+        logger.warning("MoE load balancing training is disabled. Please set enable_moe_load_balancing_training to True in the config['custom'] to enable it.")
     
     report_data = None
     if step % report_every == 0:
