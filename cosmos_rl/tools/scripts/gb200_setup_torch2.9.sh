@@ -115,6 +115,11 @@ unset PIP_CONSTRAINT
 pip install -U pip setuptools packaging psutil
 
 ###################################################
+## Install PyTorch, torchvision, and torchaudio
+echo "Installing PyTorch, torchvision, and torchaudio..."
+pip install -U torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu129
+
+###################################################
 ## Install vllm with no torch dependencies
 
 echo "Installing vLLM 0.12.0..."
@@ -128,7 +133,6 @@ pip install vllm==0.12.0
 echo "Installing flash_attn and related packages..."
 
 ## No need of these since torch related already installed in this container
-pip install -U torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu129
 pip install -U flashinfer-python==0.6.1
 pip install -U https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl
 pip install -U transformer_engine[pytorch] --no-build-isolation
