@@ -193,6 +193,7 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
             batch_size, grid_t, channel = patches.shape[:3]
             grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
 
+            # [1, 16, 3, 320, 608] -> [1, 16, 3, 20, 16, 38, 16]
             patches = patches.view(
                 batch_size, # 0
                 grid_t, # 1
@@ -202,10 +203,11 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
                 grid_w, # 5
                 patch_size, # 6
             )
-            # [1, 16, 3, 320, 608] -> [1, 16, 3, 20, 16, 38, 16])
-            # [batch_size, grid_t, grid_h, grid_w, channel, patch_size, patch_size]
+            # [1, 16, 3, 20, 16, 38, 16] -> [1, 16, 20, 38, 16, 16, 3]
+            # After permute: [batch_size, grid_t, grid_h, grid_w, patch_size, patch_size, channel]
             patches = patches.permute(0, 1, 3, 5, 4, 6, 2)
 
+            # [1, 16, 20, 38, 16, 16, 3] -> [1, 5120, 768]
             flatten_patches = patches.reshape(
                 batch_size,
                 grid_t * grid_h * grid_w,
