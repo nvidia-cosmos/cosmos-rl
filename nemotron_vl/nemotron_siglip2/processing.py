@@ -146,10 +146,9 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
         image_mean: Optional[Union[float, list[float]]] = None,
         image_std: Optional[Union[float, list[float]]] = None,
         patch_size: Optional[int] = None,
-        temporal_patch_size: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
-    ):
+    ):  
         merge_size = self.merge_size
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
@@ -163,7 +162,7 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
                     num_frames=num_frames,
                     height=height,
                     width=width,
-                    temporal_factor=temporal_patch_size,
+                    temporal_factor=1,
                     factor=patch_size * merge_size,
                     min_pixels=size.shortest_edge,
                     max_pixels=size.longest_edge,
@@ -191,35 +190,26 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
             )
             patches = stacked_videos
     
-            # Check that videos have `num_frames` divisible by `temporal_patch_size`
-            if patches.shape[1] % temporal_patch_size != 0:
-                repeats = patches[:, -1:].repeat(1, temporal_patch_size - 1, 1, 1, 1)
-                patches = torch.cat([patches, repeats], dim=1)
             batch_size, grid_t, channel = patches.shape[:3]
-            grid_t = grid_t // temporal_patch_size
             grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
 
             patches = patches.view(
                 batch_size, # 0
                 grid_t, # 1
-                temporal_patch_size, # 2
-                channel, # 3
-                grid_h, # 4
-                patch_size, # 5
-                grid_w, # 6
-                patch_size, # 7
+                channel, # 2
+                grid_h, # 3
+                patch_size, # 4
+                grid_w, # 5
+                patch_size, # 6
             )
-            # [1, 16, 3, 320, 608] -> [1, 16, 1, 3, 20, 16, 38, 16])
-            # [batch_size, grid_t, temporal_patch_size, grid_h, grid_w, channel, patch_size, patch_size]
-            patches = patches.permute(0, 1, 2, 4, 6, 3, 5, 7)
-            if self.temporal_patch_mean_pooling:
-                patches = patches.mean(dim=2)
-                grid_t = grid_t
-                temporal_patch_size = 1
+            # [1, 16, 3, 320, 608] -> [1, 16, 3, 20, 16, 38, 16])
+            # [batch_size, grid_t, grid_h, grid_w, channel, patch_size, patch_size]
+            patches = patches.permute(0, 1, 3, 5, 4, 6, 2)
+
             flatten_patches = patches.reshape(
                 batch_size,
                 grid_t * grid_h * grid_w,
-                channel * temporal_patch_size * patch_size * patch_size,
+                patch_size * patch_size * channel,
             )
 
             processed_videos_grouped[shape] = flatten_patches
@@ -416,7 +406,7 @@ class NemotronNanoV3BridgeProcessor(ProcessorMixin):
                     curr_timestamp = self._calculate_timestamps(
                         metadata.frames_indices,
                         metadata.fps,
-                        self.video_processor.temporal_patch_size,
+                        merge_size = 1,
                     )
 
                     video_placeholder = ""
