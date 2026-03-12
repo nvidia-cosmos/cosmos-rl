@@ -84,11 +84,11 @@ advantage_high = 5.0
 advantage_low = -5.0
 
 [train.train_policy.remote_reward]
-score_key = "pickscore"
 scale = 1.0
 
-[train.train_policy.remote_reward.reward_fn]
-pickscore = 1.0
+[[train.train_policy.remote_reward.reward_fns]]
+name = "pickscore"
+weight = 1.0
 
 [train.ckpt]
 enable_checkpoint = true
@@ -104,12 +104,8 @@ dataset.split = "test"
 n_init_replicas = 1
 tp_size = 1
 dp_shard_size = 8
-pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
 dp_shard_size = 8
-pp_size = 1
-dp_replicate_size = 1
