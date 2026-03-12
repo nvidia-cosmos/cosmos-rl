@@ -31,6 +31,7 @@ from typing import (
 from transformers import AutoProcessor, AutoConfig
 from glob import glob
 
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
@@ -971,13 +972,13 @@ class HFVLMDataPacker(DataPacker):
             if "logprob_masks" in result:
                 result["logprob_masks"] = result["logprob_masks"][:max_len]
             if has_vision:
-                print(
-                    f"WARNING: [{media_type}] Truncated vision sample from {orig_len} to "
+                logger.warning(
+                    f"[{media_type}] Truncated vision sample from {orig_len} to "
                     f"{max_len} tokens (trailing text only, vision tokens preserved)."
                 )
             else:
-                print(
-                    f"WARNING: [{media_type}] Truncated sample from {orig_len} to "
+                logger.warning(
+                    f"[{media_type}] Truncated sample from {orig_len} to "
                     f"{max_len} tokens."
                 )
 

@@ -142,8 +142,8 @@ class SFTDataset(Dataset):
                             )
                 except Exception as dbg_e:
                     msg_info.append(f"debug_err:{dbg_e}")
-                print(
-                    f"WARNING: sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                logger.warning(
+                    f"sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
                     f"\n  traceback: {_tb.format_exc().splitlines()[-3:]}"
                     f"\n  messages: {msg_info}"
                 )
