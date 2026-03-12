@@ -143,12 +143,15 @@ def get_orthonormal_optimizer_mesh(mesh_or_parallel_dims: Any) -> Any:
     - If possible, return the mesh[("dp_cp_tp",)] submesh.
     - Otherwise, return the original mesh object.
     """
+    if mesh_or_parallel_dims is None:
+        return None
 
     mesh = mesh_or_parallel_dims
     # If caller passed ParallelDims, use its built mesh.
     if hasattr(mesh_or_parallel_dims, "mesh"):
         mesh = mesh_or_parallel_dims.mesh
-
+        if mesh is None:
+            return None
     # Cosmos RL: 1D submesh named "dp_cp_tp" (flattened dp × cp × tp).
     try:
         key = ("dp_cp_tp",)

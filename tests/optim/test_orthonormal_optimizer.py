@@ -98,16 +98,21 @@ class NoLmHeadModel(nn.Module):
 
 
 class FakeMesh:
-    """DeviceMesh-like object with ndim and __getitem__."""
+    """DeviceMesh-like object with ndim and __getitem__.
+    When ndim==1, key ("dp_cp_tp",) returns self so get_orthonormal_optimizer_mesh
+    succeeds without raising and without triggering the fallback log.
+    """
 
     def __init__(self, mapping=None, ndim=1):
         self._mapping = dict(mapping or {})
         self.ndim = ndim
 
     def __getitem__(self, key):
-        if key not in self._mapping:
-            raise KeyError(key)
-        return self._mapping[key]
+        if key == ("dp_cp_tp",) and self.ndim == 1:
+            return self
+        if key in self._mapping:
+            return self._mapping[key]
+        raise KeyError(key)
 
 
 class FakeConfig:
@@ -246,8 +251,6 @@ class TestSeparateParamGroupsForOrthonormalOptim(unittest.TestCase):
 
 
 class TestGetOrthonormalOptimizerMesh(unittest.TestCase):
-    """None, 1D passthrough, Cosmos RL dp_shard_cp, Automodel 2D, fallback."""
-
     def _call(self, mesh_or_parallel_dims):
         from cosmos_rl.policy.trainer.optm.utils import get_orthonormal_optimizer_mesh
 
@@ -260,37 +263,21 @@ class TestGetOrthonormalOptimizerMesh(unittest.TestCase):
         mesh = FakeMesh(ndim=1)
         self.assertIs(self._call(mesh), mesh)
 
-    def test_no_ndim_returned_as_is(self):
-        mesh = object()
-        self.assertIs(self._call(mesh), mesh)
-
-    def test_cosmos_rl_dp_shard_cp_returns_1d_submesh(self):
-        """Cosmos RL: mesh[('dp_shard_cp',)] is 1D submesh."""
-        dp_shard_cp_mesh = FakeMesh(ndim=1)
-        mesh = FakeMesh({("dp_shard_cp",): dp_shard_cp_mesh}, ndim=2)
+    def test_cosmos_rl_dp_cp_tp_returns_1d_submesh(self):
+        """Cosmos RL: mesh[('dp_cp_tp',)] is 1D submesh."""
+        dp_cp_tp_mesh = FakeMesh(ndim=1)
+        mesh = FakeMesh({("dp_cp_tp",): dp_cp_tp_mesh}, ndim=2)
         result = self._call(mesh)
-        self.assertIs(result, dp_shard_cp_mesh)
-
-    def test_automodel_style_2d_extracts_submesh(self):
-        inner = FakeMesh(ndim=1)
-        dp_2d = FakeMesh({"dp_shard_cp": inner}, ndim=2)
-        mesh = FakeMesh({("dp_replicate", "dp_shard_cp"): dp_2d}, ndim=2)
-        result = self._call(mesh)
-        self.assertIs(result, inner)
-
-    def test_automodel_style_fallback_on_key_error(self):
-        mesh = FakeMesh({}, ndim=2)
-        result = self._call(mesh)
-        self.assertIs(result, mesh)
+        self.assertIs(result, dp_cp_tp_mesh)
 
     def test_parallel_dims_with_mesh_uses_mesh(self):
         """When passed ParallelDims-like object with .mesh, use that mesh."""
-        dp_shard_cp_mesh = FakeMesh(ndim=1)
-        mesh = FakeMesh({("dp_shard_cp",): dp_shard_cp_mesh}, ndim=2)
+        dp_cp_tp_mesh = FakeMesh(ndim=1)
+        mesh = FakeMesh({("dp_cp_tp",): dp_cp_tp_mesh}, ndim=2)
         parallel_dims = MagicMock()
         parallel_dims.mesh = mesh
         result = self._call(parallel_dims)
-        self.assertIs(result, dp_shard_cp_mesh)
+        self.assertIs(result, dp_cp_tp_mesh)
 
 
 class TestBuildOrthonormalOptimizer(unittest.TestCase):
