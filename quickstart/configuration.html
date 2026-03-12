@@ -2922,7 +2922,7 @@
 </tr>
 <tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="22"><ul class="simple">
+<tr class="row-even"><td rowspan="19"><ul class="simple">
 <li><p>RemoteRewardConfig</p></li>
 </ul>
 </td>
@@ -2933,62 +2933,41 @@
 </tr>
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="3"><ul class="simple">
-<li><p>enabled</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enabled</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
-<li><p>score_key</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Score Key</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>overall_reward</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>scale</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Scale</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-even"><td colspan="5"><p>Scale of the total reward result.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>number</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>1.0</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>reward_fn</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>reward_fns</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Reward Fn</em></p></td>
+<td colspan="5"><p><em>Reward Fns</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Dictionary of reward functions and their weights for remote reward calculation.</p></td>
+<tr class="row-even"><td colspan="5"><p>List of reward functions for remote reward calculation.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>array</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
+<tr class="row-even"><td><p>items</p></td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/RewardFunctionConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>reward_clip_min</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Reward Clip Min</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Clip minimum of the total reward result.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>number</em></p></td>
@@ -2996,11 +2975,95 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>-5.0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>reward_clip_max</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Reward Clip Max</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Clip maximum of the total reward result.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>5.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="23"><ul class="simple">
+<li><p>RewardFunctionConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RewardFunctionConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><ul class="simple">
+<li><p><strong>name</strong></p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Name</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Name of the reward function.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>weight</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Weight</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Weight of the reward function.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>score_key</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Score Key</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Score key of the reward function. If not specified, the name will be used as the score key. You can use ‘+’ to add multiple score keys together, which will be added together as the final score. For example, ‘vq_reward+mq_reward’.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>clip_min</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Clip Min</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Clip minimum of the reward function.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>-5.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>clip_max</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Clip Max</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Clip maximum of the reward function.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>number</em></p></td>
@@ -4109,7 +4172,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="252"><ul class="simple">
+<tr class="row-even"><td rowspan="254"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -4120,13 +4183,13 @@
 </tr>
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="68"><ul class="simple">
+<tr class="row-odd"><td rowspan="70"><ul class="simple">
 <li><p>train_policy</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Train Policy</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="65"><p>default</p></td>
+<tr class="row-even"><td rowspan="67"><p>default</p></td>
 <td><p>type</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
@@ -4189,25 +4252,31 @@
 <tr class="row-odd"><td><p>use_remote_reward</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="6"><p>remote_reward</p></td>
-<td><p>enabled</p></td>
-<td colspan="2"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td><p>reward_clip_max</p></td>
+<tr class="row-even"><td rowspan="8"><p>remote_reward</p></td>
+<td><p>reward_clip_max</p></td>
 <td colspan="2"><p>5.0</p></td>
 </tr>
-<tr class="row-even"><td><p>reward_clip_min</p></td>
+<tr class="row-odd"><td><p>reward_clip_min</p></td>
 <td colspan="2"><p>-5.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>reward_fn</p></td>
-<td><p>dance_grpo</p></td>
-<td><p>1.0</p></td>
+<tr class="row-even"><td rowspan="5"><p>reward_fns</p></td>
+<td><p>clip_max</p></td>
+<td><p>5.0</p></td>
 </tr>
-<tr class="row-even"><td><p>scale</p></td>
-<td colspan="2"><p>1.0</p></td>
+<tr class="row-odd"><td><p>clip_min</p></td>
+<td><p>-5.0</p></td>
+</tr>
+<tr class="row-even"><td><p>name</p></td>
+<td><p>dance_grpo</p></td>
 </tr>
 <tr class="row-odd"><td><p>score_key</p></td>
-<td colspan="2"><p>overall_reward</p></td>
+<td><p>overall_reward</p></td>
+</tr>
+<tr class="row-even"><td><p>weight</p></td>
+<td><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td><p>scale</p></td>
+<td colspan="2"><p>1.0</p></td>
 </tr>
 <tr class="row-even"><td><p>filter_reward_metric</p></td>
 <td colspan="3"></td>
