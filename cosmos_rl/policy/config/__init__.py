@@ -255,7 +255,7 @@ class CheckpointConfig(BaseModel):
     )
     export_safetensors: bool = Field(
         default=True,
-        description="Whether to export a safetensors weight for huggingface usage, include related config files.",
+        description="Whether to export a safetensors weight for huggingface usage, include related config files. If True, the safetensors weight will be exported every `save_freq` steps. If False, the safetensors weight will be exported only when the training is finished.",
     )
     upload_hf: bool = Field(
         default=False,

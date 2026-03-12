@@ -37,9 +37,12 @@ from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
+from cosmos_rl.utils.util import (
+    copy_weights_with_decay,
+    is_master_rank,
+    str2torch_dtype,
+)
 from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
 
@@ -110,15 +113,6 @@ class NFTTrainer(DiffusersTrainer):
             tgt_params=self.old_trainable_params,
         )
 
-        # Create ema if needed
-        if self.config.train.ema_enable:
-            self.ema = EMAModuleWrapper(
-                parameters=self.trainable_params,
-                decay=self.config.train.ema_decay,
-                update_step_interval=self.config.train.ema_update_step_interval,
-                device=self.device,
-            )
-
         self.grpo_config = self.config.train.train_policy
 
         # For optimizers
@@ -136,33 +130,6 @@ class NFTTrainer(DiffusersTrainer):
             self.config.policy.diffusers.sample.num_steps
             * self.config.policy.diffusers.timesteps_fraction
         )
-
-    def save_checkpoint(
-        self,
-        current_step: int,
-        total_steps: int,
-        remain_samples_num: int,
-    ):
-        logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-        # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
-        if self.config.train.ema_enable and self.ema is not None:
-            self.ema.copy_ema_to(self.trainable_params, store_temp=True)
-        model_state_dict = self.model.get_trained_model_state_dict()
-        self.ckpt_manager.save_checkpoint(
-            model=model_state_dict,
-            optimizer=self.optimizers,
-            scheduler=self.lr_schedulers,
-            step=current_step,
-            total_steps=total_steps,
-            **{
-                "remain_samples_num": remain_samples_num,
-                "is_final": current_step == total_steps,
-            },
-        )
-        self.ckpt_manager.save_check(step=current_step)
-        # Restore current weights after saving ema weights to checkpoint
-        if self.config.train.ema_enable and self.ema is not None:
-            self.ema.copy_temp_to(self.trainable_params)
 
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
@@ -820,12 +787,45 @@ class NFTTrainer(DiffusersTrainer):
         # Only step lr scheduler when all the mini-batches are processed
         self.lr_schedulers.step()
 
-        # checkpointing
+        # Checkpointing
         if is_master_replica and (do_save_checkpoint):
-            self.save_checkpoint(
-                current_step=current_step,
+            is_last_step = current_step == total_steps
+            # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_ema_to(self.trainable_params, store_temp=True)
+
+            if is_last_step or self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{current_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=is_last_step,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
+                )
+
+            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+            model_state_dict = self.model.get_trained_model_state_dict()
+            self.ckpt_manager.save_checkpoint(
+                model=model_state_dict,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
                 total_steps=total_steps,
-                remain_samples_num=remain_samples_num,
+                **{
+                    "remain_samples_num": remain_samples_num,
+                    "is_final": is_last_step,
+                },
             )
+            self.ckpt_manager.save_check(step=current_step)
+
+            # Restore current weights after saving ema weights to checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_temp_to(self.trainable_params)
 
         return report_data

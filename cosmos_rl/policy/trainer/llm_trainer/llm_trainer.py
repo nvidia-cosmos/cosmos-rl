@@ -396,6 +396,14 @@ class LLMTrainer(Trainer):
         is_final=False,
         dtype: Optional[torch.dtype] = None,
     ):
+        """Export safetensors to the local directory/huggingface/s3.
+        Args:
+            output_dir (str): The directory to save the safetensors.
+            rel_path (str): The relative path to the output directory.
+            trainable_only (bool): Whether to export only the trainable parameters.
+            is_final (bool): Whether this is the final export.
+            dtype (torch.dtype): The dtype of the parameters.
+        """
         if self.config.policy.lora is not None and not trainable_only:
             trainable_only = True
             logger.info(
