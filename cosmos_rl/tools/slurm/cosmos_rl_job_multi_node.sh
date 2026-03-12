@@ -8,7 +8,7 @@
 #SBATCH --open-mode=append
 #SBATCH --signal=B:SIGUSR1@[[PRE_TIMEOUT_SIGNAL]]
 #SBATCH --exclusive
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:[[NGPU_PER_NODE]]
 #SBATCH --requeue
 # shellcheck disable=SC1035,SC1073,SC1020,SC1072
 [[EXTRA_SBATCH_ARGS]]
@@ -321,7 +321,7 @@ log "Container image: ${CONTAINER_IMAGE}"
 
 # --- 3c. Container Mounts --------------------------------------------------
 
-MOUNTS="/lustre:/lustre/"
+MOUNTS="[[MOUNT_DIRS]]"
 if [[ -d "${HOME}/.cache/huggingface" ]]; then
     MOUNTS="${MOUNTS},${HOME}/.cache/huggingface:/root/.cache/huggingface"
 fi
