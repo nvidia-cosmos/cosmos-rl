@@ -23,7 +23,8 @@ target_modules = [
 ]
 
 [policy.diffusers]
-dtype = "float32"
+main_dtype = "float32"
+training_dtype = "bfloat16"
 is_video = false
 offload = false
 max_prompt_length = 128

@@ -32,6 +32,7 @@ is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.diffusers]
+main_dtype = "float32"
 offload = true
 is_video = true
 max_prompt_length = 300

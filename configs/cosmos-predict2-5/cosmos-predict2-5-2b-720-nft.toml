@@ -22,7 +22,7 @@ target_modules = [ # Set both attention and cross-attention modules
 ]
 
 [policy.diffusers]
-dtype = "float32"
+main_dtype = "bfloat16"
 is_video = true
 offload = false
 max_prompt_length = 512
