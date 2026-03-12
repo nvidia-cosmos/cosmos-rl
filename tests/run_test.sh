@@ -1,4 +1,5 @@
 python -c "from cosmos_rl._version import version; print(version)"
+python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
 # run tests
 python tests/test_apex.py
 python tests/test_cosmos_hf_precision.py
