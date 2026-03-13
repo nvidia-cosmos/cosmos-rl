@@ -232,7 +232,7 @@ class NFTTrainer(DiffusersTrainer):
     ):
         """Log multimodal data to Weights & Biases (Wandb) for visualization."""
 
-        mm_datas_cpu = mm_datas.detach().cpu()
+        mm_datas_cpu = mm_datas.detach().to(torch.float16).cpu()
         num_to_log = min(15, len(mm_datas_cpu))
         rewards_cpu = rewards.detach().cpu()
 
@@ -252,9 +252,7 @@ class NFTTrainer(DiffusersTrainer):
         for out_idx, sample_idx in enumerate(sample_indices):
             out_path = os.path.join(mm_data_dir, f"{current_step}_{out_idx}.{ext}")
             if modality == "video":
-                video = (
-                    mm_datas_cpu[sample_idx].to(torch.float16).numpy()
-                )  # [T, C, H, W]
+                video = mm_datas_cpu[sample_idx].numpy()  # [T, C, H, W]
                 frames = (video.transpose(0, 2, 3, 1) * 255).astype(np.uint8)
                 imageio.mimsave(
                     out_path,
@@ -488,61 +486,50 @@ class NFTTrainer(DiffusersTrainer):
                             noise = torch.randn_like(x0.float())
                             xt = (1 - t_expanded) * x0 + t_expanded * noise
 
-                            with torch.amp.autocast(
-                                device_type="cuda",
-                                enabled=self.model.mixed_precision,
-                                dtype=self.model.training_dtype,
-                            ):
-                                self.model.transformer.set_adapter("old")
-                                transformer_inputs = (
-                                    self.model.nft_prepare_transformer_input(
-                                        latents=xt,
-                                        prompt_embeds=embeds,
-                                        prompt_attention_mask=prompt_attention_mask
-                                        if prompt_attention_mask is not None
-                                        else None,
-                                        pooled_prompt_embeds=pooled_embeds
-                                        if pooled_embeds is not None
-                                        else None,
-                                        timestep=mini_batch["timesteps"][:, j_idx],
-                                        num_frames=self.num_frames,
-                                        height=self.height,
-                                        width=self.width,
-                                    )
+                            self.model.transformer.set_adapter("old")
+                            transformer_inputs = (
+                                self.model.nft_prepare_transformer_input(
+                                    latents=xt,
+                                    prompt_embeds=embeds,
+                                    prompt_attention_mask=prompt_attention_mask
+                                    if prompt_attention_mask is not None
+                                    else None,
+                                    pooled_prompt_embeds=pooled_embeds
+                                    if pooled_embeds is not None
+                                    else None,
+                                    timestep=mini_batch["timesteps"][:, j_idx],
+                                    num_frames=self.num_frames,
+                                    height=self.height,
+                                    width=self.width,
                                 )
-                                with torch.no_grad():
-                                    old_prediction = self.model.transformer(
-                                        **transformer_inputs
-                                    )[0].detach()
-                                self.model.transformer.set_adapter("default")
-
-                                forward_prediction = self.model.transformer(
+                            )
+                            with torch.no_grad():
+                                old_prediction = self.model.transformer(
                                     **transformer_inputs
-                                )[0]
-                                # Use the base model (with adapter disabled) to a reference prediciton
-                                with torch.no_grad():
-                                    if hasattr(
-                                        self.model.transformer, "disable_adapters"
-                                    ):
-                                        self.model.transformer.disable_adapters()
+                                )[0].detach()
+                            self.model.transformer.set_adapter("default")
+
+                            forward_prediction = self.model.transformer(
+                                **transformer_inputs
+                            )[0]
+                            # Use the base model (with adapter disabled) to a reference prediciton
+                            with torch.no_grad():
+                                if hasattr(self.model.transformer, "disable_adapters"):
+                                    self.model.transformer.disable_adapters()
+                                    ref_forward_prediction = self.model.transformer(
+                                        **transformer_inputs
+                                    )[0]
+                                    self.model.transformer.enable_adapters()
+                                elif hasattr(self.model.transformer, "disable_adapter"):
+                                    with self.model.transformer.disable_adapter():
                                         ref_forward_prediction = self.model.transformer(
                                             **transformer_inputs
                                         )[0]
-                                        self.model.transformer.enable_adapters()
-                                    elif hasattr(
-                                        self.model.transformer, "disable_adapter"
-                                    ):
-                                        with self.model.transformer.disable_adapter():
-                                            ref_forward_prediction = (
-                                                self.model.transformer(
-                                                    **transformer_inputs
-                                                )[0]
-                                            )
-                                    else:
-                                        raise NotImplementedError(
-                                            "The transformer model does not support adapter disabling."
-                                        )
-                                    self.model.transformer.set_adapter("default")
+                                else:
+                                    raise NotImplementedError(
+                                        "The transformer model does not support adapter disabling."
+                                    )
+                                self.model.transformer.set_adapter("default")
 
                             advantages_clip = torch.clamp(
                                 mini_batch["advantages"],

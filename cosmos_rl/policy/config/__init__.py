@@ -1090,15 +1090,10 @@ class TokenizerConfig(BaseModel):
 
 
 class DiffusersConfig(BaseModel):
-    main_dtype: str = Field(
+    dtype: str = Field(
         default="float32",
         description="Data type for the diffusers model, include the transformer and text encoder. The VAE is always in float32 for stability.",
         choices=["float16", "bfloat16", "float32"],
-    )
-    training_dtype: Optional[str] = Field(
-        default=None,
-        description="Training data type for the diffusers model. If specified and different from main_dtype, mixed precision training will be used.",
-        choices=[None, "float16", "bfloat16", "float32"],
     )
     is_video: bool = Field(
         default=False, description="True if this model is video generate model"

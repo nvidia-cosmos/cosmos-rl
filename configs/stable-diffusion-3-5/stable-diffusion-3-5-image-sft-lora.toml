@@ -38,7 +38,6 @@ init_lora_weights = "gaussian"
 target_modules = ["attn.add_k_proj", "attn.add_q_proj", "attn.add_v_proj", "attn.to_add_out", "attn.to_k", "attn.to_out.0", "attn.to_q", "attn.to_v"]
 
 [policy.diffusers]
-main_dtype = "bfloat16"
 offload = true
 is_video = false
 max_prompt_length = 300

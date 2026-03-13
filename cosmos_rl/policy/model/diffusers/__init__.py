@@ -57,19 +57,7 @@ class DiffuserModel(BaseModel, ABC):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
-        self.main_dtype = str2torch_dtype(config.main_dtype)
-        self.training_dtype = (
-            str2torch_dtype(config.training_dtype)
-            if config.training_dtype is not None
-            else None
-        )
-        if self.training_dtype is not None and self.training_dtype != self.main_dtype:
-            logger.info(
-                f"Using mixed precision training with {self.main_dtype} as main dtype and {self.training_dtype} as training dtype for the diffusers model"
-            )
-            self.mixed_precision = True
-        else:
-            self.mixed_precision = False
+        self.dtype = str2torch_dtype(config.dtype)
         self.load_models_from_hf(model_str, model_revision)
         if lora_config is not None:
             self.is_lora = True
@@ -93,14 +81,12 @@ class DiffuserModel(BaseModel, ABC):
             model_part = getattr(self.pipeline, valid_model)
             if isinstance(model_part, nn.Module):
                 if valid_model == "transformer":
-                    model_part.to(dtype=self.main_dtype)
+                    model_part.to(dtype=self.dtype)
                 elif valid_model == "vae":
                     # VAE is always in float32 for stability
                     model_part.to(dtype=torch.float32)
-                elif self.mixed_precision:
-                    model_part.to(dtype=self.training_dtype)
                 else:
-                    model_part.to(dtype=self.main_dtype)
+                    model_part.to(dtype=self.dtype)
                 # Offload all torch.nn.Modules to cpu except transformers
                 if self.offload and valid_model != "transformer":
                     model_part.to("cpu")
