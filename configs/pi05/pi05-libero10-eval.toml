@@ -4,6 +4,7 @@
 
 [train]
 output_dir = "./outputs/pi05-libero10-eval"
+compile = false
 
 [train.train_policy]
 type = "grpo"
@@ -50,6 +51,6 @@ joint_logprob = false
 safe_get_logprob = false
 ignore_last = false
 train_expert_only = true
-discrete_state_input = true
+discrete_state_input = false
 max_token_len = 200
 trials_per_task = 50
