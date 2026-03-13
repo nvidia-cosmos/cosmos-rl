@@ -23,7 +23,6 @@ target_modules = [
 ]
 
 [policy.diffusers]
-dtype = "bfloat16"
 is_video = true
 offload = false
 max_prompt_length = 300
@@ -70,6 +69,10 @@ ema_decay = 0.9
 ema_update_step_interval = 1
 async_tp_enabled = false
 compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
 
 [train.train_policy]
 type = "grpo"

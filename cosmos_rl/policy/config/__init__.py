@@ -1091,8 +1091,8 @@ class TokenizerConfig(BaseModel):
 
 class DiffusersConfig(BaseModel):
     dtype: str = Field(
-        default="float16",
-        description="Data type for diffusers model",
+        default="float32",
+        description="Data type for the diffusers model, include the transformer and text encoder. The VAE is always in float32 for stability.",
         choices=["float16", "bfloat16", "float32"],
     )
     is_video: bool = Field(

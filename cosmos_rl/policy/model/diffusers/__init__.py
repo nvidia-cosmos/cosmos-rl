@@ -79,10 +79,16 @@ class DiffuserModel(BaseModel, ABC):
         self.offloaded_models = []
         for valid_model in self.valid_models:
             model_part = getattr(self.pipeline, valid_model)
-            if isinstance(model_part, nn.Module) and valid_model != "transformer":
-                model_part.to(dtype=self.dtype)
+            if isinstance(model_part, nn.Module):
+                if valid_model == "transformer":
+                    model_part.to(dtype=self.dtype)
+                elif valid_model == "vae":
+                    # VAE is always in float32 for stability
+                    model_part.to(dtype=torch.float32)
+                else:
+                    model_part.to(dtype=self.dtype)
                 # Offload all torch.nn.Modules to cpu except transformers
-                if self.offload:
+                if self.offload and valid_model != "transformer":
                     model_part.to("cpu")
                     self.offloaded_models.append(model_part)
             setattr(self, valid_model, model_part)
@@ -169,9 +175,9 @@ class DiffuserModel(BaseModel, ABC):
         """
         # Init from pipeline
         self.model_str = model_str
-        # Always init on cuda now
+        # Always init on cuda now, load pipeline with float32 by default
         self.pipeline = DiffusionPipeline.from_pretrained(
-            model_str, revision=revision, torch_dtype=self.dtype, device_map="cuda"
+            model_str, revision=revision, device_map="cuda"
         )
         if self.pipeline._execution_device.type != "cuda":
             logger.warning(
