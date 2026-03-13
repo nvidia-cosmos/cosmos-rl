@@ -1306,10 +1306,6 @@ class PI05(BaseModel):
             )
 
         # uint8 [0,255] NHWC → float32 [-1,1] NCHW, matching Observation.from_dict()
-        # in sft_collate_fn.  This ensures both the eval path
-        # (sample_actions → _preprocess_observation) and the GRPO training
-        # path (get_log_prob_value, which bypasses _preprocess_observation)
-        # receive correctly formatted images.
         images = images.to(torch.float32) / 255.0 * 2.0 - 1.0
         images = images.permute(0, 1, 4, 2, 3)  # [B, N, H, W, C] → [B, N, C, H, W]
 

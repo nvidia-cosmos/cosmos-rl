@@ -23,11 +23,6 @@ from torch import nn
 
 from transformers.cache_utils import Cache, StaticCache
 
-try:
-    from transformers.cache_utils import HybridCache
-except ImportError as e:
-    print(f"Error importing HybridCache: {e}")
-    HybridCache = None
 
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -222,8 +217,6 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
 
         inputs_lead_dim, sequence_length = input_tensor.shape[:2]
         if using_static_cache:
-            target_length = past_key_values.get_max_cache_shape()
-        elif isinstance(past_key_values, HybridCache):
             target_length = past_key_values.get_max_cache_shape()
         else:
             target_length = (
@@ -656,18 +649,6 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
         # Otherwise we need pixel values to be passed to model. NOTE: use_cache=False needs pixel_values always
         if cache_position[0] == 0:
             model_inputs["pixel_values"] = pixel_values
-        is_training = token_type_ids is not None and labels is not None
-        if cache_position[0] == 0 and isinstance(past_key_values, HybridCache):
-            input_tensor = inputs_embeds if inputs_embeds is not None else input_ids
-            causal_mask = self.model._update_causal_mask(
-                attention_mask,
-                token_type_ids,
-                past_key_values,
-                cache_position,
-                input_tensor,
-                is_training,
-            )
-            model_inputs["attention_mask"] = causal_mask
 
         return model_inputs
 

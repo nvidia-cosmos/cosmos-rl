@@ -51,6 +51,6 @@ joint_logprob = false
 safe_get_logprob = false
 ignore_last = false
 train_expert_only = true
-discrete_state_input = false
+discrete_state_input = true
 max_token_len = 200
 trials_per_task = 50
