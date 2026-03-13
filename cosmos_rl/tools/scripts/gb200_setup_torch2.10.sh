@@ -115,6 +115,11 @@ unset PIP_CONSTRAINT
 pip install -U pip setuptools packaging psutil
 
 ###################################################
+## Install PyTorch, torchvision, and torchaudio
+echo "Installing PyTorch, torchvision, and torchaudio..."
+pip install -U torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
+
+###################################################
 ## Install vllm with no torch dependencies
 
 echo "Installing vLLM 0.17.0..."
@@ -128,8 +133,7 @@ pip install vllm==0.17.0
 echo "Installing flash_attn and related packages..."
 
 ## No need of these since torch related already installed in this container
-pip install -U torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
-pip install -U flashinfer-python==0.6.1
+pip install -U flashinfer-python==0.6.4
 MAX_JOBS=64 FLASH_ATTN_CUDA_ARCHS=100 TORCH_CUDA_ARCH_LIST="10.0+PTX" pip install -U flash_attn==2.8.3 --no-build-isolation
 pip install -U transformer_engine[pytorch] --no-build-isolation
 
@@ -273,7 +277,7 @@ PY
 # 3) Install deps (minus excluded)
 pip install -r /tmp/local-requires-filtered.txt
 pip install tensordict
-pip install -U torchao==0.16.10
+pip install -U torchao==0.16.0
 pip install nvidia-nccl-cu12>=2.26.2
 
 if [ -n "$COSMOS_RL_EXTRAS" ]; then

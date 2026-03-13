@@ -264,21 +264,23 @@ class ControllerDataFetcher(DataFetcherBase):
                         f"[DataFetcher] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
                     )
 
-                    train_dataloader_bias = max(
-                        0,
-                        len(self.dataset.train_set)
-                        - (
-                            (
-                                math.ceil(
-                                    remain_samples_num
-                                    / self.config.rollout.n_generation
+                    train_dataloader_bias = (
+                        max(
+                            0,
+                            len(self.dataset.train_set)
+                            - (
+                                (
+                                    math.ceil(
+                                        remain_samples_num
+                                        / self.config.rollout.n_generation
+                                    )
                                 )
-                            )
-                            % len(self.dataset.train_set)
-                        ),
-                    )
+                                % len(self.dataset.train_set)
+                            ),
+                        )
+                    ) % len(self.dataset.train_set)
                     logger.info(
-                        f"[DataFetcher] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
+                        f"[DataFetcher] Loaded extra info from checkpoint: {self.ckpt_extra_info} and Skipping the first {train_dataloader_bias} samples to align with the checkpoint"
                     )
                     from cosmos_rl.policy.trainer.sampler import SkippingSampler
 
@@ -318,6 +320,13 @@ class ControllerDataFetcher(DataFetcherBase):
                     logger.error(
                         f"[DataFetcher] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
+
+            if hasattr(self.train_sampler, "set_epoch"):
+                # Here the epoch from 1 to total epoch count, not start from 0
+                self.train_sampler.set_epoch(self.epoch)
+            if hasattr(self.batch_sampler, "set_epoch"):
+                self.batch_sampler.set_epoch(self.epoch)
+
             if self.batch_sampler is not None:
                 logger.info(
                     "[DataFetcher] Using custom batch Sampler that yields list of indices for training dataset."
