@@ -1,0 +1,268 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Profiler &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Overview" href="../wfm/overview.html" />
+    <link rel="prev" title="On-Policy Distillation" href="../distillation/on_policy_distillation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Profiler</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#step-by-step-workflow">Step-by-Step Workflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#list-running-replicas">1) List running replicas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pick-the-target-policy-replica">2) Pick the target policy replica</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#enable-profiling-for-that-replica">3) Enable profiling for that replica</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#confirm-profiler-logs-on-the-policy-replica">4) Confirm profiler logs on the policy replica</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#open-the-trace-in-chrome-trace-viewer">5) Open the trace in Chrome trace viewer</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#quick-troubleshooting">Quick Troubleshooting</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Profiler</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/profiler/overview.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="profiler">
+<h1>Profiler<a class="headerlink" href="#profiler" title="Link to this heading"></a></h1>
+<p>This page explains how to enable and use runtime profiling for a running RL task.</p>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p>Start your Cosmos-RL RL task first.</p></li>
+<li><p>Make sure profiler is enabled in your TOML config.</p></li>
+</ol>
+<p>Example:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[profiler]</span>
+<span class="n">enable_profiler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+
+<span class="k">[profiler.sub_profiler_config]</span>
+<span class="n">active_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">warmup_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">wait_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">rank_filter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="n">record_shape</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">profile_memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">with_stack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">with_modules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+</pre></div>
+</div>
+<p>Important:</p>
+<ul class="simple">
+<li><p>Profiling commands below only work when <code class="docutils literal notranslate"><span class="pre">profiler.enable_profiler</span> <span class="pre">=</span> <span class="pre">true</span></code>.</p></li>
+<li><p>You can tune profiling behavior with <code class="docutils literal notranslate"><span class="pre">profiler.sub_profiler_config</span></code>.</p></li>
+<li><p>Profiler config definitions are in <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/config/__init__.py</span></code>
+(<code class="docutils literal notranslate"><span class="pre">ProfilerConfig</span></code> and <code class="docutils literal notranslate"><span class="pre">SubProfilerConfig</span></code>).</p></li>
+</ul>
+</section>
+<section id="step-by-step-workflow">
+<h2>Step-by-Step Workflow<a class="headerlink" href="#step-by-step-workflow" title="Link to this heading"></a></h2>
+<section id="list-running-replicas">
+<h3>1) List running replicas<a class="headerlink" href="#list-running-replicas" title="Link to this heading"></a></h3>
+<p>Run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>cosmos_rl.cli.cli<span class="w"> </span>replica<span class="w"> </span>ls<span class="w"> </span>-cp<span class="w"> </span><span class="m">8000</span><span class="w"> </span>-ch<span class="w"> </span>localhost
+</pre></div>
+</div>
+<p>Notes:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-cp</span></code> is the controller port.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-ch</span></code> is the controller host.</p></li>
+<li><p>Replace <code class="docutils literal notranslate"><span class="pre">8000</span></code> and <code class="docutils literal notranslate"><span class="pre">localhost</span></code> with your real controller endpoint.</p></li>
+</ul>
+</section>
+<section id="pick-the-target-policy-replica">
+<h3>2) Pick the target policy replica<a class="headerlink" href="#pick-the-target-policy-replica" title="Link to this heading"></a></h3>
+<p>From <code class="docutils literal notranslate"><span class="pre">replica</span> <span class="pre">ls</span></code> output, identify:</p>
+<ul class="simple">
+<li><p>Replica name</p></li>
+<li><p>Replica role</p></li>
+</ul>
+<p>Choose the policy replica you want to profile.</p>
+</section>
+<section id="enable-profiling-for-that-replica">
+<h3>3) Enable profiling for that replica<a class="headerlink" href="#enable-profiling-for-that-replica" title="Link to this heading"></a></h3>
+<p>Run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>cosmos_rl.cli.cli<span class="w"> </span>profile<span class="w"> </span><span class="nb">set</span><span class="w"> </span>04c8f8f4-e4e2-46ac-be3c-28ad63a7c108<span class="w"> </span>-cp<span class="w"> </span><span class="m">8000</span><span class="w"> </span>-ch<span class="w"> </span>localhost
+</pre></div>
+</div>
+<p>Replace the replica ID, host, and port with your own values.</p>
+</section>
+<section id="confirm-profiler-logs-on-the-policy-replica">
+<h3>4) Confirm profiler logs on the policy replica<a class="headerlink" href="#confirm-profiler-logs-on-the-policy-replica" title="Link to this heading"></a></h3>
+<p>In policy replica logs, you should see messages like:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>[Profiler] init profiler for rank 0
+[Profiler] start to trace for rank: 0
+[Profiler] save trace for rank: 0 to file: ./outputs/.../profile_trace/04c8f8f4-e4e2-46ac-be3c-28ad63a7c108_0/0_trace.json.gz after 3 steps.
+</pre></div>
+</div>
+<p>The save log contains the full trace file path.</p>
+</section>
+<section id="open-the-trace-in-chrome-trace-viewer">
+<h3>5) Open the trace in Chrome trace viewer<a class="headerlink" href="#open-the-trace-in-chrome-trace-viewer" title="Link to this heading"></a></h3>
+<p>The saved file is typically <code class="docutils literal notranslate"><span class="pre">trace.json.gz</span></code>.</p>
+<p>You can open it with:</p>
+<ul class="simple">
+<li><p>Perfetto UI: <a class="reference external" href="https://ui.perfetto.dev">https://ui.perfetto.dev</a></p></li>
+<li><p>Chrome tracing (legacy): <code class="docutils literal notranslate"><span class="pre">chrome://tracing</span></code></p></li>
+</ul>
+<p>Perfetto is recommended.</p>
+</section>
+</section>
+<section id="quick-troubleshooting">
+<h2>Quick Troubleshooting<a class="headerlink" href="#quick-troubleshooting" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>No profiler logs:
+- Verify <code class="docutils literal notranslate"><span class="pre">profiler.enable_profiler</span> <span class="pre">=</span> <span class="pre">true</span></code>.
+- Check <code class="docutils literal notranslate"><span class="pre">rank_filter</span></code> includes your rank.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">profile</span> <span class="pre">set</span></code> has no visible effect:
+- Re-check controller host/port and replica name.</p></li>
+<li><p>No trace file generated:
+- Make sure training runs for at least <code class="docutils literal notranslate"><span class="pre">wait_steps</span> <span class="pre">+</span> <span class="pre">warmup_steps</span> <span class="pre">+</span> <span class="pre">active_steps</span></code>.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../distillation/on_policy_distillation.html" class="btn btn-neutral float-left" title="On-Policy Distillation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../wfm/overview.html" class="btn btn-neutral float-right" title="Overview" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
