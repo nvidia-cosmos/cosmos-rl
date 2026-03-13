@@ -4,6 +4,7 @@
 
 [train]
 output_dir = "./outputs/pi05-libero10-eval"
+compile = false
 
 [train.train_policy]
 type = "grpo"

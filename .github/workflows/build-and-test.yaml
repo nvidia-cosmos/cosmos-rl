@@ -50,6 +50,8 @@ jobs:
           # ${DOCKER_RUN} ROBOTWIN_PATH=/RoboTwin python tests/test_env_manager_robotwin.py
           ${DOCKER_RUN} python tests/test_vla_libero.py --config configs/openvla-oft/openvla-oft-libero10-eval.toml --trials 50 --task-ids 0
           ${DOCKER_RUN} python tests/test_vla_libero.py --config configs/cosmos-policy/cosmos-policy-libero10-eval.toml --trials 50 --task-ids 0
+          ${DOCKER_RUN} python tests/test_vla_libero.py --config configs/pi05/pi05-libero10-eval.toml --trials 50 --task-ids 0
+
 
       - name: Run tests
         id: tests
