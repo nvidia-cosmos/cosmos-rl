@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import importlib
+import threading
 
 import torch
 import transformers
@@ -335,38 +336,41 @@ def sequence_packing_forward_qwen3_5_patch(model):
             _patch_linear_attn_for_sequence_packing(layer)
 
 
+# Thread-local storage for decoder kwargs during forward (avoids circular refs that break model.train())
+_decoder_kwargs_tls = threading.local()
+
+
 def _patch_linear_attn_for_sequence_packing(decoder_layer):
     """
     Patch Qwen3.5 linear_attn (GatedDeltaNet) so sequence packing works without
     modifying transformers: inject seq_idx into causal_conv1d_fn and cu_seqlens
     into chunk_gated_delta_rule. Equivalent to the modeling_qwen3_5.py changes.
+    Uses thread-local for kwargs to avoid circular references that cause RecursionError in model.train().
     """
     linear_attn = decoder_layer.linear_attn
 
-    # So linear_attn.forward can read kwargs from the decoder layer (set by decoder forward wrapper)
-    linear_attn._parent_decoder_layer = decoder_layer
-
-    # (1) Decoder layer forward: pass **kwargs into linear_attn by storing on layer for this call
+    # (1) Decoder layer forward: set current kwargs in thread-local so linear_attn can read them
     _original_decoder_forward = decoder_layer.forward
 
     def _decoder_forward_with_kwargs(self, *args, **kwargs):
-        self._current_layer_kwargs = kwargs
+        prev = getattr(_decoder_kwargs_tls, "current", None)
+        _decoder_kwargs_tls.current = kwargs
         try:
             return _original_decoder_forward(*args, **kwargs)
         finally:
-            del self._current_layer_kwargs
+            _decoder_kwargs_tls.current = prev
 
     decoder_layer.forward = _decoder_forward_with_kwargs.__get__(
         decoder_layer, type(decoder_layer)
     )
 
-    # (2) linear_attn.forward: read kwargs from parent, build seq_idx/cu_seqlens, set on self
+    # (2) linear_attn.forward: read kwargs from thread-local, build seq_idx/cu_seqlens, set on self
     _original_linear_forward = linear_attn.forward
 
     def _linear_attn_forward_with_packing(
         self, hidden_states, cache_params=None, attention_mask=None
     ):
-        kwargs = getattr(self._parent_decoder_layer, "_current_layer_kwargs", {})
+        kwargs = getattr(_decoder_kwargs_tls, "current", {}) or {}
         valid_input_len = kwargs.get("valid_input_len", None)
         seq_idx = None
         cu_seqlens = None
