@@ -519,7 +519,6 @@ class HFVLMDataPacker(DataPacker):
         aspect_ratio_mask = [x["aspect_ratio_mask"] for x in processed_samples]
         image_sizes = [x["image_sizes"] for x in processed_samples]
         batch_num_images = [x["batch_num_images"] for x in processed_samples]
-        mm_token_type_ids = [x["mm_token_type_ids"] for x in processed_samples]
 
         pixel_values_videos = retrieve_not_none_values(pixel_values_videos)
 
@@ -556,8 +555,6 @@ class HFVLMDataPacker(DataPacker):
         image_sizes = retrieve_not_none_values(image_sizes)
 
         batch_num_images = retrieve_not_none_values(batch_num_images)
-
-        mm_token_type_ids = retrieve_not_none_values(mm_token_type_ids)
 
         # Shape description:
         #
@@ -603,9 +600,6 @@ class HFVLMDataPacker(DataPacker):
         if batch_num_images is not None:
             batch["batch_num_images"] = batch_num_images
 
-        if mm_token_type_ids is not None:
-            batch["mm_token_type_ids"] = mm_token_type_ids
-
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
             [
@@ -639,6 +633,7 @@ class HFVLMDataPacker(DataPacker):
                 [_to_padded_mm_ids(x) for x in processed_samples],
                 dtype=torch.long,
             )
+
         if "label_ids" in processed_samples[0]:
             batch["label_ids"] = torch.tensor(
                 [
@@ -649,6 +644,7 @@ class HFVLMDataPacker(DataPacker):
                 ],
                 dtype=torch.long,
             )
+
         batch["logprob_masks"] = torch.tensor(
             [
                 x["logprob_masks"][:computed_max_len]

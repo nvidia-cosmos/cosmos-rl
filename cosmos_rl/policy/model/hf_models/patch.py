@@ -342,9 +342,7 @@ _decoder_kwargs_tls = threading.local()
 
 def _patch_linear_attn_for_sequence_packing(decoder_layer):
     """
-    Patch Qwen3.5 linear_attn (GatedDeltaNet) so sequence packing works without
-    modifying transformers: inject seq_idx into causal_conv1d_fn and cu_seqlens
-    into chunk_gated_delta_rule. Equivalent to the modeling_qwen3_5.py changes.
+    Patch Qwen3.5 linear_attn (GatedDeltaNet) so sequence packing works.
     Uses thread-local for kwargs to avoid circular references that cause RecursionError in model.train().
     """
     linear_attn = decoder_layer.linear_attn
