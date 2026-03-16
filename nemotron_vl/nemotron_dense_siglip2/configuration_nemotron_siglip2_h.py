@@ -188,6 +188,8 @@ class NemotronHConfig(PretrainedConfig):
         enable_rope = False,
         rope_scaling = None,
         rope_theta = 100000000,
+        enable_mrope = True,
+        mrope_section=[24,20,20],
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -252,6 +254,8 @@ class NemotronHConfig(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
         self.enable_rope = enable_rope
+        self.enable_mrope = enable_mrope
+        self.mrope_section = mrope_section
 
         super().__init__(
             pad_token_id=pad_token_id,

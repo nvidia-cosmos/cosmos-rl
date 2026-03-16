@@ -164,8 +164,7 @@ def segment_sum(input_tensor):
     tensor_segsum = tensor_segsum.masked_fill(~mask, -torch.inf)
     return tensor_segsum
 
-
-def apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx = None):
+def apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx=None):
     """
     Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
     """

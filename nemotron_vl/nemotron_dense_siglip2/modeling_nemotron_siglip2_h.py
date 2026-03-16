@@ -1086,7 +1086,7 @@ class NemotronHAttention(nn.Module):
             return attn_output, attn_weights
 
 
-class RotaryEmbedding(nn.Module):
+class MultiModalRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
     def __init__(self, config: NemotronHConfig, device=None):
@@ -1096,6 +1096,7 @@ class RotaryEmbedding(nn.Module):
 
         self.config = config
         self.rope_type = getattr(config, "rope_type", "default")
+        self.mrope_section = getattr(config, "mrope_section", [24, 20, 20])
         rope_init_fn: Callable = self.compute_default_rope_parameters
         # if self.rope_type != "default":
         #     rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
@@ -1133,15 +1134,40 @@ class RotaryEmbedding(nn.Module):
         )
         return inv_freq, attention_factor
 
+    def apply_interleaved_mrope(self, freqs, mrope_section):
+        """Apply interleaved MRoPE to 3D rotary embeddings.
+        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+        interleaved [THWTHWTHW...TT], preserving frequency continuity.
+        Change freqs of visual token to be interleave of thw
+        args:
+            x: (3, bs, seq_len, head_dim // 2)
+            mrope_section: (3,)
+        returns:
+            x_t: (bs, seq_len, head_dim // 2)
+        """
+        freqs_t = freqs[0]  # just overwrite the first dimension T
+        for dim, offset in enumerate((1, 2), start=1):  # H, W
+            length = mrope_section[dim] * 3
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
+
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
+        # In contrast to other models, Qwen3VL has different position ids for the grids
+        # So we expand the inv_freq to shape (3, ...)
+        #print(position_ids[:,:,-1])
+        if position_ids.ndim == 2:
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1) # (3, bs, positions, 1)
+        position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
 
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
+            #print(freqs.shape, self.mrope_section)
+            freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
@@ -1604,7 +1630,7 @@ class NemotronHModel(NemotronSiglip2PreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([NemotronHBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
 
-        self.rotary_emb = RotaryEmbedding(config) if config.enable_rope else None
+        self.rotary_emb = MultiModalRotaryEmbedding(config) if config.enable_rope else None
         self.gradient_checkpointing = False
         self.norm_f = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         # Initialize weights and apply final processing
@@ -1670,8 +1696,17 @@ class NemotronHModel(NemotronSiglip2PreTrainedModel):
 
         if cache_position is None:
             cache_position = torch.arange(hidden_states.shape[1], device=hidden_states.device)
+       # the hard coded `3` is for temporal, height and width.
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+        elif position_ids.ndim == 2:
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        elif position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            text_position_ids = position_ids[0]
+            position_ids = position_ids[1:]
+        else:
+            # Now mrope will go into this branch and do nothing
+            text_position_ids = position_ids[0]
 
         if self.rotary_emb is not None:
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -2180,52 +2215,54 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
             video_mask = video_mask[..., 0]
             visual_pos_masks = video_mask
 
-        # if position_ids is None:
-        #     attention_mask_tensor = (
-        #         attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
-        #     )
-        #     if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
-        #         attention_mask_tensor = torch.diagonal(attention_mask_tensor[:, 0], dim1=1, dim2=2)
-        #         # Only apply conversion for floating point tensors (inverted masks)
-        #         if attention_mask_tensor.dtype.is_floating_point:
-        #             attention_mask_tensor = attention_mask_tensor / torch.finfo(attention_mask_tensor.dtype).min
-        #             attention_mask_tensor = (1.0 - attention_mask_tensor).int()
+        # If mrope is disabled, position_ids will stay None
+        if position_ids is None and self.config.text_config.enable_mrope:
+            attention_mask_tensor = (
+                attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
+            )
+            if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
+                attention_mask_tensor = torch.diagonal(attention_mask_tensor[:, 0], dim1=1, dim2=2)
+                # Only apply conversion for floating point tensors (inverted masks)
+                if attention_mask_tensor.dtype.is_floating_point:
+                    attention_mask_tensor = attention_mask_tensor / torch.finfo(attention_mask_tensor.dtype).min
+                    attention_mask_tensor = (1.0 - attention_mask_tensor).int()
 
-        #     # Calculate RoPE index once per generation in the pre-fill stage only.
-        #     # When compiling, we can't check tensor values thus we check only input length
-        #     # It is safe to assume that `length!=1` means we're in pre-fill because compiled
-        #     # models currently cannot do asssisted decoding
-        #     prefill_compiled_stage = is_torchdynamo_compiling() and (
-        #         (input_ids is not None and input_ids.shape[1] != 1)
-        #         or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
-        #     )
-        #     prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
-        #         (cache_position is not None and cache_position[0] == 0)
-        #         or (past_key_values is None or past_key_values.get_seq_length() == 0)
-        #     )
-        #     if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
-        #         position_ids, rope_deltas = self.get_rope_index(
-        #             input_ids,
-        #             image_grid_thw,
-        #             video_grid_thw,
-        #             attention_mask=attention_mask_tensor,
-        #         )
-        #         self.rope_deltas = rope_deltas
-        #     # then use the prev pre-calculated rope-deltas to get the correct position ids
-        #     else:
-        #         batch_size, seq_length, _ = inputs_embeds.shape
-        #         delta = (
-        #             (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-        #             if cache_position is not None
-        #             else 0
-        #         )
-        #         position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-        #         position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-        #         if cache_position is not None:  # otherwise `deltas` is an int `0`
-        #             delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-        #         position_ids = position_ids.add(delta)
-        #         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-
+            # Calculate RoPE index once per generation in the pre-fill stage only.
+            # When compiling, we can't check tensor values thus we check only input length
+            # It is safe to assume that `length!=1` means we're in pre-fill because compiled
+            # models currently cannot do asssisted decoding
+            prefill_compiled_stage = is_torchdynamo_compiling() and (
+                (input_ids is not None and input_ids.shape[1] != 1)
+                or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
+            )
+            prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
+                (cache_position is not None and cache_position[0] == 0)
+                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            )
+            if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    attention_mask=attention_mask_tensor,
+                )
+                self.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = (
+                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                    if cache_position is not None
+                    else 0
+                )
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        # position_id: [3, bsz, seq_len]
+        # for visual: position_id in order of t,h,w on dim=0
         nemotron_h_outputs = self.language_model(
             input_ids=None,
             position_ids=position_ids,
@@ -2361,6 +2398,8 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
             del model_inputs["inputs_embeds"]
 
         # IMPORTANT: our forward() expects cache under `past_key_values`, not `past_key_values`
+        if self.config.text_config.enable_mrope:
+            position_ids = None
         model_inputs.update(
             {
                 "position_ids": position_ids,

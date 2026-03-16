@@ -378,7 +378,6 @@ def parallelize(
                             continue
                         else:
                             parameters.requires_grad = True
-
         
         # make lm_head trainable
         if 'lm_head' in train_layers:
