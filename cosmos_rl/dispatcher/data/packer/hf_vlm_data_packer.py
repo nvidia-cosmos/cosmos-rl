@@ -494,6 +494,11 @@ class HFVLMDataPacker(DataPacker):
         else:
             result_dict["batch_num_images"] = None
 
+        if "mm_token_type_ids" in inputs:
+            result_dict["mm_token_type_ids"] = inputs["mm_token_type_ids"]
+        else:
+            result_dict["mm_token_type_ids"] = None
+
         return result_dict
 
     def _collate_fn(
@@ -605,6 +610,30 @@ class HFVLMDataPacker(DataPacker):
             ],
             dtype=torch.long,
         )
+        if "mm_token_type_ids" in processed_samples[0]:
+
+            def _to_padded_mm_ids(x):
+                ids = x.get("mm_token_type_ids")
+                if ids is None:
+                    ids = []
+                elif isinstance(ids, torch.Tensor):
+                    ids = ids.tolist()
+                # Flatten 2D arrays (e.g., shape (1, seq_len)) to 1D
+                if isinstance(ids, list) and ids and isinstance(ids[0], (list, tuple)):
+                    ids = (
+                        [item for sublist in ids for item in sublist]
+                        if len(ids) > 1
+                        else list(ids[0])
+                    )
+                truncated = ids[:computed_max_len]
+                pad_len = computed_max_len - len(truncated)
+                return truncated + [0] * max(0, pad_len)
+
+            batch["mm_token_type_ids"] = torch.tensor(
+                [_to_padded_mm_ids(x) for x in processed_samples],
+                dtype=torch.long,
+            )
+
         if "label_ids" in processed_samples[0]:
             batch["label_ids"] = torch.tensor(
                 [
@@ -615,6 +644,7 @@ class HFVLMDataPacker(DataPacker):
                 ],
                 dtype=torch.long,
             )
+
         batch["logprob_masks"] = torch.tensor(
             [
                 x["logprob_masks"][:computed_max_len]
@@ -711,6 +741,11 @@ class HFVLMDataPacker(DataPacker):
             return_dict["batch_num_images"] = x["batch_num_images"]
         else:
             return_dict["batch_num_images"] = None
+
+        if "mm_token_type_ids" in x:
+            return_dict["mm_token_type_ids"] = x["mm_token_type_ids"]
+        else:
+            return_dict["mm_token_type_ids"] = None
 
         # Common fields
         input_ids = x["input_ids"]
