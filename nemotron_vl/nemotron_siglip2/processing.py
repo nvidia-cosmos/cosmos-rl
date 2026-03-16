@@ -157,7 +157,8 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
             B, T, C, H, W = stacked_videos.shape
             num_frames, height, width = T, H, W
             if do_resize:
-                
+                # 1. Both dimensions (height and width) are divisible by 'factor'.
+                # 2. The total number of pixels (t * h * w) is within the range ['min_pixels', 'max_pixels'].
                 resized_height, resized_width = smart_resize(
                     num_frames=num_frames,
                     height=height,

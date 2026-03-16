@@ -274,6 +274,15 @@ def parallelize(
                         device_mesh=world_mesh["tp"],
                         parallelize_plan=_ExpertParallel(),
                     )
+
+        # Since the layers are replaced after parallelization, we need to apply trainable pattern again if train_layers is specified in the config.
+        trainable_pattern = config.policy.trainable_pattern
+        freeze_pattern = config.policy.freeze_pattern
+        if trainable_pattern is not None:
+            model.apply_trainable_pattern(trainable_pattern)
+        if freeze_pattern is not None:
+            model.apply_freeze_pattern(freeze_pattern)
+
     # for name, param in model.named_parameters():
     #     param.requires_grad = False
     # # Only allow Attention layer to be trained
@@ -283,7 +292,7 @@ def parallelize(
     #             print(f"Setting {name} to train mode")
     #             param.requires_grad = True
     #         logger.info(f"Set Attention layer {layer_id} to train mode")
-    model.model.enable_input_require_grads()
+    # model.model.enable_input_require_grads()
 
     # apply_compile(model, fullgraph=True)
 
@@ -369,6 +378,7 @@ def parallelize(
                             continue
                         else:
                             parameters.requires_grad = True
+
         
         # make lm_head trainable
         if 'lm_head' in train_layers:

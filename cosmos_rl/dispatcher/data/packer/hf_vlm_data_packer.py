@@ -274,6 +274,11 @@ class HFVLMDataPacker(DataPacker):
             "true",
             "True",
         ]
+        logger.info(
+            f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "
+            f"and video_token_id={self.video_token_id}, model_type={self.model_type}, "
+            f"use_qwen_vl_process={self.use_qwen_vl_process}, use_siglip2_process={self.use_siglip2_process}"
+        )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """

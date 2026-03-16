@@ -1059,10 +1059,12 @@ if __name__ == "__main__":
 
     if "qwen" in vision_config.get("model_type", "").lower():
         os.environ["USE_QWEN_VL_PROCESS"] = "1"
+        print("Adding Qwen-VL-specific environment variables to enable Qwen-VL process and optimizations.")
     elif "siglip2" in vision_config.get("model_type", "").lower():
         # IDK why this is such complicated.
         os.environ["USE_QWEN_VL_PROCESS"] = "1"
         os.environ["USE_SIGLIP2_PROCESS"] = "1"
+        print("Adding SIGLIP2-specific environment variables to enable SIGLIP2 process and optimizations.")
 
     if model_arch in ["NemotronHForCausalLM", "NemotronVLForConditionCausalLM"] and text_config.get("n_routed_experts", 0) > 0:
             # Enable EP mesh to be represented by TP mesh, and also treat EP as a sub-group of Data Parallelism.
