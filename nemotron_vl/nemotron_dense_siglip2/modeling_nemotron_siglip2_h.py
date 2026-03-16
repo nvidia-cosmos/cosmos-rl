@@ -1223,6 +1223,7 @@ class Siglip2Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
         self.is_causal = False
+        self.num_key_value_groups = 1
 
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
@@ -1252,7 +1253,7 @@ class Siglip2Attention(nn.Module):
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         # We use varlen feature of flash_attention here, assert if not
-        assert self.config._attn_implementation== "flash_attention_2"
+        # assert self.config._attn_implementation== "flash_attention_2"
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         attn_output, attn_weights = attention_interface(
             self,

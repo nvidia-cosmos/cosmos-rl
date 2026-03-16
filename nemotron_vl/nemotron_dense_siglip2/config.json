@@ -4,8 +4,7 @@
   ],
   "auto_map": {
     "AutoConfig": "configuration_nemotron_siglip2_h.NemotronSiglip2Config",
-    "AutoModel": "modeling_nemotron_siglip2_h.NemotronSiglip2ForConditionCausalLM",
-    "AutoModelForCausalLM": "modeling_nemotron_siglip2_h.NemotronHForCausalLM"
+    "AutoModel": "modeling_nemotron_siglip2_h.NemotronSiglip2ForConditionCausalLM"
   },
   "image_token_id": 19,
   "video_token_id": 18,
