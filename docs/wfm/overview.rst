@@ -57,6 +57,7 @@ Starter RL recipes are also available under ``configs/stable-diffusion-3-5/`` an
 The most important RL-specific settings are:
 
 - Set ``train.train_policy.type = "grpo"`` and ``train.train_policy.trainer_type = "diffusion_nft"``.
+- Set ``mode = "colocated"`` and ``train.train_policy.uncentralized_training = true``.
 - Configure prompt sampling and rollout behavior through ``[rollout]`` and ``[policy.diffusers.sample]``.
 - Enable remote rewards with ``train.train_policy.use_remote_reward = true`` and define one or more ``[[train.train_policy.remote_reward.reward_fns]]`` entries.
 - Keep ``rollout.parallelism`` and ``policy.parallelism`` aligned in colocated mode, especially ``dp_shard_size``.
