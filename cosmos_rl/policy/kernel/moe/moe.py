@@ -647,9 +647,9 @@ class Gate(nn.Module):
         This encourages the model to route tokens to less popular experts, promoting
         better load balance.
         """
-        assert (
-            self.train_gate and self.bias_update_factor >= 0
-        ), "Gate bias update is disabled"
+        assert self.train_gate and self.bias_update_factor >= 0, (
+            "Gate bias update is disabled"
+        )
 
         assert self.training, "Gate bias update is only supported during training"
         assert self._cumulative_expert_load is not None, (
