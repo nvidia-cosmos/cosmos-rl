@@ -93,8 +93,34 @@
 <p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Overview</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#sft">SFT</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#rl">RL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#supported-models">Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#configurations">Configurations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#sft">SFT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#rl">RL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#datasets">Datasets</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id1">SFT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id2">RL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#launch-training">Launch Training</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id3">SFT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id4">RL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#use-trained-models">Use Trained Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#lora">LoRA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#full-pipeline">Full Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#add-new-models">Add New Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id5">SFT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id6">RL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id7">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#validation-checklist">Validation Checklist</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="#rl-deprecated">RL (deprecated)</a></li>
 </ul>
 </li>
@@ -131,82 +157,294 @@
   <section id="overview">
 <h1>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h1>
 <p>Cosmos-RL provides native support for SFT and RL of world foundational models.</p>
-<section id="sft">
-<h2>SFT<a class="headerlink" href="#sft" title="Link to this heading"></a></h2>
-<p><strong>Supported Models</strong></p>
+<section id="supported-models">
+<h2>Supported Models<a class="headerlink" href="#supported-models" title="Link to this heading"></a></h2>
+<p>Cosmos-RL uses diffusers-based training pipelines for both WFM SFT and WFM RL, so the same overall workflow applies across image and video diffusion models. The exported checkpoints are also diffusers-compatible, which makes post-training inference straightforward.</p>
 <ul class="simple">
 <li><p>SD3</p></li>
 <li><p>Cosmos-Predict2.5</p></li>
 <li><p>SANA-Image/Video</p></li>
 </ul>
-<p>We construct the WFM SFT training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.</p>
-<p>We support both LoRA and full model finetuning for SFT.</p>
-<p><strong>Quick start</strong>: A quick start guide for world foundational model’s SFT (Take SD3 as an example):</p>
-<ol class="arabic">
-<li><p>Configure the training recipe by editing toml files under <code class="docutils literal notranslate"><span class="pre">configs/stable-diffusion-3-5/</span></code>. For LoRA finetuning, you can refer to the example config file <code class="docutils literal notranslate"><span class="pre">stable-diffusion-3-5-image-sft-lora.toml</span></code>. For full model finetuning, you can refer to <code class="docutils literal notranslate"><span class="pre">stable-diffusion-3-5-image-sft.toml</span></code>.</p></li>
-<li><p>Configure the dataset and datapacker. The Cosmos-RL is very flexible for the user-customized dataset and input/output format. You can edit the <code class="docutils literal notranslate"><span class="pre">./cosmos_rl/tools/dataset/diffusers_dataset.py</span></code> launcher to customize your own dataset for training. For more details about the customization of dataset, please refer to <a class="reference external" href="https://nvidia-cosmos.github.io/cosmos-rl/quickstart/customization.html">Customization</a>.</p></li>
-<li><p>Launch the training script with the configured recipe:</p>
+<p>Cosmos-RL supports both LoRA finetuning and full-model finetuning.</p>
+</section>
+<section id="configurations">
+<h2>Configurations<a class="headerlink" href="#configurations" title="Link to this heading"></a></h2>
+<p>The full configuration schema is defined in <a class="reference external" href="https://nvidia-cosmos.github.io/cosmos-rl/quickstart/configuration.html">Configuration</a>. In practice, the most important config groups for WFM jobs are:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">[policy]</span></code>: sets <code class="docutils literal notranslate"><span class="pre">model_name_or_path</span></code>, enables diffusers with <code class="docutils literal notranslate"><span class="pre">is_diffusers</span> <span class="pre">=</span> <span class="pre">true</span></code>, and optionally enables LoRA through <code class="docutils literal notranslate"><span class="pre">policy.lora</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[policy.diffusers]</span></code>: controls model-specific behavior such as <code class="docutils literal notranslate"><span class="pre">is_video</span></code>, <code class="docutils literal notranslate"><span class="pre">max_prompt_length</span></code>, <code class="docutils literal notranslate"><span class="pre">inference_size</span></code>, <code class="docutils literal notranslate"><span class="pre">train_frames</span></code>, and the sampling block under <code class="docutils literal notranslate"><span class="pre">policy.diffusers.sample</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[policy.diffusers.sample]</span></code>: controls rollout and inference behavior such as <code class="docutils literal notranslate"><span class="pre">num_steps</span></code>, <code class="docutils literal notranslate"><span class="pre">eval_num_steps</span></code>, <code class="docutils literal notranslate"><span class="pre">guidance_scale</span></code>, <code class="docutils literal notranslate"><span class="pre">noise_level</span></code>, <code class="docutils literal notranslate"><span class="pre">solver</span></code>, and <code class="docutils literal notranslate"><span class="pre">deterministic_sampling</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[policy.parallelism]</span></code>: defines <code class="docutils literal notranslate"><span class="pre">cp_size</span></code>, and <code class="docutils literal notranslate"><span class="pre">dp_shard_size</span></code> for the trainer-side mesh.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[train]</span></code>: controls optimization and runtime, especially <code class="docutils literal notranslate"><span class="pre">output_dir</span></code>, <code class="docutils literal notranslate"><span class="pre">param_dtype</span></code>, <code class="docutils literal notranslate"><span class="pre">fsdp_reduce_dtype</span></code>, <code class="docutils literal notranslate"><span class="pre">train_batch_per_replica</span></code>, <code class="docutils literal notranslate"><span class="pre">ema_enable</span></code>, and <code class="docutils literal notranslate"><span class="pre">compile</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[train.ckpt]</span></code>: controls checkpoint cadence and diffusers export. Keep <code class="docutils literal notranslate"><span class="pre">export_safetensors</span> <span class="pre">=</span> <span class="pre">true</span></code> if you want ready-to-load diffusers checkpoints under <code class="docutils literal notranslate"><span class="pre">train.output_dir/safetensors/</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[validation]</span></code>: configures periodic evaluation data and validation frequency.</p></li>
+</ul>
+<section id="sft">
+<h3>SFT<a class="headerlink" href="#sft" title="Link to this heading"></a></h3>
+<p>Starter SFT recipes are available under <code class="docutils literal notranslate"><span class="pre">configs/stable-diffusion-3-5/</span></code> and <code class="docutils literal notranslate"><span class="pre">configs/sana/</span></code>:</p>
+<ul class="simple">
+<li><p>SD3: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/stable-diffusion-3-5/stable-diffusion-3-5-image-sft.toml">stable-diffusion-3-5-image-sft.toml</a>, <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/stable-diffusion-3-5/stable-diffusion-3-5-image-sft-lora.toml">stable-diffusion-3-5-image-sft-lora.toml</a></p></li>
+<li><p>SANA image: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-image-sft.toml">sana-image-sft.toml</a>, <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-image-sft-lora.toml">sana-image-sft-lora.toml</a></p></li>
+<li><p>SANA video: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-video-sft.toml">sana-video-sft.toml</a>, <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-video-sft-lora.toml">sana-video-sft-lora.toml</a></p></li>
+</ul>
+<p>The most important SFT-specific settings are:</p>
+<ul class="simple">
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">train.train_policy.type</span> <span class="pre">=</span> <span class="pre">&quot;sft&quot;</span></code>.</p></li>
+<li><p>Point <code class="docutils literal notranslate"><span class="pre">train.train_policy.dataset.local_dir</span></code> at your local image or video dataset.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">[policy.lora]</span></code> for adapter finetuning. If you omit it, the trainer updates the full transformer.</p></li>
+</ul>
+</section>
+<section id="rl">
+<h3>RL<a class="headerlink" href="#rl" title="Link to this heading"></a></h3>
+<p>Starter RL recipes are also available under <code class="docutils literal notranslate"><span class="pre">configs/stable-diffusion-3-5/</span></code> and <code class="docutils literal notranslate"><span class="pre">configs/sana/</span></code>:</p>
+<ul class="simple">
+<li><p>SD3: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/stable-diffusion-3-5/stable-diffusion-3-5-medium-nft.toml">stable-diffusion-3-5-medium-nft.toml</a></p></li>
+<li><p>SANA image: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-image-nft.toml">sana-image-nft.toml</a></p></li>
+<li><p>SANA video: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/sana/sana-video-nft.toml">sana-video-nft.toml</a></p></li>
+<li><p>Cosmos-Predict2.5: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/blob/main/configs/cosmos-predict2-5/cosmos-predict2-5-2b-720-nft.toml">cosmos-predict2-5-2b-720-nft.toml</a></p></li>
+</ul>
+<p>The most important RL-specific settings are:</p>
+<ul class="simple">
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">train.train_policy.type</span> <span class="pre">=</span> <span class="pre">&quot;grpo&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">train.train_policy.trainer_type</span> <span class="pre">=</span> <span class="pre">&quot;diffusion_nft&quot;</span></code>.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">mode</span> <span class="pre">=</span> <span class="pre">&quot;colocated&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">train.train_policy.uncentralized_training</span> <span class="pre">=</span> <span class="pre">true</span></code>.</p></li>
+<li><p>Configure prompt sampling and rollout behavior through <code class="docutils literal notranslate"><span class="pre">[rollout]</span></code> and <code class="docutils literal notranslate"><span class="pre">[policy.diffusers.sample]</span></code>.</p></li>
+<li><p>Enable remote rewards with <code class="docutils literal notranslate"><span class="pre">train.train_policy.use_remote_reward</span> <span class="pre">=</span> <span class="pre">true</span></code> and define one or more <code class="docutils literal notranslate"><span class="pre">[[train.train_policy.remote_reward.reward_fns]]</span></code> entries.</p></li>
+<li><p>Keep <code class="docutils literal notranslate"><span class="pre">rollout.parallelism</span></code> and <code class="docutils literal notranslate"><span class="pre">policy.parallelism</span></code> aligned in colocated mode, especially <code class="docutils literal notranslate"><span class="pre">dp_shard_size</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="datasets">
+<h2>Datasets<a class="headerlink" href="#datasets" title="Link to this heading"></a></h2>
+<p>The dataset entrypoint is a Python launcher, so the main customization path is to edit the corresponding dataset file rather than changing a fixed built-in schema. For more details about dataset customization, please refer to <a class="reference external" href="https://nvidia-cosmos.github.io/cosmos-rl/quickstart/customization.html">Customization</a>.</p>
+<section id="id1">
+<h3>SFT<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<p>SFT uses <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusers_dataset</span></code>.</p>
+<ul class="simple">
+<li><p>Point <code class="docutils literal notranslate"><span class="pre">train.train_policy.dataset.local_dir</span></code> to a local directory of paired metadata and visual assets.</p></li>
+<li><p>Each sample is expected to share the same basename across metadata and asset files, for example <code class="docutils literal notranslate"><span class="pre">0001.json</span></code> with <code class="docutils literal notranslate"><span class="pre">0001.jpg</span></code> for images, or <code class="docutils literal notranslate"><span class="pre">0001.json</span></code> with <code class="docutils literal notranslate"><span class="pre">0001.mp4</span></code> for videos.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">policy.diffusers.is_video</span></code> and <code class="docutils literal notranslate"><span class="pre">policy.diffusers.train_frames</span></code> determine whether the loader expects images or videos and how many frames are sampled for video training.</p></li>
+</ul>
+</section>
+<section id="id2">
+<h3>RL<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
+<p>RL uses <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusion_nft</span></code>.</p>
+<ul class="simple">
+<li><p>The built-in launcher currently supports prompt datasets such as <code class="docutils literal notranslate"><span class="pre">pickscore</span></code>, <code class="docutils literal notranslate"><span class="pre">ocr</span></code>, <code class="docutils literal notranslate"><span class="pre">geneval</span></code>, and <code class="docutils literal notranslate"><span class="pre">dance_grpo_t2v</span></code> through <code class="docutils literal notranslate"><span class="pre">train.train_policy.dataset.name</span></code> and <code class="docutils literal notranslate"><span class="pre">split</span></code>.</p></li>
+<li><p>These datasets are prompt-first rather than paired image/video supervision datasets; the reward signal is provided separately by the reward service.</p></li>
+<li><p>For custom prompt sources, metadata packing, or reward-service payloads, edit <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusion_nft.py</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="launch-training">
+<h2>Launch Training<a class="headerlink" href="#launch-training" title="Link to this heading"></a></h2>
+<p>Install the WFM dependencies first:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="s1">&#39;.[wfm]&#39;</span>
+</pre></div>
+</div>
+<p>If you are training Cosmos-Predict2.5, also install:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="n">cosmos_guardrail</span> <span class="o">--</span><span class="n">no</span><span class="o">-</span><span class="n">deps</span>
+</pre></div>
+</div>
+<p>Training progress can be monitored in Weights &amp; Biases when <code class="docutils literal notranslate"><span class="pre">logging.logger</span></code> includes <code class="docutils literal notranslate"><span class="pre">wandb</span></code>.</p>
+<section id="id3">
+<h3>SFT<a class="headerlink" href="#id3" title="Link to this heading"></a></h3>
+<p>Launch SFT with <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusers_dataset</span></code>. For example, SD3 LoRA SFT:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">-</span><span class="n">image</span><span class="o">-</span><span class="n">sft</span><span class="o">-</span><span class="n">lora</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusers_dataset</span>
 </pre></div>
 </div>
-</li>
-<li><p>Monitor training progress via Wandb.</p></li>
-<li><p>Evaluate the trained world foundational model using the diffusers-based script (coming soon).</p></li>
-</ol>
+<p>To run full-model SFT, switch to <code class="docutils literal notranslate"><span class="pre">stable-diffusion-3-5-image-sft.toml</span></code> or one of the SANA <code class="docutils literal notranslate"><span class="pre">*-sft.toml</span></code> recipes.</p>
 </section>
-<section id="rl">
-<h2>RL<a class="headerlink" href="#rl" title="Link to this heading"></a></h2>
-<p>Cosmos-RL supports <a class="reference external" href="https://arxiv.org/pdf/2509.16117">DiffusionNFT</a> algorithm for world foundational model reinforcement learning.</p>
-<p><strong>Supported Models</strong>:</p>
-<ul class="simple">
-<li><p>SD3</p></li>
-<li><p>Cosmos-Predict2.5</p></li>
-<li><p>SANA-Image/Video</p></li>
-</ul>
-<p>We construct the WFM RL training pipeline based on diffusers library. Thus it is easy to extend to other diffusion-based WFMs.</p>
-<p><strong>Quick start</strong>: A quick start guide for world foundational model’s RL (Take DiffusionNFT with Cosmos-Predict2.5 as an example):</p>
-<ol class="arabic">
-<li><p>Install the required dependencies:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="o">.</span><span class="p">[</span><span class="n">wfm</span><span class="p">]</span>
-<span class="n">pip</span> <span class="n">install</span> <span class="n">cosmos_guardrail</span> <span class="o">--</span><span class="n">no</span><span class="o">-</span><span class="n">deps</span> <span class="c1"># Required by the Cosmos2_5_PredictBasePipeline</span>
-</pre></div>
-</div>
-</li>
-<li><p>Configure the training recipe by editing toml files, you can take <code class="docutils literal notranslate"><span class="pre">configs/cosmos-predict2-5/cosmos-predict2-5-2b-720-nft.toml</span></code> as an example.</p></li>
-<li><p>Launch the reward service, you can refer docs here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.</p></li>
-<li><p>Launch the training script with the configured recipe:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">cosmos</span><span class="o">-</span><span class="n">predict2</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">cosmos</span><span class="o">-</span><span class="n">predict2</span><span class="o">-</span><span class="mi">5</span><span class="o">-</span><span class="mi">2</span><span class="n">b</span><span class="o">-</span><span class="mi">720</span><span class="o">-</span><span class="n">nft</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusion_nft</span>
-</pre></div>
-</div>
-</li>
-<li><p>Monitor training progress via Wandb.</p></li>
-<li><p>Evaluate the trained world foundational model using the diffusers-based script (coming soon).</p></li>
-</ol>
-<p><strong>Reward services</strong>: Considering the computation overhead, it’s necessary to use a seperated async service for reward computing.</p>
-<ul>
-<li><p>You can launch a reward service by following the instructions here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.</p></li>
-<li><p>Configure the environment variable <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service:</p>
+<section id="id4">
+<h3>RL<a class="headerlink" href="#id4" title="Link to this heading"></a></h3>
+<p>Launch a reward service first by following <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>. Then point the trainer to that service through environment variables:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">&quot;your_token&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/enqueue&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/fetch&quot;</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/enqueue&quot;</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/fetch&quot;</span>
 </pre></div>
 </div>
-</li>
+<p>After that, launch DiffusionNFT training with <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusion_nft</span></code>. For example, SD3 RL:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">/</span><span class="n">stable</span><span class="o">-</span><span class="n">diffusion</span><span class="o">-</span><span class="mi">3</span><span class="o">-</span><span class="mi">5</span><span class="o">-</span><span class="n">medium</span><span class="o">-</span><span class="n">nft</span><span class="o">.</span><span class="n">toml</span> <span class="n">cosmos_rl</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">diffusion_nft</span>
+</pre></div>
+</div>
+<p>To run SANA RL, switch to <code class="docutils literal notranslate"><span class="pre">sana-image-nft.toml</span></code> or <code class="docutils literal notranslate"><span class="pre">sana-video-nft.toml</span></code>.</p>
+</section>
+</section>
+<section id="use-trained-models">
+<h2>Use Trained Models<a class="headerlink" href="#use-trained-models" title="Link to this heading"></a></h2>
+<p>When <code class="docutils literal notranslate"><span class="pre">train.ckpt.export_safetensors</span> <span class="pre">=</span> <span class="pre">true</span></code>, diffusers-compatible artifacts are exported under <code class="docutils literal notranslate"><span class="pre">train.output_dir/safetensors/step_&lt;N&gt;/</span></code>.
+If its false, we will only export the final checkpoint to diffusers-compatible safetensors.</p>
+<ul class="simple">
+<li><p>If <code class="docutils literal notranslate"><span class="pre">policy.lora</span></code> is configured, the adapter is saved under <code class="docutils literal notranslate"><span class="pre">step_&lt;N&gt;/lora/</span></code>.</p></li>
+<li><p>If <code class="docutils literal notranslate"><span class="pre">policy.lora</span></code> is not configured, the full diffusers pipeline is saved directly under <code class="docutils literal notranslate"><span class="pre">step_&lt;N&gt;/</span></code>.</p></li>
 </ul>
-<p><strong>Parallelism</strong>: Support FSDP for world foundational model training. You can edit the related configurations in the toml file to enable these parallelism techniques.:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span><span class="n">rollout</span><span class="o">.</span><span class="n">parallelism</span><span class="p">]</span>
-<span class="n">dp_shard_size</span> <span class="o">=</span> <span class="mi">2</span>
+<section id="lora">
+<h3>LoRA<a class="headerlink" href="#lora" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>SFT: load the base pipeline from <code class="docutils literal notranslate"><span class="pre">policy.model_name_or_path</span></code>, then attach the adapter from <code class="docutils literal notranslate"><span class="pre">.../safetensors/step_&lt;N&gt;/lora</span></code>.</p></li>
+<li><p>RL: the loading flow is the same. RL LoRA checkpoints can be used with regular diffusers inference; the reward service is only needed during training.</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffusionPipeline</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">export_to_video</span>
 
-<span class="p">[</span><span class="n">policy</span><span class="o">.</span><span class="n">parallelism</span><span class="p">]</span>
-<span class="n">dp_shard_size</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="n">base_model</span> <span class="o">=</span> <span class="s2">&quot;stabilityai/stable-diffusion-3.5-medium&quot;</span>
+<span class="n">adapter_dir</span> <span class="o">=</span> <span class="s2">&quot;./outputs/stable-diffusion-3-5-image-sft-lora/safetensors/step_30/lora&quot;</span>
+
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">DiffusionPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">base_model</span><span class="p">,</span> <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">)</span>
+<span class="n">pipe</span><span class="o">.</span><span class="n">load_lora_weights</span><span class="p">(</span>
+    <span class="n">adapter_dir</span><span class="p">,</span>
+    <span class="n">weight_name</span><span class="o">=</span><span class="s2">&quot;model.safetensors&quot;</span><span class="p">,</span>
+    <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;default&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">pipe</span><span class="o">.</span><span class="n">set_adapters</span><span class="p">(</span><span class="s2">&quot;default&quot;</span><span class="p">)</span>
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">pipe</span><span class="p">(</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cinematic photo of a corgi astronaut on the moon.&quot;</span><span class="p">,</span>
+    <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span>
+    <span class="n">guidance_scale</span><span class="o">=</span><span class="mf">4.5</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">&quot;images&quot;</span><span class="p">):</span>
+    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;sample.png&quot;</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">&quot;sample.mp4&quot;</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
 </pre></div>
 </div>
+</section>
+<section id="full-pipeline">
+<h3>Full Pipeline<a class="headerlink" href="#full-pipeline" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>SFT: load the exported step directory directly with <code class="docutils literal notranslate"><span class="pre">DiffusionPipeline.from_pretrained</span></code>.</p></li>
+<li><p>RL: the same loading path applies when training without <code class="docutils literal notranslate"><span class="pre">policy.lora</span></code>.</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffusionPipeline</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">export_to_video</span>
+
+<span class="n">checkpoint_dir</span> <span class="o">=</span> <span class="s2">&quot;./outputs/stable-diffusion-3-5-image-sft/safetensors/step_30&quot;</span>
+
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">DiffusionPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="n">checkpoint_dir</span><span class="p">,</span>
+    <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">pipe</span><span class="p">(</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cinematic photo of a corgi astronaut on the moon.&quot;</span><span class="p">,</span>
+    <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span>
+    <span class="n">guidance_scale</span><span class="o">=</span><span class="mf">4.5</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">&quot;images&quot;</span><span class="p">):</span>
+    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;sample.png&quot;</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">&quot;sample.mp4&quot;</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="add-new-models">
+<h2>Add New Models<a class="headerlink" href="#add-new-models" title="Link to this heading"></a></h2>
+<p>To add support for a new diffusers-based WFM, the best references are the existing implementations in <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/model/diffusers/sd3_model.py</span></code>, <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/model/diffusers/sana_model.py</span></code>, and <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/model/diffusers/cosmos_predict2_5_model.py</span></code>.</p>
+<p>The integration pattern is:</p>
+<ol class="arabic simple">
+<li><p>Add a new file under <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/model/diffusers/</span></code>.</p></li>
+<li><p>Define a subclass of <code class="docutils literal notranslate"><span class="pre">DiffuserModel</span></code> and register it with <code class="docutils literal notranslate"><span class="pre">&#64;ModelRegistry.register(DiffuserModelWeightMapper)</span></code>.</p></li>
+<li><p>Return the diffusers pipeline class name from <code class="docutils literal notranslate"><span class="pre">supported_model_types()</span></code>.</p></li>
+</ol>
+<p>The <code class="docutils literal notranslate"><span class="pre">supported_model_types()</span></code> value must match <code class="docutils literal notranslate"><span class="pre">DiffusionPipeline.load_config(model_name_or_path)[&quot;_class_name&quot;]</span></code>, because <code class="docutils literal notranslate"><span class="pre">ModelRegistry.build_diffusers_model()</span></code> uses that value to choose the implementation class.</p>
+<p>New files under <code class="docutils literal notranslate"><span class="pre">cosmos_rl/policy/model/diffusers/</span></code> are auto-discovered by <code class="docutils literal notranslate"><span class="pre">cosmos_rl.policy.model.__init__</span></code>, so placing the new model file in that directory is enough as long as it is a regular <code class="docutils literal notranslate"><span class="pre">.py</span></code> module.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelRegistry</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffuserModel</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.diffusers.weight_mapper</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffuserModelWeightMapper</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffusersConfig</span>
+
+
+<span class="nd">@ModelRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">DiffuserModelWeightMapper</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">MyModel</span><span class="p">(</span><span class="n">DiffuserModel</span><span class="p">):</span>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">supported_model_types</span><span class="p">():</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;MyPipeline&quot;</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">DiffusersConfig</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">set_scheduler_timestep</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">train_sampling_steps</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoders</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizers</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>The loaded pipeline is expected to expose a few standard components:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">pipeline.transformer</span></code>: this is the trainable denoiser used by SFT, RL, EMA, and LoRA code paths.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pipeline.vae</span></code> and <code class="docutils literal notranslate"><span class="pre">pipeline.scheduler</span></code>: used by latent encoding, decoding, and noise scheduling.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pipeline.image_processor</span></code> or <code class="docutils literal notranslate"><span class="pre">pipeline.video_processor</span></code>: required by <code class="docutils literal notranslate"><span class="pre">DiffuserModel.init_output_process()</span></code>.</p></li>
+</ul>
+<p>If an upstream diffusers pipeline does not expose its denoiser as <code class="docutils literal notranslate"><span class="pre">transformer</span></code> and instead uses a different attribute such as <code class="docutils literal notranslate"><span class="pre">unet</span></code>, you should add a thin compatibility layer before trying to reuse the existing trainer stack. The current WFM diffusers path assumes the trainable module is available through <code class="docutils literal notranslate"><span class="pre">self.transformer</span></code>.</p>
+<section id="id5">
+<h3>SFT<a class="headerlink" href="#id5" title="Link to this heading"></a></h3>
+<p>For SFT, the minimum required methods are:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">text_embedding()</span></code>: call <code class="docutils literal notranslate"><span class="pre">pipeline.encode_prompt()</span></code> and return a dictionary that matches the keyword arguments expected by <code class="docutils literal notranslate"><span class="pre">self.transformer(...)</span></code>. For example, SD3 uses <code class="docutils literal notranslate"><span class="pre">encoder_hidden_states</span></code> and <code class="docutils literal notranslate"><span class="pre">pooled_projections</span></code>, while SANA and Cosmos-Predict2.5 do not use pooled projections.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">visual_embedding()</span></code>: encode input images or videos into training latents. This is usually model-specific because the VAE normalization can differ across pipelines.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">set_scheduler_timestep()</span></code>: prepare the scheduler and cache the timestep map used by training.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">add_noise()</span></code>: convert sampled timestep indices into actual scheduler timesteps and return <code class="docutils literal notranslate"><span class="pre">(noised_latent,</span> <span class="pre">noise,</span> <span class="pre">timesteps)</span></code>.</p></li>
+</ul>
+<p>The existing models illustrate the main latent-conversion differences:</p>
+<ul class="simple">
+<li><p>SD3 and Cosmos-Predict2.5 use VAE <code class="docutils literal notranslate"><span class="pre">shift_factor</span></code> and <code class="docutils literal notranslate"><span class="pre">scaling_factor</span></code> when converting pixels to latents.</p></li>
+<li><p>SANA image uses <code class="docutils literal notranslate"><span class="pre">scaling_factor</span></code> only.</p></li>
+<li><p>SANA video applies an extra normalization step with <code class="docutils literal notranslate"><span class="pre">latents_mean</span></code> and <code class="docutils literal notranslate"><span class="pre">latents_std</span></code>.</p></li>
+</ul>
+<p>Once these methods are implemented correctly, <code class="docutils literal notranslate"><span class="pre">DiffuserModel.training_sft_step()</span></code> can usually be reused without trainer changes.</p>
+</section>
+<section id="id6">
+<h3>RL<a class="headerlink" href="#id6" title="Link to this heading"></a></h3>
+<p>To support DiffusionNFT RL, you need two more model-specific entry points:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">pipeline_with_logprob()</span></code>: performs rollout-time sampling and returns the generated visuals together with <code class="docutils literal notranslate"><span class="pre">all_latents</span></code> and <code class="docutils literal notranslate"><span class="pre">all_log_probs</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nft_prepare_transformer_input()</span></code>: prepares the keyword arguments for <code class="docutils literal notranslate"><span class="pre">self.transformer(...)</span></code> during the RL training step. <code class="docutils literal notranslate"><span class="pre">diffusers_trainer/nft_trainer.py</span></code> calls this method directly.</p></li>
+</ul>
+<p>There are two common implementation styles in the current codebase:</p>
+<ul class="simple">
+<li><p>SD3 uses a relatively thin wrapper around diffusers prompt encoding and latent preparation, then delegates the denoising loop to the shared <code class="docutils literal notranslate"><span class="pre">run_sampling()</span></code> helper.</p></li>
+<li><p>SANA and Cosmos-Predict2.5 implement a custom <code class="docutils literal notranslate"><span class="pre">sde_step_with_logprob()</span></code> helper because their transition and log-probability computation is more model-specific.</p></li>
+</ul>
+<p>Keep model-specific logic close to the model implementation rather than the trainer. Examples include:</p>
+<ul class="simple">
+<li><p>classifier-free guidance details</p></li>
+<li><p>prompt enhancement logic</p></li>
+<li><p>resolution binning</p></li>
+<li><p>video-specific conditioning inputs</p></li>
+<li><p>custom latent packing or padding rules</p></li>
+</ul>
+</section>
+<section id="id7">
+<h3>Configuration<a class="headerlink" href="#id7" title="Link to this heading"></a></h3>
+<p>After the model class is added, the config side is usually straightforward:</p>
+<ul class="simple">
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">policy.is_diffusers</span> <span class="pre">=</span> <span class="pre">true</span></code>.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">policy.model_name_or_path</span></code> to the new diffusers repo or local exported pipeline.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">policy.diffusers.is_video</span></code> correctly so dataset preprocessing and inference use the right visual path.</p></li>
+<li><p>Tune <code class="docutils literal notranslate"><span class="pre">policy.diffusers.sample</span></code> for the new scheduler and guidance behavior.</p></li>
+<li><p>If you want LoRA training, set <code class="docutils literal notranslate"><span class="pre">policy.lora.target_modules</span></code> according to the module names under <code class="docutils literal notranslate"><span class="pre">self.transformer</span></code>.</p></li>
+</ul>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>We use colocated mode for the diffusion-based WFM RL training, i.e., the rollout workers and the policy trainer run on the same set of GPUs. Thus the parallelism settings for both rollout and policy should be the same.</p>
+<p>The current <code class="docutils literal notranslate"><span class="pre">DiffuserModel</span></code> implementation only supports <code class="docutils literal notranslate"><span class="pre">tp_size</span> <span class="pre">=</span> <span class="pre">1</span></code> and <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">=</span> <span class="pre">1</span></code>. If a new diffusers backend needs tensor or context parallelism, that support has to be added explicitly.</p>
 </div>
-<p><strong>Datasets</strong>:</p>
-<p>The Cosmos-RL is very flexible for the user-customized dataset and input/output format. You can edit the <code class="docutils literal notranslate"><span class="pre">./cosmos_rl/tools/dataset/diffusion_nft.py</span></code> launcher to customize your own dataset for training. For more details about the customization of dataset, please refer to <a class="reference external" href="https://nvidia-cosmos.github.io/cosmos-rl/quickstart/customization.html">Customization</a>.</p>
+</section>
+<section id="validation-checklist">
+<h3>Validation Checklist<a class="headerlink" href="#validation-checklist" title="Link to this heading"></a></h3>
+<p>Before wiring a new model into large training runs, it is worth validating these points with a tiny config:</p>
+<ol class="arabic simple">
+<li><p>Check that <code class="docutils literal notranslate"><span class="pre">DiffusionPipeline.load_config(model_name_or_path)[&quot;_class_name&quot;]</span></code> matches the string returned by <code class="docutils literal notranslate"><span class="pre">supported_model_types()</span></code>.</p></li>
+<li><p>Build the model once and confirm that <code class="docutils literal notranslate"><span class="pre">self.transformer</span></code>, <code class="docutils literal notranslate"><span class="pre">self.vae</span></code>, <code class="docutils literal notranslate"><span class="pre">self.scheduler</span></code>, and the expected text encoders/tokenizers are registered.</p></li>
+<li><p>Run <code class="docutils literal notranslate"><span class="pre">text_embedding()</span></code> and <code class="docutils literal notranslate"><span class="pre">visual_embedding()</span></code> on one small batch and verify the output shapes.</p></li>
+<li><p>Run one SFT forward pass and confirm the returned transformer inputs match the model’s forward signature.</p></li>
+<li><p>If RL is needed, run one <code class="docutils literal notranslate"><span class="pre">pipeline_with_logprob()</span></code> call and one <code class="docutils literal notranslate"><span class="pre">nft_prepare_transformer_input()</span></code> call before launching a full RL job.</p></li>
+</ol>
+</section>
 </section>
 <section id="rl-deprecated">
 <h2>RL (deprecated)<a class="headerlink" href="#rl-deprecated" title="Link to this heading"></a></h2>
