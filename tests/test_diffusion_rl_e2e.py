@@ -370,9 +370,9 @@ class TestDiffusionRLE2E(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         base_config_path = os.path.join(
             repo_root,
+            "tests",
             "configs",
-            "stable-diffusion-3-5",
-            "stable-diffusion-3-5-medium-nft.toml",
+            "diffusion_rl_e2e_test.toml",
         )
         timeout_s = int(os.environ.get("COSMOS_DIFFUSION_RL_E2E_TIMEOUT_S", "1800"))
 
