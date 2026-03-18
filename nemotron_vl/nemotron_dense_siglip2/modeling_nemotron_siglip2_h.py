@@ -1249,11 +1249,9 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads, self.head_dim).transpose(0, 1).unsqueeze(0)
 
         attention_interface: Callable = eager_attention_forward
+        assert self.config._attn_implementation== "flash_attention_2", "Only flash attention 2 is supported for Siglip2Attention for now for var-length input. Please set `_attn_implementation` to `flash_attention_2` in the config."
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
-        # We use varlen feature of flash_attention here, assert if not
-        # assert self.config._attn_implementation== "flash_attention_2"
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         attn_output, attn_weights = attention_interface(
             self,
