@@ -115,8 +115,8 @@ class OptimizersContainer(Optimizer, Generic[T]):
             zip(self.model_parts, optimizer_kwargs)
         ):
             model_part_name = (
-                self.model_modpath[model_id]
-                if self.model_modpath and model_id < len(self.model_modpath)
+                self.model_module_path[model_id]
+                if self.model_module_path and model_id < len(self.model_module_path)
                 else f"part_{model_id}"
             )
 
