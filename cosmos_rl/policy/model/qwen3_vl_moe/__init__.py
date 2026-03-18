@@ -60,7 +60,7 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoeVisionModel,
 )
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    _compute_default_rope_parameters,
+    compute_default_rope_parameters,
 )
 
 
@@ -78,7 +78,7 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_seq_len
         self.config = config
         if config.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = _compute_default_rope_parameters
+            self.rope_init_fn = compute_default_rope_parameters
         else:
             self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
         self.mrope_section = config.hf_config.rope_scaling.get(

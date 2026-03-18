@@ -3,9 +3,23 @@ from typing import Optional
 from transformers import AutoConfig
 
 
+# For transformers v5.0.0 and higher, rope_theta is not in the config,
+# so we need to get it from the rope_parameters dictionary.
+def get_rope_theta(hf_config: AutoConfig) -> float:
+    rope_theta = getattr(hf_config, "rope_theta", None) or (
+        getattr(hf_config, "rope_parameters", {}).get("rope_theta", None)
+        if hasattr(hf_config, "rope_parameters")
+        and "rope_theta" in getattr(hf_config, "rope_parameters", {})
+        else None
+    )
+    if rope_theta is None:
+        raise ValueError("rope_theta is not found in config={hf_config}")
+    return rope_theta
+
+
 # For transformers v5.0.0 and higher, "default" is excluded from dictionary ROPE_INIT_FUNCTIONS and harcoded individually for each model.
 # This function is a copy of the original function in Transformers < 5.0.0, to be compatible with Transformers v5.0.0 and higher.
-def _compute_default_rope_parameters(
+def compute_default_rope_parameters(
     config: Optional[AutoConfig] = None,
     device: Optional["torch.device"] = None,
     seq_len: Optional[int] = None,

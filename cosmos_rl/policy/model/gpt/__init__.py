@@ -41,7 +41,8 @@ import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    _compute_default_rope_parameters,
+    compute_default_rope_parameters,
+    get_rope_theta,
 )
 
 
@@ -77,7 +78,7 @@ class RotaryEmbedding(nn.Module):
         self.args = args
         if args.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
             # For transformers v5.0.0 and higher
-            self.rope_init_fn = _compute_default_rope_parameters
+            self.rope_init_fn = compute_default_rope_parameters
         else:
             self.rope_init_fn = ROPE_INIT_FUNCTIONS[args.rope_type]
         self.device = device
@@ -776,17 +777,6 @@ class GPT(BaseModel):
             head_dim = hf_config.hidden_size // hf_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
 
-        # For transformers v5.0.0 and higher, rope_theta is not in the config,
-        # so we need to get it from the rope_parameters dictionary.
-        rope_theta = getattr(hf_config, "rope_theta", None) or (
-            getattr(hf_config, "rope_parameters", {}).get("rope_theta", None)
-            if hasattr(hf_config, "rope_parameters")
-            and "rope_theta" in getattr(hf_config, "rope_parameters", {})
-            else None
-        )
-        if rope_theta is None:
-            raise ValueError("rope_theta is not found in config={hf_config}")
-
         model = cls.from_model_args(
             GPTArgs(
                 dim=hf_config.hidden_size,
@@ -797,7 +787,7 @@ class GPT(BaseModel):
                 head_dim=head_dim,
                 vocab_size=vocab_size,
                 max_seq_len=max_position_embeddings,
-                rope_theta=rope_theta,
+                rope_theta=get_rope_theta(hf_config),
                 q_k_norm_enabled=hf_config.model_type == "qwen3",
                 norm_type="rmsnorm",
                 rope_type=rope_type,

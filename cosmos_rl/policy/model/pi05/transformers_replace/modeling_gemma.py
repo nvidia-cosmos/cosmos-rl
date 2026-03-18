@@ -38,7 +38,7 @@ from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import
     GemmaConfig,
 )
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    _compute_default_rope_parameters,
+    compute_default_rope_parameters,
 )
 
 
@@ -156,7 +156,7 @@ class GemmaRotaryEmbedding(nn.Module):
 
         self.config = config
         if self.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = _compute_default_rope_parameters
+            self.rope_init_fn = compute_default_rope_parameters
         else:
             self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 

@@ -79,7 +79,7 @@ assert is_flash_attn_2_available(), (
 )
 
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    _compute_default_rope_parameters,
+    compute_default_rope_parameters,
 )
 
 logger = logging.get_logger(__name__)
@@ -648,7 +648,7 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
 
         self.config = config
         if self.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = _compute_default_rope_parameters
+            self.rope_init_fn = compute_default_rope_parameters
         else:
             self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
