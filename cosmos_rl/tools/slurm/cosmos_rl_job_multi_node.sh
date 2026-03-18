@@ -416,6 +416,7 @@ srun \
         exit 1
     fi
     cd "${cosmos_dir}"
+    export NCCL_NVLS_ENABLE=0 # Disable NCCL NVLS to avoid potential instability issues in slurm clusters.
     # exec to replace the shell with the launcher so that it receives signals directly and can forward to the policy processes correctly for graceful shutdown and checkpointing.
     exec python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
@@ -443,6 +444,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
             exit 1
         fi
         cd "${cosmos_dir}"
+        export NCCL_NVLS_ENABLE=0 # Disable NCCL NVLS to avoid potential instability issues in slurm clusters.
         python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
         ' \
         &
