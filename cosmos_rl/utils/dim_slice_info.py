@@ -18,6 +18,13 @@ from functools import reduce
 from math import gcd
 import torch
 
+try:
+    from torch.distributed.tensor.placement_types import (
+        _StridedShard as _StridedShardPlacement,
+    )
+except ImportError:
+    _StridedShardPlacement = None
+
 
 class DimSliceInfo:
     """
@@ -251,7 +258,10 @@ def extract_infomation_from_dtensor(
             f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
         )
         for dim, placement in zip(mesh.mesh_dim_names, placements):
-            if placement.is_shard():
+            if placement.is_shard() or (
+                _StridedShardPlacement is not None
+                and isinstance(placement, _StridedShardPlacement)
+            ):
                 dims_map[dim] = placement.dim
             elif placement.is_replicate():
                 pass
