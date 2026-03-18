@@ -61,6 +61,7 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
 )
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
     compute_default_rope_parameters,
+    get_rope_theta,
 )
 
 
@@ -989,15 +990,6 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
 
-        rope_theta = getattr(lm_config, "rope_theta", None) or (
-            getattr(lm_config, "rope_parameters", {}).get("rope_theta", None)
-            if hasattr(lm_config, "rope_parameters")
-            and "rope_theta" in getattr(lm_config, "rope_parameters", {})
-            else None
-        )
-        if rope_theta is None:
-            raise ValueError("rope_theta is not found in config={lm_config}")
-
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
@@ -1008,7 +1000,7 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim=head_dim,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=rope_theta,
+            rope_theta=get_rope_theta(lm_config),
             q_k_norm_enabled=True,
             norm_type="rmsnorm",
             rope_type=rope_type,
