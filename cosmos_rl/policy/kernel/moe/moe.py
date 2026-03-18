@@ -584,7 +584,7 @@ class Gate(nn.Module):
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
-            scores = scores.sigmoid()
+            scores = scores.float().sigmoid()
         original_scores = scores
 
         # Add correction bias to balance tokens across gates.
@@ -613,10 +613,10 @@ class Gate(nn.Module):
             )
         weights = weights * self.route_scale
 
-        if self.bias_update_factor > 0 or self.aux_loss_coeff > 0:
+        if self.bias_update_factor >= 0 or self.aux_loss_coeff > 0:
             expert_load = self._compute_expert_load(indices, token_mask)
 
-        if self.bias_update_factor > 0 and self.training:
+        if self.bias_update_factor >= 0 and self.training:
             if self._cumulative_expert_load is None:
                 self._cumulative_expert_load = expert_load.detach()
             else:
@@ -647,7 +647,7 @@ class Gate(nn.Module):
         This encourages the model to route tokens to less popular experts, promoting
         better load balance.
         """
-        assert self.train_gate and self.bias_update_factor > 0, (
+        assert self.train_gate and self.bias_update_factor >= 0, (
             "Gate bias update is disabled"
         )
 
