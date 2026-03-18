@@ -52,6 +52,9 @@ from cosmos_rl.policy.model.vision_encoder.qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
     rotate_half,
 )
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    _compute_default_rope_parameters,
+)
 
 
 @dataclass
@@ -84,7 +87,10 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2_5_VL_LM_Args, device=None):
         super().__init__()
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        if config.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
+            self.rope_init_fn = _compute_default_rope_parameters
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):
@@ -1045,6 +1051,15 @@ class Qwen2_5_VLConditionalModel(BaseModel):
 
         bias_list = ["q_proj", "k_proj", "v_proj"]
 
+        rope_theta = getattr(hf_config, "rope_theta", None) or (
+            getattr(hf_config, "rope_parameters", {}).get("rope_theta", None)
+            if hasattr(hf_config, "rope_parameters")
+            and "rope_theta" in getattr(hf_config, "rope_parameters", {})
+            else None
+        )
+        if rope_theta is None:
+            raise ValueError("rope_theta is not found in config={hf_config}")
+
         lm_args = Qwen2_5_VL_LM_Args(
             mrope_section=hf_config.rope_scaling["mrope_section"],
             dim=hf_config.hidden_size,
@@ -1054,7 +1069,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             n_kv_heads=hf_config.num_key_value_heads,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=hf_config.rope_theta,
+            rope_theta=rope_theta,
             norm_type="rmsnorm",
             hidden_act=hf_config.hidden_act,
             norm_eps=hf_config.rms_norm_eps,

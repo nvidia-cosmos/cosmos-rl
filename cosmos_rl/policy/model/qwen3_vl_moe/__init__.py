@@ -59,6 +59,9 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
     Qwen3VLMoeVisionModel,
 )
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    _compute_default_rope_parameters,
+)
 
 
 @dataclass
@@ -74,7 +77,10 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.max_seq_len_cached = config.max_seq_len
         self.original_max_seq_len = config.max_seq_len
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        if config.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
+            self.rope_init_fn = _compute_default_rope_parameters
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
         self.mrope_section = config.hf_config.rope_scaling.get(
             "mrope_section", [24, 20, 20]
         )
@@ -983,6 +989,15 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
 
+        rope_theta = getattr(lm_config, "rope_theta", None) or (
+            getattr(lm_config, "rope_parameters", {}).get("rope_theta", None)
+            if hasattr(lm_config, "rope_parameters")
+            and "rope_theta" in getattr(lm_config, "rope_parameters", {})
+            else None
+        )
+        if rope_theta is None:
+            raise ValueError("rope_theta is not found in config={lm_config}")
+
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
@@ -993,7 +1008,7 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim=head_dim,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=lm_config.rope_theta,
+            rope_theta=rope_theta,
             q_k_norm_enabled=True,
             norm_type="rmsnorm",
             rope_type=rope_type,

@@ -84,6 +84,10 @@ except ImportError:
     print("torch.distributed.tensor is not available. DeepSeek model will not work.")
 from torch.distributed.device_mesh import DeviceMesh
 
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    _compute_default_rope_parameters,
+)
+
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "Qwen2VLConfig"
@@ -142,7 +146,10 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        if self.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
+            self.rope_init_fn = _compute_default_rope_parameters
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
