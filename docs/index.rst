@@ -98,6 +98,11 @@ Main Features
    distillation/on_policy_distillation
 
 .. toctree::
+   :caption: Profiler
+
+   profiler/overview
+
+.. toctree::
    :caption: World Foundational Models
 
    wfm/overview

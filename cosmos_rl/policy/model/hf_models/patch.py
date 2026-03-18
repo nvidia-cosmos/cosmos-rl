@@ -14,13 +14,18 @@
 # limitations under the License.
 
 import importlib
+import threading
 
 import torch
 import transformers
 from typing import Any, Optional
 from transformers import AutoConfig
 from transformers.cache_utils import Cache
-from transformers.utils.import_utils import is_torchdynamo_compiling
+from transformers.utils.import_utils import (
+    is_torchdynamo_compiling,
+    is_causal_conv1d_available,
+    is_flash_linear_attention_available,
+)
 
 from cosmos_rl.utils.logging import logger
 
@@ -207,7 +212,12 @@ def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
 
 
 def sequence_packing_forward_qwen3_vl_patch(model):
-    original_forward = model.language_model.forward
+    language_model = getattr(model, "language_model", None) or getattr(
+        model.model, "language_model", None
+    )
+    if language_model is None:
+        raise ValueError("language_model not found")
+    original_forward = language_model.forward
 
     def sequence_packing_forward_qwen3_vl_inner(*args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
@@ -256,14 +266,176 @@ def sequence_packing_forward_qwen3_vl_patch(model):
         return result
 
     # Replace the forward method
-    model.language_model.forward = sequence_packing_forward_qwen3_vl_inner
+    language_model.forward = sequence_packing_forward_qwen3_vl_inner
 
     # Replace the self_attn.forward method
-    for layer in model.language_model.layers:
+    for layer in language_model.layers:
         original_attn_forward = layer.self_attn.forward
         layer.self_attn.forward = make_new_self_attn_forward(
             original_attn_forward
         ).__get__(layer.self_attn, type(layer.self_attn))
+
+
+def sequence_packing_forward_qwen3_5_patch(model):
+    if not is_causal_conv1d_available():
+        raise ImportError(
+            "Qwen3.5 sequence packing requires causal_conv1d. "
+            "Install with: pip install causal-conv1d"
+        )
+    if not is_flash_linear_attention_available():
+        raise ImportError(
+            "Qwen3.5 sequence packing requires flash-linear-attention (fla>=0.2.2). "
+            "Install with: pip install flash-linear-attention"
+        )
+    original_forward = model.model.language_model.forward
+
+    def sequence_packing_forward_qwen3_5_inner(*args, **kwargs):
+        valid_input_len = kwargs.get("valid_input_len")
+        if valid_input_len is not None:
+            kwargs["valid_input_len"] = valid_input_len
+            inputs_embeds = kwargs.get("inputs_embeds")
+            position_ids = kwargs.get("position_ids", None)
+            batch_size = valid_input_len.shape[0]
+            inputs_embeds_list = []
+            position_ids_list = []
+            for i in range(batch_size):
+                valid_len = valid_input_len[i].item()
+                cur_inputs_embeds = inputs_embeds[i : i + 1, :valid_len, :].clone()
+                inputs_embeds_list.append(cur_inputs_embeds)
+                if position_ids is not None:
+                    cur_position_ids = position_ids[:, i : i + 1, :valid_len].clone()
+                    position_ids_list.append(cur_position_ids)
+            kwargs["inputs_embeds"] = torch.cat(inputs_embeds_list, dim=1)
+            if len(position_ids_list) > 0:
+                kwargs["position_ids"] = torch.cat(position_ids_list, dim=2)
+            # Clear attention mask cache
+            kwargs["attention_mask_cache"] = {}
+            del (
+                inputs_embeds_list,
+                position_ids_list,
+            )
+        else:
+            logger.warning(
+                "valid_input_len is not provided, skip sequence packing forward"
+            )
+        # Call original forward
+        result = original_forward(*args, **kwargs)
+        return result
+
+    # Replace the forward method
+    model.model.language_model.forward = sequence_packing_forward_qwen3_5_inner
+
+    # Replace the self_attn.forward and linear_attn (sequence packing) for each layer
+    for layer in model.model.language_model.layers:
+        if layer.layer_type == "full_attention":
+            original_attn_forward = layer.self_attn.forward
+            layer.self_attn.forward = make_new_self_attn_forward(
+                original_attn_forward
+            ).__get__(layer.self_attn, type(layer.self_attn))
+        elif layer.layer_type == "linear_attention":
+            _patch_linear_attn_for_sequence_packing(layer)
+
+
+# Thread-local storage for decoder kwargs during forward (avoids circular refs that break model.train())
+_decoder_kwargs_tls = threading.local()
+
+
+def _patch_linear_attn_for_sequence_packing(decoder_layer):
+    """
+    Patch Qwen3.5 linear_attn (GatedDeltaNet) so sequence packing works.
+    Uses thread-local for kwargs to avoid circular references that cause RecursionError in model.train().
+    """
+    linear_attn = decoder_layer.linear_attn
+
+    # (1) Decoder layer forward: set current kwargs in thread-local so linear_attn can read them
+    _original_decoder_forward = decoder_layer.forward
+
+    def _decoder_forward_with_kwargs(self, *args, **kwargs):
+        prev = getattr(_decoder_kwargs_tls, "current", None)
+        _decoder_kwargs_tls.current = kwargs
+        try:
+            return _original_decoder_forward(*args, **kwargs)
+        finally:
+            _decoder_kwargs_tls.current = prev
+
+    decoder_layer.forward = _decoder_forward_with_kwargs.__get__(
+        decoder_layer, type(decoder_layer)
+    )
+
+    # (2) linear_attn.forward: read kwargs from thread-local, build seq_idx/cu_seqlens, set on self
+    _original_linear_forward = linear_attn.forward
+
+    def _linear_attn_forward_with_packing(
+        self, hidden_states, cache_params=None, attention_mask=None
+    ):
+        kwargs = getattr(_decoder_kwargs_tls, "current", {}) or {}
+        valid_input_len = kwargs.get("valid_input_len", None)
+        seq_idx = None
+        cu_seqlens = None
+        batch_size, seq_len, _ = hidden_states.shape
+        use_precomputed = (
+            cache_params is not None
+            and getattr(cache_params, "has_previous_state", False)
+            and seq_len == 1
+        )
+        if valid_input_len is not None and not use_precomputed and batch_size == 1:
+            valid_list = valid_input_len.tolist()
+            if sum(valid_list) == seq_len:
+                segment_ids = torch.cat(
+                    [
+                        torch.full(
+                            (L,), i, dtype=torch.int32, device=hidden_states.device
+                        )
+                        for i, L in enumerate(valid_list)
+                    ],
+                    dim=0,
+                )
+                seq_idx = segment_ids.unsqueeze(0)
+                cu_seqlens = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=hidden_states.device),
+                        valid_input_len.cumsum(0),
+                    ],
+                    dim=0,
+                )
+        self._seq_pack_seq_idx = seq_idx
+        self._seq_pack_cu_seqlens = cu_seqlens
+        try:
+            return _original_linear_forward(
+                hidden_states,
+                cache_params=cache_params,
+                attention_mask=attention_mask,
+            )
+        finally:
+            del self._seq_pack_seq_idx
+            del self._seq_pack_cu_seqlens
+
+    linear_attn.forward = _linear_attn_forward_with_packing.__get__(
+        linear_attn, type(linear_attn)
+    )
+
+    # (3) causal_conv1d_fn: inject seq_idx when set
+    _original_causal_conv1d_fn = linear_attn.causal_conv1d_fn
+    if _original_causal_conv1d_fn is not None:
+
+        def _wrapped_causal_conv1d_fn(*args, **fn_kwargs):
+            seq_idx = getattr(linear_attn, "_seq_pack_seq_idx", None)
+            if seq_idx is not None:
+                fn_kwargs["seq_idx"] = seq_idx
+            return _original_causal_conv1d_fn(*args, **fn_kwargs)
+
+        linear_attn.causal_conv1d_fn = _wrapped_causal_conv1d_fn
+
+    # (4) chunk_gated_delta_rule: inject cu_seqlens when set
+    _original_chunk_rule = linear_attn.chunk_gated_delta_rule
+
+    def _wrapped_chunk_gated_delta_rule(*args, **fn_kwargs):
+        cu_seqlens = getattr(linear_attn, "_seq_pack_cu_seqlens", None)
+        if cu_seqlens is not None:
+            fn_kwargs["cu_seqlens"] = cu_seqlens
+        return _original_chunk_rule(*args, **fn_kwargs)
+
+    linear_attn.chunk_gated_delta_rule = _wrapped_chunk_gated_delta_rule
 
 
 def sequence_packing_forward_gemma3_vl_patch(model):
@@ -596,6 +768,8 @@ def visual_forward_qwen3_vl_patch(model):
 # The patching logic is model-dependent, with special handling required for Vision-Language Models (VLMs) and other architectures.
 SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS = {
     "qwen3_vl": sequence_packing_forward_qwen3_vl_patch,
+    "qwen3_5": sequence_packing_forward_qwen3_5_patch,
+    "qwen3_5_moe": sequence_packing_forward_qwen3_5_patch,
     "gemma3": sequence_packing_forward_gemma3_vl_patch,
     "llm": sequence_packing_forward_llm_patch,
 }

@@ -105,6 +105,7 @@ class NFTRollout(RolloutBase):
                 )
                 for _ in range(total_batch)
             ]
+
             with torch.no_grad():
                 # Inference with logprob computation
                 # mm_datas contains the generated images/videos

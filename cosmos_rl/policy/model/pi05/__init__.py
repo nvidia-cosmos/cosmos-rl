@@ -181,9 +181,7 @@ def preprocess_observation_pytorch(
                 )
                 image = split_images[0]
                 for i, meta_key in enumerate(meta_image_keys):
-                    meta_image = split_images[i + 1]
-                    if is_channels_first:
-                        meta_image = split_images[i + 1].permute(0, 3, 1, 2)
+                    meta_image = split_images[i + 1].permute(0, 3, 1, 2)
                     out_images[meta_key] = meta_image * 2.0 - 1.0
 
             # Color augmentations for all cameras
@@ -226,15 +224,10 @@ def preprocess_observation_pytorch(
             )
             image = split_images[0]
             for i, meta_key in enumerate(meta_image_keys):
-                if is_channels_first:
-                    meta_image = split_images[i + 1].permute(0, 3, 1, 2)
-                else:
-                    meta_image = split_images[i + 1]
+                meta_image = split_images[i + 1].permute(0, 3, 1, 2)
                 out_images[meta_key] = meta_image
 
-        # Convert back to [B, C, H, W] format if it was originally channels-first
-        if is_channels_first:
-            image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+        image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
 
         out_images[key] = image
 
@@ -261,8 +254,8 @@ def preprocess_observation_pytorch(
         state=observation.state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        token_ar_mask=observation.token_ar_mask,
-        token_loss_mask=observation.token_loss_mask,
+        # token_ar_mask=observation.token_ar_mask,
+        # token_loss_mask=observation.token_loss_mask,
     )
 
 
@@ -1223,6 +1216,15 @@ class PI05(BaseModel):
         device = device or torch.device("cpu")
         if device.type == "cuda":
             torch.cuda.set_device(device.index or torch.cuda.current_device())
+
+        # meta device
+        self._apply(
+            lambda t: torch.empty_like(t, device=device)
+            if t.device.type == "meta"
+            else t.to(device),
+            recurse=True,
+        )
+
         weight_path = os.path.join(model_path, "model.safetensors")
 
         state_dict = {}
@@ -1233,7 +1235,7 @@ class PI05(BaseModel):
         ) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
-        # logger.info(f'{state_dict.keys()}')
+
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
         embed_key = (
             "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
@@ -1302,6 +1304,10 @@ class PI05(BaseModel):
             image_masks = torch.tensor(
                 [[1, 1, 0] for _ in range(batch_size)], dtype=torch.bool
             )
+
+        # uint8 [0,255] NHWC → float32 [-1,1] NCHW, matching Observation.from_dict()
+        images = images.to(torch.float32) / 255.0 * 2.0 - 1.0
+        images = images.permute(0, 1, 4, 2, 3)  # [B, N, H, W, C] → [B, N, C, H, W]
 
         raw_states = []
         for i in range(batch_size):
@@ -1396,9 +1402,7 @@ class PI05(BaseModel):
             :, : self.hf_config.action_horizon, : self.hf_config.action_env_dim
         ].to(torch.float32)
         actions_np = actions.detach().cpu().numpy()
-        unnormed = torch.tensor(
+        outputs["action"] = torch.tensor(
             self._unnormalize_pi05_actions(actions_np), device=actions.device
         )
-        unnormed[..., -1] = -torch.sign(2.0 * unnormed[..., -1] - 1.0)
-        outputs["action"] = unnormed
         return outputs

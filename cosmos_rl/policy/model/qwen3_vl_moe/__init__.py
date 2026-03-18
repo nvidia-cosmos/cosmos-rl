@@ -43,7 +43,11 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
-from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_inputs,
+    generate_mask,
+    recover_dims,
+)
 from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
@@ -204,8 +208,8 @@ class Qwen3MoE(nn.Module):
                 interested_tokens,
                 inputs_seq_dim=1,
                 inputs_batch_dim=0,
-                position_ids_seq_dim=2,
-                position_ids_batch_dim=1,
+                position_ids_seq_dim=1,
+                position_ids_batch_dim=0,
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
@@ -216,6 +220,16 @@ class Qwen3MoE(nn.Module):
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
+
+            # Pack visual_pos_masks to match packed sequence
+            if visual_pos_masks is not None:
+                valid_input_mask = generate_mask(valid_input_len, inputs_embeds, 1, 0)
+                visual_pos_masks = recover_dims(
+                    visual_pos_masks[valid_input_mask],
+                    visual_pos_masks,
+                    1,
+                    0,
+                )
         elif cp_mesh is not None:
             [inputs_embeds, interested_tokens] = slice_inputs_for_ulysses(
                 [inputs_embeds, interested_tokens],

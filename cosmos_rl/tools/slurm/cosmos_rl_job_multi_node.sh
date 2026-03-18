@@ -8,7 +8,7 @@
 #SBATCH --open-mode=append
 #SBATCH --signal=B:SIGUSR1@[[PRE_TIMEOUT_SIGNAL]]
 #SBATCH --exclusive
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:[[NGPU_PER_NODE]]
 #SBATCH --requeue
 # shellcheck disable=SC1035,SC1073,SC1020,SC1072
 [[EXTRA_SBATCH_ARGS]]
@@ -145,9 +145,16 @@ sig_handler() {
     received_signal="${sig}"
     log "Signal ${sig} caught. Will terminate job and potentially requeue."
 
-    # Send SIGTERM to all child processes
+    # Explicitly forward signal to policy srun first (SIGUSR1 or SIGTERM).
+    if [[ -n "${pid_policy}" ]]; then
+        kill -s "${sig}" "${pid_policy}" 2>/dev/null || true
+        log "Forwarded signal ${sig} to policy process with PID ${pid_policy}"
+    fi
+
+    # If SIGUSR1 received keep all srun so that checkpoint/autoresume can execute.
+    # Otherwise send SIGTERM to terminate the processes.
     for pid in "${pid_controller}" "${pid_policy}" "${pid_rollout}"; do
-        if [[ -n "${pid}" ]]; then
+        if [[ "${sig}" != "SIGUSR1" ]] && [[ -n "${pid}" ]]; then
             kill "${pid}" 2>/dev/null || true
         fi
     done
@@ -314,7 +321,7 @@ log "Container image: ${CONTAINER_IMAGE}"
 
 # --- 3c. Container Mounts --------------------------------------------------
 
-MOUNTS="/lustre:/lustre/"
+MOUNTS="[[MOUNT_DIRS]]"
 if [[ -d "${HOME}/.cache/huggingface" ]]; then
     MOUNTS="${MOUNTS},${HOME}/.cache/huggingface:/root/.cache/huggingface"
 fi
@@ -409,7 +416,9 @@ srun \
         exit 1
     fi
     cd "${cosmos_dir}"
-    python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
+    export NCCL_NVLS_ENABLE=0 # Disable NCCL NVLS to avoid potential instability issues in slurm clusters.
+    # exec to replace the shell with the launcher so that it receives signals directly and can forward to the policy processes correctly for graceful shutdown and checkpointing.
+    exec python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
     &
 pid_policy=$!
@@ -435,6 +444,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
             exit 1
         fi
         cd "${cosmos_dir}"
+        export NCCL_NVLS_ENABLE=0 # Disable NCCL NVLS to avoid potential instability issues in slurm clusters.
         python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --config /opt/config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
         ' \
         &

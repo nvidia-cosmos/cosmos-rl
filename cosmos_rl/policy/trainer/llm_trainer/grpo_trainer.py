@@ -1879,7 +1879,8 @@ class GRPOTrainer(LLMTrainer):
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):
-            if self.config.train.ckpt.export_safetensors:
+            is_last_step = current_step == total_steps
+            if is_last_step or self.config.train.ckpt.export_safetensors:
                 logger.info(
                     f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
                 )
@@ -1890,7 +1891,7 @@ class GRPOTrainer(LLMTrainer):
                         f"step_{current_step}",
                     ),
                     trainable_only=False,
-                    is_final=current_step == total_steps,
+                    is_final=is_last_step,
                     dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
             logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
@@ -1902,7 +1903,7 @@ class GRPOTrainer(LLMTrainer):
                 total_steps=total_steps,
                 **{
                     "remain_samples_num": remain_samples_num,
-                    "is_final": current_step == total_steps,
+                    "is_final": is_last_step,
                 },
             )
             self.ckpt_manager.save_check(step=current_step)

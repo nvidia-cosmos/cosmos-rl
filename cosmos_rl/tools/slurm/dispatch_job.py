@@ -286,6 +286,12 @@ def main():
         help="Path to the cosmos-rl repository root, container will use this path for mounting and setting PYTHONPATH, so that the cosmos_rl package can be used from this specified repo.",
     )
     parser.add_argument(
+        "--mount-dirs",
+        type=str,
+        default="/lustre:/lustre/",
+        help="Comma-separated container mount mappings to inject into the sbatch template.",
+    )
+    parser.add_argument(
         "--cosmos-container",
         "--container",
         dest="container",
@@ -531,6 +537,7 @@ def main():
         "NUM_POLICY_NODES": str(n_policy_nodes),
         "NUM_ROLLOUT_NODES": str(n_rollout_nodes),
         "NUM_REFERENCE_NODES": str(n_reference_nodes),
+        "MOUNT_DIRS": args.mount_dirs,
         "NODE_LAUNCH_METADATA_POLICY": json.dumps(
             [x.to_json() for x in policy_node_launch_metadata]
         ),
@@ -543,6 +550,7 @@ def main():
         "REPO_ROOT_PATH": args.repo_root_path
         if args.repo_root_path is not None
         else "",
+        "NGPU_PER_NODE": str(args.ngpu_per_node),
     }
 
     # Read the template relative to the current file

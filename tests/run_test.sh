@@ -1,4 +1,5 @@
 python -c "from cosmos_rl._version import version; print(version)"
+python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
 # run tests
 python tests/test_apex.py
 python tests/test_cosmos_hf_precision.py
@@ -35,5 +36,7 @@ python tests/test_vllm_rollout_async.py
 python tests/test_custom_args.py
 python tests/test_colocated_separated.py
 python tests/test_load_balanced_dataset.py
+python tests/test_resume_data_index.py
 /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
 python tests/optim/test_orthonormal_optimizer.py
+python tests/test_diffusion_rl_e2e.py

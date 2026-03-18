@@ -255,7 +255,7 @@ class CheckpointConfig(BaseModel):
     )
     export_safetensors: bool = Field(
         default=True,
-        description="Whether to export a safetensors weight for huggingface usage, include related config files.",
+        description="Whether to export a safetensors weight for huggingface usage, include related config files. If True, the safetensors weight will be exported every `save_freq` steps. If False, the safetensors weight will be exported only when the training is finished.",
     )
     upload_hf: bool = Field(
         default=False,
@@ -317,16 +317,45 @@ class OverlongRewardConfig(BaseModel):
     )
 
 
-class RemoteRewardConfig(BaseModel):
-    enabled: bool = True
-    score_key: str = "overall_reward"
-    scale: float = 1.0
-    reward_fn: Dict[str, float] = Field(
-        default_factory=lambda: {"dance_grpo": 1.0},
-        description="Dictionary of reward functions and their weights for remote reward calculation.",
+class RewardFunctionConfig(BaseModel):
+    name: str = Field(
+        description="Name of the reward function.",
     )
-    reward_clip_min: float = -5.0
-    reward_clip_max: float = 5.0
+    weight: float = Field(description="Weight of the reward function.", default=1.0)
+    score_key: Optional[str] = Field(
+        description="Score key of the reward function. If not specified, the name will be used as the score key. You can use '+' to add multiple score keys together, which will be added together as the final score. For example, 'vq_reward+mq_reward'.",
+        default=None,
+    )
+    clip_min: float = Field(
+        description="Clip minimum of the reward function.", default=-5.0
+    )
+    clip_max: float = Field(
+        description="Clip maximum of the reward function.", default=5.0
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.score_key is None:
+            self.score_key = self.name
+        return self
+
+
+class RemoteRewardConfig(BaseModel):
+    scale: float = Field(description="Scale of the total reward result.", default=1.0)
+    reward_fns: List[RewardFunctionConfig] = Field(
+        default_factory=lambda: [
+            RewardFunctionConfig(
+                name="dance_grpo", weight=1.0, score_key="overall_reward"
+            )
+        ],
+        description="List of reward functions for remote reward calculation.",
+    )
+    reward_clip_min: float = Field(
+        description="Clip minimum of the total reward result.", default=-5.0
+    )
+    reward_clip_max: float = Field(
+        description="Clip maximum of the total reward result.", default=5.0
+    )
 
 
 class GrpoConfig(BaseModel):
@@ -969,6 +998,16 @@ class TrainingConfig(BaseModel):
         description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
     )
 
+    save_ckpt_at_exit: bool = Field(
+        default=True,
+        description="Whether to save checkpoint at exit. If set to True, the checkpoint will be saved when the process receives a specified signal, normally specified as SIGUSR1.",
+    )
+
+    signal_to_handle: List[str] = Field(
+        default_factory=lambda: ["SIGUSR1"],
+        description="The signal to handle. When the process receives any of these signals, it will trigger a checkpoint save if `save_ckpt_at_exit` is True. Specified as SIGUSR1.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.async_tp_enabled and not self.compile:
@@ -1000,6 +1039,13 @@ class TrainingConfig(BaseModel):
             # Seed must be positive
             logger.warning("Seed is negative, setting to 42")
             self.seed = 42
+
+        # If optm_lr is a dict, ensure `global` key is present for default learning rate
+        # Otherwise, some uncovered params will be left `requires_grad=True` but with no optimizer updating them, which can cause confusion.
+        if isinstance(self.optm_lr, dict):
+            assert "global" in self.optm_lr, (
+                "optm_lr dict must contain a 'global' key for default learning rate"
+            )
 
         return self
 
@@ -1133,8 +1179,8 @@ class TokenizerConfig(BaseModel):
 
 class DiffusersConfig(BaseModel):
     dtype: str = Field(
-        default="float16",
-        description="Data type for diffusers model",
+        default="float32",
+        description="Data type for the diffusers model, include the transformer and text encoder. The VAE is always in float32 for stability.",
         choices=["float16", "bfloat16", "float32"],
     )
     is_video: bool = Field(

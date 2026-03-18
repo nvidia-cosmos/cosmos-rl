@@ -22,7 +22,6 @@ target_modules = [ # Set both attention and cross-attention modules
 ]
 
 [policy.diffusers]
-dtype = "float32"
 is_video = true
 offload = false
 max_prompt_length = 512
@@ -69,6 +68,10 @@ ema_decay = 0.9
 ema_update_step_interval = 1
 async_tp_enabled = false
 compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
 
 [train.train_policy]
 type = "grpo"
@@ -83,11 +86,12 @@ advantage_high = 5.0
 advantage_low = -5.0
 
 [train.train_policy.remote_reward]
-score_key = "overall_reward"
 scale = 1.0
 
-[train.train_policy.remote_reward.reward_fn]
-dance_grpo = 1.0
+[[train.train_policy.remote_reward.reward_fns]]
+name = "dance_grpo"
+weight = 1.0
+score_key = "overall_reward"
 
 [train.ckpt]
 enable_checkpoint = true
@@ -103,12 +107,8 @@ dataset.split = "test"
 n_init_replicas = 1
 tp_size = 1
 dp_shard_size = 8
-pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
 dp_shard_size = 8
-pp_size = 1
-dp_replicate_size = 1

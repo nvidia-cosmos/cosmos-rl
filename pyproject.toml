@@ -59,6 +59,7 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 
 [project.scripts]
 cosmos-rl = "cosmos_rl.launcher.launch_all:main"
+cosmos-cli = "cosmos_rl.cli.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -110,6 +111,7 @@ vla = [
     "timm<1",
     "wandb>0.13.1",
     "transformers<5.0.0",
+    "sentencepiece",
 ]
 
 rl = [

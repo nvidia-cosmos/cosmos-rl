@@ -16,6 +16,8 @@
 
 import inspect
 import os
+import atexit
+import traceback as _tb
 import torch
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
@@ -105,11 +107,48 @@ class SFTDataset(Dataset):
                     item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
                 break
             except Exception as e:
+                msg_info = []
+                try:
+                    msgs = raw_item if isinstance(raw_item, list) else []
+                    if isinstance(raw_item, dict) and "messages" in raw_item:
+                        msgs = raw_item["messages"]
+                    for msg in msgs:
+                        if not isinstance(msg, dict):
+                            msg_info.append(f"non-dict:{type(msg).__name__}")
+                            continue
+                        role = msg.get("role", "?")
+                        content = msg.get("content")
+                        if isinstance(content, list):
+                            items = []
+                            for c in content:
+                                if isinstance(c, dict):
+                                    item_d = {}
+                                    for k, v in c.items():
+                                        if isinstance(
+                                            v, (str, int, float, bool, type(None))
+                                        ):
+                                            item_d[k] = str(v)[:100]
+                                        else:
+                                            item_d[k] = type(v).__name__
+                                    items.append(item_d)
+                            msg_info.append(f"{role}:{items}")
+                        elif isinstance(content, str):
+                            msg_info.append(f"{role}:str({len(content)})")
+                        else:
+                            msg_info.append(
+                                f"{role}:content={type(content).__name__}({repr(content)[:200]})"
+                                if content is not None
+                                else f"{role}:content=None"
+                            )
+                except Exception as dbg_e:
+                    msg_info.append(f"debug_err:{dbg_e}")
+                logger.warning(
+                    f"sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                    f"\n  traceback: {_tb.format_exc().splitlines()[-3:]}"
+                    f"\n  messages: {msg_info}"
+                )
                 if attempt >= max_retries - 1:
                     raise
-                print(
-                    f"WARNING: sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
-                )
                 continue
 
         if self.cache is not None:
@@ -320,6 +359,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             dataset=dataset,
             val_dataset=val_dataset,
         )
+
+        # Register the exit function to be called when the program exits
+        atexit.register(self.handle_shutdown)
 
     def setup(
         self,
@@ -1007,6 +1049,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 data_arrival_event = torch.cuda.Event(enable_timing=True)
                 data_arrival_event.record()
 
+                if self.signal_handler is not None and any(
+                    self.signal_handler.signals_received()
+                ):
+                    # If processes was killed by signal trapped, stop training and finish the main_loop.
+                    stop_training = True
+                    self.signal_handler.release()
+                    break
+
             if stop_training:
                 break
             cur_epoch += 1
@@ -1022,6 +1072,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_score=val_avg_loss,
         )
 
+    def handle_shutdown(self):
+        # handle the ckpt saving
+        logger.info("Handling shutdown...")
         if (
             hasattr(self.trainer, "upload_thread")
             and self.trainer.upload_thread is not None

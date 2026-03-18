@@ -2,32 +2,31 @@ redis = "12800"
 mode = "colocated"
 
 [policy]
-model_name_or_path = "stabilityai/stable-diffusion-3.5-medium"
+model_name_or_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
 is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.lora]
 lora_names = ["default", "old"]
-r = 32
-lora_alpha = 64
+r = 4
+lora_alpha = 4
 init_lora_weights = "gaussian"
 target_modules = [
-    "attn.add_k_proj",
-    "attn.add_q_proj",
-    "attn.add_v_proj",
-    "attn.to_add_out",
-    "attn.to_k",
-    "attn.to_out.0",
-    "attn.to_q",
-    "attn.to_v",
+    "attn1.to_q",
+    "attn1.to_k",
+    "attn1.to_v",
+    "attn1.to_out.0",
+    "attn2.to_q",
+    "attn2.to_k",
+    "attn2.to_v",
+    "attn2.to_out.0",
 ]
 
 [policy.diffusers]
-dtype = "float32"
 is_video = false
 offload = false
-max_prompt_length = 128
-inference_size = [512, 512]
+max_prompt_length = 300
+inference_size = [1024, 1024]
 timestep_fraction = 0.99
 nft_beta = 1.0
 weight_copy_decay_type = 1
@@ -36,8 +35,8 @@ weight_copy_decay_type = 1
 num_steps = 10
 eval_num_steps = 40
 guidance_scale = 1.0
-noise_level = 0.7
-solver = "dpm2"
+noise_level = 1
+solver = "euler"
 deterministic_sampling = true
 
 [rollout]
@@ -48,7 +47,7 @@ n_generation = 24
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
 experiment_name = "None"
-multi_modal_log_interval = 10
+multi_modal_log_interval = 1
 
 [train]
 non_text = true
@@ -56,7 +55,7 @@ resume = false
 epoch = 100000
 seed = 42
 train_batch_per_replica = 1152  # 6*24*8
-output_dir = "./outputs/stable-diffusion-3-5-medium_720_nft"
+output_dir = "./outputs/sana-image-nft"
 epsilon = 1e-8
 optm_name = "AdamW"
 optm_lr = 3e-4
@@ -70,6 +69,10 @@ ema_decay = 0.9
 ema_update_step_interval = 1
 async_tp_enabled = false
 compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
 
 [train.train_policy]
 type = "grpo"
@@ -84,11 +87,11 @@ advantage_high = 5.0
 advantage_low = -5.0
 
 [train.train_policy.remote_reward]
-score_key = "pickscore"
 scale = 1.0
 
-[train.train_policy.remote_reward.reward_fn]
-pickscore = 1.0
+[[train.train_policy.remote_reward.reward_fns]]
+name = "pickscore"
+weight = 1.0
 
 [train.ckpt]
 enable_checkpoint = true
@@ -104,12 +107,8 @@ dataset.split = "test"
 n_init_replicas = 1
 tp_size = 1
 dp_shard_size = 8
-pp_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
 dp_shard_size = 8
-pp_size = 1
-dp_replicate_size = 1
