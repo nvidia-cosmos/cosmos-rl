@@ -35,6 +35,7 @@ reward_service/Qwen2-VL-2B-Instruct
 *.pkl
 *.pt
 *.bin
+*.safetensors
 
 # Other uncheckable file types
 *.zip
