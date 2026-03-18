@@ -654,16 +654,19 @@ class NFTTrainer(DiffusersTrainer):
                             all_reduced = True
                             grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                             grad_norm_count += 1
-                            if self.config.train.ema_enable and self.ema is not None:
-                                self.ema.step(self.trainable_params, current_step)
+                            if (
+                                self.config.train.ema_enable
+                                and self.model.ema is not None
+                            ):
+                                self.model.ema.step(self.trainable_params, current_step)
                         else:
                             all_reduced = False
 
                     if not all_reduced:
                         grad_norm_sum += self.all_reduce_states(inter_policy_nccl)
                         grad_norm_count += 1
-                        if self.config.train.ema_enable and self.ema is not None:
-                            self.ema.step(self.trainable_params, current_step)
+                        if self.config.train.ema_enable and self.model.ema is not None:
+                            self.model.ema.step(self.trainable_params, current_step)
 
         with torch.no_grad():
             decay = get_weight_copy_decay(current_step, self.weight_copy_decay_type)
@@ -789,8 +792,8 @@ class NFTTrainer(DiffusersTrainer):
         if is_master_replica and (do_save_checkpoint):
             is_last_step = current_step == total_steps
             # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
-            if self.config.train.ema_enable and self.ema is not None:
-                self.ema.copy_ema_to(self.trainable_params, store_temp=True)
+            if self.config.train.ema_enable and self.model.ema is not None:
+                self.model.ema.copy_ema_to(self.trainable_params, store_temp=True)
 
             if is_last_step or self.config.train.ckpt.export_safetensors:
                 logger.info(
@@ -823,7 +826,7 @@ class NFTTrainer(DiffusersTrainer):
             self.ckpt_manager.save_check(step=current_step)
 
             # Restore current weights after saving ema weights to checkpoint
-            if self.config.train.ema_enable and self.ema is not None:
-                self.ema.copy_temp_to(self.trainable_params)
+            if self.config.train.ema_enable and self.model.ema is not None:
+                self.model.ema.copy_temp_to(self.trainable_params)
 
         return report_data

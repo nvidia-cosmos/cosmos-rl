@@ -104,16 +104,15 @@ class DiffusionNFTDataPacker(BaseDataPacker):
 
     def get_rollout_input(
         self,
-        completions: List[Any] = None,
-        completed_conversations: List[Any] = None,
-        logprobs: List[Any] = None,
-        token_ids: List[Any] = None,
-        payload: RLPayload = None,
+        payloads: List[RLPayload] = None,
         n_generation: int = 8,
     ):
-        assert payload is not None, "Payload cannot be None."
-        prompts = [payload.prompt["prompt"]] * n_generation
-        metadatas = [payload.prompt["metadata"]] * n_generation
+        assert payloads is not None, "Payloads cannot be None."
+        prompts = []
+        metadatas = []
+        for payload in payloads:
+            prompts.extend([payload.prompt["prompt"]] * n_generation)
+            metadatas.extend([payload.prompt["metadata"]] * n_generation)
         return prompts, metadatas
 
     def get_policy_input(

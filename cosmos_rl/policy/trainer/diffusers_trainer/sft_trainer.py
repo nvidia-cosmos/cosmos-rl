@@ -118,8 +118,8 @@ class SFTTrainer(DiffusersTrainer):
             and self.config.train.ckpt.enable_checkpoint
         ):
             # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
-            if self.config.train.ema_enable and self.ema is not None:
-                self.ema.copy_ema_to(self.model.trainable_params, store_temp=True)
+            if self.config.train.ema_enable and self.model.ema is not None:
+                self.model.ema.copy_ema_to(self.model.trainable_params, store_temp=True)
 
             if is_last_step or self.config.train.ckpt.export_safetensors:
                 logger.info(
@@ -149,8 +149,8 @@ class SFTTrainer(DiffusersTrainer):
             self.ckpt_manager.save_check(step=train_step)
 
             # Restore current weights after saving ema weights to checkpoint
-            if self.config.train.ema_enable and self.ema is not None:
-                self.ema.copy_temp_to(self.model.trainable_params)
+            if self.config.train.ema_enable and self.model.ema is not None:
+                self.model.ema.copy_temp_to(self.model.trainable_params)
 
     def step_training(
         self,
@@ -207,8 +207,8 @@ class SFTTrainer(DiffusersTrainer):
 
         self.optimizers.step()
         self.lr_schedulers.step()
-        if self.config.train.ema_enable and self.ema is not None:
-            self.ema.step(self.trainable_params, train_step)
+        if self.config.train.ema_enable and self.model.ema is not None:
+            self.model.ema.step(self.trainable_params, train_step)
 
         end_event.record()
 

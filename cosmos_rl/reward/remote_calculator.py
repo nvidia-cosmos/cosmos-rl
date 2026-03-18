@@ -70,7 +70,8 @@ class RemoteRewardCalculator:
                 "[RemoteRewardCalculator] RemoteRewardCalculator is already setup, returning directly."
             )
             return
-        self.config = config.train.train_policy.remote_reward
+        self.train_config = config.train.train_policy.remote_reward
+        self.val_config = config.validation.remote_reward
         # We use wan2pt1 VAE tokenizer to encode the images/videos into latents.
         try:
             self.tokenizer = Wan2pt1VAEInterface(
@@ -85,6 +86,8 @@ class RemoteRewardCalculator:
         self.token = os.environ.get("REMOTE_REWARD_TOKEN", "")
         self.uuid2payload = dict()
         self.uuid2replica = dict()
+        self.uuid2stage = dict()
+        self.uuid2step = dict()
 
     @classmethod
     def get_instance(cls) -> "RemoteRewardCalculator":
@@ -96,27 +99,6 @@ class RemoteRewardCalculator:
         if not hasattr(cls, "_instance"):
             cls._instance = cls()
         return cls._instance
-
-    def compute_validation_rewards(
-        self,
-        payloads: List[RLPayload],
-        step: int,
-    ) -> Tuple[List[RLPayload], bool, int]:
-        """
-        Compute rewards and advantages for the given payloads using validation reward function.
-        Args:
-            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
-            step (int): The weight step where the payloads are generated.
-        Returns:
-            Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
-                payloads: List of RLPayload with rewards and advantages
-                is_validation: whether the payloads are from validation set (always True)
-                step: the weight step where the payloads are generated
-        """
-        # TODO(dinghaoy): support remote validation reward computation
-        raise NotImplementedError(
-            "[RemoteRewardCalculator] Remote validation reward computation is not implemented yet."
-        )
 
     def enqueue_request(self, mm_tensor, data):
         """Enqueue the request and return UUID."""
@@ -212,16 +194,16 @@ class RemoteRewardCalculator:
             uuid (str): The UUID of the enqueued reward calculation request.
         """
 
-        if is_validation:
-            return self.compute_validation_rewards(payloads, step)
-
         # Only support batch-level image/video reward calculation for now.
         modality = payloads[0].extra_info.get("modality", "image")
 
         payload = payloads[0]
         mm_datas = payload.completions
         prompts = [payload.prompt["prompt"]] * len(mm_datas)
-        reward_fns = {fn.name: fn.weight for fn in self.config.reward_fns}
+        if is_validation:
+            reward_fns = {fn.name: fn.weight for fn in self.val_config.reward_fns}
+        else:
+            reward_fns = {fn.name: fn.weight for fn in self.train_config.reward_fns}
         data = {
             "prompts": prompts,
             "reward_fn": reward_fns,
@@ -268,14 +250,16 @@ class RemoteRewardCalculator:
         uuid, replica_id = self.enqueue_request(mm_tensor, data)
         self.uuid2payload[uuid] = payload
         self.uuid2replica[uuid] = replica_id
-
+        self.uuid2stage[uuid] = "validation" if is_validation else "training"
+        self.uuid2step[uuid] = step
         return uuid
 
-    def fetch_reward(self, uuid):
+    def fetch_reward(self, uuid, is_validation):
         """Poll for reward until ready."""
         logger.debug(
             f"[RemoteRewardCalculator] Trying to fetch reward for UUID {uuid}..."
         )
+        config = self.val_config if is_validation else self.train_config
         replica_id = self.uuid2replica.get(uuid, None)
         # Specify replica_id header if available for lepton endpoint
         headers = {
@@ -289,7 +273,7 @@ class RemoteRewardCalculator:
             headers["X-Lepton-Replica-Target"] = replica_id
 
         total_score = 0
-        for reward_fn in self.config.reward_fns:
+        for reward_fn in config.reward_fns:
             response = make_request_with_retry(
                 partial(
                     requests.post,
@@ -340,10 +324,10 @@ class RemoteRewardCalculator:
         return (
             torch.clamp(
                 total_score,
-                min=self.config.reward_clip_min,
-                max=self.config.reward_clip_max,
+                min=config.reward_clip_min,
+                max=config.reward_clip_max,
             )
-            * self.config.scale
+            * config.scale
         )
 
     def get_results(
@@ -363,17 +347,24 @@ class RemoteRewardCalculator:
         # Try to fetch results from the first uuid until failed.
         valid_results = []
         valid_payloads = []
+        valid_stages = []
+        valid_steps = []
         while not uuids.empty():
             uuid = uuids.queue[0]
             logger.debug(f"[RemoteRewardCalculator] Current queue: {list(uuids.queue)}")
             try:
-                rewards = self.fetch_reward(uuid)
+                is_validation = self.uuid2stage[uuid] == "validation"
+                rewards = self.fetch_reward(uuid, is_validation)
                 uuids.get()  # remove the uuid from the queue
                 valid_results.append(rewards)
                 valid_payloads.append(self.uuid2payload[uuid])
+                valid_stages.append(self.uuid2stage[uuid])
+                valid_steps.append(self.uuid2step[uuid])
                 # Remove the payload from the dict to save memory
                 del self.uuid2payload[uuid]
                 del self.uuid2replica[uuid]
+                del self.uuid2stage[uuid]
+                del self.uuid2step[uuid]
             except Exception as e:
                 logger.info(
                     f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
@@ -384,6 +375,17 @@ class RemoteRewardCalculator:
         assert all(payload.prompt_idx >= 0 for payload in valid_payloads), (
             "[Reward] All payloads should have a valid prompt index"
         )
+        # All the stages should be the same
+        assert all(stage == valid_stages[0] for stage in valid_stages), (
+            "[Reward] All stages should be the same"
+        )
+        # All the steps should be the same
+        assert all(step == valid_steps[0] for step in valid_steps), (
+            "[Reward] All steps should be the same"
+        )
+        is_validation = valid_stages[0] == "validation"
+        step = valid_steps[0]
+
         payload_list: List[RLPayload] = []
         for i, payload in enumerate(valid_payloads):
             rewards = valid_results[i]
@@ -403,4 +405,4 @@ class RemoteRewardCalculator:
             )
             payload_list.append(new_payload)
 
-        return payload_list, False, 0  # the step is not used for remote reward
+        return payload_list, is_validation, step

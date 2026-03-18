@@ -137,7 +137,7 @@ class DiffusersTrainer(Trainer):
                 logger.info(
                     f"Creating EMA for model with decay {self.config.train.ema_decay} and update step interval {self.config.train.ema_update_step_interval}"
                 )
-            self.ema = EMAModuleWrapper(
+            self.model.ema = EMAModuleWrapper(
                 parameters=self.model.trainable_params,
                 decay=self.config.train.ema_decay,
                 update_step_interval=self.config.train.ema_update_step_interval,
