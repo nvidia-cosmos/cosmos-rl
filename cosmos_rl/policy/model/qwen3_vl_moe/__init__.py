@@ -21,7 +21,6 @@ from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -60,7 +59,7 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoeVisionModel,
 )
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    compute_default_rope_parameters,
+    get_rope_init_fn,
     get_rope_theta,
 )
 
@@ -78,10 +77,7 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.max_seq_len_cached = config.max_seq_len
         self.original_max_seq_len = config.max_seq_len
         self.config = config
-        if config.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = compute_default_rope_parameters
-        else:
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        self.rope_init_fn = get_rope_init_fn(config.rope_type)
         self.mrope_section = config.hf_config.rope_scaling.get(
             "mrope_section", [24, 20, 20]
         )

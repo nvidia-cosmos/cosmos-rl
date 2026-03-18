@@ -19,7 +19,6 @@ from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     resolve_model_path,
@@ -53,7 +52,7 @@ from cosmos_rl.policy.model.vision_encoder.qwen2_5_vl import (
     rotate_half,
 )
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    compute_default_rope_parameters,
+    get_rope_init_fn,
     get_rope_theta,
 )
 
@@ -88,10 +87,7 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2_5_VL_LM_Args, device=None):
         super().__init__()
         self.config = config
-        if config.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = compute_default_rope_parameters
-        else:
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        self.rope_init_fn = get_rope_init_fn(config.rope_type)
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):

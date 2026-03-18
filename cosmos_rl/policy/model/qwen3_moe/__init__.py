@@ -39,14 +39,13 @@ from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    compute_default_rope_parameters,
+    get_rope_init_fn,
     get_rope_theta,
 )
 
@@ -85,10 +84,7 @@ class RotaryEmbedding(nn.Module):
     def __init__(self, args: Qwen3MoeArgs, device=None):
         super().__init__()
         self.args = args
-        if args.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = compute_default_rope_parameters
-        else:
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[args.rope_type]
+        self.rope_init_fn = get_rope_init_fn(args.rope_type)
         self.device = device
         self.config = args
         self.reset_inv_freq(device=device)

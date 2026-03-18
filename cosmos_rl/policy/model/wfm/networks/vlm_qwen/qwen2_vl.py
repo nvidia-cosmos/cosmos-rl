@@ -54,7 +54,6 @@ except ImportError:
     )
     is_flash_attn_available = False
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
@@ -85,7 +84,7 @@ except ImportError:
 from torch.distributed.device_mesh import DeviceMesh
 
 from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
-    compute_default_rope_parameters,
+    get_rope_init_fn,
 )
 
 logger = logging.get_logger(__name__)
@@ -146,10 +145,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        if self.rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
-            self.rope_init_fn = compute_default_rope_parameters
-        else:
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rope_init_fn = get_rope_init_fn(self.rope_type)
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)

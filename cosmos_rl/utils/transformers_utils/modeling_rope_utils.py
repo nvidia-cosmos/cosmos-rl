@@ -1,6 +1,7 @@
 import torch
-from typing import Optional
+from typing import Optional, Callable
 from transformers import AutoConfig
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 
 # For transformers v5.0.0 and higher, rope_theta is not in the config,
@@ -15,6 +16,13 @@ def get_rope_theta(hf_config: AutoConfig) -> float:
     if rope_theta is None:
         raise ValueError("rope_theta is not found in config={hf_config}")
     return rope_theta
+
+
+def get_rope_init_fn(rope_type: str) -> Callable:
+    if rope_type == "default" and "default" not in ROPE_INIT_FUNCTIONS:
+        return compute_default_rope_parameters
+    else:
+        return ROPE_INIT_FUNCTIONS[rope_type]
 
 
 # For transformers v5.0.0 and higher, "default" is excluded from dictionary ROPE_INIT_FUNCTIONS and harcoded individually for each model.
