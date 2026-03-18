@@ -259,5 +259,6 @@ nemotron_vl/*.sh
 nemotron_vl/*.txt
 nemotron_vl/*.png
 nemotron_vl/*.md
+nemotron_vl/dev_docs
 */nohup.out
 docs/plans

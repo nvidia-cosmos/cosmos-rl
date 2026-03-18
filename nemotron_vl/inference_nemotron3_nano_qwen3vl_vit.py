@@ -1,19 +1,17 @@
 import transformers
-from transformers import AutoTokenizer, AutoConfig, AutoProcessor,AutoModel, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoConfig, AutoProcessor, AutoModel, AutoModelForCausalLM
 import torch
 import json
-import importlib
+import os
 from safetensors import safe_open
 from safetensors.torch import save_file
 from collections import OrderedDict
-import json
-import os
-from safetensors.torch import save_file
 from accelerate import init_on_device
-import PIL
+from qwen_vl_utils import process_vision_info
 
-model_path = '/workspace/ruipul/cosmos-rl-private/nemotron_vl/nemotron_siglip2'
-safetensor_file = '/workspace/ruipul/cosmos-rl-private/nemotron_vl/outputs/siglip2_official_nemotron_vl_stage1_match_video_rerun/20260306143627/safetensors/step_12398'
+model_path = "./nemotron_vl_overwrite"
+original_path = "/workspace/nemotron-vlm/NVIDIA-Nemotron-3-Nano-VL-30B-A3B-BF16"
+safetensor_file = "/workspace/jiaxinc/jobs/fast_s2_qwen3vit-nemotron-moe/20260312154623/safetensors/step_13795"
 
 def set_model_with_weight(model, safetensor_dir):
     safetensors_files = sorted(
@@ -103,53 +101,94 @@ model._apply(
 )
 
 set_model_with_weight(model, safetensor_file)
+# compare_model_with_safetensor(model, original_path)
 
 processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 model.set_attn_implementation("flash_attention_2")
-messages = [
-[{
-    "role": "user",
-    "content": [
-        {"type": "video", "video": "/workspace/yangyangt/cosmos-rl-private/nemotron_vl/2dbb31d4-b92a-4399-a35d-ddbdba49072f_2761808000796.camera_front_wide_120fov.mp4"},
-        {"type": "text", "text": "describe the video in detail."}
-        ]
-    }
-]
-]
 
 processor.tokenizer.pad_token = tokenizer.eos_token
-processor.tokenizer.padding_side='left'
-processor.video_processor.size['longest_edge'] = 32 * 32 * 196 * 8
-processor.video_processor.fps = 2
-# 传预采样帧（PIL 列表）时：content 里的 "fps"/"num_frames" 不会被 apply_chat_template 读取。
-# 若不设 do_sample_frames=False，会按 fps 再采样；metadata.fps 为 None 会被当成 24，导致 8 帧被采成 4 帧。
-# 因此显式关闭帧采样，保留全部 8 帧；或改为传入 num_frames=8。
-result = processor.apply_chat_template(
-    messages,
-    tokenize=True,
-    return_dict=True,
-    return_tensors="pt",
-    add_generation_prompt=True,
-    enable_thinking=False,
-    padding=True,
-    max_num_patches=196
-)
-response = tokenizer.decode(result['input_ids'][0])
+processor.tokenizer.padding_side = 'left'
+# NOTE:since we use do_resize=False in processor, we don't need to set the size
+# processor.video_processor.size['longest_edge'] = 32 * 32 * 196 * 8
+
+video_messages = [
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "video",
+                "fps": 2,
+                "video": "/workspace/simonz/share/test_samples/night_driving.mp4"
+            },
+            {"type": "text", "text": "Describe this video in detail."},
+        ],
+    }
+]
+
+image_messages = [
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "image": "/workspace/simonz/share/test_samples/tennis_girl.png",
+            },
+            {"type": "text", "text": "Describe this image in detail."},
+        ],
+    }
+]
+
+messages_list = [video_messages, image_messages]
+
 model.to('cuda').to(torch.bfloat16)
 model.eval()
-result.to('cuda')
-with torch.no_grad():
-    output = model.generate(
-        **result,
-        max_new_tokens=512,
-        do_sample=False,
-        temperature=0.0,
-        top_p=0.95,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id
+
+for messages in messages_list:
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
 
-for i in range(1):
-    response = tokenizer.decode(output[i], skip_special_tokens=True)
+    image_inputs, video_inputs, video_kwargs = process_vision_info(
+        messages, image_patch_size=16, return_video_metadata=True, return_video_kwargs=True
+    )
+
+    video_metadatas = None
+    if video_inputs is not None:
+        video_inputs, video_metadatas = zip(*video_inputs)
+        video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
+        for i, v in enumerate(video_inputs):
+            print(f"[DEBUG] video[{i}] raw shape: {v.shape}  (frames, C, H, W)")
+
+    if image_inputs is not None:
+        for i, img in enumerate(image_inputs):
+            print(f"[DEBUG] image[{i}] raw size: {img.size}  (W, H)")
+
+    inputs = processor(
+        text=text,
+        images=image_inputs,
+        videos=video_inputs,
+        video_metadata=video_metadatas, 
+        return_tensors="pt", 
+        do_resize=False, 
+        **video_kwargs
+    )
+    inputs = {k: v.cuda() for k, v in inputs.items()}
+
+    if "video_grid_thw" in inputs:
+        for i, thw in enumerate(inputs["video_grid_thw"]):
+            print(f"[DEBUG] Video {i}: grid_thw={thw.tolist()} (t={thw[0].item()} frames)")
+    if "image_grid_thw" in inputs:
+        for i, thw in enumerate(inputs["image_grid_thw"]):
+            print(f"[DEBUG] Image {i}: grid_thw={thw.tolist()} (h={thw[1].item()}, w={thw[2].item()})")
+
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+    response = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
     print(response)
