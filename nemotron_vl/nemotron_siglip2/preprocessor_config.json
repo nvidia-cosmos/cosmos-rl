@@ -4,6 +4,7 @@
         "shortest_edge": 65536
     },
     "patch_size": 16,
+    "do_resize": false,
     "merge_size": 2,
     "image_mean": [
         0.5,

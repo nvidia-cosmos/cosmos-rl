@@ -269,15 +269,10 @@ class HFVLMDataPacker(DataPacker):
             "qwen3_5",
             "qwen3_5_moe",
         ] or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
-        self.use_siglip2_process = os.environ.get("USE_SIGLIP2_PROCESS", "0") in [
-            "1",
-            "true",
-            "True",
-        ]
         logger.info(
             f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "
             f"and video_token_id={self.video_token_id}, model_type={self.model_type}, "
-            f"use_qwen_vl_process={self.use_qwen_vl_process}, use_siglip2_process={self.use_siglip2_process}"
+            f"use_qwen_vl_process={self.use_qwen_vl_process}"
         )
 
     def get_rollout_input(self, sample: Payload) -> Any:
@@ -333,7 +328,7 @@ class HFVLMDataPacker(DataPacker):
         video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
         if (
-            (self.use_qwen_vl_process or self.use_siglip2_process)
+            self.use_qwen_vl_process
             and len(image_inputs) == 0
             and len(video_inputs) == 0
         ):
@@ -502,9 +497,7 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            if (self.use_qwen_vl_process or self.use_siglip2_process) and isinstance(
-                messages, list
-            ):
+            if self.use_qwen_vl_process and isinstance(messages, list):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     messages,
                     image_patch_size=16,  # TODO: hardcode

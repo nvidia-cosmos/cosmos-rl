@@ -23,8 +23,7 @@ from transformers.video_utils import VideoInput, group_videos_by_shape, reorder_
 from transformers.utils import logging
 from transformers.video_utils import VideoInput
 from transformers.models.siglip2.image_processing_siglip2_fast import Siglip2ImageProcessorFast,convert_image_to_patches, pad_along_first_dim, Siglip2FastImageProcessorKwargs
-from transformers.models.siglip2.image_processing_siglip2 import get_image_size_for_max_num_patches
-from transformers.utils import auto_docstring, TensorType
+from transformers.utils import TensorType
 from transformers.image_processing_utils_fast import SizeDict
 from torchvision.transforms.v2 import functional as F
 from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor, Qwen3VLVideoProcessorInitKwargs, smart_resize, get_image_size
@@ -52,24 +51,7 @@ class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
 class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
     def __init__(self, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]):
         super().__init__(**kwargs)
-
-    @auto_docstring
-    def preprocess(self, images: ImageInput, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]) -> BatchFeature:
-        # Extract max_pixels before the base class validates kwargs (it only
-        # knows about max_num_patches).  Convert to max_num_patches so the
-        # rest of the pipeline uses a single unified parameter.
-        max_pixels = kwargs.pop("max_pixels", None)
-        if max_pixels is not None:
-            scale_factor = (self.patch_size * self.merge_size) ** 2
-            kwargs["max_num_patches"] = int(max_pixels) // scale_factor
-        else:
-            logger.warning(
-                "max_pixels was not provided to Siglip2ImageProcessorCustom; "
-                f"falling back to default max_num_patches={self.max_num_patches}. "
-                "This may cause shape mismatches for large images with do_resize=False."
-            )
-        return super().preprocess(images, **kwargs)
-
+    
     def _preprocess(
         self,
         images: list["torch.Tensor"],
@@ -85,43 +67,28 @@ class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
         return_tensors: Optional[Union[str, TensorType]],
         **kwargs,
     ) -> BatchFeature:
-
-        pixel_masks = []
         pixel_values = []
         spatial_shapes = []
-        merge_size = self.merge_size
         for image in images:
             if do_resize:
-                height, width = get_image_size_for_max_num_patches(
-                    image_height=image.shape[1],
-                    image_width=image.shape[2],
-                    patch_size=patch_size * merge_size,
-                    max_num_patches=max_num_patches,
-                )
-                side_dict = SizeDict(height=height, width=width)
-                image = self.resize(image=image, size=side_dict, interpolation=interpolation)
-
+                raise RuntimeError("do_resize=True is not supported in Siglip2ImageProcessorCustom. Please resize outside of this processor.")
             image = self.rescale_and_normalize(image, do_rescale, rescale_factor, do_normalize, image_mean, image_std)
 
             # (num_channels, height, width) -> (num_patches, patch_size * patch_size * num_channels)
             patches = convert_image_to_patches(image, patch_size)
-            patches, mask = pad_along_first_dim(patches, max_num_patches * (merge_size**2))
 
             num_patches_height = image.shape[1] // patch_size
             num_patches_width = image.shape[2] // patch_size
 
             spatial_shapes.append((num_patches_height, num_patches_width))
             pixel_values.append(patches)
-            pixel_masks.append(mask)
 
-        pixel_values = torch.stack(pixel_values)
-        pixel_masks = torch.stack(pixel_masks)
+        # pixel_values = torch.stack(pixel_values)
         spatial_shapes = torch.tensor(spatial_shapes)
 
         batch_feature = BatchFeature(
             data={
-                "pixel_values": pixel_values,
-                "pixel_attention_mask": pixel_masks,
+                "pixel_values": torch.cat(pixel_values, dim=0),
                 "spatial_shapes": spatial_shapes,
             },
             tensor_type=return_tensors,
@@ -148,7 +115,7 @@ class Qwen3VLVideoProcessorCustom(Qwen3VLVideoProcessor):
         patch_size: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
-    ):  
+    ):
         merge_size = self.merge_size
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
@@ -343,27 +310,20 @@ class NemotronNanoV3BridgeProcessor(ProcessorMixin):
         )
         if images is not None:
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
-            pixel_attention_mask = image_inputs.pop("pixel_attention_mask")
             pixel_values = image_inputs.pop("pixel_values")
-            mask = pixel_attention_mask.bool().view(-1)
             spatial_shapes = image_inputs.pop("spatial_shapes")
             final_pixel_value = pixel_values.view(-1, pixel_values.shape[-1])
-            final_pixel_value = final_pixel_value[mask]
             t_dim = torch.ones((spatial_shapes.shape[0], 1), 
                    dtype=spatial_shapes.dtype, 
                    device=spatial_shapes.device)
             image_grid_thw = torch.cat([t_dim, spatial_shapes], dim=1)
             image_inputs = {
-                # "pixel_values_origin": pixel_values,
                 "pixel_values": final_pixel_value,
                 "image_grid_thw": image_grid_thw,
-                # "pixel_attention_mask": pixel_attention_mask,
-                # "spatial_shapes": spatial_shapes
             }
         else:
             image_inputs = {}
             image_grid_thw = None
-
 
         if videos is not None:
             videos_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
