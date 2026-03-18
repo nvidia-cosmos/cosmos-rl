@@ -33,6 +33,10 @@ _EXPECTED_TRANSFORMERS_VERSION = "4.57.6"
 
 
 def pre_hf_models_patch(hf_config: AutoConfig):
+    # Set attention implementation to flash_attention_2 by default
+    if hasattr(hf_config, "_attn_implementation"):
+        hf_config._attn_implementation = "flash_attention_2"
+
     if (
         hf_config.model_type == "internvl_chat"
         and hasattr(hf_config, "llm_config")
