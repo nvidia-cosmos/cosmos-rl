@@ -805,7 +805,6 @@ class GPT(BaseModel):
                 hf_config=hf_config,
             )
         )
-        print("model loaded")
         return model
 
     @classmethod
