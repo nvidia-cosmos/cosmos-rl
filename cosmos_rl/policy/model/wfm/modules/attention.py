@@ -25,7 +25,12 @@ try:
 
     FLASH_ATTN_3_AVAILABLE = True
 except ModuleNotFoundError:
-    FLASH_ATTN_3_AVAILABLE = False
+    try:
+        from flash_attn_3_nv.flash_attn_interface import flash_attn_varlen_func
+
+        FLASH_ATTN_3_AVAILABLE = True
+    except ModuleNotFoundError:
+        FLASH_ATTN_3_AVAILABLE = False
 
 import warnings
 
@@ -104,7 +109,7 @@ def flash_attention(
     assert FLASH_ATTN_3_AVAILABLE and compute_cap == 90
 
     # Note: dropout_p, window_size are not supported in FA3 now.
-    x = flash_attn_varlen_func(
+    result = flash_attn_varlen_func(
         q=q,
         k=k,
         v=v,
@@ -121,7 +126,8 @@ def flash_attention(
         softmax_scale=softmax_scale,
         causal=causal,
         deterministic=deterministic,
-    )[0].unflatten(0, (b, lq))
+    )
+    x = (result[0] if isinstance(result, tuple) else result).unflatten(0, (b, lq))
 
     # output
     return x.type(out_dtype)
