@@ -5238,7 +5238,7 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="57"><ul class="simple">
+<tr class="row-odd"><td rowspan="66"><ul class="simple">
 <li><p>ValidationConfig</p></li>
 </ul>
 </td>
@@ -5297,7 +5297,7 @@
 </td>
 <td colspan="5"><p><em>Batch Size</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Batch size for validation, will use the same batch size as training if not set.</p></td>
+<tr class="row-odd"><td colspan="5"><p>Batch size for validation, will use the same rollout batch size as training if not set.</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>None</p></td>
@@ -5441,6 +5441,39 @@
 <tr class="row-odd"><td><p>additionalProperties</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>use_remote_reward</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Use Remote Reward</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use remote reward calculation. If None, will use the same as training policy. If set to True, the reward calculation will be done in a remote worker. If False, the reward calculation will be done in the local process.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>remote_reward</p></li>
+</ul>
+</td>
+<td colspan="5"><p>Configuration for remote reward calculation. If None, will use the same as training policy.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/RemoteRewardConfig</span></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
 </tbody>
 </table>
