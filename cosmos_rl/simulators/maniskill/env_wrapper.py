@@ -255,9 +255,7 @@ class ManiSkillEnvWrapper(gym.Env):
         episode_ids = torch.tensor(
             [self.seed + tid for tid in trial_ids], dtype=torch.int64
         )
-        obs, _ = self.env.reset(
-            seed=seed, options={"episode_id": episode_ids}
-        )
+        obs, _ = self.env.reset(seed=seed, options={"episode_id": episode_ids})
 
         instructions = self._get_language_instructions()
         images_and_states = self._extract_image_and_state(obs)
@@ -277,8 +275,7 @@ class ManiSkillEnvWrapper(gym.Env):
             )
 
             self.env_states[eid].current_obs = {
-                k: v[i] if v is not None else None
-                for k, v in images_and_states.items()
+                k: v[i] if v is not None else None for k, v in images_and_states.items()
             }
 
             if do_validation[i]:
@@ -346,8 +343,7 @@ class ManiSkillEnvWrapper(gym.Env):
                 self.env_states[eid].active = False
 
             self.env_states[eid].current_obs = {
-                k: v[i] if v is not None else None
-                for k, v in images_and_states.items()
+                k: v[i] if v is not None else None for k, v in images_and_states.items()
             }
 
             if self.env_states[eid].do_validation:

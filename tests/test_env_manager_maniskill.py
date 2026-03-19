@@ -42,7 +42,6 @@ Tests:
 """
 
 import os
-import sys
 import tempfile
 import unittest
 import warnings
@@ -311,7 +310,9 @@ class TestManiSkillEnvWrapper(unittest.TestCase):
         do_validation = [True if i == 0 else False for i in range(self.config.num_envs)]
 
         self.env.reset(env_ids, task_ids, trial_ids, do_validation)
-        print(f"Validation enabled for env 0, disabled for envs 1..{self.config.num_envs - 1}")
+        print(
+            f"Validation enabled for env 0, disabled for envs 1..{self.config.num_envs - 1}"
+        )
 
         # Verify flags
         env_states = self.env.get_env_states(env_ids)
@@ -408,19 +409,25 @@ class TestManiSkillEnvWrapper(unittest.TestCase):
             trial_ids = [0] * multi_cfg.num_envs
 
             # Task 0: PickCube-v1
-            imgs0, descs0 = multi_env.reset(env_ids, [0] * multi_cfg.num_envs, trial_ids, False)
+            imgs0, descs0 = multi_env.reset(
+                env_ids, [0] * multi_cfg.num_envs, trial_ids, False
+            )
             self.assertEqual(multi_env._current_task_env_id, "PickCube-v1")
             print(f"Task 0: {multi_env._current_task_env_id}")
             print(f"  full_images shape: {imgs0['full_images'].shape}")
 
             # Task 1: StackCube-v1
-            imgs1, descs1 = multi_env.reset(env_ids, [1] * multi_cfg.num_envs, trial_ids, False)
+            imgs1, descs1 = multi_env.reset(
+                env_ids, [1] * multi_cfg.num_envs, trial_ids, False
+            )
             self.assertEqual(multi_env._current_task_env_id, "StackCube-v1")
             print(f"Task 1: {multi_env._current_task_env_id}")
             print(f"  full_images shape: {imgs1['full_images'].shape}")
 
             # Switch back to 0 — env should be recreated
-            imgs0b, _ = multi_env.reset(env_ids, [0] * multi_cfg.num_envs, trial_ids, False)
+            imgs0b, _ = multi_env.reset(
+                env_ids, [0] * multi_cfg.num_envs, trial_ids, False
+            )
             self.assertEqual(multi_env._current_task_env_id, "PickCube-v1")
             print("Switched back to PickCube-v1 successfully")
         finally:
@@ -446,7 +453,11 @@ class TestManiSkillEnvWrapper(unittest.TestCase):
 
             for step_num in range(short_cfg.max_steps + 5):
                 sample = short_env.env.action_space.sample()
-                actions = torch.from_numpy(sample).float() if isinstance(sample, np.ndarray) else sample
+                actions = (
+                    torch.from_numpy(sample).float()
+                    if isinstance(sample, np.ndarray)
+                    else sample
+                )
                 result = short_env.step(env_ids, actions)
 
                 n_active = int(result["active"].sum())
