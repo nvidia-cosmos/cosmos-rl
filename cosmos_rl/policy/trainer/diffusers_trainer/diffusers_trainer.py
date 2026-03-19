@@ -145,7 +145,10 @@ class DiffusersTrainer(Trainer):
             )
 
         self.ckpt_manager = CheckpointMananger(
-            self.config, self.parallel_dims, self.global_rank
+            self.config,
+            self.parallel_dims,
+            self.global_rank,
+            hook_fns=kwargs.get("hook_fns", {}),
         )
 
         self.build_optimizers()

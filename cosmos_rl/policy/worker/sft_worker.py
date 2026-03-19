@@ -424,6 +424,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             train_stream=self.train_stream,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
+            hook_fns=self.hook_fns,
         )
         self.ckpt_total_steps, self.train_step, _ = self.trainer.load_model()
         if isinstance(dataset, Callable):
