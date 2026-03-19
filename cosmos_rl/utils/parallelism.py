@@ -27,11 +27,15 @@ from typing import Generator, Optional, List
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import ParallelismConfig
+from functools import lru_cache
 
 
-TP_EP_INTERCHANGABLE_WITH_DP_FUSED = os.environ.get(
-    "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
-).lower() in ["1", "true"]
+@lru_cache(maxsize=1)
+def is_tp_ep_interchangeable_with_dp_fused():
+    TP_EP_INTERCHANGABLE_WITH_DP_FUSED = os.environ.get(
+        "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
+    ).lower() in ["1", "true"]
+    return TP_EP_INTERCHANGABLE_WITH_DP_FUSED
 
 
 def train_context(enable_compiled_autograd: bool):
@@ -146,9 +150,9 @@ class ParallelDims:
             )
 
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
-        assert (
-            dp_shard >= 1
-        ), f"dp_shard of size {dp_shard} is not valid, should be equal or greater than 1"
+        assert dp_shard >= 1, (
+            f"dp_shard of size {dp_shard} is not valid, should be equal or greater than 1"
+        )
 
         assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
@@ -162,9 +166,9 @@ class ParallelDims:
 
         # Checks for MoE weights. Note that dp_shard is only used for the non-MoE weights.
         if ep > 1:
-            assert (
-                dp_shard_with_ep == -1 or dp_shard_with_ep >= 1
-            ), " dp_shard_with_ep must -1 or >=1."
+            assert dp_shard_with_ep == -1 or dp_shard_with_ep >= 1, (
+                " dp_shard_with_ep must -1 or >=1."
+            )
             if dp_shard_with_ep < 0:
                 logger.info(
                     "dp_shard_with_ep is set to -1, will be automatically determined based "
@@ -174,9 +178,9 @@ class ParallelDims:
                     pp * ep * tp
                 )
                 logger.info(f"dp_shard_with_ep is set to {dp_shard_with_ep}.")
-            assert (
-                dp_shard_with_ep >= 1
-            ), f"WORLD_SIZE({self.world_size}) is not a multiple of pp({pp}) * ep({ep}) * tp({tp})"
+            assert dp_shard_with_ep >= 1, (
+                f"WORLD_SIZE({self.world_size}) is not a multiple of pp({pp}) * ep({ep}) * tp({tp})"
+            )
 
             if tp > 1:
                 raise ValueError(
@@ -205,9 +209,9 @@ class ParallelDims:
                 valid_dims.append(dim)
                 valid_names.append(name)
 
-        assert (
-            math.prod(valid_dims) == self.world_size
-        ), f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+        assert math.prod(valid_dims) == self.world_size, (
+            f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+        )
 
         logger.info(
             f"Building {len(valid_dims)}-D device mesh with {valid_names}, {valid_dims}"
@@ -235,6 +239,10 @@ class ParallelDims:
         dp_shard_cp_mesh_dim_names = []
         # Mesh useful for TP-merged FSDP
         dp_cp_tp_mesh_dim_names = []
+        # weight loading mesh, which is used for loading weights in single replica
+        weight_loading_mesh_dim_names = []
+        # Mesh for loss reduce in single replica
+        loss_parallel_mesh_dim_names = []
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
         # Mesh for model parallel
@@ -245,27 +253,32 @@ class ParallelDims:
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
-            # Do not add dp_replicate to dp_cp_tp_mesh_dim_names,
-            # since each replica is independent of each other
-            # dp_cp_tp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
             dp_shard_cp_mesh_dim_names.append("dp_shard")
             dp_cp_tp_mesh_dim_names.append("dp_shard")
             dp_cp_mesh_dim_names.append("dp_shard")
+            weight_loading_mesh_dim_names.append("dp_shard")
+            loss_parallel_mesh_dim_names.append("dp_shard")
         if self.cp_enabled:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_tp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
             pp_cp_tp_mesh_dim_names.append("cp")
+            weight_loading_mesh_dim_names.append("cp")
+            loss_parallel_mesh_dim_names.append("cp")
         if self.tp_enabled:
             dp_cp_tp_mesh_dim_names.append("tp")
             mp_mesh_dim_names.append("tp")
             pp_cp_tp_mesh_dim_names.append("tp")
-            if TP_EP_INTERCHANGABLE_WITH_DP_FUSED:
+            weight_loading_mesh_dim_names.append("tp")
+            if is_tp_ep_interchangeable_with_dp_fused():
+                print(
+                    "TP_EP_INTERCHANGABLE_WITH_DP_FUSED is enabled, adding tp to dp mesh and dp_cp_mesh."
+                )
                 dp_mesh_dim_names.append("tp")
                 dp_cp_mesh_dim_names.append("tp")
-                dp_shard_cp_mesh_dim_names.append("tp")
+                loss_parallel_mesh_dim_names.append("tp")
 
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
@@ -277,10 +290,19 @@ class ParallelDims:
             mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
                 mesh_dim_name="dp_shard_cp"
             )
+        if loss_parallel_mesh_dim_names != []:
+            mesh[tuple(loss_parallel_mesh_dim_names)]._flatten(
+                mesh_dim_name="loss_parallel"
+            )
         if dp_cp_tp_mesh_dim_names != []:
             mesh[tuple(dp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp")
         if dp_cp_mesh_dim_names != []:
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+
+        if weight_loading_mesh_dim_names != []:
+            mesh[tuple(weight_loading_mesh_dim_names)]._flatten(
+                mesh_dim_name="weight_loading"
+            )
 
         if mp_mesh_dim_names != []:
             mesh[tuple(mp_mesh_dim_names)]._flatten(mesh_dim_name="mp")
@@ -335,7 +357,7 @@ class ParallelDims:
         return (
             self.dp_replicate > 1
             or self.dp_shard > 1
-            or (TP_EP_INTERCHANGABLE_WITH_DP_FUSED and self.tp > 1)
+            or (is_tp_ep_interchangeable_with_dp_fused() and self.tp > 1)
         )
 
     @property

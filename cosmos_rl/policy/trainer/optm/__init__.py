@@ -43,6 +43,28 @@ except ImportError:
 T = TypeVar("T", bound=Optimizer)
 
 
+class OptimizerDesc:
+    num_parameters: int
+    num_trainable_parameters: int
+    lr: float
+    optimizer_cls: str
+    model_part: str = ""
+
+    def __init__(
+        self,
+        num_parameters: int,
+        num_trainable_parameters: int,
+        lr: float,
+        optimizer_cls: str,
+        model_part: str = "",
+    ) -> None:
+        self.num_parameters = num_parameters
+        self.num_trainable_parameters = num_trainable_parameters
+        self.lr = lr
+        self.optimizer_cls = optimizer_cls
+        self.model_part = model_part
+
+
 class OptimizersContainer(Optimizer, Generic[T]):
     """A container for multiple optimizers.
 
@@ -77,16 +99,35 @@ class OptimizersContainer(Optimizer, Generic[T]):
         optimizer_cls: type[T],
         model_parts: List[nn.Module],
         optimizer_kwargs: List[Dict[str, Any]],
+        model_modpath: List[str] = None,
     ) -> None:
         all_params = []
         self.model_parts = model_parts
+        self.model_modpath = model_modpath
         self.optimizers = [[] for _ in self.model_parts]
         # Compute total number of parameters
         total_trainable_params = 0
         all_trainable_params = []
+        param_set = set()
+
+        optimizer_desc_by_model_part = {}
         for model_id, (model, optimizer_kwargs_i) in enumerate(
             zip(self.model_parts, optimizer_kwargs)
         ):
+            model_part_name = (
+                self.model_modpath[model_id]
+                if self.model_modpath and model_id < len(self.model_modpath)
+                else f"part_{model_id}"
+            )
+
+            optimizer_desc_by_model_part[model_id] = OptimizerDesc(
+                num_parameters=0,
+                num_trainable_parameters=0,
+                lr=optimizer_kwargs_i.get("lr", None),
+                optimizer_cls=optimizer_cls.__name__,
+                model_part=model_part_name,
+            )
+
             if model is None:
                 continue
             optimizer_kwargs_copy = deepcopy(optimizer_kwargs_i)
@@ -95,27 +136,58 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 # Group the parameters by device mesh to do optimizer fusion.
                 parameters_by_mesh = collections.defaultdict(list)
                 for name, p in model.named_parameters():
-                    if p.requires_grad:
-                        all_trainable_params.append(name)
-                        device_mesh = (
-                            p.device_mesh if hasattr(p, "device_mesh") else "default"
+                    if p not in param_set:
+                        param_set.add(p)
+                        optimizer_desc_by_model_part[
+                            model_id
+                        ].num_parameters += p.numel()
+
+                        if p.requires_grad:
+                            param_set.add(p)
+                            all_trainable_params.append(name)
+                            device_mesh = (
+                                p.device_mesh
+                                if hasattr(p, "device_mesh")
+                                else "default"
+                            )
+                            parameters_by_mesh[device_mesh].append(p)
+                            all_params.append(p)
+                            total_trainable_params += p.numel()
+                            optimizer_desc_by_model_part[
+                                model_id
+                            ].num_trainable_parameters += p.numel()
+                    elif p.requires_grad:
+                        logger.warning(
+                            f"Parameter {name} in model part {model_part_name} is duplicated but requires grad. "
+                            f"Only the first occurrence will be optimized."
                         )
-                        parameters_by_mesh[device_mesh].append(p)
-                        all_params.append(p)
-                        total_trainable_params += p.numel()
                 for params in parameters_by_mesh.values():
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
             else:
                 for name, p in model.named_parameters():
-                    if p.requires_grad:
-                        optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
-                        self.optimizers[model_id].append(optimizer)
-                        all_params.append(p)
-                        total_trainable_params += p.numel()
-                        all_trainable_params.append(name)
+                    if p not in param_set:
+                        param_set.add(p)
+                        optimizer_desc_by_model_part[
+                            model_id
+                        ].num_parameters += p.numel()
+
+                        if p.requires_grad:
+                            optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
+                            self.optimizers[model_id].append(optimizer)
+                            all_params.append(p)
+                            total_trainable_params += p.numel()
+                            optimizer_desc_by_model_part[
+                                model_id
+                            ].num_trainable_parameters += p.numel()
+                            all_trainable_params.append(name)
         logger.info(f"Total number of trainable parameters: {total_trainable_params}")
         logger.debug(f"Trainable parameters: {all_trainable_params}")
+        descs = [
+            optimizer_desc_by_model_part[i]
+            for i in sorted(optimizer_desc_by_model_part)
+        ]
+        _print_optimizer_desc_table(descs)
 
         self._post_init(all_params, optimizer_kwargs)
 
@@ -179,9 +251,56 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
+def _print_optimizer_desc_table(descs: list["OptimizerDesc"]) -> None:
+    if not descs:
+        logger.info("No optimizer descs to display.")
+        return
+
+    columns = [
+        "model_part",
+        "optimizer_cls",
+        "lr",
+        "num_parameters",
+        "num_trainable_parameters",
+        "status",
+    ]
+
+    rows = []
+    for d in descs:
+        status = "FROZEN" if d.num_trainable_parameters == 0 else "TRAINABLE"
+        rows.append(
+            [
+                str(d.model_part),
+                str(d.optimizer_cls),
+                str(d.lr),
+                str(d.num_parameters),
+                str(d.num_trainable_parameters),
+                status,
+            ]
+        )
+
+    # column widths
+    widths = [len(c) for c in columns]
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt(r):
+        return " | ".join(r[i].ljust(widths[i]) for i in range(len(r)))
+
+    header = fmt(columns)
+    sep = "-+-".join("-" * w for w in widths)
+
+    logger.info(header)
+    logger.info(sep)
+    for r in rows:
+        logger.info(fmt(r))
+
+
 def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
+    model_modpath: List[str] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -198,14 +317,34 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        model_modpath (List[str], optional): List of model part paths. Defaults to None.
     """
     lr = config.train.optm_lr
     if isinstance(lr, float):
         lr = [lr] * len(model_parts)
     elif isinstance(lr, list):
-        assert len(lr) == len(
-            model_parts
-        ), "The length of lr and model_parts must be the same"
+        if len(lr) != len(model_parts):
+            if len(lr) > len(model_parts):
+                logger.warning(
+                    f"Length of lr ({len(lr)}) is greater than length of model_parts ({len(model_parts)}). "
+                    f"Only the first {len(model_parts)} lrs will be used."
+                )
+                lr = lr[: len(model_parts)]
+            else:
+                # List the model part names for better debugging
+                if model_modpath is not None:
+                    model_part_names = model_modpath
+                else:
+                    model_part_names = []
+                    for model_part in model_parts:
+                        if model_part is None:
+                            model_part_names.append("None")
+                        else:
+                            model_part_names.append(type(model_part).__name__)
+                raise ValueError(
+                    f"The length of lr ({len(lr)}) and model_parts ({len(model_parts)}) must be the same. "
+                    f"Model parts: {model_part_names}"
+                )
     else:
         raise ValueError(f"Invalid lr: {lr}")
 
@@ -214,9 +353,9 @@ def build_optimizers(
         assert optm_impl in ["fused", "foreach", "for-loop"], "Invalid optm_impl"
         optm_impl = [optm_impl] * len(model_parts)
     elif isinstance(optm_impl, list):
-        assert len(optm_impl) == len(
-            model_parts
-        ), "The length of optm_impl and model_parts must be the same"
+        assert len(optm_impl) == len(model_parts), (
+            "The length of optm_impl and model_parts must be the same"
+        )
         assert all(
             optm_impl_i in ["fused", "foreach", "for-loop"] for optm_impl_i in optm_impl
         ), "Invalid optm_impl"
@@ -271,7 +410,13 @@ def build_optimizers(
         if unused_kwargs:
             logger.warning(f"Unused kwargs in optimizer-{name}: {unused_kwargs}")
         filtered_optimizer_kwargs.append(optimizer_kwargs_i)
-    return OptimizersContainer(optimizer_cls, model_parts, filtered_optimizer_kwargs)
+
+    return OptimizersContainer(
+        optimizer_cls,
+        model_parts,
+        filtered_optimizer_kwargs,
+        model_modpath=model_modpath,
+    )
 
 
 class LRSchedulersContainer(Stateful):
@@ -301,39 +446,55 @@ class LRSchedulersContainer(Stateful):
     schedulers: List[LRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
+        assert len(optimizers) > 0, (
+            "Must have at least one optimizer to create LRScheduler"
+        )
 
-        self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
+        # [[scheduler1_for_optm1, scheduler2_for_optm1], [scheduler1_for_optm2, scheduler2_for_optm2], ...]
+        self.schedulers = [[] for _ in optimizers.model_parts]
+        for model_id, optm_list in enumerate(optimizers.optimizers):
+            for optm in optm_list:
+                scheduler = LambdaLR(optm, lr_lambda=lr_lambda)
+                self.schedulers[model_id].append(scheduler)
 
     def __iter__(self) -> LRScheduler:
-        return iter(self.schedulers)
+        return iter(itertools.chain(*self.schedulers))
 
     def __len__(self) -> int:
         return len(self.schedulers)
 
     def step(self) -> None:
-        for scheduler in self.schedulers:
+        for scheduler in itertools.chain(*self.schedulers):
             scheduler.step()
 
-    def get_last_lr(self) -> float:
-        return self.schedulers[0].get_last_lr()
+    def get_last_lr(self, model_part_idx: int = 0) -> float:
+        return self.schedulers[model_part_idx][0].get_last_lr()
 
     def state_dict(self) -> Dict[str, Any]:
-        # While there may be multiple schedulers, we only save the first one because
-        # the state_dict is the same for all. See the limitations section in the
-        # docstring.
-        return self.schedulers[0].state_dict()
+        state_dict = {}
+        for idx, scheduler_list in enumerate(self.schedulers):
+            # each schduler state is same inside the same model part, so we just save the first one to avoid redundancy
+            if len(scheduler_list) == 0:
+                continue
+            scheduler = scheduler_list[0]
+            sd = scheduler.state_dict()
+            for k, v in sd.items():
+                if f"idx-{idx}-{k}" in state_dict:
+                    raise ValueError(f"Duplicated scheduler key is deteced! Key = {k}")
+                state_dict[f"idx-{idx}-{k}"] = v
+        return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # Load the same state_dict for all schedulers. The key value we're concerned
-        # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
-        # in ``job_config`` remain unchanged when resuming from a checkpoint, this
-        # approach is safe. We call ``copy()`` here to ensure extra safety.
-        for scheduler in self.schedulers:
-            scheduler.load_state_dict(copy.deepcopy(state_dict))
+        for idx, scheduler_list in enumerate(self.schedulers):
+            if len(scheduler_list) == 0:
+                continue
+            current_state_dict = {
+                k.replace(f"idx-{idx}-", ""): v
+                for k, v in state_dict.items()
+                if k.startswith(f"idx-{idx}-")
+            }
+            for scheduler in scheduler_list:
+                scheduler.load_state_dict(copy.deepcopy(current_state_dict))
 
 
 def build_lr_schedulers(
@@ -445,9 +606,9 @@ def build_lr_schedulers(
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            assert (
-                warmup_steps != 0
-            ), "warmup_steps must not be zero to reach this branch"
+            assert warmup_steps != 0, (
+                "warmup_steps must not be zero to reach this branch"
+            )
             curr_adjustment = float(current_step / warmup_steps)
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0

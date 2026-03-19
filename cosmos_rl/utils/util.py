@@ -197,7 +197,7 @@ def extract_fields(dc_instance):
                     "value": value,
                     "metadata": f.metadata,
                     "type": f.type,
-                    "input_type": "checkbox" if f.type == bool else "text",
+                    "input_type": "checkbox" if f.type == bool else "text",  # noqa: E721
                 }
                 fields[f.name] = field_data
         return fields
@@ -460,9 +460,9 @@ def prepare_cosmos_data(dataset, *args, **kwargs):
                         snapshot_dir, dataset.subset, "clips"
                     )
 
-                assert os.path.exists(
-                    downloaded_clips_dir
-                ), f"Cannot find clips at {downloaded_clips_dir}"
+                assert os.path.exists(downloaded_clips_dir), (
+                    f"Cannot find clips at {downloaded_clips_dir}"
+                )
 
                 # parallel extract
                 results = {}
@@ -610,6 +610,8 @@ def fix_data_type_size(obj):
         return [fix_data_type_size(x) for x in obj]
     elif isinstance(obj, dict):
         return {fix_data_type_size(k): fix_data_type_size(v) for k, v in obj.items()}
+    elif isinstance(obj, bool):
+        return obj
     elif isinstance(obj, int):
         return ctypes.c_int64(obj)
     else:
@@ -940,9 +942,9 @@ def compute_logprobs(
     """
     # Shift token_ids
     if label_packing_mask is not None:
-        assert (
-            input_packing_mask is not None
-        ), "input_packing_mask must be provided if label_packing_mask is used"
+        assert input_packing_mask is not None, (
+            "input_packing_mask must be provided if label_packing_mask is used"
+        )
         shifted_input_ids = torch.zeros_like(input_ids_batch)
         shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
     else:
@@ -951,9 +953,9 @@ def compute_logprobs(
         shifted_input_ids[:, -1] = 0
 
     if is_full_logits:
-        assert (
-            logits.shape[:2] == shifted_input_ids.shape[:2]
-        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        assert logits.shape[:2] == shifted_input_ids.shape[:2], (
+            f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        )
         effective_logits = logits[logprob_masks]
     else:
         effective_logits = logits
@@ -1017,9 +1019,9 @@ def compute_logprobs_for_top_k_indices(
     """
     # Shift token_ids
     if label_packing_mask is not None:
-        assert (
-            input_packing_mask is not None
-        ), "input_packing_mask must be provided if label_packing_mask is used"
+        assert input_packing_mask is not None, (
+            "input_packing_mask must be provided if label_packing_mask is used"
+        )
         shifted_input_ids = torch.zeros_like(input_ids_batch)
         shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
     else:
@@ -1028,9 +1030,9 @@ def compute_logprobs_for_top_k_indices(
         shifted_input_ids[:, -1] = 0
 
     if is_full_logits:
-        assert (
-            logits.shape[:2] == shifted_input_ids.shape[:2]
-        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        assert logits.shape[:2] == shifted_input_ids.shape[:2], (
+            f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        )
         effective_logits = logits[logprob_masks]
     else:
         effective_logits = logits
@@ -1139,9 +1141,9 @@ def safe_deep_getattr(obj, attr_path, default=None):
 
 def load_model_class_by_config(hf_config):
     architectures = hf_config.architectures
-    assert (
-        len(architectures) == 1
-    ), f"zero or multiple architectures in config.json is not supported, {architectures=}"
+    assert len(architectures) == 1, (
+        f"zero or multiple architectures in config.json is not supported, {architectures=}"
+    )
 
     class_name = architectures[0]
     model_class = None
@@ -1168,11 +1170,11 @@ def decode_vision_info(prompts):
             multi_modal_data = new_prompt.pop("multi_modal_data")
             if "image" in multi_modal_data:
                 img_obj = multi_modal_data["image"]
-                assert isinstance(
-                    img_obj, list
-                ), f"image should be a list, but got {type(img_obj)}"
+                assert isinstance(img_obj, list), (
+                    f"image should be a list, but got {type(img_obj)}"
+                )
                 img_type = type(img_obj[0])
-                if img_type == str:
+                if img_type == str:  # noqa: E721
                     for i, img_b64 in enumerate(img_obj):
                         img_bytes = base64.b64decode(img_b64)
                         img_buffer = io.BytesIO(img_bytes)
@@ -1193,18 +1195,13 @@ def rank0_print(msg, *args, **kwargs):
         logger.info(msg, *args, **kwargs)
 
 
-def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
-    # Walk children first so we can safely replace in-place.
-    for name, child in list(root.named_children()):
-        replace_with_liger_equivalents(child)
-
-        lig = getattr(child, "liger_equivalent", None)
-        if lig is None:
-            continue
-
-        # Call the factory/method if it's callable; otherwise assume it's already a module.
-        new_child = lig() if callable(lig) else lig
-
+def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) -> None:
+    def replace_child(
+        name: str,
+        child: torch.nn.Module,
+        new_child: torch.nn.Module,
+        root: torch.nn.Module,
+    ):
         # Keep training/eval state.
         try:
             new_child.train(child.training)
@@ -1226,6 +1223,32 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
         rank0_print(f"Replaced {name} with liger equivalent")
         # Swap it in.
         setattr(root, name, new_child)
+
+    # Walk children first so we can safely replace in-place.
+    for name, child in list(root.named_children()):
+        replace_with_liger_equivalents(child, config)
+
+        lig = getattr(child, "liger_equivalent", None)
+        if lig is None:
+            continue
+
+        # Call the factory/method if it's callable; otherwise assume it's already a module.
+        new_child = lig() if callable(lig) else lig
+        replace_child(name, child, new_child, root)
+
+    # special case for lm_head
+    if (
+        config.policy.enable_liger_fused_cross_entropy
+        and config.train.train_policy.type == "sft"
+    ):
+        for name, child in root.named_children():
+            if name == "lm_head":
+                # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
+                new_lm_head = IdentityLayer()
+                new_lm_head.register_parameter("weight", child.weight)
+                if hasattr(child, "bias") and child.bias is not None:
+                    new_lm_head.register_parameter("bias", child.bias)
+                replace_child(name, child, new_lm_head, root)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1386,9 +1409,9 @@ def split_train_n_val_dataset(
         test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
         train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
     else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
+        assert hasattr(train_dataset, "train_test_split"), (
+            "train_dataset must have train_test_split method"
+        )
         split = train_dataset.train_test_split(
             test_size=config.dataset.test_size, shuffle=False
         )
@@ -1416,3 +1439,22 @@ def extract_padding_mask(input_ids, pad_token_id):
     padding_mask = has_pad.unsqueeze(1) & (pos >= first_pad.unsqueeze(1))
     padding_mask &= is_pad  # safety: ensure only PAD positions are True
     return padding_mask
+
+
+def recursive_check_equal(item, item_ref):
+    if isinstance(item, list):
+        if not isinstance(item_ref, list) or len(item) != len(item_ref):
+            return False
+        return all(recursive_check_equal(x, y) for x, y in zip(item, item_ref))
+    elif isinstance(item, dict):
+        if not isinstance(item_ref, dict) or set(item.keys()) != set(item_ref.keys()):
+            return False
+        return all(
+            recursive_check_equal(v, item_ref[k]) for k, v in sorted(item.items())
+        )
+    elif isinstance(item, torch.Tensor):
+        return torch.equal(item, item_ref)
+    elif isinstance(item, (int, float, str)) or item is None:
+        return item == item_ref
+    else:
+        raise ValueError(f"Unsupported item type for equality check: {type(item)}")

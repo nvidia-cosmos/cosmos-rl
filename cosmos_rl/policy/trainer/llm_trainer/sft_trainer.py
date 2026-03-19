@@ -43,11 +43,13 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.kernel.loss import CrossEntropyLoss
 
 
 def async_safe_ce(
     output: torch.Tensor,
     target: torch.LongTensor,
+    ce_impl: torch.nn.Module,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
     output_packing_mask: Optional[torch.Tensor] = None,
@@ -57,25 +59,27 @@ def async_safe_ce(
     **kwargs,
 ) -> torch.Tensor:
     if output_packing_mask is not None:
-        output = (
-            output[output_packing_mask].contiguous().view(-1, output.size(-1)).float()
-        )
+        output = output[output_packing_mask].contiguous().view(-1, output.size(-1))
     else:
-        output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+        output = output[:, :-1].contiguous().view(-1, output.size(-1))
+
+    lin_weight = kwargs.get(
+        "lin_weight", None
+    )  # For fused cross entropy, we need to pass the weight of lm_head to the loss function
 
     if target_packing_mask is not None:
         target = target[target_packing_mask].contiguous().view(-1)
     else:
         target = target[:, 1:].contiguous().view(-1)
-
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
         loss = (
-            torch.nn.functional.cross_entropy(
+            ce_impl(
                 output,
                 target,
                 ignore_index=ignore_index,
                 reduction="mean",
+                lin_weight=lin_weight,
             )
             * loss_scaling_factor
         )
@@ -83,11 +87,12 @@ def async_safe_ce(
         loss = torch.nan_to_num(loss, nan=0.0)
         return loss
     else:
-        loss = torch.nn.functional.cross_entropy(
+        loss = ce_impl(
             output,
             target,
             ignore_index=ignore_index,
             reduction="none",
+            lin_weight=lin_weight,
         )
 
         # Compute all token numbers across dp-world
@@ -137,6 +142,7 @@ class SFTTrainer(LLMTrainer):
 
         self.loss_fn = partial(
             async_safe_ce,
+            ce_impl=CrossEntropyLoss(self.config),
             dp_group=dp_group
             if self.config.train.train_policy.balance_dp_token
             else None,
@@ -153,17 +159,22 @@ class SFTTrainer(LLMTrainer):
         train_step: int,
         save_freq: int,
         inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
+        data_arrival_event: Optional[torch.cuda.Event] = None,
     ):
         pp_last_stage = False
         if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            assert train_step == 0, (
+                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            )
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
 
         aux_loss_dict = OrderedDict()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
 
         self.optimizers.zero_grad()
 
@@ -183,10 +194,6 @@ class SFTTrainer(LLMTrainer):
                 mini_batch,
             )
         )
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
         for i in mini_batch_begin_idxs:
             fixed_length = (
@@ -359,20 +366,28 @@ class SFTTrainer(LLMTrainer):
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
                         if "loss" in k.lower() and isinstance(v, torch.Tensor):
+                            v = v / len(mini_batch_begin_idxs)
                             aux_loss_dict[k] = (
                                 v.detach()
                                 if k not in aux_loss_dict
                                 else aux_loss_dict[k] + v.detach()
                             )
-                            v = v / len(mini_batch_begin_idxs)
                             loss = loss + v
+                kwargs = {
+                    "output_packing_mask": batch.get("input_packing_mask", None),
+                    "target_packing_mask": batch.get("label_packing_mask", None),
+                    "loss_scaling_factor": 1.0 / len(mini_batch_begin_idxs),
+                }
+
+                if self.config.policy.enable_liger_fused_cross_entropy:
+                    # In this case, `logits` in model output is not processed by lm_head. We have to pass weight
+                    # of lm_head to the loss function to fuse the linear and cross entropy.
+                    kwargs["lin_weight"] = self.model.lm_head.weight
 
                 ce_loss = self.loss_fn(
                     logits,
                     labels,
-                    output_packing_mask=batch.get("input_packing_mask", None),
-                    target_packing_mask=batch.get("label_packing_mask", None),
-                    loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                    **kwargs,
                 )
                 aux_loss_dict["loss"] = (
                     ce_loss.detach()
@@ -422,73 +437,87 @@ class SFTTrainer(LLMTrainer):
 
         end_event.record()
 
-        if (
-            self.parallel_dims.dp_replicate_enabled
-            or self.parallel_dims.dp_shard_enabled
-            or self.parallel_dims.cp_enabled
-        ):
-            global_avg_loss = loss_flat.clone().to(self.device)
-            global_max_loss = loss_flat.clone().to(self.device)
-            if self.parallel_dims.dp_shard_enabled or self.parallel_dims.cp_enabled:
-                torch.distributed.all_reduce(
-                    global_avg_loss,
-                    op=torch.distributed.ReduceOp.AVG,
-                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
-                )
-                torch.distributed.all_reduce(
-                    global_max_loss,
-                    op=torch.distributed.ReduceOp.MAX,
-                    group=self.parallel_dims.mesh["dp_shard_cp"].get_group(),
-                )
-            if self.parallel_dims.dp_replicate_enabled:
-                if (
-                    not (
-                        self.parallel_dims.dp_shard_enabled
-                        or self.parallel_dims.cp_enabled
-                    )
-                ) or self.parallel_dims.mesh["dp_shard_cp"].get_local_rank() == 0:
-                    torch.distributed.all_reduce(
-                        global_avg_loss,
-                        op=torch.distributed.ReduceOp.AVG,
-                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
-                    )
-                    torch.distributed.all_reduce(
-                        global_max_loss,
-                        op=torch.distributed.ReduceOp.MAX,
-                        group=self.parallel_dims.mesh["dp_replicate"].get_group(),
-                    )
-            global_avg_loss = global_avg_loss.cpu()
-            global_max_loss = global_max_loss.cpu()
-
-            # local_loss = loss_flat.clone().to(self.device)
-            # gathered_losses = [
-            #     torch.zeros_like(local_loss).to(self.device)
-            #     for _ in range(self.parallel_dims.mesh["dp_cp"].size())
-            # ]
-            # # Gather the loss from all dp/cp replicas to compute the global average and max loss for logging.
-            # # Reduce one communication overhead from using all_reduce api twice for average and max separately.
-            # torch.distributed.all_gather(
-            #     gathered_losses,
-            #     local_loss,
-            #     group=self.parallel_dims.mesh["dp_cp"].get_group(),
-            # )
-            # all_losses_tensor = torch.stack(gathered_losses)
-            # global_avg_loss = all_losses_tensor.mean(dim=0).cpu()
-            # global_max_loss = all_losses_tensor.max(dim=0).values.cpu()
-        else:
-            global_avg_loss = global_max_loss = loss_flat.cpu()
+        global_avg_loss = loss_flat.clone().to(self.device)
+        global_max_loss = loss_flat.clone().to(self.device)
+        torch.distributed.all_reduce(
+            global_avg_loss,
+            op=torch.distributed.ReduceOp.AVG,
+            group=self.parallel_dims.mesh["loss_parallel"].get_group(),
+        )
+        torch.distributed.all_reduce(
+            global_max_loss,
+            op=torch.distributed.ReduceOp.MAX,
+            group=self.parallel_dims.mesh["loss_parallel"].get_group(),
+        )
+        if self.parallel_dims.dp_replicate_enabled:
+            torch.distributed.all_reduce(
+                global_avg_loss,
+                op=torch.distributed.ReduceOp.AVG,
+                group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+            )
+            torch.distributed.all_reduce(
+                global_max_loss,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+            )
+        global_avg_loss = global_avg_loss.cpu()
+        global_max_loss = global_max_loss.cpu()
 
         if self.config.logging.logger:
-            if util.is_master_rank(self.parallel_dims, self.global_rank):
-                # Calculate last iteration time
-                assert end_event.query()
-                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            assert end_event.query()
+            fwd_bwd_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            batch_arrival_time = data_arrival_event.elapsed_time(start_event) / 1000.0
+            if (
+                self.parallel_dims.dp_replicate_enabled
+                or self.parallel_dims.dp_shard_enabled
+                or self.parallel_dims.cp_enabled
+            ):
+                time_metric_tensor_mean = torch.tensor(
+                    [fwd_bwd_time, batch_arrival_time],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                time_metric_tensor_max = time_metric_tensor_mean.clone()
+                torch.distributed.all_reduce(
+                    time_metric_tensor_mean,
+                    op=torch.distributed.ReduceOp.AVG,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                torch.distributed.all_reduce(
+                    time_metric_tensor_max,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self.parallel_dims.mesh["dp_cp"].get_group(),
+                )
+                time_metric_tensor_mean_cpu = time_metric_tensor_mean.cpu()
+                fwd_bwd_time_mean = time_metric_tensor_mean_cpu[0].item()
+                batch_arrival_time_mean = time_metric_tensor_mean_cpu[1].item()
+                # fwd_bwd_time_max = time_metric_tensor_max.cpu()[0].item()
+                batch_arrival_time_max = time_metric_tensor_max.cpu()[1].item()
+            else:
+                # fwd_bwd_time_mean = fwd_bwd_time_max = fwd_bwd_time
+                fwd_bwd_time_mean = fwd_bwd_time
+                batch_arrival_time_mean = batch_arrival_time_max = batch_arrival_time
 
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
                 loss_metrics = {
-                    "train/iteration_time": iter_time,
-                    "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                    "train/iteration_time": fwd_bwd_time_mean,
+                    "train/batch_arrival_time_mean": batch_arrival_time_mean,
+                    "train/batch_arrival_time_max": batch_arrival_time_max,
                 }
+                learning_rates_metric = {
+                    "optimizer/grad_norm": grad_norm if grad_norm is not None else -1,
+                }
+                for idx in range(len(self.model_parts)):
+                    try:
+                        learning_rates_metric[
+                            f"optimizer/lr_{self.model_modpath[idx]}"
+                        ] = self.lr_schedulers.get_last_lr(idx)[0]
+                    except Exception:
+                        # Maybe this model part is frozen, so no optimizer/scheduler for it, just skip.
+                        # learning_rates_metric[f"optimizer/lr_{self.model_modpath[idx]}"] = -1.0
+                        pass
+                loss_metrics.update(learning_rates_metric)
+
                 for idx, name in enumerate(loss_flat_keys):
                     loss_metrics[f"train/{name}_avg"] = global_avg_loss[idx]
                     loss_metrics[f"train/{name}_max"] = global_max_loss[idx]
@@ -503,7 +532,7 @@ class SFTTrainer(LLMTrainer):
                     mfu = util.compute_mfu(
                         model=self.model,
                         n_tokens=np.prod(input_ids.shape),
-                        iter_time=iter_time,
+                        iter_time=fwd_bwd_time_mean,
                         num_gpus=self.world_size,
                         dtype=self.config.train.param_dtype,
                     )
@@ -624,14 +653,16 @@ class SFTTrainer(LLMTrainer):
         **kwargs,
     ):
         if (
-            is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
-        ) and self.parallel_dims.dp_replicate_coord[0] == 0:
+            (
+                is_last_step
+                or do_save
+                or (train_step % save_freq == 0 and train_step > 0)
+            )
+            and self.parallel_dims.dp_replicate_coord[0] == 0
+            and self.config.train.ckpt.enable_checkpoint
+        ):
             # save safetensors
-            # TODO(dinghaoy): support export safetensors asynchronously.
-            if is_last_step or (
-                self.config.train.ckpt.export_safetensors
-                and self.config.train.ckpt.enable_checkpoint
-            ):
+            if is_last_step or self.config.train.ckpt.export_safetensors:
                 logger.info(
                     f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
                 )
@@ -690,11 +721,13 @@ class SFTTrainer(LLMTrainer):
                     pp_master_rank=self.parallel_dims.world_size
                     - self.parallel_dims.world_size / self.parallel_dims.pp,
                 )
+            torch.distributed.barrier()
 
     def load_model(self):
         """Load model weights from checkpoint if available."""
         ckpt_total_steps = 0
         train_step = 0
+        ckpt_extra_vars = {}
         if (
             not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
@@ -743,9 +776,9 @@ class SFTTrainer(LLMTrainer):
                         self.optimizers, self.config, ckpt_total_steps
                     )
                 if ckpt_total_steps > 0:
-                    assert (
-                        self.lr_schedulers is not None
-                    ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
+                    assert self.lr_schedulers is not None, (
+                        "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
+                    )
 
             send_recv_hook = partial(
                 dist.broadcast,
@@ -762,7 +795,7 @@ class SFTTrainer(LLMTrainer):
             )
 
         self.model.train()
-        return ckpt_total_steps, train_step
+        return ckpt_total_steps, train_step, ckpt_extra_vars
 
     @property
     def pp_loss_fn(self):
@@ -792,6 +825,7 @@ class SFTTrainer(LLMTrainer):
         return torch.compile(
             partial(
                 async_safe_ce,
+                ce_impl=CrossEntropyLoss(),
                 loss_scaling_factor=loss_scaling_factor,
                 dp_group=dp_group
                 if self.config.train.train_policy.balance_dp_token

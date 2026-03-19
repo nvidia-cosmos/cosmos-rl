@@ -3,6 +3,18 @@ from typing import Dict, Tuple
 import torch
 from torch.nn import Parameter
 
+try:
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
+except ImportError:
+    # TODO: for vLLM version compatibility, we need to check the vLLM version and update the import path and usage of Fp8LinearOp accordingly.
+    print(
+        "Warning: Fp8LinearOp is not imported successfully. This may be because the vLLM version is different. Please check the vLLM version and make sure it is compatible."
+    )
+    Fp8LinearOp = None
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils import w8a8_utils
+
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 

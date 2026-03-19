@@ -57,9 +57,9 @@ class CastConfig:
 
     def __post_init__(self):
         if self.scaling_granularity is ScalingGranularity.AXISWISE:
-            assert (
-                self.scaling_type is ScalingType.DYNAMIC
-            ), "only dynamic scaling is supported for axiswise scaling granularity"
+            assert self.scaling_type is ScalingType.DYNAMIC, (
+                "only dynamic scaling is supported for axiswise scaling granularity"
+            )
 
 
 class Float4LinearRecipeName(enum.Enum):
@@ -123,9 +123,9 @@ class Float4LinearConfig:
         ):
             is_disabled_1 = cc1.scaling_type is ScalingType.DISABLED
             is_disabled_2 = cc2.scaling_type is ScalingType.DISABLED
-            assert (
-                is_disabled_1 == is_disabled_2
-            ), f"scaling type of {gemm_name} must be the same, got {cc1.scaling_type} and {cc2.scaling_type}"
+            assert is_disabled_1 == is_disabled_2, (
+                f"scaling type of {gemm_name} must be the same, got {cc1.scaling_type} and {cc2.scaling_type}"
+            )
 
         for cc1, cc2, operand_name, default_dtype in [
             (cc_i, cc_i_gw, "input", te_dtype),
@@ -136,9 +136,9 @@ class Float4LinearConfig:
                 object.__setattr__(cc1, "target_dtype", default_dtype)
             if cc2.target_dtype is None:
                 object.__setattr__(cc2, "target_dtype", default_dtype)
-            assert (
-                cc1.target_dtype == cc2.target_dtype
-            ), f"{operand_name} must be cast to the same dtype, got {cc1.target_dtype} and {cc2.target_dtype}"
+            assert cc1.target_dtype == cc2.target_dtype, (
+                f"{operand_name} must be cast to the same dtype, got {cc1.target_dtype} and {cc2.target_dtype}"
+            )
 
     @staticmethod
     def from_recipe_name(
@@ -150,9 +150,9 @@ class Float4LinearConfig:
         """
         if isinstance(recipe_name, str):
             valid_names = [n.value for n in Float4LinearRecipeName]
-            assert (
-                recipe_name in valid_names
-            ), f"recipe name {recipe_name} is not valid, must be one of {valid_names}"
+            assert recipe_name in valid_names, (
+                f"recipe name {recipe_name} is not valid, must be one of {valid_names}"
+            )
             recipe_name = Float4LinearRecipeName(recipe_name)
 
         if recipe_name is Float4LinearRecipeName.TENSORWISE:

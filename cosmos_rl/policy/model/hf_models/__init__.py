@@ -93,11 +93,15 @@ class HFModel(BaseModel):
         # cosmos_default_dtype is config.train.master_dtype
         # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
         self.model = self.model.to(dtype=torch.get_default_dtype())
+        attn_implementation = getattr(
+            self.hf_config, "_attn_implementation", "flash_attention_2"
+        )
         try:
-            self.model.set_attn_implementation("flash_attention_2")
+            self.model.set_attn_implementation(attn_implementation)
+            logger.info(f"Set attn_implementation to {attn_implementation}")
         except Exception as e:
             logger.warning(
-                f"Set attn_implementation to flash_attention_2 failed with error: {e}"
+                f"Set attn_implementation to {attn_implementation} failed with error: {e}"
             )
         self.model_class = model_class
         self.is_vlm = is_vlm
@@ -128,9 +132,9 @@ class HFModel(BaseModel):
         # Configure gradient checkpointing if enabled
         if self._gradient_checkpointing_enabled:
             self.model.gradient_checkpointing_enable()
-            assert (
-                self.model.is_gradient_checkpointing
-            ), "Gradient checkpointing is not enabled"
+            assert self.model.is_gradient_checkpointing, (
+                "Gradient checkpointing is not enabled"
+            )
             logger.info("Enabled gradient checkpointing for HFModel")
 
     @cached_property
@@ -201,13 +205,14 @@ class HFModel(BaseModel):
             "layers",
             "model.layers",
             "backbone.layers",  # NemotronH_Nano_VL_V2
+            "language_model.layers",  # Qwen3-5
         ]:
             lm_layers = safe_deep_getattr(self.language_model, path, None)
             if lm_layers is not None:
                 break
-        assert (
-            lm_layers is not None
-        ), f"Can not get lm layers from {self.language_model}."
+        assert lm_layers is not None, (
+            f"Can not get lm layers from {self.language_model}."
+        )
         return lm_layers
 
     @property
@@ -226,9 +231,9 @@ class HFModel(BaseModel):
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
                     break
-            assert (
-                vision_layers is not None
-            ), f"Can not get vision layers from {self.vision_model}."
+            assert vision_layers is not None, (
+                f"Can not get vision layers from {self.vision_model}."
+            )
         return vision_layers
 
     @property
@@ -295,6 +300,8 @@ class HFModel(BaseModel):
             "model.embed_tokens",
             "embeddings",
             "backbone.embeddings",  # NemotronH_Nano_VL_V2
+            "model.embeddings",
+            "language_model.embed_tokens",  # Qwen3-5
         ]:
             embed_tokens = safe_deep_getattr(self.language_model, path, None)
             if embed_tokens is not None:
@@ -308,15 +315,28 @@ class HFModel(BaseModel):
         vision_model = None
         if self.is_vlm:
             # Extract vision model from various possible attribute names
-            if hasattr(self.model, "vision_tower"):
-                vision_model = self.model.vision_tower
-            elif hasattr(self.model, "visual"):
-                vision_model = self.model.visual
-            elif hasattr(self.model, "vision_model"):
-                vision_model = self.model.vision_model
-            else:
-                raise ValueError(f"Can not get vision model from {self.model}")
+            for path in [
+                "vision_tower",
+                "vision_model",
+                "visual",
+                "model.visual",
+            ]:
+                vision_model = safe_deep_getattr(self.model, path, None)
+                if vision_model is not None:
+                    break
+            assert vision_model is not None, (
+                f"Can not get vision model from {self.model}"
+            )
         return vision_model
+
+    @property
+    def lm_head(self):
+        if getattr(self.language_model, "lm_head", None) is not None:
+            return self.language_model.lm_head
+        elif getattr(self.model, "lm_head", None) is not None:
+            return self.model.lm_head
+        else:
+            return None
 
     @property
     def multi_modal_projector(self):
@@ -327,6 +347,9 @@ class HFModel(BaseModel):
             elif hasattr(self.model, "mlp1"):
                 # Handle InternVL architecture's multi-modal projector naming
                 multi_modal_projector = self.model.mlp1
+            elif hasattr(self.vision_model, "merger"):
+                # Handle Qwen-VL architecture where the multi-modal projector is named "merger" and is a submodule of the vision model
+                multi_modal_projector = self.vision_model.merger
 
         return multi_modal_projector
 
@@ -339,7 +362,24 @@ class HFModel(BaseModel):
                 "vision_model.radio_model.input_conditioner.norm_mean",
                 "vision_model.radio_model.input_conditioner.norm_std",
             ]
+        elif self.hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+            # Skip loading multi token prediction layer for Qwen3-5
+            filter_list = [
+                "mtp.*",
+            ]
         return filter_list
+
+    def _should_skip_tensor(self, name: str) -> bool:
+        """Check if tensor name matches any pattern in tensor_names_to_skip (supports regex)."""
+        for pattern in self.tensor_names_to_skip:
+            # Treat as regex if pattern contains regex metacharacters
+            if re.search(r"[*+?\[\](){}|^$\\]", pattern):
+                if re.fullmatch(pattern, name):
+                    return True
+            else:
+                if re.fullmatch(re.escape(pattern), name):
+                    return True
+        return False
 
     @property
     def delay_cp_slice_inputs(self):
@@ -402,9 +442,9 @@ class HFModel(BaseModel):
                 lm_head_weight_key = k
                 if embed_tokens_weight_key is not None:
                     break
-        assert (
-            lm_head_weight_key is not None and embed_tokens_weight_key is not None
-        ), "lm_head and embed_tokens weight keys not found in the state dict"
+        assert lm_head_weight_key is not None and embed_tokens_weight_key is not None, (
+            "lm_head and embed_tokens weight keys not found in the state dict"
+        )
 
         hf_checkpoint_conversion_mapping = getattr(
             self.model, "_checkpoint_conversion_mapping", None
@@ -445,7 +485,7 @@ class HFModel(BaseModel):
             device,
         ):
             # Skip tensors in the skip list
-            if name in self.tensor_names_to_skip:
+            if self._should_skip_tensor(name):
                 logger.info(f"Skipping {name} because it is in the skip list")
                 continue
 
@@ -475,9 +515,9 @@ class HFModel(BaseModel):
 
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -513,9 +553,9 @@ class HFModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight.to(device))
 
@@ -576,7 +616,7 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
-            if name in self.tensor_names_to_skip:
+            if self._should_skip_tensor(name):
                 logger.info(f"Skipping {name} because it is in the skip list")
                 continue
             tp_slice_dim = None
@@ -594,9 +634,9 @@ class HFModel(BaseModel):
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight.to(device))
 
@@ -609,21 +649,45 @@ class HFModel(BaseModel):
         return position_ids, inputs, seq_dim_idx
 
     def separate_model_parts(self) -> List[nn.Module]:
-        if self.is_vlm:
-            model_parts = [self.language_model, self.vision_model]
-            if self.multi_modal_projector is not None:
-                logger.info("Adding multi_modal_projector to model parts")
-                model_parts.append(self.multi_modal_projector)
-            # Handle cases where lm_head exists at model level rather than language_model level
-            if (
-                getattr(self.language_model, "lm_head", None) is None
-                and getattr(self.model, "lm_head", None) is not None
-            ):
-                logger.info("Adding lm_head to model parts")
-                model_parts.append(self.model.lm_head)
-            return model_parts
-        else:
-            return [self.language_model]
+        if not self.is_vlm:
+            return [self.model]
+
+        # Optimizer Order:
+        # 1. language_model
+        # 2. multi_modal_projector (if exists)
+        # 3. vision_model
+        # 4. other modules that are not included in above 3 parts, e.g., lm_head in some models like Qwen/Qwen3-VL-2B-Instruct, which is not a submodule of language_model.
+        parts: List[nn.Module] = (
+            [self.language_model, self.vision_model]
+            if self.multi_modal_projector is None
+            else [self.language_model, self.multi_modal_projector, self.vision_model]
+        )
+        all_params = set()
+        for part in parts:
+            all_params.update(set(part.parameters()))
+
+        # Ensure there is not any modules that are ignored in the above two parts
+        modules_to_check = list(self.model.children())
+        while modules_to_check:
+            module = modules_to_check.pop(0)
+            # 1. if module === any part, skip
+            if any(module is part for part in parts):
+                continue
+            # 2. if no part is submodule of module, add this module to parts
+            elif not any(part in module.modules() for part in parts):
+                # in case of some tied that have already been added to parts, e.g., lm_head in `Qwen/Qwen3-VL-2B-Instruct`
+                module_params = set(module.parameters())
+                if module_params & all_params == module_params:
+                    logger.warning(
+                        f"All parameters of {module} are shared with other parts, skip adding it to parts to avoid duplication."
+                    )
+                else:
+                    all_params.update(module_params)
+                    parts.append(module)
+            # 3. else, this module is a parent module of some part, check its children
+            else:
+                modules_to_check.extend(module.children())
+        return parts
 
     @cached_property
     def _get_nparams_and_flops_fn(
@@ -717,9 +781,9 @@ class HFModel(BaseModel):
         need_dequantization = False
         if quantization_config is not None:
             if quantization_config["quant_method"] in ["mxfp4"]:
-                assert hasattr(
-                    transformers_quantization_config, "Mxfp4Config"
-                ), "Mxfp4Config is not supported in this version of transformers. Please upgrade transformers to version 4.45.0 or higher."
+                assert hasattr(transformers_quantization_config, "Mxfp4Config"), (
+                    "Mxfp4Config is not supported in this version of transformers. Please upgrade transformers to version 4.45.0 or higher."
+                )
                 logger.warning(
                     "We don't support mxfp4 training for HFModel currently, will default to dequantizing the model to bf16/fp16."
                 )
@@ -786,6 +850,27 @@ class HFModel(BaseModel):
     def named_parameters(self, *args, **kwargs):
         return self.model.named_parameters(*args, **kwargs)
 
+    def named_modules(self, *args, **kwargs):
+        return self.model.named_modules(*args, **kwargs)
+
+    def parameters(self, *args, **kwargs):
+        return self.model.parameters(*args, **kwargs)
+
+    def modules(self, *args, **kwargs):
+        return self.model.modules(*args, **kwargs)
+
+    def children(self, *args, **kwargs):
+        return self.model.children(*args, **kwargs)
+
+    def named_children(self, *args, **kwargs):
+        return self.model.named_children(*args, **kwargs)
+
+    def buffers(self, *args, **kwargs):
+        return self.model.buffers(*args, **kwargs)
+
+    def named_buffers(self, *args, **kwargs):
+        return self.model.named_buffers(*args, **kwargs)
+
     @classmethod
     def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
@@ -803,18 +888,23 @@ class HFModel(BaseModel):
     def check_tp_compatible(self, tp_size: int):
         num_attention_heads = self.text_config.num_attention_heads
         num_key_value_heads = self.text_config.num_key_value_heads
-        assert (
-            num_attention_heads % tp_size == 0
-        ), f"{num_attention_heads=} must be divisible by TP size ({tp_size})"
-        assert (
-            num_key_value_heads % tp_size == 0
-        ), f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
+        assert num_attention_heads % tp_size == 0, (
+            f"{num_attention_heads=} must be divisible by TP size ({tp_size})"
+        )
+        assert num_key_value_heads % tp_size == 0, (
+            f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
+        )
 
     def check_sequence_packing_compatible(self):
         if self.sequence_packing_forward_patched is None:
             # called only once if patch is successful
+            force_sequence_packing = int(os.environ.get("FORCE_SEQUENCE_PACKING", 0))
             patch_success = sequence_packing_forward_patch(self.hf_config, self)
-            self.sequence_packing_forward_patched = patch_success
+            self.sequence_packing_forward_patched = (
+                patch_success or force_sequence_packing == 1
+            )
+            if (not patch_success) and force_sequence_packing == 1:
+                logger.info("force packing without patch")
         return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):

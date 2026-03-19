@@ -25,6 +25,7 @@ def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
+
 """
 HPSv2, ImageReward, OCR, and GenEval reward functions are supported currently.
 """
@@ -47,6 +48,7 @@ api_enqueue = "/api/reward/enqueue"  # For enqueueing reward calculation tasks.
 api_reward = "/api/reward/pull"  # For pulling reward calculation results.
 token = None  # If authentication is needed, set the token here.
 
+
 def make_headers(replica_id: str | None = None, extra: dict | None = None) -> dict:
     headers: dict = {}
     if token:
@@ -56,6 +58,7 @@ def make_headers(replica_id: str | None = None, extra: dict | None = None) -> di
     if extra:
         headers.update(extra)
     return headers
+
 
 # The folllowing code is an example of how to generate encoded latents from video using the Wan2pt1TokenizerHelper.
 # The generated latents can be sent to the "/api/reward/enqueue" endpoint for calculating rewards.
@@ -72,6 +75,7 @@ if use_fake:
 else:
     import os
     from PIL import Image
+
     img_folder_path = "/path/to/your/image/folder"  # Set your image folder path here.
     for img_name in os.listdir(img_folder_path):
         img_path = os.path.join(img_folder_path, img_name)
@@ -210,19 +214,19 @@ for uuid, replica_id, reward_types in pending_requests:
     # For GenEval type score:
     {
         'scores': {
-            'gen_eval_score': [0.0],
-            'gen_eval_reward': [0.0],
-            'gen_eval_strict': [0.0],
+            'gen_eval_score': [0.0, 0.0],
+            'gen_eval_reward': [0.0, 0.0],
+            'gen_eval_strict': [0.0, 0.0],
             'gen_eval_group': {
-                'single_object': [0.0],
-                'two_object': [-10.0],
-                'counting': [-10.0],
-                'colors': [-10.0],
-                'position': [-10.0],
-                'color_attr': [-10.0]
+                'single_object': [0.0, 0.0],
+                'two_object': [-10.0, -10.0],
+                'counting': [-10.0, -10.0],
+                'colors': [-10.0, -10.0],
+                'position': [-10.0, -10.0],
+                'color_attr': [-10.0, -10.0]
         },
         'input_info': {
-            'shape': [1, 512, 512, 3],
+            'shape': [2, 512, 512, 3],
             'dtype': 'torch.uint8',
             'min': '0.000',
             'max': '254.000'
@@ -230,6 +234,21 @@ for uuid, replica_id, reward_types in pending_requests:
         'duration': '1.07',
         'decoded_duration': '0.00',
         'type': 'gen_eval'
+    }
+    # For UnifiedReward type score:
+    {
+        'scores':{
+            'unified_reward': [0.2, 0.2]
+        },
+        'input_info': {
+            'shape': [2, 512, 512, 3],
+            'dtype': 'torch.uint8',
+            'min': '0.000',
+            'max': '254.000'
+        },
+        'duration': '8.24',
+        'decoded_duration': '0.00',
+        'type': 'unified_reward'
     }
     Inside each field of the response, the values are lists corresponding to the batch size.    
 """

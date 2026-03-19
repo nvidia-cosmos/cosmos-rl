@@ -38,9 +38,9 @@ class TestFASwitch(unittest.TestCase):
             user_specified_fa_version=user_specified_fa_version,
         )
 
-        assert (
-            a_flash_attn_meta is b_flash_attn_meta
-        ), "FlashAttnMeta is not a singleton"
+        assert a_flash_attn_meta is b_flash_attn_meta, (
+            "FlashAttnMeta is not a singleton"
+        )
 
         major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
         if major >= 9 and not torch_compile:

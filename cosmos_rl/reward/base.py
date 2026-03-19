@@ -45,12 +45,14 @@ class RolloutGroup:
         Returns:
             List[Rollout]: List of Rollout with rewards and advantages.
         """
-        assert (
-            self.reference_answer is not None
-        ), "[RolloutGroup] Reference answer is not provided"
+        assert self.reference_answer is not None, (
+            "[RolloutGroup] Reference answer is not provided"
+        )
         assert (
             self.payload.completions is not None and len(self.payload.completions) > 0
-        ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
+        ), (
+            "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
+        )
 
         # completion can be any objects such as tensors and videos in tensor native or video modes,
         # so that reward functions can compute reward directly from tensors or videos
@@ -64,7 +66,9 @@ class RolloutGroup:
             == len(rewards[1])
             == len(rewards[2])
             == len(self.payload.completions)
-        ), "[RolloutGroup] The length of rewards, filter_rewards, reward_metrics should be the same as the length of completions"
+        ), (
+            "[RolloutGroup] The length of rewards, filter_rewards, reward_metrics should be the same as the length of completions"
+        )
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
         advantages = algo.compute_advantage([r for r in rewards[0]])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
@@ -73,9 +77,9 @@ class RolloutGroup:
             # Find the best reward and cumulative logprob from the group by the cumulative logprob
             # We need calculate the most likely mode reward which is the reward of the completion
             # with the highest cumulative logprob and highest probability
-            assert (
-                len(self.payload.cumulative_logprob) == len(rewards[0])
-            ), "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"
+            assert len(self.payload.cumulative_logprob) == len(rewards[0]), (
+                "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"
+            )
             best_reward = None
             best_cumulative_logprob = None
             for i, reward in enumerate(rewards[0]):

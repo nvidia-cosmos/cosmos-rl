@@ -974,8 +974,7 @@ def load(
         )
         if backend_args is not None:
             raise ValueError(
-                '"file_client_args and "backend_args" cannot be set at the '
-                "same time."
+                '"file_client_args and "backend_args" cannot be set at the same time.'
             )
 
     handler = file_handlers[file_format]
@@ -1076,8 +1075,7 @@ def dump(
         )
         if backend_args is not None:
             raise ValueError(
-                '"file_client_args" and "backend_args" cannot be set at the '
-                "same time."
+                '"file_client_args" and "backend_args" cannot be set at the same time.'
             )
 
     handler = file_handlers[file_format]

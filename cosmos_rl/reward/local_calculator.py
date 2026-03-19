@@ -123,9 +123,9 @@ class LocalRewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        assert all(
-            payload.prompt_idx >= 0 for payload in payloads
-        ), "[Reward] All payloads should have a valid prompt index"
+        assert all(payload.prompt_idx >= 0 for payload in payloads), (
+            "[Reward] All payloads should have a valid prompt index"
+        )
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=payload.prompt_idx,
@@ -202,9 +202,9 @@ class LocalRewardCalculator:
         if is_validation:
             return self.compute_validation_rewards(payloads, step)
 
-        assert all(
-            payload.prompt_idx >= 0 for payload in payloads
-        ), "[Reward] All payloads should have a valid prompt index"
+        assert all(payload.prompt_idx >= 0 for payload in payloads), (
+            "[Reward] All payloads should have a valid prompt index"
+        )
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -248,9 +248,9 @@ class LocalRewardCalculator:
                     )
                 )
                 for shared_prefix, rollout_indices in shared_prefix_groups.items():
-                    assert (
-                        len(rollout_indices) > 1
-                    ), "Shared prefix group should not be empty"
+                    assert len(rollout_indices) > 1, (
+                        "Shared prefix group should not be empty"
+                    )
                     # Check if the shared prefix holds different rewards
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:

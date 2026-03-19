@@ -102,9 +102,9 @@ def _swizzle_pp_grpo_forward(
     )
     current_per_token_logprobs = current_per_token_logprobs.cpu()
     cu_seqlens = cu_seqlens.cpu()
-    assert (
-        len(current_per_token_logprobs) == cu_seqlens[-1]
-    ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+    assert len(current_per_token_logprobs) == cu_seqlens[-1], (
+        f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+    )
     for i in range(len(cu_seqlens) - 1):
         trainer.pp_data.append(
             {
@@ -178,9 +178,9 @@ class TorchEngine(LLMTrainer):
         for token in tokens:
             if token not in self.tokenizer_mapping():
                 logger.warning(f"[Reference] Token {token} not found in tokenizer")
-                assert (
-                    token > self.max_valid_token_id
-                ), f"Token {token} is less than max valid token id {self.max_valid_token_id}"
+                assert token > self.max_valid_token_id, (
+                    f"Token {token} is less than max valid token id {self.max_valid_token_id}"
+                )
                 new_tokens.append(token)
             else:
                 new_tokens.append(self.tokenizer_mapping()[token])
@@ -204,9 +204,9 @@ class TorchEngine(LLMTrainer):
             if hasattr(processed_input, "input_ids")
             else processed_input["input_ids"]
         )
-        assert (
-            input_ids_mapped == input_ids_new
-        ), f"Input ids mapped: {input_ids_mapped} != input ids new: {input_ids_new}"
+        assert input_ids_mapped == input_ids_new, (
+            f"Input ids mapped: {input_ids_mapped} != input ids new: {input_ids_new}"
+        )
         return input_ids
 
     def collate_topk_indices(self, rollouts: List[Rollout], computed_max_len: int):
@@ -217,17 +217,17 @@ class TorchEngine(LLMTrainer):
             for token_id in token_ids:
                 assert len(token_id) > 0, "Token ids should not be empty"
                 if len(token_id) > self.config.distillation.top_k:
-                    assert (
-                        len(token_id) == self.config.distillation.top_k + 1
-                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    assert len(token_id) == self.config.distillation.top_k + 1, (
+                        f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    )
                     if self.config.distillation.top_k > 0:
                         token_id = token_id[
                             1:
                         ]  # remove the first token id which is the selected token only keep top_k token ids
                 else:
-                    assert (
-                        len(token_id) == self.config.distillation.top_k
-                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
+                    assert len(token_id) == self.config.distillation.top_k, (
+                        f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
+                    )
                 token_id = self.map_student_token_ids_to_tokenizer_token_ids(token_id)
                 updated_token_ids.append(token_id)
             updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
@@ -268,9 +268,9 @@ class TorchEngine(LLMTrainer):
 
         # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
         samples = [rollout.prompt for rollout in rollouts]
-        assert all(
-            rollout.prompt is not None for rollout in rollouts
-        ), "All rollouts should have a valid prompt"
+        assert all(rollout.prompt is not None for rollout in rollouts), (
+            "All rollouts should have a valid prompt"
+        )
         assert all(
             rollout.completion_token_ids is not None
             and len(rollout.completion_token_ids) > 0
@@ -292,9 +292,9 @@ class TorchEngine(LLMTrainer):
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
-        assert all(
-            samples[i] is not None for i in range(len(samples))
-        ), "All samples should be not None"
+        assert all(samples[i] is not None for i in range(len(samples))), (
+            "All samples should be not None"
+        )
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
                 samples[i],
@@ -324,9 +324,9 @@ class TorchEngine(LLMTrainer):
             n_microbatches = (
                 batch_size // self.config.distillation.parallelism.pp_micro_batch_size
             )
-            assert (
-                n_microbatches % self.parallel_dims.pp == 0
-            ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
+            assert n_microbatches % self.parallel_dims.pp == 0, (
+                f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
+            )
 
         with torch.set_grad_enabled(False):
             with torch.cuda.stream(self.train_stream):
@@ -620,9 +620,9 @@ class TorchEngine(LLMTrainer):
                                 current_per_token_logprobs.cpu()
                             )
                             cu_seqlens = cu_seqlens.cpu()
-                            assert (
-                                len(current_per_token_logprobs) == cu_seqlens[-1]
-                            ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+                            assert len(current_per_token_logprobs) == cu_seqlens[-1], (
+                                f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+                            )
                             for i in range(len(cu_seqlens) - 1):
                                 if packing_seq:
                                     # Need to unpack the logprobs according to the original sequence lengths.
@@ -703,9 +703,9 @@ class TorchEngine(LLMTrainer):
             metrics: a dict of collected metrics, e.g. entropy
         """
         assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
-        assert (
-            "logprob_masks" in minibatch
-        ), "logprob_masks is required for computing logprobs"
+        assert "logprob_masks" in minibatch, (
+            "logprob_masks is required for computing logprobs"
+        )
         return logprobs_computing(
             minibatched_topk_indices,
             minibatch["logprob_masks"],

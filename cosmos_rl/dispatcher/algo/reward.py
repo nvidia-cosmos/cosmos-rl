@@ -333,9 +333,9 @@ class Reward:
                     else:
                         filter_reward_name_to_weight[fn] = weight
                 elif isinstance(fn, int):
-                    assert (
-                        explicit_reward_fn is not None
-                    ), "When filtered reward function is given as index, explicit_reward_fn must be provided."
+                    assert explicit_reward_fn is not None, (
+                        "When filtered reward function is given as index, explicit_reward_fn must be provided."
+                    )
                     index_for_filter_in_explicit.append((fn, weight))
                 elif isinstance(fn, Callable):
                     self.filter_reward_fns.append((fn, weight))
@@ -355,9 +355,9 @@ class Reward:
             )
             self.is_filter = [0.0] * len(self.reward_funcs)
             for i, weight in index_for_filter_in_explicit:
-                assert (
-                    i < len(self.reward_funcs)
-                ), f"Index {i} for filtered reward function is out of range, only {len(self.reward_funcs)} reward functions are provided."
+                assert i < len(self.reward_funcs), (
+                    f"Index {i} for filtered reward function is out of range, only {len(self.reward_funcs)} reward functions are provided."
+                )
                 self.is_filter[i] = weight
         else:
             self.reward_funcs = []
@@ -412,15 +412,16 @@ class Reward:
                 # The second element is expected to be a dictionary of reward components
                 # It will be used for metric logging and reporting
                 val, rewards_dict = val
-                assert (
-                    isinstance(rewards_dict, list)
-                    and len(rewards_dict) == len(to_be_evaluated_list)
-                ), "The second element returned by reward function must be a list of dictionaries containing reward components for each evaluated item."
+                assert isinstance(rewards_dict, list) and len(rewards_dict) == len(
+                    to_be_evaluated_list
+                ), (
+                    "The second element returned by reward function must be a list of dictionaries containing reward components for each evaluated item."
+                )
                 for i in range(len(to_be_evaluated_list)):
                     all_rewards_dicts[i].update(rewards_dict[i])
-            assert (
-                isinstance(val, list) and len(val) == len(to_be_evaluated_list)
-            ), "The reward function must return a list of rewards with the same length as to_be_evaluated_list."
+            assert isinstance(val, list) and len(val) == len(to_be_evaluated_list), (
+                "The reward function must return a list of rewards with the same length as to_be_evaluated_list."
+            )
             for i in range(len(to_be_evaluated_list)):
                 total_rewards[i] += weight * val[i]
                 filter_rewards[i] += filter * val[i]
@@ -440,9 +441,9 @@ class Reward:
                     # The second element is expected to be a dictionary of reward components
                     # It will be used for metric logging and reporting
                     val, rewards_dict = val
-                    assert isinstance(
-                        rewards_dict, dict
-                    ), "The second element returned by reward function must be a dictionary containing reward components."
+                    assert isinstance(rewards_dict, dict), (
+                        "The second element returned by reward function must be a dictionary containing reward components."
+                    )
                     all_rewards_dicts[i].update(rewards_dict)
                 total_rewards[i] += weight * val
                 filter_rewards[i] += filter * val

@@ -16,6 +16,8 @@
 
 import inspect
 import os
+import atexit
+import traceback as _tb
 import torch
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
@@ -32,6 +34,8 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
+import cosmos_rl.utils.distributed as dist_utils
+import torch.distributed as dist
 from cosmos_rl.utils.report.wandb_logger import (
     init_wandb,
     is_wandb_available,
@@ -113,19 +117,129 @@ class SFTDataset(Dataset):
             if cache_obj is not None:
                 return cache_obj
 
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if not self.is_user_dataset and self.column_name
-            else self.dataset[idx]
-        )
+        max_retries = 50
+        for attempt in range(max_retries):
+            raw_item = (
+                self.dataset[idx][self.column_name]
+                if not self.is_user_dataset and self.column_name
+                else self.dataset[idx]
+            )
 
-        if isinstance(idx, list):  # a batch of items
-            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
-        else:
-            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+            try:
+                if isinstance(idx, list):  # a batch of items
+                    item = [self.data_packer.sft_process_sample(x) for x in raw_item]
+                else:
+                    item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+                break
+            except Exception as e:
+                msg_info = []
+                try:
+                    msgs = raw_item if isinstance(raw_item, list) else []
+                    if isinstance(raw_item, dict) and "messages" in raw_item:
+                        msgs = raw_item["messages"]
+                    for msg in msgs:
+                        if not isinstance(msg, dict):
+                            msg_info.append(f"non-dict:{type(msg).__name__}")
+                            continue
+                        role = msg.get("role", "?")
+                        content = msg.get("content")
+                        if isinstance(content, list):
+                            items = []
+                            for c in content:
+                                if isinstance(c, dict):
+                                    item_d = {}
+                                    for k, v in c.items():
+                                        if isinstance(
+                                            v, (str, int, float, bool, type(None))
+                                        ):
+                                            item_d[k] = str(v)[:100]
+                                        else:
+                                            item_d[k] = type(v).__name__
+                                    items.append(item_d)
+                            msg_info.append(f"{role}:{items}")
+                        elif isinstance(content, str):
+                            msg_info.append(f"{role}:str({len(content)})")
+                        else:
+                            msg_info.append(
+                                f"{role}:content={type(content).__name__}({repr(content)[:200]})"
+                                if content is not None
+                                else f"{role}:content=None"
+                            )
+                except Exception as dbg_e:
+                    msg_info.append(f"debug_err:{dbg_e}")
+                logger.warning(
+                    f"sft_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                    f"\n  traceback: {_tb.format_exc().splitlines()[-3:]}"
+                    f"\n  messages: {msg_info}"
+                )
+                if attempt >= max_retries - 1:
+                    raise
+                continue
 
         if self.cache is not None:
-            # try cache obj
+            self.cache.set(idx, item)
+        return item
+
+
+class DPODataset(Dataset):
+    """Dataset wrapper for DPO: yields processed {'chosen': dict, 'rejected': dict}."""
+
+    def __init__(
+        self,
+        config: SFTDataConfig,
+        dataset: Dataset,
+        data_packer: BaseDataPacker,
+        is_user_dataset: bool = False,
+    ):
+        self.config = config
+        self.column_name = config.conversation_column_name
+        self.dataset = dataset
+        self.data_packer = data_packer
+        self.is_user_dataset = is_user_dataset
+        self.cache = None
+        if self.config.enable_dataset_cache:
+            cache_folder = os.path.join(
+                os.environ.get(
+                    "COSMOS_CACHE",
+                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
+                ),
+                "datasets_cache",
+                f"dpo-{self.config.dataset.name}-{config_hash(config)}",
+            )
+            logger.info(f"DPODataset Cache folder: {cache_folder}")
+            self.cache = cache.DiskCache(cache_folder)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        if self.cache is not None:
+            cache_obj = self.cache.get(idx)
+            if cache_obj is not None:
+                return cache_obj
+
+        max_retries = 50
+        for attempt in range(max_retries):
+            raw_item = (
+                self.dataset[idx][self.column_name]
+                if not self.is_user_dataset and self.column_name
+                else self.dataset[idx]
+            )
+            try:
+                if hasattr(self.data_packer, "dpo_process_sample"):
+                    item = self.data_packer.dpo_process_sample(raw_item)
+                else:
+                    raise ValueError("DPO requires data_packer with dpo_process_sample")
+                break
+            except Exception as e:
+                if attempt >= max_retries - 1:
+                    raise
+                print(
+                    f"WARNING: dpo_process_sample failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                continue
+
+        if self.cache is not None:
             self.cache.set(idx, item)
         return item
 
@@ -205,7 +319,9 @@ def construct_dataset(
         f"Dataset cache settings - train: {train_enable_cache}, val: {val_enable_cache}"
     )
 
-    train_sft_dataset = SFTDataset(
+    trainer_type = cosmos_config.train.train_policy.trainer_type
+    DatasetCls = DPODataset if trainer_type == "dpo" else SFTDataset
+    train_sft_dataset = DatasetCls(
         config,
         dataset=train_dataset,
         data_packer=data_packer,
@@ -213,7 +329,7 @@ def construct_dataset(
         enable_cache=train_enable_cache,
         cache_prefix="train",
     )
-    test_sft_dataset = SFTDataset(
+    test_sft_dataset = DatasetCls(
         config,
         dataset=test_dataset,
         data_packer=val_data_packer,
@@ -288,6 +404,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             dataset=dataset,
             val_dataset=val_dataset,
         )
+
+        # Register the exit function to be called when the program exits
+        atexit.register(self.handle_shutdown)
 
     def setup(
         self,
@@ -371,11 +490,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
         )
-        self.ckpt_total_steps, self.train_step = self.trainer.load_model()
-        # only for load-balanced batching
-        self.load_balanced_max_steps = (
-            self.config.train.train_policy.load_balanced_max_steps
-        )
+        self.ckpt_total_steps, self.train_step, _ = self.trainer.load_model()
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
@@ -482,6 +597,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             # Filter kwargs to only those the function accepts
             filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
             batch_sampler = batch_sampler(**filtered)
+        self.train_batch_sampler = batch_sampler
 
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
@@ -529,7 +645,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             """
             if self.enable_dp_load_balancing:
                 # For load-balanced batching, training is step-based, not epoch-based.
-                # Since total_steps = load_balanced_max_steps, train_step is always < load_balanced_max_steps
+                # Since total_steps = max_num_steps, train_step is always < max_num_steps
                 # when resuming (otherwise training would have already completed).
                 # LoadBalancedDataset will automatically manage epoch increments when data loops.
 
@@ -537,7 +653,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 # (epoch will be automatically incremented by LoadBalancedDataset when data loops)
                 initial_epoch = 0
                 # Skip batches equal to completed steps (use modulo for robustness)
-                batches_to_skip = self.train_step % self.load_balanced_max_steps
+                batches_to_skip = self.train_step % self.config.train.max_num_steps
 
                 if hasattr(train_dataset, "set_epoch"):
                     train_dataset.set_epoch(initial_epoch)
@@ -553,7 +669,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             else:
                 # Resume training from the last checkpoint if needed
                 total_steps_per_epoch = len(
-                    get_train_data_loader(self.train_sampler, batch_sampler)
+                    get_train_data_loader(self.train_sampler, self.train_batch_sampler)
                 )
                 data_loader_bias = self.train_step % total_steps_per_epoch
                 data_loader_bias *= self.config.train.train_batch_per_replica
@@ -578,15 +694,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             else 1
                         ),
                     )
-                if batch_sampler is not None:
-                    batch_sampler = SkippingSampler(
-                        batch_sampler,
-                        skip_samples=data_loader_bias
-                        // (
-                            len(list(islice(iter(batch_sampler), 1))[0])
-                            if isinstance(list(islice(iter(batch_sampler), 1))[0], list)
-                            else 1
-                        ),
+                if self.train_batch_sampler is not None:
+                    if hasattr(self.train_batch_sampler, "set_epoch"):
+                        self.train_batch_sampler.set_epoch(
+                            self.train_step // total_steps_per_epoch
+                        )
+                    batched_loader_bias = self.train_step % total_steps_per_epoch
+                    self.train_batch_sampler = SkippingSampler(
+                        self.train_batch_sampler,
+                        skip_samples=batched_loader_bias,
                     )
                 self.start_epoch = self.train_step // total_steps_per_epoch
 
@@ -617,7 +733,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             self.train_data_loader = train_dataset.dataset.data_loader
         else:
             self.train_data_loader = get_train_data_loader(
-                self.train_sampler, batch_sampler
+                self.train_sampler, self.train_batch_sampler
             )
 
         val_num_workers = (
@@ -678,16 +794,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
             else len(self.train_data_loader) * self.epoch
         )
 
-        if self.config.train.max_num_steps is not None:
+        if self.enable_dp_load_balancing:
+            self.total_steps = self.config.train.max_num_steps
+            logger.info(
+                f"Total training steps set to max_num_steps={self.config.train.max_num_steps} for load-balanced dynamic batching"
+            )
+        elif self.config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
-
-        if self.enable_dp_load_balancing:
-            logger.info(
-                f"Total training steps set to load_balanced_max_steps={self.load_balanced_max_steps} for load-balanced dynamic batching"
-            )
-            self.total_steps = self.load_balanced_max_steps
 
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
@@ -752,7 +867,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_total_samples = 0
 
         for batch_index, val_global_batch in enumerate(
-            tqdm(self.val_data_loader, desc="Validation")
+            tqdm(
+                self.get_batch_from_dataloader(self.val_data_loader), desc="Validation"
+            )
         ):
             # Call pre_per_step_validation_hook
             if self.pre_per_step_validation_hook is not None:
@@ -839,6 +956,113 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         return val_avg_loss
 
+    def collect_broadcast_info(self, item):
+        if isinstance(item, list):
+            return [self.collect_broadcast_info(x) for x in item]
+        elif isinstance(item, dict):
+            return {k: self.collect_broadcast_info(v) for k, v in item.items()}
+        elif isinstance(item, torch.Tensor):
+            return {"tensor_to_be_recv": (item.shape, item.dtype, item.device)}
+        elif isinstance(item, (int, float, str)) or item is None:
+            return item
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def recv_tensor_from_info(self, item):
+        if isinstance(item, list):
+            return [self.recv_tensor_from_info(x) for x in item]
+        elif isinstance(item, dict):
+            if (
+                "tensor_to_be_recv" in item
+                and len(item) == 1
+                and isinstance(item["tensor_to_be_recv"], tuple)
+                and len(item["tensor_to_be_recv"]) == 3
+            ):
+                placeholder = torch.empty(
+                    *item["tensor_to_be_recv"][0],
+                    dtype=item["tensor_to_be_recv"][1],
+                    device=self.device,
+                )
+                dist.broadcast(
+                    placeholder,
+                    group_src=0,
+                    group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                )
+                return placeholder.to(item["tensor_to_be_recv"][2])
+            return {k: self.recv_tensor_from_info(v) for k, v in sorted(item.items())}
+        elif isinstance(item, (int, float, str)) or item is None:
+            return item
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def send_tensor_from_info(self, item):
+        if isinstance(item, list):
+            for x in item:
+                self.send_tensor_from_info(x)
+        elif isinstance(item, dict):
+            for _, v in sorted(item.items()):
+                self.send_tensor_from_info(v)
+        elif isinstance(item, torch.Tensor):
+            dist.broadcast(
+                item.to(self.device),
+                group_src=0,
+                group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+            )
+        elif isinstance(item, (int, float, str)) or item is None:
+            pass
+        else:
+            raise ValueError(
+                f"Unsupported item type for broadcast info collection: {type(item)}"
+            )
+
+    def get_batch_from_dataloader(self, data_loader):
+        # self.iter = iter(self.train_data_loader)
+        if self.config.train.train_policy.dataloader_broadcast and (
+            self.parallel_dims.pp_enabled
+            or self.parallel_dims.cp_enabled
+            or self.parallel_dims.tp_enabled
+        ):
+            # Only the first rank of the pp/cp/tp mesh will read from the dataloader and broadcast to other ranks, to avoid redundant dataloader workers and potential data mismatches across ranks.
+            if self.parallel_dims.mesh["pp_cp_tp"].get_local_rank() == 0:
+                for batch in data_loader:
+                    info = self.collect_broadcast_info(batch)
+                    dist_utils.broadcast_object_cpu(
+                        info,
+                        group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                        group_src=0,
+                    )
+                    self.send_tensor_from_info(batch)
+                    yield batch
+                dist_utils.broadcast_object_cpu(
+                    "end",
+                    group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                    group_src=0,
+                )
+            else:
+                while True:
+                    info = dist_utils.broadcast_object_cpu(
+                        None,
+                        group=self.parallel_dims.mesh["pp_cp_tp"].get_group(),
+                        group_src=0,
+                    )
+                    if info == "end":
+                        break
+                    batch = self.recv_tensor_from_info(info)
+                    # Do check to verify that the broadcast batch matches the dataloader batch for non-zero ranks, to ensure correctness of broadcasting logic.
+                    # ref = next(self.iter)
+                    # assert util.recursive_check_equal(
+                    #     batch, ref
+                    # ), f"Broadcast batch does not match dataloader batch for non-zero rank {batch} {ref}"
+                    yield batch
+        else:
+            # If dataloader_broadcast is enabled but no relevant parallelism is enabled, just yield batches without broadcasting
+            for batch in data_loader:
+                yield batch
+
     def main_loop(self):
         self.profiler.start()
         pp_last_stage = False
@@ -871,9 +1095,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
         for _ in range(self.start_epoch, self.epoch):
             if hasattr(self.train_sampler, "set_epoch"):
                 self.train_sampler.set_epoch(cur_epoch)
+            if hasattr(self.train_batch_sampler, "set_epoch"):
+                self.train_batch_sampler.set_epoch(cur_epoch)
+            if hasattr(self.train_data_loader, "dataset") and hasattr(
+                self.train_data_loader.dataset, "set_epoch"
+            ):
+                self.train_data_loader.dataset.set_epoch(cur_epoch)
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+
+            data_arrival_event = torch.cuda.Event(enable_timing=True)
+            data_arrival_event.record()
             # global_batch is a list of items from `datapacker.sft_process_sample()`
-            for global_batch in self.train_data_loader:
+            for global_batch in self.get_batch_from_dataloader(self.train_data_loader):
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
                 if (
@@ -907,7 +1140,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     total_steps=self.total_steps,
                     train_step=self.train_step,
                     save_freq=self._save_freq,
+                    data_arrival_event=data_arrival_event,
                 )
+                report_data["train/epoch"] = cur_epoch
 
                 self.train_step += 1
 
@@ -930,9 +1165,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             step=self.train_step,
                         )
                     if "console" in self.config.logging.logger:
-                        logger.info(
-                            f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
-                        )
+                        log_info = f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['optimizer/grad_norm']:.5f}, Iteration time: {report_data['train/iteration_time']:.2f}s"
+                        # Append learning rate of each optimizer to log_info
+                        for key in report_data:
+                            if key.startswith("optimizer/lr_"):
+                                log_info += f", {key}: {report_data[key]:.5e}"
+
+                        logger.info(log_info)
 
                     # Add total_steps and epoch info for custom loggers (1-indexed epochs)
                     report_data["train/total_steps"] = self.total_steps
@@ -963,6 +1202,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
 
                 self.profiler.step()
+                data_arrival_event = torch.cuda.Event(enable_timing=True)
+                data_arrival_event.record()
+
+                if self.signal_handler is not None and any(
+                    self.signal_handler.signals_received()
+                ):
+                    # If processes was killed by signal trapped, stop training and finish the main_loop.
+                    stop_training = True
+                    self.signal_handler.release()
+                    break
 
                 if self.train_step >= self.total_steps:
                     stop_training = True
@@ -1014,6 +1263,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "final_val_loss": val_avg_loss,
             }
             self.post_training_hook(self, report_data=post_training_data)
+
+    def handle_shutdown(self):
+        # handle the ckpt saving
+        logger.info("Handling shutdown...")
         if (
             hasattr(self.trainer, "upload_thread")
             and self.trainer.upload_thread is not None

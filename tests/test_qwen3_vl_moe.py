@@ -142,9 +142,9 @@ def create_assistant_tokens_mask(tokens, processor):  # Qwen2 based model
 
     # Initialize the mask with False values.
     masks = np.zeros_like(np_tokens, dtype=bool)
-    assert len(start_indices) == len(
-        end_indices
-    ), "remember to set add_generation_prompt=False in apply_chat_template"
+    assert len(start_indices) == len(end_indices), (
+        "remember to set add_generation_prompt=False in apply_chat_template"
+    )
     # For each pair of bos/eos, check if the role is 'assistant'
     # and apply the mask accordingly.
     for start, end in zip(start_indices, end_indices):
@@ -368,4 +368,5 @@ class TestCosmosHfPrecision(unittest.TestCase):
 # torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py
 if __name__ == "__main__":
     os.environ["COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU"] = "1"
+    os.environ["TP_EP_INTERCHANGABLE_WITH_DP_FUSED"] = "1"
     unittest.main()

@@ -71,9 +71,9 @@ class ExampleHFRollout(RolloutBase):
         **kwargs,
     ) -> List[RolloutResult]:
         """Generate sequences"""
-        assert (
-            self.parallel_dims.world_size == self.parallel_dims.dp_shard
-        ), "HF Rollout only supports world size equal to dp_shard"
+        assert self.parallel_dims.world_size == self.parallel_dims.dp_shard, (
+            "HF Rollout only supports world size equal to dp_shard"
+        )
         response = []
         if isinstance(self.model, FSDPModule):
             register_fsdp_forward_method(self.model, "generate")

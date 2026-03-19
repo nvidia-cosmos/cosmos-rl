@@ -102,9 +102,9 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def forward(self, x, position_ids):
         if self.inv_freq.dtype != torch.float32:
             self.reset_inv_freq(device=x.device)
-            assert (
-                self.inv_freq.dtype == torch.float32
-            ), "inv_freq dtype should be float32"
+            assert self.inv_freq.dtype == torch.float32, (
+                "inv_freq dtype should be float32"
+            )
         # Core RoPE block. In contrast to other models, Qwen2_5_VL has different position ids for thw grids
         # So we expand the inv_freq to shape (3, ...)
         inv_freq_expanded = (
@@ -223,9 +223,9 @@ class Qwen2_5_VLAttention(nn.Module):
         super().__init__()
         self.config = model_args
         self.mrope_section = model_args.mrope_section
-        assert (
-            len(self.mrope_section) == 3
-        ), "mrope_section must be a list of 3 integers"
+        assert len(self.mrope_section) == 3, (
+            "mrope_section must be a list of 3 integers"
+        )
 
         self.n_heads = model_args.n_heads
         self.n_kv_heads = model_args.n_kv_heads
@@ -461,9 +461,9 @@ class Qwen2_5_VLModel(nn.Module):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
 
             h = self.norm(h)
@@ -535,9 +535,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         n_tokens = (input_ids == pad_token_id).sum().item()
         if n_tokens > 0:
             vision_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), "vision_embeds.shape[0] must be equal to n_tokens"
+            assert vision_embeds.shape[0] == n_tokens, (
+                "vision_embeds.shape[0] must be equal to n_tokens"
+            )
             mask = input_ids == pad_token_id
             mask_unsqueezed = mask.unsqueeze(-1)
             mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
@@ -805,9 +805,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}, n_video_tokens: {n_video_tokens}")
             # get vision embeddings as tokens for next phase
             if n_image_tokens > 0:
-                assert (
-                    image_grid_thw is not None
-                ), "image_grid_thw must be provided if there are image tokens"
+                assert image_grid_thw is not None, (
+                    "image_grid_thw must be provided if there are image tokens"
+                )
                 inputs_embeds = self._process_vision_embeddings(
                     inputs_embeds,
                     input_ids,
@@ -817,9 +817,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
                 )
 
             if n_video_tokens > 0:
-                assert (
-                    video_grid_thw is not None
-                ), "video_grid_thw must be provided if there are video tokens"
+                assert video_grid_thw is not None, (
+                    "video_grid_thw must be provided if there are video tokens"
+                )
                 inputs_embeds = self._process_vision_embeddings(
                     inputs_embeds,
                     input_ids,
@@ -828,9 +828,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
                     self.video_token_id,
                 )
         else:
-            assert (
-                input_ids.is_floating_point()
-            ), "input of pipeline stage > 0 must be of floating point type"
+            assert input_ids.is_floating_point(), (
+                "input of pipeline stage > 0 must be of floating point type"
+            )
             inputs_embeds = input_ids
 
         # For GRPO, we can pass in the logprob_masks to the model
@@ -992,9 +992,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
                 raise ValueError(f"Unsupported weight: {dest_name}")
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -1129,4 +1129,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             visual_n_heads % tp_size == 0
             and llm_n_heads % tp_size == 0
             and llm_n_kv_heads % tp_size == 0
-        ), f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} must be divisible by TP size ({tp_size})"
+        ), (
+            f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} must be divisible by TP size ({tp_size})"
+        )

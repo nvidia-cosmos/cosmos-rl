@@ -131,9 +131,9 @@ class ControllerDataFetcher(DataFetcherBase):
         self.data_fetched_for_each_policy_at_step = {}
 
         if self.config.train.train_policy.type == "sft":
-            assert (
-                self.config.train.train_policy.dataloader_batch_size
-            ), "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            assert self.config.train.train_policy.dataloader_batch_size, (
+                "[DataFetcher] dataloader_batch_size must be set for SFT policy"
+            )
             # Set n_generation to 1 for SFT policy to avoid duplicated data counting when calculating the related value.
             self.config.rollout.n_generation = 1
 
@@ -264,21 +264,23 @@ class ControllerDataFetcher(DataFetcherBase):
                         f"[DataFetcher] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
                     )
 
-                    train_dataloader_bias = max(
-                        0,
-                        len(self.dataset.train_set)
-                        - (
-                            (
-                                math.ceil(
-                                    remain_samples_num
-                                    / self.config.rollout.n_generation
+                    train_dataloader_bias = (
+                        max(
+                            0,
+                            len(self.dataset.train_set)
+                            - (
+                                (
+                                    math.ceil(
+                                        remain_samples_num
+                                        / self.config.rollout.n_generation
+                                    )
                                 )
-                            )
-                            % len(self.dataset.train_set)
-                        ),
-                    )
+                                % len(self.dataset.train_set)
+                            ),
+                        )
+                    ) % len(self.dataset.train_set)
                     logger.info(
-                        f"[DataFetcher] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
+                        f"[DataFetcher] Loaded extra info from checkpoint: {self.ckpt_extra_info} and Skipping the first {train_dataloader_bias} samples to align with the checkpoint"
                     )
                     from cosmos_rl.policy.trainer.sampler import SkippingSampler
 
@@ -298,6 +300,8 @@ class ControllerDataFetcher(DataFetcherBase):
                         ),
                     )
                     if self.batch_sampler is not None:
+                        if hasattr(self.batch_sampler, "set_epoch"):
+                            self.batch_sampler.set_epoch(self.epoch)
                         self.batch_sampler = SkippingSampler(
                             base_sampler=self.batch_sampler,
                             skip_samples=train_dataloader_bias
@@ -316,6 +320,13 @@ class ControllerDataFetcher(DataFetcherBase):
                     logger.error(
                         f"[DataFetcher] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
+
+            if hasattr(self.train_sampler, "set_epoch"):
+                # Here the epoch from 1 to total epoch count, not start from 0
+                self.train_sampler.set_epoch(self.epoch)
+            if hasattr(self.batch_sampler, "set_epoch"):
+                self.batch_sampler.set_epoch(self.epoch)
+
             if self.batch_sampler is not None:
                 logger.info(
                     "[DataFetcher] Using custom batch Sampler that yields list of indices for training dataset."
@@ -345,9 +356,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     or self.config.validation.batch_size
                     or self.rollout_batch_size
                 )
-                assert (
-                    self.val_batch_size > 0
-                ), "[DataFetcher] val_batch_size should be greater than 0."
+                assert self.val_batch_size > 0, (
+                    "[DataFetcher] val_batch_size should be greater than 0."
+                )
                 if self.val_dataset is not None:
                     assert isinstance(self.val_dataset, Dataset) or isinstance(
                         self.val_dataset, datasets.arrow_dataset.Dataset
@@ -442,6 +453,11 @@ class ControllerDataFetcher(DataFetcherBase):
 
         self.remain_samples_num = remain_samples_num
 
+    def validate_after_resume(self, ckpt_extra_info: dict):
+        assert ckpt_extra_info == self.ckpt_extra_info, (
+            "The keys in the checkpoint extra info should be consistent with the initial ckpt extra info. Please check the checkpoint path and config."
+        )
+
     def get_batched_prompt(
         self,
         n: int,
@@ -500,9 +516,9 @@ class ControllerDataFetcher(DataFetcherBase):
             First use the fetched_data_buffer to fill the payloads_list.
             Then fetch new data from the iterator until we have n payloads or the iterator is exhausted.
             """
-            assert (
-                rank_in_mesh is not None
-            ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            assert rank_in_mesh is not None, (
+                "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+            )
             while n - len(payloads_list) > 0:
                 found = False
                 for index, data in enumerate(fetched_data_buffer):
@@ -541,6 +557,8 @@ class ControllerDataFetcher(DataFetcherBase):
                         if hasattr(self.train_sampler, "set_epoch"):
                             # Here the epoch from 1 to total epoch count, not start from 0
                             self.train_sampler.set_epoch(self.epoch)
+                        if hasattr(self.batch_sampler, "set_epoch"):
+                            self.batch_sampler.set_epoch(self.epoch)
                         if self.epoch <= self.config.train.epoch:
                             logger.info(f"[Controller] Epoch {self.epoch} start.")
                             iterator = iter(self.train_dataloader)
@@ -570,9 +588,9 @@ class ControllerDataFetcher(DataFetcherBase):
                             # For non-multi-turn rollout, we set reference answer to None.
                             payload.reference_answer = None
                     if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-                        assert (
-                            rank_in_mesh is not None
-                        ), "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        assert rank_in_mesh is not None, (
+                            "rank_in_mesh should not be None when data_dispatch_as_rank_in_mesh is enabled"
+                        )
                         if (
                             idx % self.rollout_global_mesh_size == rank_in_mesh
                             and (

@@ -22,37 +22,47 @@ from cosmos_rl_reward.handler.registry import RewardRegistry
 from cosmos_rl_reward.utils.logging import logger
 
 
-
-
 @RewardRegistry.register()
 class ImageReward(BaseRewardHandler):
     NEEDS_LATENT_DECODER = False
     reward_name = "image_reward"
 
-
-    def __init__(self, dtype="float32", device="cuda", model_path="/workspace", **kwargs):
+    def __init__(
+        self, dtype="float32", device="cuda", model_path="/workspace", **kwargs
+    ):
         super().__init__()
         self.model = None
         self.dtype = dtype
         self.device = device
         self.model_path = model_path
 
-
     def set_up(self):
         import torch
         import ImageReward as RM
-        cache_root = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache")), "ImageReward")
+
+        cache_root = os.path.join(
+            os.environ.get("HF_HOME", os.path.expanduser("~/.cache")), "ImageReward"
+        )
         if isinstance(self.dtype, str):
             self.dtype = getattr(torch, self.dtype)
-        self.model = RM.load("ImageReward-v1.0", device=self.device, download_root=cache_root).eval().to(dtype=self.dtype)
+        self.model = (
+            RM.load("ImageReward-v1.0", device=self.device, download_root=cache_root)
+            .eval()
+            .to(dtype=self.dtype)
+        )
         self.model.requires_grad_(False)
-
 
     def calculate_reward(self, images, metadata):
         import torch
         from PIL import Image
-        start = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
-        end = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+
+        start = (
+            torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        )
+        end = (
+            torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        )
+
         def _error(msg: str):
             logger.error(msg)
             return {
@@ -63,12 +73,15 @@ class ImageReward(BaseRewardHandler):
                 "decoded_duration": metadata.get("decode_duration", "N/A"),
                 "type": self.reward_name,
             }
+
         if start is not None:
             start.record()
         if images is None:
             return _error("[image_reward] images tensor is None.")
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
-            return _error(f"[image_reward] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}")
+            return _error(
+                f"[image_reward] expects 4D torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images, 'shape', None)} dtype={getattr(images, 'dtype', None)}"
+            )
         if images.shape[0] == 0:
             return _error("[image_reward] images batch size is zero.")
         x = images
@@ -80,20 +93,31 @@ class ImageReward(BaseRewardHandler):
             x_nhwc = x.permute(0, 2, 3, 1).contiguous()
         else:
             raise ValueError(f"channel dim must be 3, got shape {x.shape}")
-        pil_images = [Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])]
+        pil_images = [
+            Image.fromarray(x_nhwc[i].cpu().numpy()) for i in range(x_nhwc.shape[0])
+        ]
         prompts = metadata.get("prompts")
         if prompts is None:
             return _error("[image_reward] prompts are required and cannot be None.")
         if isinstance(prompts, str):
             prompts = [prompts]
         if len(prompts) != len(pil_images):
-            return _error(f"[image_reward] prompts length ({len(prompts)}) must match batch size ({len(pil_images)}).")
+            return _error(
+                f"[image_reward] prompts length ({len(prompts)}) must match batch size ({len(pil_images)})."
+            )
         _, m = self.model.inference_rank(prompts, pil_images)
-        diag = torch.tensor(m, device=self.device, dtype=self.dtype).reshape(len(prompts), len(prompts)).diagonal(0).float().cpu().tolist()
+        diag = (
+            torch.tensor(m, device=self.device, dtype=self.dtype)
+            .reshape(len(prompts), len(prompts))
+            .diagonal(0)
+            .float()
+            .cpu()
+            .tolist()
+        )
         if end is not None:
             end.record()
             torch.cuda.synchronize()
-            duration = f"{start.elapsed_time(end)/1000.0:.2f}"
+            duration = f"{start.elapsed_time(end) / 1000.0:.2f}"
         else:
             duration = "0.00"
         return {

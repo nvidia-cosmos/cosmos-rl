@@ -102,8 +102,10 @@ def update_stage(self, position_ids_shape):
     inputs_meta_len = len(self._stage.inputs_meta)
     outputs_meta_len = len(self._stage._outputs_meta)
     if (inputs_meta_len > 1 or outputs_meta_len > 1) and not self.clear_stage_enabled:
-        logger.warning(f"Default pipeline parallelism dynamic shape mode currently only supports at most 1 input meta (got {inputs_meta_len}) \
-                         or 1 output meta (got {outputs_meta_len}). Set clear_stage_enabled to True.")
+        logger.warning(
+            f"Default pipeline parallelism dynamic shape mode currently only supports at most 1 input meta (got {inputs_meta_len}) \
+                         or 1 output meta (got {outputs_meta_len}). Set clear_stage_enabled to True."
+        )
         self.clear_stage_enabled = True
 
     if (
@@ -202,9 +204,9 @@ def step_func(self, *args, target=None, losses: Optional[List] = None, **kwargs)
             self.init_position_ids_shape = position_ids.shape
         seq_len_multiple = kwargs.get("seq_len_multiple", None)
         if self.pp_dynamic_shape_enabled and self.seq_len_multiple is None:
-            assert (
-                seq_len_multiple is not None
-            ), "Seq len multiple is required for dynamic shape mode"
+            assert seq_len_multiple is not None, (
+                "Seq len multiple is required for dynamic shape mode"
+            )
             self.seq_len_multiple = seq_len_multiple
     # Update stage if it is already initialized by updating input/output metadata
     # to match the new input shapes and types
@@ -549,9 +551,9 @@ def patch_fsdp_foreach_reduce():
         ):
             if (shard_dim := fsdp_param.fsdp_placement.dim) == 0:
                 continue
-            assert (
-                unsharded_grad.size(shard_dim) % world_size == 0
-            ), f"Shard({shard_dim}) requires even sharding: {unsharded_grad.size()=} {world_size=}"
+            assert unsharded_grad.size(shard_dim) % world_size == 0, (
+                f"Shard({shard_dim}) requires even sharding: {unsharded_grad.size()=} {world_size=}"
+            )
             chunks = torch.chunk(unsharded_grad, world_size, dim=shard_dim)
             unsharded_grads[i] = torch.cat(chunks, dim=0)
         padded_unsharded_sizes = tuple(

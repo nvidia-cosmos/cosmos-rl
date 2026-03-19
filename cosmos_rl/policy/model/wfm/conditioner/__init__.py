@@ -57,9 +57,9 @@ class GeneralConditioner(nn.Module, ABC):
         for emb_config in emb_models:
             emb_name = emb_config.name
             embedder = get_embedder(emb_config)
-            assert isinstance(
-                embedder, AbstractEmbModel
-            ), f"embedder model {embedder.__class__.__name__} has to inherit from AbstractEmbModel"
+            assert isinstance(embedder, AbstractEmbModel), (
+                f"embedder model {embedder.__class__.__name__} has to inherit from AbstractEmbModel"
+            )
             embedder.is_trainable = getattr(emb_config, "is_trainable", True)
             embedder.dropout_rate = getattr(emb_config, "dropout_rate", 0.0)
             if not embedder.is_trainable:

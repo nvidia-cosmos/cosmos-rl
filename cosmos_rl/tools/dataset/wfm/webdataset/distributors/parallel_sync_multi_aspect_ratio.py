@@ -83,9 +83,9 @@ class ShardlistMultiAspectRatioParallelSync(ShardlistMultiAspectRatio):
         chunk_mappings = chunk_mappings[group_id::group_num]
         chunk_mappings = chunk_mappings[worker_id::num_workers]
 
-        assert (
-            len(chunk_mappings) == 1
-        ), f"Length of chunk_mappings {len(chunk_mappings)} != 1"
+        assert len(chunk_mappings) == 1, (
+            f"Length of chunk_mappings {len(chunk_mappings)} != 1"
+        )
         return chunk_mappings[0][1]
 
     def enable_parallel(self):

@@ -43,7 +43,11 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, CosmosModelOutput
-from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_inputs,
+    generate_mask,
+    recover_dims,
+)
 from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
@@ -204,8 +208,8 @@ class Qwen3MoE(nn.Module):
                 interested_tokens,
                 inputs_seq_dim=1,
                 inputs_batch_dim=0,
-                position_ids_seq_dim=2,
-                position_ids_batch_dim=1,
+                position_ids_seq_dim=1,
+                position_ids_batch_dim=0,
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
@@ -216,6 +220,16 @@ class Qwen3MoE(nn.Module):
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
+
+            # Pack visual_pos_masks to match packed sequence
+            if visual_pos_masks is not None:
+                valid_input_mask = generate_mask(valid_input_len, inputs_embeds, 1, 0)
+                visual_pos_masks = recover_dims(
+                    visual_pos_masks[valid_input_mask],
+                    visual_pos_masks,
+                    1,
+                    0,
+                )
         elif cp_mesh is not None:
             [inputs_embeds, interested_tokens] = slice_inputs_for_ulysses(
                 [inputs_embeds, interested_tokens],
@@ -268,9 +282,9 @@ class Qwen3MoE(nn.Module):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
@@ -353,9 +367,9 @@ class Qwen3VLMoeModel(BaseModel):
             vision_embeds, deepstack_image_embeds = self.visual(
                 pixel_values, grid_thw=grid_thw
             )
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), f"vision_embeds.shape[0] must be equal to n_tokens, but got {vision_embeds.shape[0]} != {n_tokens}"
+            assert vision_embeds.shape[0] == n_tokens, (
+                f"vision_embeds.shape[0] must be equal to n_tokens, but got {vision_embeds.shape[0]} != {n_tokens}"
+            )
             mask = input_ids == pad_token_id
             mask_unsqueezed = mask.unsqueeze(-1)
             mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
@@ -568,9 +582,9 @@ class Qwen3VLMoeModel(BaseModel):
             # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}")
             # get vision embeddings as tokens for next phase
             if n_image_tokens > 0:
-                assert (
-                    image_grid_thw is not None
-                ), "image_grid_thw must be provided if there are image tokens"
+                assert image_grid_thw is not None, (
+                    "image_grid_thw must be provided if there are image tokens"
+                )
                 inputs_embeds, deepstack_image_embeds, image_mask = (
                     self._process_vision_embeddings(
                         inputs_embeds,
@@ -582,9 +596,9 @@ class Qwen3VLMoeModel(BaseModel):
                 )
 
             if n_video_tokens > 0:
-                assert (
-                    video_grid_thw is not None
-                ), "video_grid_thw must be provided if there are video tokens"
+                assert video_grid_thw is not None, (
+                    "video_grid_thw must be provided if there are video tokens"
+                )
                 inputs_embeds, deepstack_video_embeds, video_mask = (
                     self._process_vision_embeddings(
                         inputs_embeds,
@@ -616,9 +630,9 @@ class Qwen3VLMoeModel(BaseModel):
                 visual_pos_masks = video_mask
                 deepstack_visual_embeds = deepstack_video_embeds
         else:
-            assert (
-                input_ids.is_floating_point()
-            ), "input of pipeline stage > 0 must be of floating point type"
+            assert input_ids.is_floating_point(), (
+                "input of pipeline stage > 0 must be of floating point type"
+            )
             inputs_embeds = input_ids
         # For GRPO, we can pass in the logprob_masks to the model
         # to avoid computing the logits which are not needed for the model
@@ -783,9 +797,9 @@ class Qwen3VLMoeModel(BaseModel):
                 dest_name,
             ):
                 tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
-                assert (
-                    n_experts % tp_ep_size == 0
-                ), "n_experts must be divisible by tp_ep_size"
+                assert n_experts % tp_ep_size == 0, (
+                    "n_experts must be divisible by tp_ep_size"
+                )
 
                 if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
                     dp_shard_rank = parallel_dims.mesh[
@@ -854,9 +868,9 @@ class Qwen3VLMoeModel(BaseModel):
                             local_view = local_view[expert_id]
                             expert_weight = expert_weight.transpose(0, 1)
 
-                            assert (
-                                local_view.shape == expert_weight.shape
-                            ), f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                            assert local_view.shape == expert_weight.shape, (
+                                f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                            )
                             with torch.no_grad():
                                 local_view.data.copy_(expert_weight)
                     else:
@@ -876,9 +890,9 @@ class Qwen3VLMoeModel(BaseModel):
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
 
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -907,9 +921,9 @@ class Qwen3VLMoeModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight)
 
@@ -1039,27 +1053,20 @@ class Qwen3VLMoeModel(BaseModel):
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         visual_n_heads = self.config.encoder_args.n_heads
         llm_n_heads = self.config.lm_args.n_heads
-        cp_compatible = (
-            visual_n_heads % (cp_size * tp_size) == 0
-            and llm_n_heads % (cp_size * tp_size) == 0
-        )
+        cp_compatible = visual_n_heads % cp_size == 0 and llm_n_heads % cp_size == 0
         if not cp_compatible:
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size})"
             )
 
     def check_tp_compatible(self, tp_size: int):
-        visual_n_heads = self.config.encoder_args.n_heads
-        llm_n_heads = self.config.lm_args.n_heads
-        llm_n_kv_heads = self.config.lm_args.n_kv_heads
         llm_n_experts = self.config.lm_args.n_experts
-        non_divisible_by_tp_size = (
-            visual_n_heads % tp_size != 0
-            or llm_n_heads % tp_size != 0
-            or llm_n_kv_heads % tp_size != 0
-            or llm_n_experts % tp_size != 0
-        )
+        non_divisible_by_tp_size = llm_n_experts % tp_size != 0
         if non_divisible_by_tp_size:
             raise ValueError(
-                f"Model is not compatible with tp/ep parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} or llm_n_kv_heads={llm_n_kv_heads} or llm_n_experts={llm_n_experts} is not satisified by tp size({tp_size})"
+                f"Model is not compatible with tp/ep parallelism, model's llm_n_experts={llm_n_experts} is not divisible by tp size({tp_size})"
             )
+        assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+            "1",
+            "true",
+        ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 1 for Qwen3-VL-MoE"

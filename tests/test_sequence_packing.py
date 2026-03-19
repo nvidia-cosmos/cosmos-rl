@@ -27,6 +27,13 @@ except ImportError:
     print("Install transformers >= 4.57.0 to test Qwen3VLForConditionalGeneration")
 
 try:
+    from transformers import Qwen3_5ForConditionalGeneration
+except ImportError:
+    Qwen3_5ForConditionalGeneration = None
+    print("Install transformers >= 5.2.0 to test Qwen3_5ForConditionalGeneration")
+
+
+try:
     from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 except ImportError:
     qwen_vl_process_vision_info = None
@@ -78,7 +85,9 @@ def get_inputs(hf_processor, conversations, pad_token_id):
     if len(inputs) > 1:
         for input in inputs[1:]:
             for key, value in input.items():
-                if key == "input_ids":
+                if key in ["input_ids", "mm_token_type_ids"]:
+                    if key == "mm_token_type_ids":
+                        pad_token_id = 0
                     if input0[key].shape[1] < max_input_len:
                         input0[key] = torch.cat(
                             [
@@ -149,9 +158,9 @@ class SeqPackingTest(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             # Check if process completed successfully
-            assert (
-                process.returncode == 0
-            ), f"Process failed with code: {process.returncode}"
+            assert process.returncode == 0, (
+                f"Process failed with code: {process.returncode}"
+            )
 
     def test_train_for_sequence_packing(self):
         self.run_train_for_sequence_packing(4, 1, 1)
@@ -162,28 +171,38 @@ class SeqPackingTest(unittest.TestCase):
         for model_id in [
             "Qwen/Qwen3-VL-8B-Instruct",
             "microsoft/phi-4",
+            "Qwen/Qwen3.5-4B",
             # "google/gemma-3-1b-pt", # Need access to it.
         ]:
-            if model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
+            if model_id in ["Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3.5-4B"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
                     sequence_packing_forward_qwen3_vl_patch,
+                    sequence_packing_forward_qwen3_5_patch,
                 )
 
-                if (
-                    Qwen3VLForConditionalGeneration is not None
-                    and qwen_vl_process_vision_info is not None
-                ):
+                model_id_to_class_patch_fn_dict = {
+                    "Qwen/Qwen3-VL-8B-Instruct": (
+                        Qwen3VLForConditionalGeneration,
+                        sequence_packing_forward_qwen3_vl_patch,
+                    ),
+                    "Qwen/Qwen3.5-4B": (
+                        Qwen3_5ForConditionalGeneration,
+                        sequence_packing_forward_qwen3_5_patch,
+                    ),
+                }
+                model_class, model_patch_fn = model_id_to_class_patch_fn_dict[model_id]
+                if model_class is not None and qwen_vl_process_vision_info is not None:
                     hf_processor = AutoProcessor.from_pretrained(
                         model_id, trust_remote_code=True
                     )
-                    model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    model = model_class.from_pretrained(
                         model_id,
                         dtype=torch.bfloat16,
                         trust_remote_code=True,
                         device_map="cuda:0",
                     ).eval()
                     # Patch the model for sequence packing
-                    sequence_packing_forward_qwen3_vl_patch(model)
+                    model_patch_fn(model)
 
                     conversation1 = [
                         {"content": "Answer the questions.", "role": "system"},

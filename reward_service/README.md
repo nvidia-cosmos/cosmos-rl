@@ -21,6 +21,7 @@ A service for calculating rewards of generated videos/images for world foundatio
 - `image_reward`: [ImageReward](https://github.com/THUDM/ImageReward) - Image quality and prompt alignment scoring
 - `ocr`: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) based reward for text rendering accuracy
 - `gen_eval`: [GenEval](https://github.com/djghosh13/geneval) - Object detection based compositional generation evaluation
+- `unified_reward`: [UnifiedReward](https://huggingface.co/CodeGoat24/UnifiedReward-7b-v1.5) - For multimodal understanding and generation assessment
 
 ## 2. Installation
 
@@ -46,7 +47,7 @@ Set up the required environment and dependencies:
 cosmos-rl-reward-prepare --config cosmos_rl_reward/configs/rewards.toml
 ```
 
-Since different reward calculations may have different dependencies, separate environment for each type of rewards might be needed if necessary. Virtual python environment is used to offer separate environments for different types of rewards. 
+Since different reward calculations may have different dependencies, separate environment for each type of rewards might be needed if necessary. Virtual python environment is used to offer separate environments for different types of rewards.
 
 This command will:
 - Initialize necessary directories
@@ -254,6 +255,8 @@ Each `[[reward_args]]` block defines a reward calculation type. Multiple blocks 
 | `model_path` | string | Path or identifier of the reward model, specific to each reward type |
 | `download_path` | string | (Optional) Directory where model files should be downloaded if explicit downloading is needed |
 | `dtype` | string | Data type for model inference (e.g., "float16", "float32") |
+| `endpoint_url` | string | Custom endpoint URL for model inference if applicable (e.g., for sglang or vllm served models) |
+| `endpoint_api_key` | string | API key for the custom endpoint if applicable |
 | `enable` | boolean | Whether this reward calculator is enabled (true/false) |
 
 
@@ -280,7 +283,14 @@ Submit a reward calculation request to the service queue.
 #### Request Body
 
 The request body consists of JSON metadata followed by bytes of the videos/images, which are combined as a whole chunk of bytes: `<JSON>\n<MM_BYTES>`
-The sent videos' bytes are bytes of the latents encoded from the original videos to reduce the size, while images' bytes are directly a tensor. Inside the service, the received video bytes are decoded back to normal video format first.
+
+We have three `media_type` for the bytes. Detailed loading and processing can be found in the example clients.
+
+| media_type |                         Description                          |      Shape      |  Range   |
+| ---------- | :----------------------------------------------------------: | :-------------: | :------: |
+| latent     | Encoded from the original videos to reduce the size. The received video bytes are decoded back in the service. | [B, C, T, H, W] |    -     |
+| image      |                The tensors of original images                |  [B, H, W, C]   | [0, 255] |
+| video      |                The tensors of original videos                | [B, C, T, H, W] | [0, 255] |
 
 ##### JSON Metadata
 
@@ -288,27 +298,29 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
 # Video (Cosmos-Reason1, DanceGRPO)
 {
   "prompts": ["prompt text"],
-  "reward_fn": { 
-    "cosmos_reason1": 1.0, 
+  "reward_fn": {
+    "cosmos_reason1": 1.0,
     "dance_grpo": 1.0
   },
   "video_infos": [
     {
       "fps": 30
     }
-  ]
+  ],
+  "media_type": "latent",
 }
 
-# Image (HPSv2, ImageReward)
+# Image (HPSv2, ImageReward, UnifiedReward)
 {
-  "prompts": ["a photo of a cat", "a beautiful sunset"]
+  "prompts": ["a photo of a cat", "a beautiful sunset"],
   "reward_fn": {
     "hpsv2": 1.0,
     "image_reward": 1.0,
+    "unified_reward": 1.0,
   },
   "media_type": "image",
 }
- 
+
 # Image (HPSv3)
 {
   "prompts": [
@@ -330,7 +342,7 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
   },
   "media_type": "image",
 }
- 
+
 # Image (OCR)
 {
   "prompts": ["New York Skyline with 'Hello World' written with fireworks"],
@@ -341,34 +353,29 @@ The sent videos' bytes are bytes of the latents encoded from the original videos
 
 # Image (GenEval)
 {
-  "prompt": "a photo of a brown giraffe and a white stop sign"
+  "prompts": ["a photo of a brown giraffe and a white stop sign"],
   "reward_fn": {"gen_eval": 1.0},
 	"media_type": "image",
-  "tag": "single_object",
-  "include": [
-    {"class": "giraffe", "count": 1, "color": "brown"},
-    {"class": "stop sign", "count": 1, "color": "black"}
+  "geneval_tags": ["single_object"],
+  "geneval_includes": [
+    [
+      {"class": "giraffe", "count": 1, "color": "brown"},
+      {"class": "stop sign", "count": 1, "color": "black"}
+    ],
   ],
+  "geneval_only_strict": false,
 }
 ```
 | Field | Type | Description |
 |-------|------|-------------|
 | `prompts` | List[str] | List of text prompts corresponding to the videos |
-| `reward_fn` | Dict | Reward types with their weights, can specify one or multiple reward types required for the videos |
+| `reward_fn` | Dict | Reward types with their weights, can specify one or multiple reward types. **If the weight<=0, the server will omit related reward_fn. The server will not weight the scores when weight>0, the user should do it on the client side** |
 | `video_infos` | List[Dict] | Video metadata, including fps, not used for images |
 | `media_type` | str | Default to `video`. The image reward should pass it as  `image`. |
 | `ocr_use_gpu` | bool | For OCR reward, whether to use GPU for OCR scorer. |
-| `prompt` | str | For GenEval reward, the description of the image. (GenEval does not support batched data currently; you can divide a batch into separate requests.) |
-| `tag` | str | For GenEval reward, choices in [`single_object`, `two_object`, `counting`, `colors`, `position`, `color_attr`], full definition can be found [here](https://github.com/djghosh13/geneval) |
-| `include` | List[Dict] | For GenEval reward, class, count, and color information of the input image. |
-
-##### Bytes of MultiModal Data
-
-Images: [`B, H, W, C`]
-
-Videos: [`B, C, T, H, W`]
-
-Detailed loading and processing can be found in the example clients.
+| `geneval_tags` | List[str] | For GenEval reward, choices in [`single_object`, `two_object`, `counting`, `colors`, `position`, `color_attr`], full definition can be found [here](https://github.com/djghosh13/geneval) |
+| `geneval_includes` | List[List[Dict]] | For GenEval reward, class, count, and color information of the input image. |
+| `geneval_only_strict` | bool | For GenEval reward. If True, compute and return only the strict evaluation signals (e.g., strict_correct/score) and disable the non-strict correct metric by forcing it to False; if False, also compute the non-strict correct result. |
 
 #### Response
 
@@ -412,44 +419,44 @@ Inside each field of the response, the values are lists corresponding to the bat
 # Video (Cosmos-Reason1)
 {
     'scores': {
-        'prediction': ['Good'], 
-        'no_score': [0.9997965693473816], 
-        'yes_logit': [17.5], 
+        'prediction': ['Good'],
+        'no_score': [0.9997965693473816],
+        'yes_logit': [17.5],
         'no_logit': [26.0]
-    }, 
+    },
     'input_info': {
-        'shape': [1, 16, 24, 54, 96], 
-        'dtype': 'torch.bfloat16', 
-        'min': '0.000', 
-        'max': '1.000', 
+        'shape': [1, 16, 24, 54, 96],
+        'dtype': 'torch.bfloat16',
+        'min': '0.000',
+        'max': '1.000',
         'video_infos': [
             {'video_fps': 16.0}
         ]
-    }, 
-    'duration': '2.23', 
-    'decoded_duration': '2.02', 
+    },
+    'duration': '2.23',
+    'decoded_duration': '2.02',
     'type': 'cosmos_reason1'
 }
 
 # Video (DanceGRPO)
 {
     'scores': {
-        'vq_reward': [-0.5091875791549683], 
-        'mq_reward': [-1.1062785387039185], 
-        'ta_reward': [-2.6613192558288574], 
+        'vq_reward': [-0.5091875791549683],
+        'mq_reward': [-1.1062785387039185],
+        'ta_reward': [-2.6613192558288574],
         'overall_reward': [-4.276785373687744]
-    }, 
+    },
     'input_info': {
-        'shape': [1, 16, 24, 54, 96], 
-        'dtype': 'torch.bfloat16', 
-        'min': '0.000', 
-        'max': '1.000', 
+        'shape': [1, 16, 24, 54, 96],
+        'dtype': 'torch.bfloat16',
+        'min': '0.000',
+        'max': '1.000',
         'video_infos': [
             {'video_fps': 16.0}
         ]
-    }, 
-    'duration': '0.77', 
-    'decoded_duration': '2.02', 
+    },
+    'duration': '0.77',
+    'decoded_duration': '2.02',
     'type': 'dance_grpo'
 }
 
@@ -483,6 +490,22 @@ Inside each field of the response, the values are lists corresponding to the bat
     'duration': '0.30',
     'decoded_duration': '0.00',
     'type': 'image_reward'
+}
+
+# Image (UnifiedReward)
+{
+    'scores':{
+        'unified_reward': [0.2, 0.2]
+    },
+    'input_info': {
+        'shape': [2, 512, 512, 3],
+        'dtype': 'torch.uint8',
+        'min': '0.000',
+        'max': '254.000'
+    },
+    'duration': '8.24',
+    'decoded_duration': '0.00',
+    'type': 'unified_reward'
 }
 
 # Image (HPSv3)
@@ -536,19 +559,19 @@ Inside each field of the response, the values are lists corresponding to the bat
 # Image (GenEval)
 {
     'scores': {
-        'gen_eval_score': [0.0],
-        'gen_eval_reward': [0.0],
-        'gen_eval_strict': [0.0],
+        'gen_eval_score': [0.0, 0.0],
+        'gen_eval_reward': [0.0, 0.0],
+        'gen_eval_strict': [0.0, 0.0],
         'gen_eval_group': {
-            'single_object': [0.0],
-            'two_object': [-10.0],
-            'counting': [-10.0],
-            'colors': [-10.0],
-            'position': [-10.0],
-            'color_attr': [-10.0]
+            'single_object': [0.0, 0.0],
+            'two_object': [-10.0, -10.0],
+            'counting': [-10.0, -10.0],
+            'colors': [-10.0, -10.0],
+            'position': [-10.0, -10.0],
+            'color_attr': [-10.0, -10.0]
     },
     'input_info': {
-        'shape': [1, 512, 512, 3],
+        'shape': [2, 512, 512, 3],
         'dtype': 'torch.uint8',
         'min': '0.000',
         'max': '254.000'
@@ -586,7 +609,7 @@ python -m build
 ls dist/
 ```
 
-Built package wheel and tar files can be found in `dist`. 
+Built package wheel and tar files can be found in `dist`.
 
 ## 7. Add New Reward Support
 
@@ -596,7 +619,7 @@ To add a new reward support, a reward handler class based on `BaseRewardHandler`
 @RewardRegistry.register()
 class NewReward(BaseRewardHandler):
     reward_name = "new_reward_type"
-  
+
     def __init__(
         self,
         model_path,

@@ -84,9 +84,9 @@ class P2RCollectiveManager:
         nccl_unique_id = None
         if self.role != Role.ROLLOUT:
             # policy initialization
-            assert (
-                command.src_replica_size == self.world_size
-            ), "The source replica size should be the same as the world size."
+            assert command.src_replica_size == self.world_size, (
+                "The source replica size should be the same as the world size."
+            )
             if not command.src_replica_name == self.replica_name:
                 raise RuntimeError(
                     f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
@@ -95,7 +95,9 @@ class P2RCollectiveManager:
             if mesh_key not in self.unique_ids_cache:
                 if self.global_rank == 0:
                     nccl_unique_id = create_nccl_uid()
-                    logger.debug(f"[Policy] Creating nccl group id for {mesh_key}")
+                    logger.debug(
+                        f"[Policy] Created nccl group id for {mesh_key} in {self.role} side."
+                    )
                     self.api_client.post_nccl_comm_initiator(mesh_key, nccl_unique_id)
 
                 # broadcast the nccl group id to all ranks
@@ -357,9 +359,9 @@ class P2RCollectiveManager:
                 ipc_mesh_key = self.generate_mesh_key(
                     mesh_key, p_rank, r_rank, is_ipc=True
                 )
-                assert (
-                    ipc_mesh_key in self.ipc_comm_cache
-                ), "IPC socket not found for mesh key: {ipc_mesh_key}"
+                assert ipc_mesh_key in self.ipc_comm_cache, (
+                    "IPC socket not found for mesh key: {ipc_mesh_key}"
+                )
                 socket = self.ipc_comm_cache[ipc_mesh_key]
                 ipc_data = tensor_ipc_serialize(tensor)
                 socket.send_pyobj(ipc_data)
@@ -368,15 +370,15 @@ class P2RCollectiveManager:
                 nccl_mesh_key = self.generate_mesh_key(
                     mesh_key, p_rank, r_rank, is_p2p=True
                 )
-                assert (
-                    nccl_mesh_key in self.nccl_comm_cache
-                ), "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                assert nccl_mesh_key in self.nccl_comm_cache, (
+                    "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                )
                 comm_index = self.nccl_comm_cache[nccl_mesh_key]
                 nccl_send(tensor, 1, comm_index)
         else:
-            assert (
-                mesh_key in self.nccl_comm_cache
-            ), "NCCL communicator index not found for mesh key: {mesh_key_or_comm_index}"
+            assert mesh_key in self.nccl_comm_cache, (
+                "NCCL communicator index not found for mesh key: {mesh_key_or_comm_index}"
+            )
             comm_index = self.nccl_comm_cache[mesh_key]
             nccl_send(tensor, self.world_size + r_rank, comm_index)
 
@@ -397,9 +399,9 @@ class P2RCollectiveManager:
                 ipc_mesh_key = self.generate_mesh_key(
                     mesh_key, p_rank, r_rank, is_ipc=True
                 )
-                assert (
-                    ipc_mesh_key in self.ipc_comm_cache
-                ), "IPC socket not found for mesh key: {ipc_mesh_key}"
+                assert ipc_mesh_key in self.ipc_comm_cache, (
+                    "IPC socket not found for mesh key: {ipc_mesh_key}"
+                )
                 socket = self.ipc_comm_cache[ipc_mesh_key]
                 ipc_data = socket.recv_pyobj()
                 tensor.copy_(tensor_ipc_deserialize(ipc_data).cuda())
@@ -408,14 +410,14 @@ class P2RCollectiveManager:
                 nccl_mesh_key = self.generate_mesh_key(
                     mesh_key, p_rank, r_rank, is_p2p=True
                 )
-                assert (
-                    nccl_mesh_key in self.nccl_comm_cache
-                ), "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                assert nccl_mesh_key in self.nccl_comm_cache, (
+                    "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
+                )
                 comm_index = self.nccl_comm_cache[nccl_mesh_key]
                 nccl_recv(tensor, 0, comm_index)
         else:
-            assert (
-                mesh_key in self.nccl_comm_cache
-            ), "NCCL communicator index not found for mesh key: {mesh_key}"
+            assert mesh_key in self.nccl_comm_cache, (
+                "NCCL communicator index not found for mesh key: {mesh_key}"
+            )
             comm_index = self.nccl_comm_cache[mesh_key]
             nccl_recv(tensor, p_rank, comm_index)

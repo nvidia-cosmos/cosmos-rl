@@ -16,20 +16,153 @@
 import io
 import os
 import base64
+import copy
 import torch
+import numpy as np
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple, Union
+from typing import (
+    List,
+    Any,
+    Dict,
+    Optional,
+    Tuple,
+    Union,
+)  # Tuple used in dpo_collate_fn
 from transformers import AutoProcessor, AutoConfig
+from glob import glob
 
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
-from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
-
+from qwen_vl_utils import fetch_image, fetch_video
+from qwen_vl_utils.vision_process import smart_nframes
 
 IGNORE_LABEL_ID = -100
+
+
+def fetch_video_frames(vision_info, image_patch_size, return_video_metadata):
+    FRAME_FACTOR = 2
+    frame_dir = vision_info.get("frame_dir", None)
+    frames = sorted(
+        filter(lambda x: "json" not in x, glob(os.path.join(frame_dir, "*")))
+    )
+    max_pixels = vision_info.get("max_pixels", 196 * (16 * 2) ** 2)
+    extracted_fps = (
+        vision_info.get("extracted_fps")
+        if "metadata" not in vision_info
+        else vision_info["metadata"].get("extracted_fps")
+    )
+    total_frames = len(frames)
+    if total_frames == 0:
+        raise ValueError(f"No frames found in {frame_dir}")
+    if total_frames < FRAME_FACTOR:
+        nframes = FRAME_FACTOR
+        idx = list(range(total_frames)) + [total_frames - 1] * (
+            FRAME_FACTOR - total_frames
+        )
+        sample_fps = extracted_fps
+    else:
+        nframes = smart_nframes(
+            vision_info, total_frames=total_frames, video_fps=extracted_fps
+        )
+        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+        sample_fps = nframes / max(total_frames, 1e-6) * extracted_fps
+    sampled_frames = [
+        fetch_image(
+            {"image": frames[i], "max_pixels": max_pixels},
+            image_patch_size=image_patch_size,
+        )
+        for i in idx
+    ]
+    video = torch.stack(
+        [torch.from_numpy(np.array(img).transpose(2, 0, 1)) for img in sampled_frames]
+    ).float()
+    if return_video_metadata:
+        video_metadata = dict(
+            fps=extracted_fps,
+            frames_indices=idx,
+            total_num_frames=len(frames),
+        )
+        return (video, video_metadata), sample_fps
+    return video, sample_fps
+
+
+def extract_vision_info(
+    conversations: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]],
+) -> List[Dict[str, Any]]:
+    vision_infos = []
+    if isinstance(conversations[0], dict):
+        conversations = [conversations]
+    for conversation in conversations:
+        for message in conversation:
+            if isinstance(message["content"], list):
+                for ele in message["content"]:
+                    if (
+                        "image" in ele
+                        or "image_url" in ele
+                        or "video" in ele
+                        or "frame_dir" in ele
+                        or ele.get("type", "text")
+                        in ("image", "image_url", "video", "video_frames")
+                    ):
+                        vision_infos.append(ele)
+    return vision_infos
+
+
+def qwen_vl_process_vision_info(
+    conversations: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]],
+    return_video_kwargs: bool = False,
+    return_video_metadata: bool = False,
+    image_patch_size: int = 14,
+) -> Tuple[
+    Optional[List[Image.Image]],
+    Optional[List[Union[torch.Tensor, List[Image.Image]]]],
+    Optional[Dict[str, Any]],
+]:
+    vision_infos = extract_vision_info(conversations)
+    ## Read images or videos
+    image_inputs = []
+    video_inputs = []
+    video_sample_fps_list = []
+    for vision_info in vision_infos:
+        if "image" in vision_info or "image_url" in vision_info:
+            image_inputs.append(
+                fetch_image(vision_info, image_patch_size=image_patch_size)
+            )
+        elif "video" in vision_info:
+            video_input, video_sample_fps = fetch_video(
+                vision_info,
+                return_video_sample_fps=True,
+                image_patch_size=image_patch_size,
+                return_video_metadata=return_video_metadata,
+            )
+            video_sample_fps_list.append(video_sample_fps)
+            video_inputs.append(video_input)
+        elif "frame_dir" in vision_info:
+            video_input, video_sample_fps = fetch_video_frames(
+                vision_info,
+                image_patch_size=image_patch_size,
+                return_video_metadata=return_video_metadata,
+            )
+            video_sample_fps_list.append(video_sample_fps)
+            video_inputs.append(video_input)
+        else:
+            raise ValueError("image, image_url, frame_dir or video should in content.")
+    if len(image_inputs) == 0:
+        image_inputs = None
+    if len(video_inputs) == 0:
+        video_inputs = None
+
+    video_kwargs = {"do_sample_frames": False}
+    if not return_video_metadata:  # BC for qwen2.5vl
+        video_kwargs.update({"fps": video_sample_fps_list})
+
+    if return_video_kwargs:
+        return image_inputs, video_inputs, video_kwargs
+    return image_inputs, video_inputs
 
 
 def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
@@ -53,9 +186,9 @@ def decode_base64_to_image(
             new_image_inputs.append(image_input)
             continue
         else:
-            assert isinstance(
-                image_input, str
-            ), f"image_input should be a string, but got {type(image_input)}"
+            assert isinstance(image_input, str), (
+                f"image_input should be a string, but got {type(image_input)}"
+            )
             if os.path.isfile(image_input):
                 continue
             else:
@@ -131,7 +264,21 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type in ["qwen3_vl"]
+        self.use_qwen_vl_process = self.model_type in [
+            "qwen3_vl",
+            "qwen3_5",
+            "qwen3_5_moe",
+        ] or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
+        self.use_siglip2_process = os.environ.get("USE_SIGLIP2_PROCESS", "0") in [
+            "1",
+            "true",
+            "True",
+        ]
+        logger.info(
+            f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "
+            f"and video_token_id={self.video_token_id}, model_type={self.model_type}, "
+            f"use_qwen_vl_process={self.use_qwen_vl_process}, use_siglip2_process={self.use_siglip2_process}"
+        )
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -186,7 +333,7 @@ class HFVLMDataPacker(DataPacker):
         video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
         if (
-            self.use_qwen_vl_process
+            (self.use_qwen_vl_process or self.use_siglip2_process)
             and len(image_inputs) == 0
             and len(video_inputs) == 0
         ):
@@ -264,6 +411,7 @@ class HFVLMDataPacker(DataPacker):
         add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
+            conversation = copy.deepcopy(conversation)
             # Replace all the assistant content with consecutive `pad_token` * 10
             pad_token = self.tokenizer.pad_token
             pad_token_id = self.tokenizer.pad_token_id
@@ -281,17 +429,17 @@ class HFVLMDataPacker(DataPacker):
                             assistant_contents.append(new_content)
                             new_content = pad_token * pad_run_length
                         elif isinstance(new_content, dict):
-                            assert (
-                                "text" in new_content
-                            ), f"text not in content: {content}"
+                            assert "text" in new_content, (
+                                f"text not in content: {content}"
+                            )
                             assistant_contents.append(new_content["text"])
                             new_content["text"] = pad_token * pad_run_length
                         elif isinstance(content, list):
                             for i, item in enumerate(content):
                                 if isinstance(item, dict):
-                                    assert (
-                                        "text" in item
-                                    ), f"text not in content: {item}"
+                                    assert "text" in item, (
+                                        f"text not in content: {item}"
+                                    )
                                     assistant_contents.append(item["text"])
                                     new_content[i]["text"] = pad_token * pad_run_length
                                 else:
@@ -328,9 +476,9 @@ class HFVLMDataPacker(DataPacker):
                             assistant_contents.append(content["text"])
                         elif isinstance(content, list):
                             for _, item in enumerate(content):
-                                assert (
-                                    "text" in item
-                                ), f"text not in content of assistant: {item}"
+                                assert "text" in item, (
+                                    f"text not in content of assistant: {item}"
+                                )
                                 assistant_contents.append(item["text"])
                         else:
                             raise ValueError(
@@ -343,27 +491,23 @@ class HFVLMDataPacker(DataPacker):
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
+
             video_kwargs = {}
             image_inputs = []
             video_inputs = []
             video_metadatas = None
-
-            # For dataset with PIL image objects
-            if "images" in conversation:
-                image_inputs = conversation["images"]
-            else:
-                image_inputs, video_inputs = process_vision_info(conversation)
-                image_inputs = decode_base64_to_image(image_inputs)
 
             kwarg = {
                 "return_tensors": "pt",
                 "images": image_inputs,
             }
 
-            if self.use_qwen_vl_process:
+            if (self.use_qwen_vl_process or self.use_siglip2_process) and isinstance(
+                messages, list
+            ):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
-                    conversation,
-                    image_patch_size=16,
+                    messages,
+                    image_patch_size=16,  # TODO: hardcode
                     return_video_kwargs=True,
                     return_video_metadata=True,
                 )
@@ -472,6 +616,11 @@ class HFVLMDataPacker(DataPacker):
             result_dict["batch_num_images"] = inputs["batch_num_images"]
         else:
             result_dict["batch_num_images"] = None
+
+        if "mm_token_type_ids" in inputs:
+            result_dict["mm_token_type_ids"] = inputs["mm_token_type_ids"]
+        else:
+            result_dict["mm_token_type_ids"] = None
 
         return result_dict
 
@@ -584,6 +733,30 @@ class HFVLMDataPacker(DataPacker):
             ],
             dtype=torch.long,
         )
+        if "mm_token_type_ids" in processed_samples[0]:
+
+            def _to_padded_mm_ids(x):
+                ids = x.get("mm_token_type_ids")
+                if ids is None:
+                    ids = []
+                elif isinstance(ids, torch.Tensor):
+                    ids = ids.tolist()
+                # Flatten 2D arrays (e.g., shape (1, seq_len)) to 1D
+                if isinstance(ids, list) and ids and isinstance(ids[0], (list, tuple)):
+                    ids = (
+                        [item for sublist in ids for item in sublist]
+                        if len(ids) > 1
+                        else list(ids[0])
+                    )
+                truncated = ids[:computed_max_len]
+                pad_len = computed_max_len - len(truncated)
+                return truncated + [0] * max(0, pad_len)
+
+            batch["mm_token_type_ids"] = torch.tensor(
+                [_to_padded_mm_ids(x) for x in processed_samples],
+                dtype=torch.long,
+            )
+
         if "label_ids" in processed_samples[0]:
             batch["label_ids"] = torch.tensor(
                 [
@@ -594,6 +767,7 @@ class HFVLMDataPacker(DataPacker):
                 ],
                 dtype=torch.long,
             )
+
         batch["logprob_masks"] = torch.tensor(
             [
                 x["logprob_masks"][:computed_max_len]
@@ -603,9 +777,9 @@ class HFVLMDataPacker(DataPacker):
             dtype=torch.bool,
         )
 
-        assert len(batch["input_ids"]) == len(
-            batch["logprob_masks"]
-        ), "The length of input_ids, logprob_masks should be the same"
+        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
+            "The length of input_ids, logprob_masks should be the same"
+        )
 
         return batch
 
@@ -691,6 +865,11 @@ class HFVLMDataPacker(DataPacker):
         else:
             return_dict["batch_num_images"] = None
 
+        if "mm_token_type_ids" in x:
+            return_dict["mm_token_type_ids"] = x["mm_token_type_ids"]
+        else:
+            return_dict["mm_token_type_ids"] = None
+
         # Common fields
         input_ids = x["input_ids"]
         completion_ids = []
@@ -726,17 +905,158 @@ class HFVLMDataPacker(DataPacker):
                 del x["label_ids"]
         return self._collate_fn(processed_samples, computed_max_len)
 
+    @staticmethod
+    def _detect_media_types(sample: "HFVLMDataPacker.Payload") -> str:
+        """Classify a conversation sample as 'text', 'image', 'video', or 'mixed'."""
+        types_found: set = set()
+        if isinstance(sample, list):
+            for msg in sample:
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict):
+                            t = c.get("type", "text")
+                            if t in ("image", "video"):
+                                types_found.add(t)
+                elif isinstance(content, str):
+                    types_found.add("text")
+        if not types_found:
+            return "unknown"
+        if len(types_found) > 1:
+            return "mixed(" + "+".join(sorted(types_found)) + ")"
+        return next(iter(types_found))
+
     def sft_process_sample(self, sample: "HFVLMDataPacker.Payload") -> Dict[str, Any]:
         """
         Accepts either raw text or conversation format.
         """
-        return self.get_policy_input(sample, add_generation_prompt=False)
+        result = self.get_policy_input(sample, add_generation_prompt=False)
+
+        max_len = getattr(self.config.policy, "model_max_length", None)
+        if max_len is not None and len(result["input_ids"]) > max_len:
+            media_type = self._detect_media_types(sample)
+            has_vision = (
+                result.get("pixel_values") is not None
+                or result.get("pixel_values_videos") is not None
+            )
+            if has_vision:
+                # Truncation is safe only if every vision placeholder token
+                # falls within the kept prefix (indices 0..max_len-1).  If so,
+                # only trailing text tokens are removed and pixel tensor
+                # alignment is preserved.
+                input_ids = result["input_ids"]
+                vision_ids = {v for v in self.vision_ids if v is not None}
+                last_vision_pos = -1
+                for i, tok in enumerate(input_ids):
+                    if tok in vision_ids:
+                        last_vision_pos = i
+                        if last_vision_pos >= max_len:
+                            break
+                if last_vision_pos >= max_len:
+                    raise ValueError(
+                        f"[{media_type}] Sample exceeds model_max_length after tokenization "
+                        f"({len(result['input_ids'])} > {max_len}) and truncation would "
+                        f"break vision token alignment, skipping."
+                    )
+            orig_len = len(result["input_ids"])
+            result["input_ids"] = result["input_ids"][:max_len]
+            if "label_ids" in result:
+                result["label_ids"] = result["label_ids"][:max_len]
+            if "logprob_masks" in result:
+                result["logprob_masks"] = result["logprob_masks"][:max_len]
+            if has_vision:
+                logger.warning(
+                    f"[{media_type}] Truncated vision sample from {orig_len} to "
+                    f"{max_len} tokens (trailing text only, vision tokens preserved)."
+                )
+            else:
+                logger.warning(
+                    f"[{media_type}] Truncated sample from {orig_len} to "
+                    f"{max_len} tokens."
+                )
+
+        return result
 
     def sft_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
         """
         Compute the maximum sequence length of the processed samples
         """
         return max([len(x["input_ids"]) for x in processed_samples])
+
+    def dpo_process_sample(
+        self, sample: Dict[str, "HFVLMDataPacker.Payload"]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        DPO: Process a sample with chosen/rejected conversation pairs.
+        sample: {"chosen": messages_list, "rejected": messages_list}
+        Returns: {"chosen": model_input_dict, "rejected": model_input_dict}
+        """
+        chosen = self._process_single_sample(
+            sample["chosen"], add_generation_prompt=False
+        )
+        rejected = self._process_single_sample(
+            sample["rejected"], add_generation_prompt=False
+        )
+        # DPO needs logprob_masks (1 = response tokens for log prob)
+        for d in [chosen, rejected]:
+            label_ids = d.get("label_ids")
+            if label_ids is not None:
+                if isinstance(label_ids, list):
+                    d["logprob_masks"] = [
+                        1 if x != IGNORE_LABEL_ID else 0 for x in label_ids
+                    ]
+                else:
+                    d["logprob_masks"] = (label_ids != IGNORE_LABEL_ID).long().tolist()
+        max_len = getattr(self.config.policy, "model_max_length", None)
+        if max_len is not None:
+            for d in [chosen, rejected]:
+                if len(d["input_ids"]) > max_len:
+                    raise ValueError(
+                        f"DPO sample exceeds model_max_length ({len(d['input_ids'])} > {max_len})"
+                    )
+        return {"chosen": chosen, "rejected": rejected}
+
+    def dpo_collate_fn(
+        self, batch: List[Dict[str, Dict[str, Any]]]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Collate a list of {"chosen": dict, "rejected": dict} into batched chosen and rejected.
+        """
+        chosen_list = [x["chosen"] for x in batch]
+        rejected_list = [x["rejected"] for x in batch]
+
+        # _collate_fn expects all vision keys; image-only samples from _process_single_sample
+        # may lack pixel_values_videos etc. Fill missing keys with None before collating.
+        _OPTIONAL_COLLATE_KEYS = [
+            "pixel_values_videos",
+            "video_grid_thw",
+            "second_per_grid_ts",
+            "pixel_values",
+            "image_grid_thw",
+            "pixel_values_videos_lengths_per_sample",
+            "pixel_values_lengths_per_sample",
+            "aspect_ratio_ids",
+            "aspect_ratio_mask",
+            "image_sizes",
+            "batch_num_images",
+        ]
+
+        def _ensure_collate_keys(samples: List[Dict]) -> None:
+            for s in samples:
+                for k in _OPTIONAL_COLLATE_KEYS:
+                    if k not in s:
+                        s[k] = None
+
+        _ensure_collate_keys(chosen_list)
+        _ensure_collate_keys(rejected_list)
+
+        computed_max_len_chosen = self.policy_compute_max_len(chosen_list)
+        computed_max_len_rejected = self.policy_compute_max_len(rejected_list)
+        # Use max of both for padding
+        computed_max_len = max(computed_max_len_chosen, computed_max_len_rejected)
+        chosen_batch = self._collate_fn(chosen_list, computed_max_len)
+        rejected_batch = self._collate_fn(rejected_list, computed_max_len)
+        return chosen_batch, rejected_batch
 
     def sft_collate_fn(
         self,

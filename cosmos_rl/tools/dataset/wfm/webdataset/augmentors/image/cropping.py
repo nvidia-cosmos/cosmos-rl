@@ -46,9 +46,9 @@ class CenterCrop(Augmentor):
             We also save the cropping parameters in the aug_params dict
             so that it will be used by other transforms.
         """
-        assert (self.args is not None) and (
-            "size" in self.args
-        ), "Please specify size in args"
+        assert (self.args is not None) and ("size" in self.args), (
+            "Please specify size in args"
+        )
 
         img_size = obtain_augmentation_size(data_dict, self.args)
         width, height = img_size

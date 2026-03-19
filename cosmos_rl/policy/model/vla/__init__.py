@@ -39,7 +39,13 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import resolve_model_path
 
 
-def _find_or_get_model_path_file(name_or_path: str, subpath: str):
+def _postprocess_gripper(actions: np.ndarray) -> np.ndarray:
+    """Normalize gripper from [0,1]→[-1,1], binarize, then invert for LIBERO."""
+    actions[..., -1] = -np.sign(2.0 * actions[..., -1] - 1.0)
+    return actions
+
+
+def _find_or_get_model_path_file(name_or_path: str, subpath: str) -> str:
     local_model_path = resolve_model_path(name_or_path)
     file_path = os.path.join(local_model_path, subpath)
     if not os.path.exists(file_path):
@@ -733,9 +739,7 @@ class OpenVLA(BaseModel):
 
     def separate_model_parts(self) -> List[torch.nn.Module]:
         """Separate model into parts for parallelization"""
-        parts = []
-        parts.append(self.model)
-        return parts
+        return [self.model]
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         """Calculate number of parameters and FLOPs for VLA model"""
@@ -897,6 +901,13 @@ class OpenVLA(BaseModel):
             # Process proprioception
             if self.hf_config.use_proprio:
                 state = inputs["states"][i]
+                # OpenVLA-OFT expects 9D (pos, quat, gripper); others may use 8D (pos, axis-angle, gripper)
+                if state.shape[-1] == 9 and vla_type != "openvla-oft":
+                    from cosmos_rl.simulators.libero.utils import quat2axisangle
+
+                    state = np.concatenate(
+                        [state[:3], quat2axisangle(state[3:7]), state[7:]]
+                    )
                 norm_proprio = normalize_proprio(
                     state, self.norm_stats[unnorm_key]["proprio"]
                 )
@@ -980,6 +991,7 @@ class OpenVLA(BaseModel):
                 temperature=temperature,
             )
 
+            actions = _postprocess_gripper(actions)
             return {
                 "action": actions,
                 "responses": responses,

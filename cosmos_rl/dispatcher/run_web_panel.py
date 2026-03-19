@@ -47,6 +47,7 @@ from cosmos_rl.dispatcher.protocol import (
     GetShardSendRecvInstsRequest,
     IpcInfoRequest,
     QueryIpcInfoRequest,
+    ResumeInfoRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.network_util import find_available_port
@@ -77,6 +78,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
     COSMOS_API_IPC_INFO_SUFFIX,
     COSMOS_API_QUERY_IPC_INFO_SUFFIX,
+    COSMOS_API_RESUME_INFO_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
@@ -335,6 +337,13 @@ async def get_trainable_params():
         )
 
 
+@app.post(COSMOS_API_RESUME_INFO_SUFFIX)
+async def resume_info(request: ResumeInfoRequest):
+    logger.info(f"[Dispatcher] Validate resume info: {request.ckpt_extra_info}")
+    controller.data_fetcher.validate_after_resume(request.ckpt_extra_info)
+    return {"message": "Resume info received and processed"}
+
+
 """
 NCCL Handshake API
 """
@@ -538,12 +547,12 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     dataloader: Optional[Callable[[CosmosConfig], Iterable]] = None,
-    data_packer: Optional[BaseDataPacker] = None,
+    data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
-    val_data_packer: Optional[BaseDataPacker] = None,
+    val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     hook_fns: Optional[Dict[str, Callable]] = None,
     sampler: Optional[Callable] = None,
@@ -614,9 +623,9 @@ def main(
                 "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
             )
             raise e
-        assert (
-            args.config is not None
-        ), "Config file path is required. Please provide --config argument."
+        assert args.config is not None, (
+            "Config file path is required. Please provide --config argument."
+        )
 
     # Load config from file if provided
     loaded_config = None
@@ -644,9 +653,9 @@ def main(
                 )
 
         if data_packer is not None:
-            assert isinstance(
-                data_packer, BaseDataPacker
-            ), "data_packer should be a BaseDataPacker instance"
+            assert isinstance(data_packer, BaseDataPacker) or callable(data_packer), (
+                "data_packer should be a BaseDataPacker instance or a Callable"
+            )
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,

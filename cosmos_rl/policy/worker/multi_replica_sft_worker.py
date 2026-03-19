@@ -75,13 +75,13 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             )
             self.total_steps = command.total_steps
             if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
-                assert (
-                    self.total_steps == self.loaded_total_steps
-                ), f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+                assert self.total_steps == self.loaded_total_steps, (
+                    f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+                )
         else:
-            assert (
-                self.total_steps == command.total_steps
-            ), f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
+            assert self.total_steps == command.total_steps, (
+                f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
+            )
         ret = super().execute_policy_to_policy_broadcast(command)
         self.weight_sync_done = True
         logger.info("[SFT] Weight synchronization from broadcast command done.")
@@ -94,21 +94,26 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             )
             self.total_steps = command.total_steps
             if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
-                assert (
-                    self.total_steps == self.loaded_total_steps
-                ), f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+                assert self.total_steps == self.loaded_total_steps, (
+                    f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
+                )
         else:
-            assert (
-                self.total_steps == command.total_steps
-            ), f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
+            assert self.total_steps == command.total_steps, (
+                f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
+            )
         ret = super().execute_policy_to_policy_unicast(command)
         self.weight_sync_done = True
         logger.info("[SFT] Weight synchronization from unicast command done.")
         return ret
 
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        self.loaded_total_steps, self.loaded_train_step = self.trainer.load_model()
+        self.loaded_total_steps, self.loaded_train_step, ckpt_extra_info = (
+            self.trainer.load_model()
+        )
         logger.info("[SFT] Weight resume command executed, model weights loaded.")
+        if self.config.train.resume:
+            self.api_client.post_resume_info(ckpt_extra_info)
+            logger.info("[SFT] Posted resume info to controller after weight resume.")
         return False
 
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -150,9 +155,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 prompt_queue=self.data_queue,
                 validation_step=self.train_step or 0,
             )
-            assert (
-                (val_batch_size % self.dp_world_size) == 0
-            ), f"val_batch_size({val_batch_size}) must be divisible by dp_world_size({self.dp_world_size})"
+            assert (val_batch_size % self.dp_world_size) == 0, (
+                f"val_batch_size({val_batch_size}) must be divisible by dp_world_size({self.dp_world_size})"
+            )
             if self.data_queue.qsize() >= val_batch_size // self.dp_world_size:
                 global_batch = [
                     self.data_queue.get()
@@ -242,9 +247,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         """
         Request new prompts from the controller for both training and validation.
         """
-        assert (
-            prompt_queue.empty()
-        ), "Prompt queue should be empty before requesting new prompts."
+        assert prompt_queue.empty(), (
+            "Prompt queue should be empty before requesting new prompts."
+        )
         prompts_and_is_end: Tuple[List[RLPayload] | None, bool] = (None, False)
         is_validation = kwargs.get("validation_step", None) is not None
         if self.global_rank == 0:
@@ -254,9 +259,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 batch_size * self.parallel_dims.mesh["dp"].size(), **kwargs
             )
 
-            assert all(
-                payload["prompt_idx"] >= 0 for payload in payloads
-            ), "All payloads should have a valid prompt index"
+            assert all(payload["prompt_idx"] >= 0 for payload in payloads), (
+                "All payloads should have a valid prompt index"
+            )
 
             if len(payloads) > 0:
                 if self.config.train.local_dataset:
@@ -322,9 +327,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 if self.train_step is None:
                     self.train_step = fullpayload.weight_version
                     if self.loaded_train_step is not None:
-                        assert (
-                            self.train_step == self.loaded_train_step
-                        ), f"train_step {self.train_step} should be equal to loaded_train_step {self.loaded_train_step}"
+                        assert self.train_step == self.loaded_train_step, (
+                            f"train_step {self.train_step} should be equal to loaded_train_step {self.loaded_train_step}"
+                        )
                 target_train_step = max(target_train_step, fullpayload.weight_version)
                 target_epoch = max(target_epoch, fullpayload.extra_info["epoch"])
                 target_remain_samples_num = min(
@@ -358,9 +363,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     else:
                         payload = self.data_packer.sft_process_sample(payload)
                 prompt_queue.put(payload)
-            assert (
-                self.train_step == target_train_step or is_validation
-            ), f"train_step {self.train_step} should be equal to target_train_step {target_train_step}"
+            assert self.train_step == target_train_step or is_validation, (
+                f"train_step {self.train_step} should be equal to target_train_step {target_train_step}"
+            )
             new_epoch = (
                 self.current_epoch is not None and self.current_epoch != target_epoch
             )
@@ -398,6 +403,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
 
+        data_arrival_event = torch.cuda.Event(enable_timing=True)
+        data_arrival_event.record()
         while True:
             self.broadcast_command()
             while len(self.command_buffer.queue) > 0:
@@ -407,7 +414,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     isinstance(cmd, PolicyToPolicyUnicastCommand)
                     or isinstance(cmd, PolicyToPolicyBroadcastCommand)
                     or isinstance(cmd, WeightResumeCommand)
-                ), f"Expected PolicyToPolicyUnicastCommand or PolicyToPolicyBroadcastCommand or WeightResumeCommand, but got {type(cmd)}"
+                ), (
+                    f"Expected PolicyToPolicyUnicastCommand or PolicyToPolicyBroadcastCommand or WeightResumeCommand, but got {type(cmd)}"
+                )
 
                 abort = self.execute_command(cmd)
                 assert not abort, "Aborting main loop due to command execution."
@@ -437,8 +446,10 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     },
                 )
             assert (
-                (self.config.train.train_batch_per_replica % self.dp_world_size) == 0
-            ), f"train_batch_per_replica({self.config.train.train_batch_per_replica}) must be divisible by dp_world_size({self.dp_world_size})"
+                self.config.train.train_batch_per_replica % self.dp_world_size
+            ) == 0, (
+                f"train_batch_per_replica({self.config.train.train_batch_per_replica}) must be divisible by dp_world_size({self.dp_world_size})"
+            )
             if (
                 self.data_queue.qsize()
                 >= self.config.train.train_batch_per_replica // self.dp_world_size
@@ -472,6 +483,7 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                     train_step=self.train_step,
                     save_freq=self._save_freq,
                     inter_policy_nccl=self.inter_policy_nccl,
+                    data_arrival_event=data_arrival_event,
                 )
 
                 self.train_step += 1
@@ -490,6 +502,8 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         self.profiler.check_finished(),
                         report_data,
                     )
+                data_arrival_event = torch.cuda.Event(enable_timing=True)
+                data_arrival_event.record()
 
             if self.train_step >= self.total_steps or is_end:
                 logger.info(

@@ -45,9 +45,29 @@ try:
     )
 except ImportError:
     logger.warning(
-        "Qwen3VLForConditionalGeneration is not available. Please install transformers >= 4.57.0 to import Qwen3VLForConditionalGeneration, "
+        "Qwen3VLForConditionalGeneration is not available. Please install transformers >= 4.57.0 to import Qwen3VLForConditionalGeneration."
     )
     Qwen3VLForConditionalGeneration = None
+
+try:
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        Qwen3_5ForConditionalGeneration,
+    )
+except ImportError:
+    logger.warning(
+        "Qwen3_5ForConditionalGeneration is not available. Please install transformers >= 5.2.0 to import Qwen3_5ForConditionalGeneration."
+    )
+    Qwen3_5ForConditionalGeneration = None
+
+try:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeForConditionalGeneration,
+    )
+except ImportError:
+    logger.warning(
+        "Qwen3_5MoeForConditionalGeneration is not available. Please install transformers >= 5.2.0 to import Qwen3_5MoeForConditionalGeneration."
+    )
+    Qwen3_5MoeForConditionalGeneration = None
 
 
 # For VLMs, we only support TP for the language model, and ignore the vision encoder.
@@ -83,11 +103,15 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
         Qwen2_5_VLForConditionalGeneration,
         Qwen3ForCausalLM,
         Qwen3VLForConditionalGeneration,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5MoeForConditionalGeneration,
     ]:
         if model_class in [
             Gemma3ForConditionalGeneration,
             Qwen2_5_VLForConditionalGeneration,
             Qwen3VLForConditionalGeneration,
+            Qwen3_5ForConditionalGeneration,
+            Qwen3_5MoeForConditionalGeneration,
         ]:
             model_prefix = "model.language_model"
 

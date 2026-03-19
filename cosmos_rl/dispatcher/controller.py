@@ -249,10 +249,11 @@ maxmemory-policy allkeys-lfu
             rollouts_per_global_batch / self.config.rollout.n_generation
         )  # global_batch_size: number of prompts needed for single policy step.
         rollouts_per_global_batch = rollouts_per_global_batch or 1
-        # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
-        # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
-        weight_version_for_current_batch = (
-            self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
+        # get_batched_prompt is called in single thread, so we use `total_pending_rollouts()` based on `current_step` to calculate the weight version for each payload.
+        # This could ensure that each step of policy will get enough and accurate prompts to generae rollouts needed.
+        weight_version_for_current_batch = self.policy_status_manager.current_step + (
+            self.policy_status_manager.total_pending_rollouts()
+            // rollouts_per_global_batch
         )
 
         is_sft = self.config.train.train_policy.type == "sft"
@@ -322,6 +323,8 @@ maxmemory-policy allkeys-lfu
         if (
             step_fetched_count_control
             and len(self.rollout_status_manager.replica_scaling_log) == 0
+            # Don't do the weight version control at fetching when there is replica scaling since the pending rollout count may not reflect the real training status of the policy replicas during scaling, which may lead to too aggressive throttling and cause starvation of rollout generation.
+            and len(self.policy_status_manager.replica_scaling_log) == 0
         ):
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
@@ -349,7 +352,9 @@ maxmemory-policy allkeys-lfu
                                 weight_version_for_each_payload
                             ]
                             == global_batch_size
-                        ), f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
+                        ), (
+                            f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
+                        )
                         weight_version_for_each_payload += 1
                     # record the number of valid prompts for each weight version
                     # tag the payload with the corresponding weight version
@@ -380,8 +385,7 @@ maxmemory-policy allkeys-lfu
                         weight_version_for_current_batch
                     ] += current_fetch_count
                 for i in range(current_fetch_count):
-                    # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
-                    # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
+                    # Assign estimated weight version to each payload for weight version control.
                     payloads_list[i].weight_version = weight_version_for_current_batch
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.

@@ -54,6 +54,14 @@ class RewardArgs(BaseModel):
         default="cuda",
         description="Device to run the reward model on, e.g., 'cuda' or 'cpu'",
     )
+    endpoint_url: str = Field(
+        default="",
+        description="Custom endpoint URL for model inference if applicable (e.g., for sglang or vllm served models)",
+    )
+    endpoint_api_key: str = Field(
+        default="",
+        description="API key for the custom endpoint if applicable",
+    )
     enable: bool = Field(default=True, description="Whether to enable this reward")
 
 
@@ -80,6 +88,16 @@ class DecodeArgs(BaseModel):
     load_mean_std: bool = Field(
         default=False, description="Whether to load mean and std for normalization"
     )
+    wan2pt2_model_path: str = Field(
+        default="",
+        description="Path to the Wan2pt2 VAE model for Cosmos3 latent decoding. "
+        "Supports HuggingFace model ID (e.g. 'https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B/resolve/main/Wan2.2_VAE.pth'), "
+        "HuggingFace URL, or local path. Empty = disabled.",
+    )
+    wan2pt2_credential_path: str = Field(
+        default="",
+        description="Path to S3 credentials JSON for wan2pt2_model_path (only needed for s3:// paths).",
+    )
 
 
 class Config(BaseModel):
@@ -91,7 +109,7 @@ class Config(BaseModel):
         default=False,
         description="If true, do not initialize the latent decoder (image-only mode).",
     )
-    
+
     host: str = Field(default="localhost", description="Host address for the launcher")
     port: int = Field(default=8080, description="Port number for the launcher")
 

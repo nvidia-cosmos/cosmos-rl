@@ -87,6 +87,14 @@ class ColocatedAPIClient(APIClient):
             replica_name, weight_step, total_steps, profile_finished, report_data
         )
 
+    def post_resume_info(self, resume_info: Dict[str, Any]):
+        """
+        Post the resumed extra info to the controller.
+        Args:
+            resume_info: The resumed extra info to post.
+        """
+        super().post_resume_info(resume_info)
+
     def get_policy_model(self) -> Any:
         """
         Get the policy model parameters from the controller.

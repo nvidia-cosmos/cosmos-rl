@@ -23,7 +23,16 @@ import cosmos_rl_reward.model  # noqa: F401 to register all reward models
 
 
 class RewardProcessHandler:
-    def __init__(self, reward_name, model_path, dtype, device, download_path):
+    def __init__(
+        self,
+        reward_name,
+        model_path,
+        dtype,
+        device,
+        download_path,
+        endpoint_url="",
+        endpoint_api_key="",
+    ):
         """
         Initialize the RewardProcessHandler with necessary attributes for launching the reward process.
         Args:
@@ -32,12 +41,16 @@ class RewardProcessHandler:
             dtype (str): The data type for model.
             device (str): The device to run the model on, e.g., "cuda"
             download_path (str): The path to download or load related files including models.
+            endpoint_url (str): Custom endpoint URL for model inference if applicable (e.g., for sglang or vllm served models)
+            endpoint_api_key (str): API key for the custom endpoint if applicable
         """
         self.reward_name = reward_name
         self.model_path = model_path
         self.dtype = dtype
         self.device = device
         self.download_path = download_path
+        self.endpoint_url = endpoint_url
+        self.endpoint_api_key = endpoint_api_key
 
     def init_process(
         self, cuda_maxbytes=1024 * 1024 * 512, cpu_maxbytes=1024 * 1024, envs={}
@@ -106,6 +119,10 @@ class RewardProcessHandler:
                 str(self.dtype),
                 "--device",
                 str(self.device),
+                "--endpoint_url",
+                self.endpoint_url,
+                "--endpoint_api_key",
+                self.endpoint_api_key,
             ]
         )
         logger.info(f"Starting reward process with command: {' '.join(cmd)}")

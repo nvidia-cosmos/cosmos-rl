@@ -96,7 +96,9 @@ def _patch_vllm_rollout_locked_step(
             and self._cosmos_step_counter % COSMOS_ROLLOUT_REPORT_INTERVAL == 0
         ):
             _, is_validation, _, _ = reward_fetch()
-            assert not is_validation, "Validation report should be handled in the broadcast command rather than step function."
+            assert not is_validation, (
+                "Validation report should be handled in the broadcast command rather than step function."
+            )
 
         if (
             COSMOS_ROLLOUT_STEP_INTERVAL > 0
@@ -261,7 +263,7 @@ class vLLMRollout(RolloutBase):
             pp_size = rollout_parallelism.pp_size
 
             enable_ep_parallelism = False
-            disable_mm_preprocessor_cache = False
+            extra_kwargs = {}
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
@@ -273,7 +275,7 @@ class vLLMRollout(RolloutBase):
                 enable_ep_parallelism = True
             if model_type in multimodal_type:
                 # for vllm nightly, this is only True for multimodal models, check here
-                disable_mm_preprocessor_cache = True
+                extra_kwargs["mm_processor_cache_gb"] = 0
             assert tp_size * pp_size == rollout_parallelism.world_size, (
                 "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
                 % (tp_size, pp_size, rollout_parallelism.world_size)
@@ -294,7 +296,6 @@ class vLLMRollout(RolloutBase):
                 enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
                 gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
                 disable_custom_all_reduce=True,
-                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
                 skip_tokenizer_init=False,
                 max_model_len=policy_config.model_max_length,
                 disable_log_stats=True,
@@ -312,6 +313,7 @@ class vLLMRollout(RolloutBase):
                 load_format=load_format,
                 # Set max_logprobs for distillation, default is 20
                 max_logprobs=max(self.config.distillation.top_k, 20),
+                **extra_kwargs,
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
@@ -429,29 +431,29 @@ class vLLMRollout(RolloutBase):
             return [], []
         ret_logprobs = []
         ret_token_ids = []
-        assert (
-            len(logprobs) == len(actual_token_ids)
-        ), f"[Rollout] The length of logprobs {len(logprobs)} should be equal to the length of actual_token_ids {len(actual_token_ids)}."
+        assert len(logprobs) == len(actual_token_ids), (
+            f"[Rollout] The length of logprobs {len(logprobs)} should be equal to the length of actual_token_ids {len(actual_token_ids)}."
+        )
         for logp, actual_id in zip(logprobs, actual_token_ids):
             local_logprobs = []
             local_token_ids = []
             if top_k == 0:
-                assert (
-                    len(logp) == 1
-                ), f"[Rollout] logprobs length should be 1, but got {logp}."
+                assert len(logp) == 1, (
+                    f"[Rollout] logprobs length should be 1, but got {logp}."
+                )
                 for i, lp in logp.items():
-                    assert (
-                        i == actual_id
-                    ), f"[Rollout] The token id from logprobs {i} should be equal to the actual token id {actual_id}."
+                    assert i == actual_id, (
+                        f"[Rollout] The token id from logprobs {i} should be equal to the actual token id {actual_id}."
+                    )
                     local_token_ids.append(i)
                     local_logprobs.append(lp.logprob)
             else:
-                assert (
-                    len(logp) == top_k or len(logp) == top_k + 1
-                ), f"[Rollout] logprobs length should be {top_k} or {top_k+1}, but got {logp} for {actual_id}."
-                assert (
-                    actual_id in logp
-                ), f"[Rollout] actual token id {actual_id} should be in logprobs {logp.keys()}."
+                assert len(logp) == top_k or len(logp) == top_k + 1, (
+                    f"[Rollout] logprobs length should be {top_k} or {top_k + 1}, but got {logp} for {actual_id}."
+                )
+                assert actual_id in logp, (
+                    f"[Rollout] actual token id {actual_id} should be in logprobs {logp.keys()}."
+                )
                 local_token_ids.append(actual_id)
                 local_logprobs.append(logp[actual_id].logprob)
                 for i, lp in logp.items():
@@ -475,24 +477,24 @@ class vLLMRollout(RolloutBase):
             or self.config.distillation.top_k > 0
         ):
             return [], []
-        assert (
-            output.prompt_logprobs is not None and len(output.prompt_logprobs) > 0
-        ), "Prompt logprobs should not be None or empty"
-        assert (
-            output.prompt_logprobs[0] is None
-        ), "Prompt logprobs should be None for the first token"
+        assert output.prompt_logprobs is not None and len(output.prompt_logprobs) > 0, (
+            "Prompt logprobs should not be None or empty"
+        )
+        assert output.prompt_logprobs[0] is None, (
+            "Prompt logprobs should be None for the first token"
+        )
         if (
             self.config.distillation.top_k > 0
             and self.config.distillation.rollout_top_k_recompute
         ):
             assert output_topk.prompt_logprobs is not None and len(
                 output_topk.prompt_logprobs
-            ) > len(
-                output.prompt_logprobs
-            ), "Prompt logprobs top_k should not be larger than prompt logprobs"
-            assert (
-                output_topk.prompt_logprobs[0] is None
-            ), "Prompt logprobs top_k should be None for the first token"
+            ) > len(output.prompt_logprobs), (
+                "Prompt logprobs top_k should not be larger than prompt logprobs"
+            )
+            assert output_topk.prompt_logprobs[0] is None, (
+                "Prompt logprobs top_k should be None for the first token"
+            )
             # The following logic is commented out because we have already checked the token ids and logprobs keys in get_completion_logprobs_and_token_ids
             # but kept here for future reference and debug.
             # for x in range(1, len(output.prompt_logprobs)):
@@ -537,11 +539,11 @@ class vLLMRollout(RolloutBase):
                 self.config.distillation.top_k > 0
                 and self.config.distillation.rollout_top_k_recompute
             ):
-                assert (
-                    len(output.outputs[index_in_outputs].logprobs)
-                    + len(output.prompt_logprobs)
-                    == len(output_topk.prompt_logprobs)
-                ), f"[Rollout] The length of logprobs {len(output.outputs[index_in_outputs].logprobs)} + prompt_logprobs {len(output.prompt_logprobs)} should be equal to the length of top_k prompt_logprobs {len(output_topk.prompt_logprobs)}"
+                assert len(output.outputs[index_in_outputs].logprobs) + len(
+                    output.prompt_logprobs
+                ) == len(output_topk.prompt_logprobs), (
+                    f"[Rollout] The length of logprobs {len(output.outputs[index_in_outputs].logprobs)} + prompt_logprobs {len(output.prompt_logprobs)} should be equal to the length of top_k prompt_logprobs {len(output_topk.prompt_logprobs)}"
+                )
                 # The following logic is commented out because we have already checked the token ids and logprobs keys in get_prompt_logprobs_and_token_ids
                 # but kept here for future reference and debug.
                 # for k in range(len(output.outputs[index_in_outputs].logprobs)):
@@ -610,9 +612,9 @@ class vLLMRollout(RolloutBase):
         prompts = []
         for pl in payloads:
             if not self.config.train.local_dataset:
-                assert (
-                    pl.prompt is not None
-                ), "Prompt should not be None for single turn rollout generation."
+                assert pl.prompt is not None, (
+                    "Prompt should not be None for single turn rollout generation."
+                )
             else:
                 # Quert prompt from local dataset
                 pass
@@ -751,9 +753,9 @@ class vLLMRollout(RolloutBase):
             sampling_params=topk_sampling_params,
             use_tqdm=False,
         )
-        assert (
-            len(results_with_top_k) == len(results) * sampling_params.n
-        ), f"[Rollout] The number of results {len(results_with_top_k)} is not equal to the expected {len(results) * sampling_params.n}"
+        assert len(results_with_top_k) == len(results) * sampling_params.n, (
+            f"[Rollout] The number of results {len(results_with_top_k)} is not equal to the expected {len(results) * sampling_params.n}"
+        )
         return results_with_top_k
 
     @torch.no_grad()
@@ -778,9 +780,9 @@ class vLLMRollout(RolloutBase):
             current_conversation: ConversationType,
         ):
             assistant_turn_count = 0
-            assert (
-                payload.conversation is not None
-            ), "Conversation should not be None for multi-turn rollout generation."
+            assert payload.conversation is not None, (
+                "Conversation should not be None for multi-turn rollout generation."
+            )
             while (
                 assistant_turn_count
                 < self.rollout_config.multi_turn_config.max_assistant_turns
@@ -807,9 +809,9 @@ class vLLMRollout(RolloutBase):
                                 results, sampling_params
                             )
                         )
-                assert (
-                    len(results) == 1
-                ), "[Rollout] Expected single result for multi-turn rollout generation"
+                assert len(results) == 1, (
+                    "[Rollout] Expected single result for multi-turn rollout generation"
+                )
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
                 responses = [output.text for output in results[0].outputs]
@@ -916,12 +918,12 @@ class vLLMRollout(RolloutBase):
                     prompt_logprobs_list = prompt_logprobs
                     prompt_token_ids_list = prompt_token_ids
                 else:
-                    assert (
-                        prompt_logprobs_list == prompt_logprobs
-                    ), "Prompt logprobs should be the same for all generations"
-                    assert (
-                        prompt_token_ids_list == prompt_token_ids
-                    ), "Prompt token ids should be the same for all generations"
+                    assert prompt_logprobs_list == prompt_logprobs, (
+                        "Prompt logprobs should be the same for all generations"
+                    )
+                    assert prompt_token_ids_list == prompt_token_ids, (
+                        "Prompt token ids should be the same for all generations"
+                    )
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,

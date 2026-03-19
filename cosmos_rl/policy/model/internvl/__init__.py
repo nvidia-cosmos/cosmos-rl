@@ -166,12 +166,14 @@ class Qwen3MoE(nn.Module):
             )
             h = self.identity_layer(inputs_embeds)
 
+        # Auxiliary loss from MoE layers.
+        aux_loss = None
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
                 and layer._gradient_checkpointing_enabled
             ):
-                h = torch.utils.checkpoint.checkpoint(
+                h, local_aux_loss = torch.utils.checkpoint.checkpoint(
                     layer,
                     h,
                     position_embeddings,
@@ -179,18 +181,24 @@ class Qwen3MoE(nn.Module):
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings, **kwargs)
+                h, local_aux_loss = layer(
+                    h, position_embeddings=position_embeddings, **kwargs
+                )
 
+            if local_aux_loss is not None:
+                aux_loss = (
+                    local_aux_loss if aux_loss is None else aux_loss + local_aux_loss
+                )
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
-        return CosmosModelOutput(logits=h)
+        return CosmosModelOutput(logits=h, aux_loss=aux_loss)
 
     def current_device(self):
         return next(self.parameters()).device
@@ -327,9 +335,9 @@ class InternVLChatModel(BaseModel):
         n_image_tokens_in_vision_embeds = vision_embeds.reshape(-1, feature_dim).shape[
             0
         ]
-        assert (
-            n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds
-        ), f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
+        assert n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds, (
+            f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
+        )
         input_embeds = input_embeds.clone()
         input_embeds[selected] = (
             vision_embeds.reshape(-1, feature_dim)
@@ -364,9 +372,9 @@ class InternVLChatModel(BaseModel):
                     self.image_token_id,
                 )
         else:
-            assert (
-                input_ids.is_floating_point()
-            ), "input of pipeline stage > 0 must be of floating point type"
+            assert input_ids.is_floating_point(), (
+                "input of pipeline stage > 0 must be of floating point type"
+            )
             inputs_embeds = input_ids
 
         # For GRPO, we can pass in the logprob_masks to the model
@@ -578,14 +586,14 @@ class InternVLChatModel(BaseModel):
             if expert_id is not None:
                 local_view = local_view[expert_id]
             if slice_range is not None:
-                assert (
-                    local_view.shape[0] == 2 * self.model.model_args.ffn_dim
-                ), f"Shape mismatch: {local_view.shape[0]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                assert local_view.shape[0] == 2 * self.model.model_args.ffn_dim, (
+                    f"Shape mismatch: {local_view.shape[0]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                )
                 local_view = local_view[slice_range]
 
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -668,7 +676,7 @@ class InternVLChatModel(BaseModel):
                 biases=bias_list,
                 train_gate=True,
                 gate_bias_update_factor=1.0,
-                aux_loss_coeff=0.0,
+                aux_loss_coeff=getattr(hf_config, "aux_loss_coeff", 0.0),
                 hf_config=lm_config,
             )
         else:
@@ -723,25 +731,19 @@ class InternVLChatModel(BaseModel):
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         visual_n_heads = self.config.encoder_args.num_attention_heads
         llm_n_heads = self.config.lm_args.n_heads
-        cp_compatible = (
-            visual_n_heads % (cp_size * tp_size) == 0
-            and llm_n_heads % (cp_size * tp_size) == 0
-        )
+        cp_compatible = visual_n_heads % cp_size == 0 and llm_n_heads % cp_size == 0
         if not cp_compatible:
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size})"
             )
 
     def check_tp_compatible(self, tp_size: int):
-        visual_n_heads = self.config.encoder_args.num_attention_heads
-        llm_n_heads = self.config.lm_args.n_heads
-        llm_n_kv_heads = self.config.lm_args.n_kv_heads
-        non_divisible_by_tp_size = (
-            visual_n_heads % tp_size != 0
-            or llm_n_heads % tp_size != 0
-            or llm_n_kv_heads % tp_size != 0
-        )
+        non_divisible_by_tp_size = self.config.lm_args.n_experts % tp_size != 0
         if non_divisible_by_tp_size:
             raise ValueError(
-                f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} or llm_n_kv_heads={llm_n_kv_heads} is not satisified by tp size({tp_size})"
+                f"Model is not compatible with tp/ep parallelism, model's expert number={self.model_args.n_experts} is not divisible by tp size({tp_size})"
             )
+        assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+            "1",
+            "true",
+        ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 1 for InternVL"

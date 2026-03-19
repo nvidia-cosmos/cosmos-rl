@@ -30,7 +30,6 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 
 
 # TODO (yy): only support FSDP now, may support other parallelization policy if needed
-# TODO (yy): Add EMA warpper
 @pre_parallelize_sanity_check
 def parallelize(
     model: nn.Module,

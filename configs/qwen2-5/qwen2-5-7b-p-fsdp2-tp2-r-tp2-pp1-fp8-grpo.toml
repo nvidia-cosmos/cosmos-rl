@@ -72,4 +72,3 @@ cp_size = 1
 dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
-

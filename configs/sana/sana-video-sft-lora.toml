@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 10
-output_dir = "./outputs/sft_sana_video"
+output_dir = "./outputs/sana-video-sft-lora"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
@@ -35,7 +35,16 @@ model_gradient_checkpointing = true
 r = 4
 lora_alpha = 4
 init_lora_weights = "gaussian"
-target_modules = ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0", "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"]
+target_modules = [
+    "attn1.to_q",
+    "attn1.to_k",
+    "attn1.to_v",
+    "attn1.to_out.0",
+    "attn2.to_q",
+    "attn2.to_k",
+    "attn2.to_v",
+    "attn2.to_out.0",
+]
 
 [policy.diffusers]
 offload = true

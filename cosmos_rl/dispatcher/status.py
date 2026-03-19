@@ -114,7 +114,6 @@ class PolicyStatusManager:
 
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
-        self.consumed_samples_num = 0
         self.samples_on_the_fly = 0
 
         self.status = {}
@@ -162,6 +161,17 @@ class PolicyStatusManager:
         self.data_fetcher = data_fetcher
 
         self.recompute_total_steps()
+        # For resume case to activate dataloader and validation if needed
+        if (
+            self.config.train.resume
+            and self.config.validation.enable
+            and self.current_step > 0
+            and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            )
+        ):
+            self.data_fetcher.validation_activate_dataloader(self.current_step)
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -220,14 +230,14 @@ class PolicyStatusManager:
         Set the status of the policy.
         """
         if name not in self.status:
-            assert (
-                status == PolicyStatus.UNINITIALIZED
-            ), "Policy status should be UNINITIALIZED when first created"
+            assert status == PolicyStatus.UNINITIALIZED, (
+                "Policy status should be UNINITIALIZED when first created"
+            )
             self.status[name] = status
             return
-        assert (
-            status != PolicyStatus.UNINITIALIZED
-        ), "Policy status should not be UNINITIALIZED when already created"
+        assert status != PolicyStatus.UNINITIALIZED, (
+            "Policy status should not be UNINITIALIZED when already created"
+        )
         self.status[name] = status
 
     def recompute_total_steps(
@@ -340,9 +350,9 @@ class PolicyStatusManager:
         """
         Unregister the replica from the status manager.
         """
-        assert (
-            replica_name in self
-        ), f"Replica {replica_name} not found in policy status manager"
+        assert replica_name in self, (
+            f"Replica {replica_name} not found in policy status manager"
+        )
 
         replica = self.policy_replicas.pop(replica_name)
         self.status.pop(replica_name)
@@ -404,9 +414,9 @@ class PolicyStatusManager:
 
             # Load weight for the first loaded replica policy
             if len(valid_replicas) == 1:
-                assert not hasattr(
-                    self, "_first_policy_replica_arrived"
-                ), "Expect only one policy replica to load weight during training process"
+                assert not hasattr(self, "_first_policy_replica_arrived"), (
+                    "Expect only one policy replica to load weight during training process"
+                )
                 self._first_policy_replica_arrived = True
                 # This is the first policy replica to arrive, it is responsible for weight initialization
                 command.WeightResumeCommand.trigger(
@@ -525,9 +535,9 @@ class PolicyStatusManager:
                     ):
                         initialized_replica = replica
                         break
-                assert (
-                    initialized_replica is not None
-                ), "No replica was selected to load weights"
+                assert initialized_replica is not None, (
+                    "No replica was selected to load weights"
+                )
                 command.PolicyToPolicyBroadcastCommand.trigger(
                     src_replica=initialized_replica,
                     dst_replicas=valid_replicas,
@@ -574,13 +584,13 @@ class PolicyStatusManager:
             )
         else:
             # This is the case when the dynamic scaling is triggered
-            assert (
-                self.policy_init_done
-            ), "Policy initialization must be done before building another mesh"
+            assert self.policy_init_done, (
+                "Policy initialization must be done before building another mesh"
+            )
 
-            assert (
-                target_replica.status.mesh_rank == -1
-            ), "Target replica should not be in the mesh"
+            assert target_replica.status.mesh_rank == -1, (
+                "Target replica should not be in the mesh"
+            )
 
             # This occurs when new dynamic scaling is triggered
             initialized_replica = None
@@ -593,9 +603,9 @@ class PolicyStatusManager:
                     # to broadcast weights
                     initialized_replica = replica
                     break
-            assert (
-                initialized_replica is not None
-            ), "No replica was selected to load weights"
+            assert initialized_replica is not None, (
+                "No replica was selected to load weights"
+            )
             self.trigger_rebuild_mesh(valid_replicas)
 
             command.PolicyToPolicyUnicastCommand.trigger(
@@ -620,12 +630,16 @@ class PolicyStatusManager:
             len(x) for x in self.val_report_data[validation_step]
         )
 
-        validation_finished = n_items_of_this_step == (
-            self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader)
+        validation_finished = (
+            n_items_of_this_step
+            == (self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader))
+            * self.config.validation.n_generation
         )
 
         if self.data_fetcher.activated_val_tqdm:
-            self.data_fetcher.activated_val_tqdm.update(n_items_of_this_step)
+            self.data_fetcher.activated_val_tqdm.update(
+                n_items_of_this_step // self.config.validation.n_generation
+            )
         else:
             logger.error("[Controller] Validation tqdm is not activated")
         # Check if all rollout replicas have reported validation results
@@ -762,7 +776,6 @@ class PolicyStatusManager:
                 )
             n_samples += 1
             self.put_rollout(rollout)
-            self.consumed_samples_num += 1
             if self.config.train.train_policy.on_policy:
                 if self.total_pending_rollouts() == 0:
                     self.on_policy_rollout_completed = True
@@ -789,9 +802,9 @@ class PolicyStatusManager:
         """
         filtered_rollouts = []
         for idx, rollout in enumerate(rollouts):
-            assert (
-                rollout.weight_version <= self.current_step
-            ), f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
+            assert rollout.weight_version <= self.current_step, (
+                f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
+            )
             # Estimate the step when this rollout will be used for training
             # This is estimated based on the current step, the number of pending rollouts,
             # and the number of rollouts before this rollout in the current batch.
@@ -844,7 +857,7 @@ class PolicyStatusManager:
                     )
                 else:
                     logger.info(
-                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                        f"Step: {train_step}/{total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Max Loss {report_data['train/loss_max']:.5f}, Grad norm: {report_data['optimizer/grad_norm']:.5f}, Iteration time: {report_data['train/iteration_time']:.2f}s."
                     )
             for custom_logger_fn in self.custom_logger_fns:
                 # We add a separate try-except block to handle the error of custom logger function.
@@ -934,9 +947,9 @@ class PolicyStatusManager:
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
                 self.get_all_atoms_arrived_replicas()
             )
-            assert (
-                self.samples_on_the_fly >= 0
-            ), "samples_on_the_fly should not be negative"
+            assert self.samples_on_the_fly >= 0, (
+                "samples_on_the_fly should not be negative"
+            )
             # All replicas have been reduced, trigger allreduce
             need_sync_weight = step % self.config.train.sync_weight_interval == 0
             # If the current step is the last step, we need to sync weight always to act as ending signal
@@ -1079,7 +1092,6 @@ class PolicyStatusManager:
                                                 mm_result_sample["reward"],
                                             ),
                                             format="mp4",
-                                            fps=8,
                                         )
                                         for mm_result_sample in raw_data
                                     ]
@@ -1248,9 +1260,9 @@ class PolicyStatusManager:
             required_rollouts = 0
             all_ready_or_reduced = True
             items_count = 0
-            assert (
-                self.current_step + 1 == self.total_steps
-            ), "The last command should be fake and next step should be the last step"
+            assert self.current_step + 1 == self.total_steps, (
+                "The last command should be fake and next step should be the last step"
+            )
         else:
             items_count = self.config.train.train_batch_per_replica
             required_rollouts = items_count * len(arrived_replicas)
@@ -1481,9 +1493,9 @@ class RolloutStatusManager:
         """
         Unregister the replica from the status manager.
         """
-        assert (
-            replica_name in self
-        ), f"Replica {replica_name} not found in policy status manager"
+        assert replica_name in self, (
+            f"Replica {replica_name} not found in policy status manager"
+        )
 
         replica = self.rollout_replicas.pop(replica_name)
         self.replica_scaling_log.append(ReplicaScalingLog.down(replica))

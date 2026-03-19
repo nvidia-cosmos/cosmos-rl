@@ -807,13 +807,13 @@ def policy_to_policy_sync_common(
             sample_tensors = sample_tensor()
             for tensor, origin_tensor in zip(sample_tensors, origin_sample_tensors):
                 if isinstance(tensor, torch.Tensor):
-                    assert torch.allclose(
-                        tensor, origin_tensor
-                    ), f"Tensor values do not match {tensor} {origin_tensor}"
+                    assert torch.allclose(tensor, origin_tensor), (
+                        f"Tensor values do not match {tensor} {origin_tensor}"
+                    )
                 elif isinstance(tensor, bool):
-                    assert (
-                        tensor == origin_tensor
-                    ), f"Tensor values do not match {tensor} {origin_tensor}"
+                    assert tensor == origin_tensor, (
+                        f"Tensor values do not match {tensor} {origin_tensor}"
+                    )
     finally:
         # Detach from shared memory
         shm.close()
@@ -892,9 +892,9 @@ def run_overfitting_policy(args: argparse.Namespace):
         pp_last_stage: bool = False,
     ):
         if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            assert train_step == 0, (
+                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            )
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
@@ -1555,9 +1555,9 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                 )
                 sft_worker.trainer.optimizers.step()
                 if sft_worker.trainer.lr_schedulers is None:
-                    assert (
-                        sft_worker.train_step == 0
-                    ), "lr_schedulers should be None if training is from scratch"
+                    assert sft_worker.train_step == 0, (
+                        "lr_schedulers should be None if training is from scratch"
+                    )
                     sft_worker.trainer.lr_schedulers = build_lr_schedulers(
                         sft_worker.trainer.optimizers,
                         sft_worker.config,
@@ -1621,12 +1621,12 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     sft_worker = SFTPolicyWorker(config=config, parallel_dims=parallel_dims)
     packing_losses = train_test(sft_worker, True)
     if util.is_master_rank(sft_worker.parallel_dims, sft_worker.global_rank):
-        assert (
-            len(non_packing_losses) == 8
-        ), f"Expected non-packing losses to be 8, but got {len(non_packing_losses)}"
-        assert (
-            len(packing_losses) == 8
-        ), f"Expected packing losses to be 8, but got {len(packing_losses)}"
+        assert len(non_packing_losses) == 8, (
+            f"Expected non-packing losses to be 8, but got {len(non_packing_losses)}"
+        )
+        assert len(packing_losses) == 8, (
+            f"Expected packing losses to be 8, but got {len(packing_losses)}"
+        )
         double_actual = torch.tensor(non_packing_losses).double().view(-1)
         double_expected = torch.tensor(packing_losses).double().view(-1)
         cosine_similarity = torch.nn.functional.cosine_similarity(
@@ -2112,20 +2112,20 @@ def run_sft_data_packer_factory():
     )
 
     # Verify factory functions were called
-    assert (
-        factory_call_count["data_packer"] == 1
-    ), f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
-    assert (
-        factory_call_count["val_data_packer"] == 1
-    ), f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
+    assert factory_call_count["data_packer"] == 1, (
+        f"data_packer factory should be called once, got {factory_call_count['data_packer']}"
+    )
+    assert factory_call_count["val_data_packer"] == 1, (
+        f"val_data_packer factory should be called once, got {factory_call_count['val_data_packer']}"
+    )
 
     # Verify data packers are properly set
-    assert isinstance(
-        sft_worker.data_packer, DecoderOnlyLLMDataPacker
-    ), f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
-    assert isinstance(
-        sft_worker.val_data_packer, DecoderOnlyLLMDataPacker
-    ), f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
+    assert isinstance(sft_worker.data_packer, DecoderOnlyLLMDataPacker), (
+        f"data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.data_packer)}"
+    )
+    assert isinstance(sft_worker.val_data_packer, DecoderOnlyLLMDataPacker), (
+        f"val_data_packer should be DecoderOnlyLLMDataPacker, got {type(sft_worker.val_data_packer)}"
+    )
 
     # Verify data loaders work
     cnt = 0
@@ -2236,7 +2236,9 @@ def run_gspo_test():
             logger.info(f"Step {i} report {report['train/loss_avg']}")
             assert (
                 report["train/loss_avg"] < -0.1 and report["train/loss_avg"] > -0.8
-            ), f"Expected loss avg to be between -0.1 and -0.8, but got {report['train/loss_avg']} for step {i}"
+            ), (
+                f"Expected loss avg to be between -0.1 and -0.8, but got {report['train/loss_avg']} for step {i}"
+            )
     rl_worker.handle_shutdown()
     destroy_distributed()
 
@@ -2551,12 +2553,12 @@ def run_sft_ddp_load_check():
                 cnt += 1
                 if cnt > 10:
                     break
-            assert all(
-                results1
-            ), "DDP load failed for some model parameters, they should match hf loaded weights"
-            assert not all(
-                results2
-            ), "DDP load failed for some model parameters, they should be different after load"
+            assert all(results1), (
+                "DDP load failed for some model parameters, they should match hf loaded weights"
+            )
+            assert not all(results2), (
+                "DDP load failed for some model parameters, they should be different after load"
+            )
             results1 = []
             cnt = 0
             for key in pre_optimizer_state_dict_cpu.keys():
@@ -2674,14 +2676,14 @@ async def main():
     print(f"Rank {rank} started with mode {mode} {torch.cuda.current_device()}")
 
     if mode == "policy_send_to_rollout":
-        assert (
-            world_size == POLICY_WORLD_SIZE
-        ), "World size must match POLICY_WORLD_SIZE for policy process"
+        assert world_size == POLICY_WORLD_SIZE, (
+            "World size must match POLICY_WORLD_SIZE for policy process"
+        )
         await run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_sync)
     elif mode == "rollout_recv_from_policy":
-        assert (
-            world_size == ROLLOUT_WORLD_SIZE
-        ), "World size must match ROLLOUT_WORLD_SIZE for rollout process"
+        assert world_size == ROLLOUT_WORLD_SIZE, (
+            "World size must match ROLLOUT_WORLD_SIZE for rollout process"
+        )
         await run_rollout_recv_from_policy(
             shm_name, shm_size, rank, trainable_param_sync
         )

@@ -282,9 +282,26 @@ def main():
     redis_url = f"http://localhost:{port}"
     info = {"reward": {}}
     controllers: Dict[str, RewardProcessHandler] = {}
+
+    # Shared memory sizing
+    # - CUDA buffer holds decoded tensors (can be large for video batches)
+    # - CPU shared memory holds metadata (msgpack)
+    shmem_cuda_maxbytes = int(
+        os.environ.get("COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES", 1024 * 1024 * 1024)
+    )
+    shmem_cpu_maxbytes = int(
+        os.environ.get("COSMOS_RL_REWARD_SHMEM_CPU_MAXBYTES", 1024 * 1024)
+    )
+    logger.info(
+        "[reward_serve] Shared memory config: "
+        f"COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES={shmem_cuda_maxbytes}, "
+        f"COSMOS_RL_REWARD_SHMEM_CPU_MAXBYTES={shmem_cpu_maxbytes}"
+    )
     # Filter only enabled rewards
     enabled_reward_args = [
-        reward_arg for reward_arg in loaded_config.reward_args if getattr(reward_arg, "enable", True)
+        reward_arg
+        for reward_arg in loaded_config.reward_args
+        if getattr(reward_arg, "enable", True)
     ]
     for reward_arg in enabled_reward_args:
         logger.info(f"Setting up reward: {reward_arg.reward_type}")
@@ -295,9 +312,15 @@ def main():
             reward_arg.dtype,
             device=reward_arg.device,
             download_path=reward_arg.download_path,
+            endpoint_url=reward_arg.endpoint_url,
+            endpoint_api_key=reward_arg.endpoint_api_key,
         )
         RewardRegistry.register_reward_venv(key, reward_arg.venv_python)
-        controllers[key].init_process(envs={"REDIS_URL": redis_url})
+        controllers[key].init_process(
+            cuda_maxbytes=shmem_cuda_maxbytes,
+            cpu_maxbytes=shmem_cpu_maxbytes,
+            envs={"REDIS_URL": redis_url},
+        )
         info["reward"][key] = controllers[key].process_handler.shm_cpu.name
 
     # Instantiate the DecodeHandler singleton
@@ -326,6 +349,21 @@ def main():
             )
             if not os.path.exists(model_path):
                 download_file(loaded_config.decode_args.model_path, model_path)
+        # Resolve Wan2pt2 model path if configured.
+        wan2pt2_model_path = loaded_config.decode_args.wan2pt2_model_path
+        if (
+            wan2pt2_model_path
+            and not wan2pt2_model_path.startswith("s3://")
+            and not os.path.exists(wan2pt2_model_path)
+        ):
+            wan2pt2_local = os.path.join(
+                get_cosmos_rl_reward_cache_dir(),
+                os.path.basename(wan2pt2_model_path),
+            )
+            if not os.path.exists(wan2pt2_local):
+                download_file(wan2pt2_model_path, wan2pt2_local)
+            wan2pt2_model_path = wan2pt2_local
+
         # Initialize the DecodeHandler in the worker process with decoder args
         initialized = decoder.threading_pool.submit(
             DecodeHandler.initialize,
@@ -337,6 +375,8 @@ def main():
             chunk_duration=loaded_config.decode_args.chunk_duration,
             temporal_window=loaded_config.decode_args.temporal_window,
             load_mean_std=loaded_config.decode_args.load_mean_std,
+            wan2pt2_model_path=wan2pt2_model_path,
+            wan2pt2_credential_path=loaded_config.decode_args.wan2pt2_credential_path,
         )
     else:
         # Initialize without decoder (skip heavy imports/downloads)

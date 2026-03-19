@@ -354,9 +354,9 @@ def tar_file_expander(
                             sample["fname"].split(".")[0] for sample in sample_list
                         ]
                         # Check all the prefix are the same
-                        assert all(
-                            prefix == all_prefix[0] for prefix in all_prefix
-                        ), f"prefixes are not the same: {all_prefix}"
+                        assert all(prefix == all_prefix[0] for prefix in all_prefix), (
+                            f"prefixes are not the same: {all_prefix}"
+                        )
                         # Correct the order of sample_list
                         sample_list = correct_order(sample_list, url.keys)
                         # Yield all the samples

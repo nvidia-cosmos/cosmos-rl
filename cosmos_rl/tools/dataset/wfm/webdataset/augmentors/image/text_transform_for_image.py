@@ -93,9 +93,9 @@ class TextTransformForImage(Augmentor):
                 ]["embeddings"][embedding_key]
                 data_dict["selected_caption_type"] = caption_type
             else:
-                assert (
-                    caption_type == "ai_v3p1"
-                ), f"Caption type {caption_type} not supported"
+                assert caption_type == "ai_v3p1", (
+                    f"Caption type {caption_type} not supported"
+                )
                 if decoded_captions_ai["had_parse_issue"]:
                     data_dict["ai_caption"] = decoded_captions_ai["captions"][
                         "kosmos_2"
@@ -166,9 +166,9 @@ class TextTransformForImageWithoutEmbeddings(Augmentor):
                 data_dict["ai_caption"] = decoded_captions_ai["caption"]["prompt"]
                 data_dict["selected_caption_type"] = caption_type
             else:
-                assert (
-                    caption_type == "ai_v3p1"
-                ), f"Caption type {caption_type} not supported"
+                assert caption_type == "ai_v3p1", (
+                    f"Caption type {caption_type} not supported"
+                )
                 if decoded_captions_ai["had_parse_issue"]:
                     data_dict["ai_caption"] = decoded_captions_ai["captions"][
                         "kosmos_2"

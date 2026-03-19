@@ -88,4 +88,3 @@ VLMs
 
 .. tip::
    The generic HF Model wrapper enables support for most Hugging Face models without additional configuration. For optimal performance, consider using models that have been specifically tested and optimized.
-

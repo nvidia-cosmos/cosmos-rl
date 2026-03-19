@@ -96,8 +96,11 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
-# NCCL related
-set_env "NCCL_CUMEM_ENABLE" "1"
+# NCCL related, to avoid potential unstable issues such as https://github.com/NVIDIA/nccl/issues/1234
+# Only set if not set by user to avoid overwriting user specified envs. `NCCL_CUMEM_ENABLE` -> 0
+if [ -z "$NCCL_CUMEM_ENABLE" ]; then
+  set_env "NCCL_CUMEM_ENABLE" "0"
+fi
 
 if [ "$BACKEND" == "trtllm" ]; then
   # BACKEND won't have affect on policy.
@@ -158,6 +161,8 @@ if [ "$TYPE" == "policy" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$TYPE" == "rollout" ]; then
+  # Disable TP_EP_INTERCHANGABLE_WITH_DP_FUSED for rollout to avoid potential unstable issues
+  export TP_EP_INTERCHANGABLE_WITH_DP_FUSED=0
   if [ "$BACKEND" == "trtllm" ]; then
     COSMOS_WORLD_SIZE=$((NNODES * NGPU))
     export COSMOS_WORLD_SIZE

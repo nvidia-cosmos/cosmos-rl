@@ -455,7 +455,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
-            nccl_group_start(communicator_index)
+            if constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0:
+                nccl_group_start(communicator_index)
 
             for insts_group in self.policy_to_rollout_recv_insts:
                 # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
@@ -471,13 +472,16 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 total_bytes_received += bytes_received
 
                 pending_groups += 1
-                if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                    nccl_group_end(communicator_index)
+                if pending_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                    if constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0:
+                        nccl_group_end(communicator_index)
                     flush_completions(pending_bytes, pending_completions)
-                    nccl_group_start(communicator_index)
+                    if constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0:
+                        nccl_group_start(communicator_index)
                     pending_groups = 0
 
-            nccl_group_end(communicator_index)
+            if constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0:
+                nccl_group_end(communicator_index)
             flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):
@@ -516,12 +520,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
-                assert (
-                    self.rank_in_rollout_repicas >= 0
-                ), "[Rollout] rank in rollout replicas should be set before broadcast."
-                assert (
-                    len(dst_replica_names) == len(self.replica_name_to_rank)
-                ), "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                assert self.rank_in_rollout_repicas >= 0, (
+                    "[Rollout] rank in rollout replicas should be set before broadcast."
+                )
+                assert len(dst_replica_names) == len(self.replica_name_to_rank), (
+                    "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                )
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
 

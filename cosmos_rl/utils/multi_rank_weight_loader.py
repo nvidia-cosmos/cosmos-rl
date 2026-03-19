@@ -46,15 +46,15 @@ class MultiRankWeightLoader:
         # since each replica is independent and should load weights separately
         if dist.is_initialized():
             assert hasattr(parallel_dims, "mesh"), "parallel_dims.mesh is not found"
-            # Use dp_cp_tp mesh which excludes dp_replicate
+            # Use weight_loading mesh which excludes dp_replicate
             # This ensures we only communicate within the same replica
             try:
-                self.group = parallel_dims.mesh.get_group("dp_cp_tp")
+                self.group = parallel_dims.mesh.get_group("weight_loading")
                 self.rank = dist.get_rank(self.group)
                 self.world_size = dist.get_world_size(self.group)
             except (KeyError, AttributeError):
                 raise ValueError(
-                    "[MultiRankWeightLoader] dp_cp_tp group not found in parallel_dims.mesh"
+                    "[MultiRankWeightLoader] weight_loading group not found in parallel_dims.mesh"
                 )
         else:
             self.rank = 0

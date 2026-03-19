@@ -25,7 +25,6 @@ from cosmos_rl.simulators.libero.venv import ReconfigureSubprocEnv
 from cosmos_rl.simulators.libero.utils import (
     get_benchmark_overridden,
     get_libero_dummy_action,
-    quat2axisangle,
 )
 from cosmos_rl.simulators.utils import save_rollout_video
 
@@ -110,7 +109,7 @@ class LiberoEnvWrapper(gym.Env):
                 np.concatenate(
                     [
                         obs[env_id]["robot0_eef_pos"],
-                        quat2axisangle(obs[env_id]["robot0_eef_quat"]),
+                        obs[env_id]["robot0_eef_quat"],
                         obs[env_id]["robot0_gripper_qpos"],
                     ]
                 )
@@ -152,9 +151,7 @@ class LiberoEnvWrapper(gym.Env):
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(env_ids):
             self.env_states[env_id].current_obs = {
-                "full_images": images_and_states["full_images"][i],
-                "wrist_images": images_and_states["wrist_images"][i],
-                "states": images_and_states["states"][i],
+                k: v[i] for k, v in images_and_states.items()
             }
         return images_and_states, task_descriptions
 
@@ -248,9 +245,7 @@ class LiberoEnvWrapper(gym.Env):
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(env_ids):
             self.env_states[env_id].current_obs = {
-                "full_images": images_and_states["full_images"][i],
-                "wrist_images": images_and_states["wrist_images"][i],
-                "states": images_and_states["states"][i],
+                k: v[i] for k, v in images_and_states.items()
             }
         descriptions = [self.env_states[env_id].language for env_id in env_ids]
         return images_and_states, descriptions
@@ -303,11 +298,9 @@ class LiberoEnvWrapper(gym.Env):
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
 
-        # Libero-specific gripper post-processing
-        actions = normalize_gripper_action(actions)
-        actions = invert_gripper_action(actions)
-
-        steps = actions.shape[1]
+        steps = actions.shape[1] if actions.ndim > 2 else 1
+        if actions.ndim == 2:
+            actions = actions[:, None, :]
         for step in range(steps):
             results = self.step(env_ids, actions[:, step])
 

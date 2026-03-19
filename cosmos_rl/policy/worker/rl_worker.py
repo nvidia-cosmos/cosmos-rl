@@ -69,9 +69,9 @@ class RLPolicyWorker(PolicyWorkerBase):
     config: CosmosConfig
 
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        assert isinstance(
-            config, CosmosConfig
-        ), "config must be a CosmosConfig object for this trainer"
+        assert isinstance(config, CosmosConfig), (
+            "config must be a CosmosConfig object for this trainer"
+        )
         super().__init__(config, parallel_dims=parallel_dims)
 
         self.report_data = {}
@@ -357,9 +357,9 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         self.p2r_collective_manager.setup_manager(command)
 
-        assert (
-            self.trainer.map_w_from_policy_to_rollout is not None
-        ), "No parameters to sync found."
+        assert self.trainer.map_w_from_policy_to_rollout is not None, (
+            "No parameters to sync found."
+        )
         st = time.time()
 
         if self.policy_to_rollout_insts is None:
@@ -396,7 +396,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
 
                     def grouped_send(grouped_send_ops):
-                        if self.rl_mode != "colocated_separated":
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
                             # Only in non-colocated-separated mode, we could use NCCL group feature.
                             nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
@@ -406,7 +409,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                             self.p2r_collective_manager.send(
                                 base_mesh_key, view, r_rank
                             )
-                        if self.rl_mode != "colocated_separated":
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
                             nccl_group_end(comm_id)
                         grouped_send_ops.clear()
 
@@ -464,7 +470,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                                 grouped_send_ops.append((view, r_rank, dest_name))
                                 total_bytes_sent += view.numel() * view.element_size()
                         num_groups += 1
-                        if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                        if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                             grouped_send(grouped_send_ops)
                             num_groups = 0
 
@@ -479,9 +485,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                     if not hasattr(self, "synced_trainable_params"):
                         self.synced_trainable_params = transferred_params_cnt
                     else:
-                        assert (
-                            self.synced_trainable_params == transferred_params_cnt
-                        ), "Trainable synced params count must match at each weight sync."
+                        assert self.synced_trainable_params == transferred_params_cnt, (
+                            "Trainable synced params count must match at each weight sync."
+                        )
 
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
@@ -492,7 +498,14 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(WeightResumeCommand)
     def execute_weight_resume(self, command: WeightResumeCommand = None):
-        return self.trainer.weight_resume()
+        ckpt_extra_info = self.trainer.weight_resume()
+        if self.config.train.resume:
+            # Validate for resume, make sure the ckpt extra info is consistent with the loaded ckpt extra info in the data fetcher.
+            self.api_client.post_resume_info(ckpt_extra_info)
+            logger.info(
+                f"[Policy] Posted resume info to controller for weight resume with ckpt extra info: {ckpt_extra_info}"
+            )
+        return False
 
     @CommMixin.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):
@@ -511,13 +524,24 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
+            do_save_checkpoint = command.do_save
+            if (
+                self.signal_handler is not None
+                and any(self.signal_handler.signals_received())
+                and not hasattr(self, "signal_handled")
+            ):
+                logger.info("Signal received, preparing to save checkpoint...")
+                do_save_checkpoint = True
+                self.signal_handler.release()
+                self.signal_handled = True
+
             self.trainer.update_lr_schedulers(command.total_steps)
             report_data = self.trainer.step_training(
                 rollouts=self.dispatch_rollouts(),
                 current_step=command.global_step,
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
-                do_save_checkpoint=command.do_save,
+                do_save_checkpoint=do_save_checkpoint,
                 inter_policy_nccl=self.inter_policy_nccl,
                 is_master_replica=self.is_master_replica,
             )
@@ -576,9 +600,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
                     if bmcmd:
-                        assert isinstance(
-                            bmcmd, BuildMeshCommand
-                        ), "Only buildmesh command is supported"
+                        assert isinstance(bmcmd, BuildMeshCommand), (
+                            "Only buildmesh command is supported"
+                        )
                         self.is_master_replica = (
                             bmcmd.replica_name_to_rank[self.replica_name] == 0
                         )
@@ -658,9 +682,9 @@ class RLPolicyWorker(PolicyWorkerBase):
             - Getting the prompt and conversation from the local dataset if local_dataset is enabled
             - Getting the teacher result from the Redis if the teacher result uuid is not empty
             """
-            assert all(
-                rollout.prompt_idx >= 0 for rollout in rollouts
-            ), "All rollouts from controller should have a valid prompt index"
+            assert all(rollout.prompt_idx >= 0 for rollout in rollouts), (
+                "All rollouts from controller should have a valid prompt index"
+            )
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
                     if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
@@ -671,7 +695,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                                 == self.inter_policy_nccl.replica_name_to_rank[
                                     self.replica_name
                                 ]
-                            ), f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
+                            ), (
+                                f"Rollout prompt idx {rollout.prompt_idx} mod {len(self.inter_policy_nccl.replica_name_to_rank)} must be equal to replica rank {self.inter_policy_nccl.replica_name_to_rank[self.replica_name]} in mesh."
+                            )
                     # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx

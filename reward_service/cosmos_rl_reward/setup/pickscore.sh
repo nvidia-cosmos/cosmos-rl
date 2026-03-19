@@ -53,4 +53,3 @@ fi
 "$PIP_BIN" install redis msgpack requests
 
 echo "INFO: PickScore setup completed. Venv python: ${VENV_DIR}/bin/python"
-

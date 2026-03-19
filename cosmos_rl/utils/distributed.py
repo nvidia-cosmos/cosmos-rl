@@ -21,7 +21,7 @@ import threading
 from collections import defaultdict
 from queue import Queue, Empty
 from datetime import timedelta
-from typing import Dict, Iterable, Optional, Union, Callable
+from typing import Dict, Iterable, Optional, Union, Callable, List
 from functools import partial
 
 # Third party imports
@@ -173,9 +173,9 @@ def gradient_reduce_across_dp_replicas_(
                 size = g.numel()
                 g.copy_(tmp_buffer[offset : offset + size].view_as(g))
                 offset += size
-                assert (
-                    offset <= tmp_buffer.numel()
-                ), "offset should be equal to total size"
+                assert offset <= tmp_buffer.numel(), (
+                    "offset should be equal to total size"
+                )
 
 
 gradient_reduce_across_dp_replicas_.first_invoke = True
@@ -183,7 +183,7 @@ gradient_reduce_across_dp_replicas_.first_invoke = True
 
 @torch.no_grad()
 def gradient_norm_clipping(
-    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    parameters: List[torch.Tensor],
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
@@ -217,17 +217,20 @@ def gradient_norm_clipping(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
+    param_set = set()
     # Group the parameters by their device meshes.
     parameters_by_mesh = defaultdict(list)
     for param in parameters:
-        if param.grad is not None:
-            # If one parameter belongs to multiple meshes, use a flattened mesh name
-            # by concatenating all the mesh names together.
-            if hasattr(param, "device_mesh"):
-                device_mesh_str = "-".join(list(param.device_mesh.mesh_dim_names))
-            else:
-                device_mesh_str = "default"
-            parameters_by_mesh[device_mesh_str].append(param)
+        if param not in param_set:
+            param_set.add(param)
+            if param.grad is not None:
+                # If one parameter belongs to multiple meshes, use a flattened mesh name
+                # by concatenating all the mesh names together.
+                if hasattr(param, "device_mesh"):
+                    device_mesh_str = "-".join(list(param.device_mesh.mesh_dim_names))
+                else:
+                    device_mesh_str = "default"
+                parameters_by_mesh[device_mesh_str].append(param)
     # Compute the norm for each mesh group
     per_mesh_norm_list = []
     for mesh, params in parameters_by_mesh.items():
@@ -391,6 +394,34 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
     )
     dist.all_gather_object(obj_lst, obj, group=group)
     return obj_lst
+
+
+def all_reduce_tensor_object_cpu(
+    tensor_obj: torch.Tensor,
+    op=dist.ReduceOp.SUM,
+    device=torch.device("cpu"),
+    group=None,
+) -> torch.Tensor:
+    """
+    Reduce an object from all processes to the source process.
+    The object is first converted to a list and then reduced.
+    """
+    obj = tensor_obj.flatten().tolist()
+    gathered_obj_lst = all_gather_object_cpu(obj, device=device, group=group)
+    data = torch.tensor(gathered_obj_lst)
+    if op == dist.ReduceOp.SUM:
+        tensor = data.sum(dim=0)
+    elif op == dist.ReduceOp.PRODUCT:
+        tensor = data.prod(dim=0)
+    elif op == dist.ReduceOp.MIN:
+        tensor = data.min(dim=0).values
+    elif op == dist.ReduceOp.MAX:
+        tensor = data.max(dim=0).values
+    elif op == dist.ReduceOp.AVG:
+        tensor = data.mean(dim=0)
+    else:
+        raise ValueError(f"Unsupported reduce operation: {op}")
+    return tensor.view(tensor_obj.shape)
 
 
 class HighAvailabilitylNccl:
@@ -747,9 +778,9 @@ class DistKVStore:
                 group=self.group,
             )
             local_ip, local_port = broadcast_object_list
-            assert (
-                local_ip is not None and local_port is not None
-            ), "Failed to broadcast local store info"
+            assert local_ip is not None and local_port is not None, (
+                "Failed to broadcast local store info"
+            )
 
             while True:
                 try:

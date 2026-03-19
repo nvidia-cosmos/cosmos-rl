@@ -63,7 +63,14 @@ class GenEvalReward(BaseRewardHandler):
     NEEDS_LATENT_DECODER = False
     reward_name = "gen_eval"
 
-    def __init__(self, model_path: str = "", download_path: str = "", device: str = "cuda", dtype: str = "float32", **kwargs):
+    def __init__(
+        self,
+        model_path: str = "",
+        download_path: str = "",
+        device: str = "cuda",
+        dtype: str = "float32",
+        **kwargs,
+    ):
         super().__init__()
         self.device = device
         self.dtype = dtype
@@ -74,7 +81,9 @@ class GenEvalReward(BaseRewardHandler):
         self.compute_geneval = None
 
     @classmethod
-    def load_geneval(cls, DEVICE, config_path, ckpt_path, object_names_path=None, classnames=None):
+    def load_geneval(
+        cls, DEVICE, config_path, ckpt_path, object_names_path=None, classnames=None
+    ):
         import open_clip
         from clip_benchmark.metrics import zeroshot_classification as zsc
         from mmdet.apis import inference_detector, init_detector
@@ -86,7 +95,9 @@ class GenEvalReward(BaseRewardHandler):
                 startt = time.time()
                 result = fn(*args, **kwargs)
                 endt = time.time()
-                logger.info(f"[gen_eval] Function {fn.__name__!r} executed in {endt - startt:.3f}s")
+                logger.info(
+                    f"[gen_eval] Function {fn.__name__!r} executed in {endt - startt:.3f}s"
+                )
                 return result
 
             return wrapper
@@ -140,20 +151,26 @@ class GenEvalReward(BaseRewardHandler):
                     [
                         f"a photo of a {{c}} {classname}",
                         f"a photo of a {{c}}-colored {classname}",
-                        f"a photo of a {{c}} object",
+                        "a photo of a {c} object",
                     ],
                     str(DEVICE),
                 )
             clf = COLOR_CLASSIFIERS[classname]
             dataloader = torch.utils.data.DataLoader(
-                ImageCrops(image, bboxes, transform=transform), batch_size=16, num_workers=0
+                ImageCrops(image, bboxes, transform=transform),
+                batch_size=16,
+                num_workers=0,
             )
             with torch.no_grad():
-                pred, _ = zsc.run_classification(clip_model, clf, dataloader, str(DEVICE))
+                pred, _ = zsc.run_classification(
+                    clip_model, clf, dataloader, str(DEVICE)
+                )
                 return [COLORS[index.item()] for index in pred.argmax(1)]
 
         def compute_iou(box_a, box_b):
-            area_fn = lambda box: max(box[2] - box[0] + 1, 0) * max(box[3] - box[1] + 1, 0)
+            area_fn = lambda box: max(box[2] - box[0] + 1, 0) * max(  # noqa: E731
+                box[3] - box[1] + 1, 0
+            )
             i_area = area_fn(
                 [
                     max(box_a[0], box_b[0]),
@@ -170,9 +187,9 @@ class GenEvalReward(BaseRewardHandler):
             center_a, center_b = boxes.mean(axis=-2)
             dim_a, dim_b = np.abs(np.diff(boxes, axis=-2))[..., 0, :]
             offset = center_a - center_b
-            revised_offset = (
-                np.maximum(np.abs(offset) - POSITION_THRESHOLD * (dim_a + dim_b), 0) * np.sign(offset)
-            )
+            revised_offset = np.maximum(
+                np.abs(offset) - POSITION_THRESHOLD * (dim_a + dim_b), 0
+            ) * np.sign(offset)
             if np.all(np.abs(revised_offset) < 1e-3):
                 return set()
             dx, dy = revised_offset / np.linalg.norm(offset)
@@ -197,7 +214,9 @@ class GenEvalReward(BaseRewardHandler):
                 found_objects = objects.get(classname, [])[: req["count"]]
                 if len(found_objects) < req["count"]:
                     correct = matched = False
-                    reason.append(f"expected {classname}>={req['count']}, found {len(found_objects)}")
+                    reason.append(
+                        f"expected {classname}>={req['count']}, found {len(found_objects)}"
+                    )
                 else:
                     if "color" in req:
                         colors = color_classification(image, found_objects, classname)
@@ -206,13 +225,19 @@ class GenEvalReward(BaseRewardHandler):
                             reason.append(
                                 f"expected {req['color']} {classname}>={req['count']}, found "
                                 + f"{colors.count(req['color'])} {req['color']}; and "
-                                + ", ".join(f"{colors.count(c)} {c}" for c in COLORS if c in colors)
+                                + ", ".join(
+                                    f"{colors.count(c)} {c}"
+                                    for c in COLORS
+                                    if c in colors
+                                )
                             )
                     if "position" in req and matched:
                         expected_rel, target_group = req["position"]
                         if matched_groups[target_group] is None:
                             correct = matched = False
-                            reason.append(f"no target for {classname} to be {expected_rel}")
+                            reason.append(
+                                f"no target for {classname} to be {expected_rel}"
+                            )
                         else:
                             for obj in found_objects:
                                 for target_obj in matched_groups[target_group]:
@@ -234,7 +259,9 @@ class GenEvalReward(BaseRewardHandler):
                 classname = req["class"]
                 if len(objects.get(classname, [])) >= req["count"]:
                     correct = False
-                    reason.append(f"expected {classname}<{req['count']}, found {len(objects[classname])}")
+                    reason.append(
+                        f"expected {classname}<{req['count']}, found {len(objects[classname])}"
+                    )
             return correct, "\n".join(reason)
 
         def evaluate_reward(image, objects, metadata):
@@ -246,28 +273,42 @@ class GenEvalReward(BaseRewardHandler):
                 classname = req["class"]
                 matched = True
                 found_objects = objects.get(classname, [])
-                rewards.append(1 - abs(req["count"] - len(found_objects)) / req["count"])
+                rewards.append(
+                    1 - abs(req["count"] - len(found_objects)) / req["count"]
+                )
                 if len(found_objects) != req["count"]:
                     correct = matched = False
-                    reason.append(f"expected {classname}=={req['count']}, found {len(found_objects)}")
+                    reason.append(
+                        f"expected {classname}=={req['count']}, found {len(found_objects)}"
+                    )
                     if "color" in req or "position" in req:
                         rewards.append(0.0)
                 else:
                     if "color" in req:
                         colors = color_classification(image, found_objects, classname)
-                        rewards.append(1 - abs(req["count"] - colors.count(req["color"])) / req["count"])
+                        rewards.append(
+                            1
+                            - abs(req["count"] - colors.count(req["color"]))
+                            / req["count"]
+                        )
                         if colors.count(req["color"]) != req["count"]:
                             correct = matched = False
                             reason.append(
                                 f"expected {req['color']} {classname}>={req['count']}, found "
                                 + f"{colors.count(req['color'])} {req['color']}; and "
-                                + ", ".join(f"{colors.count(c)} {c}" for c in COLORS if c in colors)
+                                + ", ".join(
+                                    f"{colors.count(c)} {c}"
+                                    for c in COLORS
+                                    if c in colors
+                                )
                             )
                     if "position" in req and matched:
                         expected_rel, target_group = req["position"]
                         if matched_groups[target_group] is None:
                             correct = matched = False
-                            reason.append(f"no target for {classname} to be {expected_rel}")
+                            reason.append(
+                                f"no target for {classname} to be {expected_rel}"
+                            )
                             rewards.append(0.0)
                         else:
                             for obj in found_objects:
@@ -291,17 +332,23 @@ class GenEvalReward(BaseRewardHandler):
             reward = sum(rewards) / len(rewards) if rewards else 0
             return correct, reward, "\n".join(reason)
 
-        def evaluate_image(image_pils, metadatas, only_strict):
-            from mmdet.apis import inference_detector
-
-            results = inference_detector(object_detector, [np.array(image_pil) for image_pil in image_pils])
+        def evaluate_image(image_pils, gen_eval_metadatas, only_strict):
+            results = inference_detector(
+                object_detector, [np.array(image_pil) for image_pil in image_pils]
+            )
             ret = []
-            for result, image_pil, metadata in zip(results, image_pils, metadatas):
+            for result, image_pil, metadata in zip(
+                results, image_pils, gen_eval_metadatas
+            ):
                 bbox = result[0] if isinstance(result, tuple) else result
-                segm = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+                segm = (
+                    result[1] if isinstance(result, tuple) and len(result) > 1 else None
+                )
                 image = ImageOps.exif_transpose(image_pil)
                 detected = {}
-                confidence_threshold = THRESHOLD if metadata["tag"] != "counting" else COUNTING_THRESHOLD
+                confidence_threshold = (
+                    THRESHOLD if metadata["tag"] != "counting" else COUNTING_THRESHOLD
+                )
                 for index, classname in enumerate(classnames):
                     ordering = np.argsort(bbox[index][:, 4])[::-1]
                     ordering = ordering[bbox[index][ordering, 4] > confidence_threshold]
@@ -319,11 +366,14 @@ class GenEvalReward(BaseRewardHandler):
                             obj
                             for obj in ordering
                             if NMS_THRESHOLD == 1
-                            or compute_iou(bbox[index][max_obj], bbox[index][obj]) < NMS_THRESHOLD
+                            or compute_iou(bbox[index][max_obj], bbox[index][obj])
+                            < NMS_THRESHOLD
                         ]
                     if not detected[classname]:
                         del detected[classname]
-                is_strict_correct, score, reason = evaluate_reward(image, detected, metadata)
+                is_strict_correct, score, reason = evaluate_reward(
+                    image, detected, metadata
+                )
                 if only_strict:
                     is_correct = False
                 else:
@@ -338,14 +388,17 @@ class GenEvalReward(BaseRewardHandler):
                         "reason": reason,
                         "metadata": json.dumps(metadata),
                         "details": json.dumps(
-                            {key: [box.tolist() for box, _ in value] for key, value in detected.items()}
+                            {
+                                key: [box.tolist() for box, _ in value]
+                                for key, value in detected.items()
+                            }
                         ),
                     }
                 )
             return ret
 
         @torch.no_grad()
-        def compute_geneval(images, metadatas, only_strict=False):
+        def compute_geneval(images, gen_eval_metadatas, only_strict=False):
             required_keys = [
                 "single_object",
                 "two_object",
@@ -359,7 +412,9 @@ class GenEvalReward(BaseRewardHandler):
             grouped_strict_rewards = defaultdict(list)
             rewards = []
             grouped_rewards = defaultdict(list)
-            results = evaluate_image(images, metadatas, only_strict=only_strict)
+            results = evaluate_image(
+                images, gen_eval_metadatas, only_strict=only_strict
+            )
             for result in results:
                 strict_rewards.append(1.0 if result["strict_correct"] else 0.0)
                 scores.append(result["score"])
@@ -370,7 +425,9 @@ class GenEvalReward(BaseRewardHandler):
                         grouped_strict_rewards[key].append(-10.0)
                         grouped_rewards[key].append(-10.0)
                     else:
-                        grouped_strict_rewards[tag].append(1.0 if result["strict_correct"] else 0.0)
+                        grouped_strict_rewards[tag].append(
+                            1.0 if result["strict_correct"] else 0.0
+                        )
                         grouped_rewards[tag].append(1.0 if result["correct"] else 0.0)
             return (
                 scores,
@@ -384,7 +441,9 @@ class GenEvalReward(BaseRewardHandler):
 
     def _resolve_paths(self):
         base_dir = self.download_path
-        ckpt_basename = "mask2former_swin-s-p4-w7-224_lsj_8x2_50e_coco_20220504_001756-743b7d99"
+        ckpt_basename = (
+            "mask2former_swin-s-p4-w7-224_lsj_8x2_50e_coco_20220504_001756-743b7d99"
+        )
         ckpt_path = os.path.join(base_dir, "reward_ckpts", f"{ckpt_basename}.pth")
         config_path = os.path.join(
             base_dir,
@@ -396,7 +455,11 @@ class GenEvalReward(BaseRewardHandler):
         return config_path, ckpt_path
 
     def set_up(self):
-        device = self.device if isinstance(self.device, str) else ("cuda" if torch.cuda.is_available() else "cpu")
+        device = (
+            self.device
+            if isinstance(self.device, str)
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         config_path, ckpt_path = self._resolve_paths()
         if not config_path or not os.path.exists(config_path):
             raise FileNotFoundError(
@@ -408,7 +471,9 @@ class GenEvalReward(BaseRewardHandler):
                 f"[gen_eval] detector ckpt not found at {ckpt_path}. "
                 f"Please run setup script or set 'download_path' correctly."
             )
-        object_names_path = os.path.join(self.download_path, "reward_ckpts", "object_names.txt")
+        object_names_path = os.path.join(
+            self.download_path, "reward_ckpts", "object_names.txt"
+        )
         self.compute_geneval = self.load_geneval(
             device, config_path, ckpt_path, object_names_path=object_names_path
         )
@@ -417,19 +482,37 @@ class GenEvalReward(BaseRewardHandler):
         st = time.time()
         if not isinstance(images, torch.Tensor) or images.dim() != 4:
             raise ValueError(
-                f"gen_eval expects 4D uint8 torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images,'shape',None)} dtype={getattr(images,'dtype',None)}"
+                f"gen_eval expects 4D uint8 torch.Tensor in BHWC/NHWC layout (B,H,W,C); got type={type(images)} shape={getattr(images, 'shape', None)} dtype={getattr(images, 'dtype', None)}"
             )
         x = images.to(torch.uint8)
         imgs = [Image.fromarray(x[i].cpu().numpy()) for i in range(x.shape[0])]
-        metas = metadata.get("video_infos")
-        if not isinstance(metas, list) or len(metas) != len(imgs):
-            metas = [metadata] * len(imgs)
+
+        # Reconstruct metadata list for each image
+        for key in ["prompts", "geneval_tags", "geneval_includes"]:
+            assert key in metadata, f"metadata must include '{key}' key"
+        prompts = metadata.get("prompts")
+        tags = metadata.get("geneval_tags")
+        includes = metadata.get("geneval_includes")
+        gen_eval_metadatas = []
+        for prompt, tag, include in zip(prompts, tags, includes):
+            gen_eval_metadatas.append(
+                {
+                    "prompt": prompt,
+                    "tag": tag,
+                    "include": include,
+                }
+            )
+
         if getattr(self, "compute_geneval", None) is None:
             raise RuntimeError(
                 "[gen_eval] Inferencer not initialized. set_up() was not called or failed; check initialization logs."
             )
-        scores, rewards, strict_rewards, group_rewards, group_strict_rewards = self.compute_geneval(
-            imgs, metas, only_strict=bool(metadata.get("geneval_only_strict", False))
+        scores, rewards, strict_rewards, group_rewards, group_strict_rewards = (
+            self.compute_geneval(
+                imgs,
+                gen_eval_metadatas,
+                only_strict=bool(metadata.get("geneval_only_strict", False)),
+            )
         )
         logger.info(f"[gen_eval] Score: {scores}")
         logger.info(f"[gen_eval] Reward: {rewards}")

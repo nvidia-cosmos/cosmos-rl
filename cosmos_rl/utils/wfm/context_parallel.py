@@ -53,9 +53,9 @@ def split_inputs_cp(x: Tensor, seq_dim: int, cp_group: ProcessGroup) -> Tensor:
     cp_ranks = get_process_group_ranks(cp_group)
     cp_size = len(cp_ranks)
 
-    assert (
-        x.shape[seq_dim] % cp_size == 0
-    ), f"{x.shape[seq_dim]} cannot divide cp_size {cp_size}"
+    assert x.shape[seq_dim] % cp_size == 0, (
+        f"{x.shape[seq_dim]} cannot divide cp_size {cp_size}"
+    )
     x = x.view(
         *x.shape[:seq_dim],
         cp_size,

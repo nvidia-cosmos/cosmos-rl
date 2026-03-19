@@ -558,9 +558,9 @@ class OptimizersContainer(Stateful):
         lr_multiplier: list[float],
         model_part_names: list[str],
     ) -> None:
-        assert len(model_parts) == len(
-            lr_multiplier
-        ), "lr_multiplier must have the same length as model_parts"
+        assert len(model_parts) == len(lr_multiplier), (
+            "lr_multiplier must have the same length as model_parts"
+        )
         self.model_parts = model_parts
         self.optimizers = [[] for _ in self.model_parts]
         self.model_part_names = model_part_names
@@ -671,9 +671,9 @@ def build_optimizers(
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
     """
-    assert (
-        len(model_parts) == len(lr_multiplier) == len(model_part_names)
-    ), "lr_multiplier and model_part_names must have the same length as model_parts"
+    assert len(model_parts) == len(lr_multiplier) == len(model_part_names), (
+        "lr_multiplier and model_part_names must have the same length as model_parts"
+    )
     optim_in_bwd = job_config.optimizer.early_step_in_backward
     if optim_in_bwd and job_config.experimental.pipeline_parallel_degree > 1:
         raise NotImplementedError(
@@ -717,9 +717,9 @@ class SchedulersContainer(Stateful):
         # Currently, we have one scheduler per optimizer. However, when using MultiSchedule PP or optimizer-in-backward,
         # there are multiple optimizers and schedulers, but the scheduler state_dict remains the same for all.
         # Therefore, we only save the first one and later load it for all.
-        assert (
-            len(self.schedulers) > 0
-        ), "Must have at least one scheduler to save state_dict"
+        assert len(self.schedulers) > 0, (
+            "Must have at least one scheduler to save state_dict"
+        )
         return self.schedulers[0].state_dict()
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -739,7 +739,7 @@ class SchedulersContainer(Stateful):
             for step in range(_step_count):
                 scheduler.step()  # Step forward to match previous training state
             logger.info(
-                f"Scheduler {idx+1}/{len(self.schedulers)} stepped {_step_count} times."
+                f"Scheduler {idx + 1}/{len(self.schedulers)} stepped {_step_count} times."
             )
             logger.info(f"Updated learning rate: {scheduler.get_last_lr()}")
 

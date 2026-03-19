@@ -254,9 +254,9 @@ class CommMixin:
         )
 
     def init_redis(self):
-        assert (
-            self.api_client.remote_ips is not None
-        ), "Please init the api client first"
+        assert self.api_client.remote_ips is not None, (
+            "Please init the api client first"
+        )
         # For command fetch via redis connection
         self.redis_controller = RedisStreamHandler(
             ips=self.api_client.remote_ips, port=int(self.config.redis)

@@ -118,6 +118,10 @@ class GetShardSendRecvInstsRequest(BaseModel):
     rank: int
 
 
+class ResumeInfoRequest(BaseModel):
+    ckpt_extra_info: Dict[str, Any]
+
+
 class RegisterRequest(BaseModel):
     replica_name: str
     role: str
@@ -130,18 +134,18 @@ class RegisterRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_mesh_names(self):
-        assert (
-            len(self.mesh_names) == len(self.ranks) == len(self.group_size)
-        ), "mesh_names, ranks, and group_size must have the same length"
-        assert set(self.mesh_names) <= set(
-            MESH_NAMES
-        ), "mesh_names must be a subset of MESH_NAMES"
-        assert (
-            self.role in Role.ALL
-        ), "role must be one of POLICY, ROLLOUT, or REFERENCE"
-        assert (
-            self.replica_name is not None and len(self.replica_name) > 0
-        ), "replica_name must be a non-empty string being consistent within a replica"
+        assert len(self.mesh_names) == len(self.ranks) == len(self.group_size), (
+            "mesh_names, ranks, and group_size must have the same length"
+        )
+        assert set(self.mesh_names) <= set(MESH_NAMES), (
+            "mesh_names must be a subset of MESH_NAMES"
+        )
+        assert self.role in Role.ALL, (
+            "role must be one of POLICY, ROLLOUT, or REFERENCE"
+        )
+        assert self.replica_name is not None and len(self.replica_name) > 0, (
+            "replica_name must be a non-empty string being consistent within a replica"
+        )
 
         new_mesh_names = []
         new_ranks = []

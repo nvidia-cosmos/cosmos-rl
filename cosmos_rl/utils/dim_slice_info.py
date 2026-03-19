@@ -18,6 +18,13 @@ from functools import reduce
 from math import gcd
 import torch
 
+try:
+    from torch.distributed.tensor.placement_types import (
+        _StridedShard as _StridedShardPlacement,
+    )
+except ImportError:
+    _StridedShardPlacement = None
+
 
 class DimSliceInfo:
     """
@@ -79,9 +86,9 @@ def slice_tensor_with_strategy(
     """
 
     view = tensor
-    assert (
-        view.shape[idx] % tensor_split_strategy.total_size == 0
-    ), f"Tensor shape {view.shape} on dim {idx} must be divisible by {tensor_split_strategy.total_size}"
+    assert view.shape[idx] % tensor_split_strategy.total_size == 0, (
+        f"Tensor shape {view.shape} on dim {idx} must be divisible by {tensor_split_strategy.total_size}"
+    )
     start = (
         view.shape[idx]
         // tensor_split_strategy.total_size
@@ -133,9 +140,9 @@ def get_unified_rank_info(
     :return: A tuple containing the unified slice information for both objects.
     """
     size = max(a.total_size, b.total_size)
-    assert (
-        size % a.total_size == 0 and size % b.total_size == 0
-    ), "Sizes are not compatible for unification"
+    assert size % a.total_size == 0 and size % b.total_size == 0, (
+        "Sizes are not compatible for unification"
+    )
     scale_a = size // a.total_size
     scale_b = size // b.total_size
     scaled_a_size = a.total_size * scale_a
@@ -178,9 +185,9 @@ def relative_rank(smaller: DimSliceInfo, larger: DimSliceInfo) -> DimSliceInfo:
     """
     s, l = get_unified_rank_info(smaller, larger)  # noqa: E741
     assert s.offset >= l.offset, "Smaller rank is not less than or equal to larger rank"
-    assert (
-        s.offset + s.length <= l.offset + l.length
-    ), "Smaller rank does not fit within larger rank"
+    assert s.offset + s.length <= l.offset + l.length, (
+        "Smaller rank does not fit within larger rank"
+    )
     rank = s.offset - l.offset
     size = l.length
     length = s.length
@@ -247,11 +254,14 @@ def extract_infomation_from_dtensor(
     if isinstance(param, torch.distributed.tensor.DTensor):
         mesh = param.device_mesh
         placements = param.placements
-        assert (
-            len(placements) == len(mesh.mesh_dim_names)
-        ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
+        assert len(placements) == len(mesh.mesh_dim_names), (
+            f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
+        )
         for dim, placement in zip(mesh.mesh_dim_names, placements):
-            if placement.is_shard():
+            if placement.is_shard() or (
+                _StridedShardPlacement is not None
+                and isinstance(placement, _StridedShardPlacement)
+            ):
                 dims_map[dim] = placement.dim
             elif placement.is_replicate():
                 pass
@@ -259,16 +269,18 @@ def extract_infomation_from_dtensor(
                 raise ValueError(f"Unsupported placement type: {placement}")
         chunk_meta_list = param.__create_chunk_list__()
         local = param.to_local()
-        assert (
-            len(chunk_meta_list) == 1
-        ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
+        assert len(chunk_meta_list) == 1, (
+            f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
+        )
         meta = chunk_meta_list[0]
         assert (
             len(meta.offsets)
             == len(meta.sizes)
             == len(global_shape)
             == len(tuple(local.shape))
-        ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
+        ), (
+            f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
+        )
 
         no_shard_dims_rank_info = {}
         for idx, g_size in enumerate(global_shape):
@@ -276,9 +288,9 @@ def extract_infomation_from_dtensor(
             total_size = int(g_size)
             length = int(meta.sizes[idx])
             if total_size == length:
-                assert (
-                    offset == 0
-                ), f"Expected rank 0 for full size dimension {idx}, but got {offset}."
+                assert offset == 0, (
+                    f"Expected rank 0 for full size dimension {idx}, but got {offset}."
+                )
                 no_shard_dims_rank_info[idx] = DimSliceInfo(
                     offset=0,
                     total_size=total_size,

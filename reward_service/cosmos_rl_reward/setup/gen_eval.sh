@@ -33,6 +33,7 @@ if [ ! -x "$PIP_BIN" ]; then
 fi
 
 PYTHON_BIN="${VENV_PATH}/bin/python"
+PIP_BIN="${VENV_PATH}/bin/pip"
 
 mkdir -p "${DOWNLOAD_PATH}/reward_ckpts"
 cd "${DOWNLOAD_PATH}/reward_ckpts"
@@ -69,7 +70,7 @@ echo "[gen_eval setup] Installing Python dependencies into venv..."
 "${PYTHON_BIN}" -m pip install redis msgpack
 
 "${PYTHON_BIN}" -m pip install -U openmim
-"${PYTHON_BIN}" -m pip install -U pip setuptools # openmim will downgrade setuptools to make mim install failed weith Python3.12
+"${PYTHON_BIN}" -m pip install setuptools==80.10.2 # openmim will downgrade setuptools to make mim install failed with Python3.12
 "${PYTHON_BIN}" -m mim install mmengine open-clip-torch clip-benchmark
 
 cd "${DOWNLOAD_PATH}"
@@ -85,7 +86,7 @@ git checkout v1.7.2
 rm -rf build dist *.egg-info
 "${PYTHON_BIN}" -m pip install ninja
 MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py build_ext --inplace
-MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py develop
+MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PIP_BIN}" install -e . --no-build-isolation
 cd "${DOWNLOAD_PATH}"
 
 # Install MMDetection (2.x)
@@ -108,5 +109,3 @@ echo "[gen_eval setup] - ckpt:        ${DOWNLOAD_PATH}/reward_ckpts/${CKPT_NAME}
 echo "[gen_eval setup] - class names: ${DOWNLOAD_PATH}/reward_ckpts/object_names.txt"
 echo "[gen_eval setup] - config:      ${DOWNLOAD_PATH}/mmdetection/configs/mask2former/mask2former_swin-s-p4-w7-224_lsj_8x2_50e_coco.py"
 echo "[gen_eval setup] Service will use download_path from rewards.toml."
-
-

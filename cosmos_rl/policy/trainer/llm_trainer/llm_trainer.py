@@ -84,7 +84,6 @@ class LLMTrainer(Trainer):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-
         model = ModelRegistry.build_model(config)
 
         # FP8 settings
@@ -132,7 +131,96 @@ class LLMTrainer(Trainer):
             )
 
             torch.cuda.empty_cache()
-            self.model_parts = model.separate_model_parts()
+
+            # If learning rate is list of `Union[float, List[float]]`,
+            #  it means the learning rates are in order of pre-defined `model.separate_model_parts()`.
+            # else, learning rate must be of type `Dict[str, float]`, where the key is the module path of the model part defined in `model.separate_model_parts()`, and the value is the learning rate for that model part.
+
+            if isinstance(config.train.optm_lr, (float, list)):
+                self.model_parts = model.separate_model_parts()
+                self.model_modpath = [None for _ in range(len(self.model_parts))]
+                # `named_modules()` recursively iterates over all modules in the model, and returns both the name and the module itself. We can use it to find the module path for each model part, which will be used in optimizer construction to get the parameters of each model part.
+                # `named_children()` only iterates over the immediate children modules, which is not enough for us to find the module path for each model part since the model part can be nested in the model.
+                for name, module in model.named_modules():
+                    if module in self.model_parts:
+                        idx = self.model_parts.index(module)
+                        self.model_modpath[idx] = name
+                        if all([modpath is not None for modpath in self.model_modpath]):
+                            break
+                for i in range(len(self.model_modpath)):
+                    if self.model_modpath[i] is None:
+                        self.model_modpath[i] = f"model_part_{i}"
+            else:
+                assert isinstance(config.train.optm_lr, dict), (
+                    "Learning rate must be either a float, a list of floats, or a dict of {model_part: lr}."
+                )
+                import re
+                from typing import Tuple, Union, Iterable, List
+
+                _num_re = re.compile(r"(\d+)")
+
+                def natural_key(s: str) -> Tuple[Union[int, str], ...]:
+                    # makes 'layers.2' < 'layers.10'
+                    parts = _num_re.split(s)
+                    out = []
+                    for p in parts:
+                        out.append(int(p) if p.isdigit() else p)
+                    return tuple(out)
+
+                def sort_module_paths_deep_to_root(
+                    paths: Iterable[str], sep: str = "."
+                ) -> List[str]:
+                    def key(p: str):
+                        depth = 0 if not p else p.count(sep) + 1
+                        # primary: deeper first; secondary: natural lexicographic for stable sibling ordering
+                        return (-depth, natural_key(p))
+
+                    return sorted(paths, key=key)
+
+                model_parts = []
+                module_paths = []
+                learning_rates = []
+
+                # check for global learning rate if exists
+                global_lr = config.train.optm_lr.get("global", None)
+                if global_lr is not None:
+                    del config.train.optm_lr["global"]
+                    assert isinstance(global_lr, float) and global_lr > 0, (
+                        f"Global learning rate must be a positive float if specified, but got {global_lr}."
+                    )
+
+                # Check existence of the module paths specified in the learning rate dict
+                module_paths = sort_module_paths_deep_to_root(
+                    config.train.optm_lr.keys()
+                )
+                all_named_modules = dict(model.named_modules())
+                for module_path in module_paths:
+                    if not self.parallel_dims.pp_enabled:
+                        assert module_path in all_named_modules, (
+                            f"Module path {module_path} specified in learning rate dict not found in the model. Available module paths are: {list(all_named_modules.keys())}"
+                        )
+                    elif module_path not in all_named_modules:
+                        logger.warning(
+                            f"Module path {module_path} specified in learning rate dict not found in the model. Available module paths are: {list(all_named_modules.keys())}"
+                        )
+                    else:
+                        pass
+                    model_parts.append(all_named_modules[module_path])
+                    learning_rates.append(config.train.optm_lr[module_path])
+
+                if global_lr is not None:
+                    model_parts.append(model)
+                    # empty string is used to represent the global learning rate for the whole model, which does not correspond to any module path.
+                    module_paths.append("[ALL_OTHER]")
+                    learning_rates.append(global_lr)
+
+                self.model_parts = model_parts
+                self.model_modpath = module_paths
+                # reset the learning rate in config to be the list of learning rates for each model part, which will be used in optimizer construction.
+                # because modules have to be in specific order during optimizer building,
+                # either a list or an ordered dict is needed to ensure the order of the model parts and the learning rates.
+                self.config.train.optm_lr = learning_rates
+
             self.model = model
             # util.add_nan_checks(model)
         except Exception as e:
@@ -168,7 +256,9 @@ class LLMTrainer(Trainer):
 
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
-        self.optimizers = build_optimizers(self.model_parts, self.config)
+        self.optimizers = build_optimizers(
+            self.model_parts, self.config, model_modpath=self.model_modpath
+        )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
                 lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
@@ -200,9 +290,9 @@ class LLMTrainer(Trainer):
 
         if has_reference_model:
             if len(self.reference_state_dict) == 0:
-                assert (
-                    not is_send
-                ), "Reference model state dict should be populated before sending"
+                assert not is_send, (
+                    "Reference model state dict should be populated before sending"
+                )
                 for key, value in model_state_dict[0].items():
                     self.reference_state_dict[key] = torch.empty_like(
                         value, device="cpu"
@@ -306,6 +396,14 @@ class LLMTrainer(Trainer):
         is_final=False,
         dtype: Optional[torch.dtype] = None,
     ):
+        """Export safetensors to the local directory/huggingface/s3.
+        Args:
+            output_dir (str): The directory to save the safetensors.
+            rel_path (str): The relative path to the output directory.
+            trainable_only (bool): Whether to export only the trainable parameters.
+            is_final (bool): Whether this is the final export.
+            dtype (torch.dtype): The dtype of the parameters.
+        """
         if self.config.policy.lora is not None and not trainable_only:
             trainable_only = True
             logger.info(

@@ -62,9 +62,9 @@ class PISFTTrainer(SFTTrainer):
 
         # prepare lr and optimizer state
         if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            assert train_step == 0, (
+                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            )
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )

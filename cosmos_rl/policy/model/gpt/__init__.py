@@ -247,9 +247,9 @@ class Attention(nn.Module):
             xv = xv.to(target_dtype)
 
         if cu_seqlens is not None:
-            assert (
-                max_seqlen is not None
-            ), "max_seqlen must be provided for variable-length sequences"
+            assert max_seqlen is not None, (
+                "max_seqlen must be provided for variable-length sequences"
+            )
             xq = xq.view(seqlen, -1, self.head_dim)
             xk = xk.view(seqlen, -1, self.head_dim)
             xv = xv.view(seqlen, -1, self.head_dim)
@@ -498,9 +498,9 @@ class GPT(BaseModel):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "logprob_masks must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "logprob_masks must be a local tensor"
+                )
                 h = h[interested_tokens]
             h = self.norm(h)
             if not self.tie_embed_tokens:
@@ -632,9 +632,9 @@ class GPT(BaseModel):
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            assert (
-                local_view.shape == sharded_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            )
             with torch.no_grad():
                 local_view.data.copy_(sharded_weight)
 
@@ -663,9 +663,9 @@ class GPT(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight)
 

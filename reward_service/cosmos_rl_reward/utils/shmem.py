@@ -252,9 +252,9 @@ class CrossProcessHandler:
             time.sleep(0.001)
         info = self.get_data_info()
         tensor_info = info.get("decoded_info", {})
-        assert (
-            "dtype" in tensor_info and "shape" in tensor_info
-        ), "Tensor info must contain 'dtype' and 'shape'."
+        assert "dtype" in tensor_info and "shape" in tensor_info, (
+            "Tensor info must contain 'dtype' and 'shape'."
+        )
         if isinstance(tensor_info["dtype"], str):
             if tensor_info["dtype"].startswith("torch."):
                 dtype = getattr(torch, tensor_info["dtype"].split(".")[-1])
@@ -280,12 +280,16 @@ class CrossProcessHandler:
             tensor (torch.Tensor): The tensor to set in shared memory.
             info (dict): The associated information.
         """
-        assert (
-            self.status[0] == CrossProcessStatus.DECODE.value
-        ), f"Expected status {CrossProcessStatus.DECODE.value}, but got {self.status[0]}."
+        assert self.status[0] == CrossProcessStatus.DECODE.value, (
+            f"Expected status {CrossProcessStatus.DECODE.value}, but got {self.status[0]}."
+        )
         if tensor.numel() * tensor.element_size() > self.cuda_maxbytes:
+            needed = tensor.numel() * tensor.element_size()
             raise ValueError(
-                f"Tensor size {tensor.numel() * tensor.element_size()} exceeds shared memory size {self.cuda_maxbytes}."
+                "Tensor size "
+                f"{needed} exceeds shared CUDA buffer size {self.cuda_maxbytes}. "
+                "Increase the shared buffer and restart the reward service, e.g. set "
+                "COSMOS_RL_REWARD_SHMEM_CUDA_MAXBYTES (bytes)."
             )
         self.set_cuda_tensor(tensor)
         self.set_cpu_info(info)
@@ -295,9 +299,9 @@ class CrossProcessHandler:
         """
         Set the finish status in the reward calculation inference stage after calculation.
         """
-        assert (
-            self.status[0] == CrossProcessStatus.INFERENCE.value
-        ), f"Expected status {CrossProcessStatus.INFERENCE.value}, but got {self.status[0]}."
+        assert self.status[0] == CrossProcessStatus.INFERENCE.value, (
+            f"Expected status {CrossProcessStatus.INFERENCE.value}, but got {self.status[0]}."
+        )
         self.status[0] = CrossProcessStatus.DECODE.value
 
     def wait_start_in_decode(self):

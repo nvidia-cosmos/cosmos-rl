@@ -69,9 +69,9 @@ def replica_placement(
     for i in range(num_replicas):
         if min_n_gpus > len(global_available_gpus[global_worker_idx]):
             # it needs multiple nodes
-            assert (
-                min_n_gpus % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus {min_n_gpus} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            assert min_n_gpus % len(global_available_gpus[global_worker_idx]) == 0, (
+                f"min_n_gpus {min_n_gpus} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            )
             nodes_needed = min_n_gpus // len(global_available_gpus[global_worker_idx])
             rdzv_ip = "localhost"
             for node_in_replica in range(nodes_needed):
@@ -401,9 +401,9 @@ cosmos-rl --config config.toml --wfm-mode"""
     ):
         command_collections = global_launch_settings[cur_work_idx]
 
-        assert (
-            command_collections.global_worker_idx == cur_work_idx
-        ), f"Global worker index {command_collections.global_worker_idx} does not match current worker index {cur_work_idx}"
+        assert command_collections.global_worker_idx == cur_work_idx, (
+            f"Global worker index {command_collections.global_worker_idx} does not match current worker index {cur_work_idx}"
+        )
 
         logger.info(
             f"Command items to be executed for worker {command_collections.global_worker_idx}:\n{command_collections}"

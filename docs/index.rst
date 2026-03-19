@@ -93,6 +93,16 @@ Main Features
    quantization/fp8
 
 .. toctree::
+   :caption: Distillation
+
+   distillation/on_policy_distillation
+
+.. toctree::
+   :caption: Profiler
+
+   profiler/overview
+
+.. toctree::
    :caption: World Foundational Models
 
    wfm/overview

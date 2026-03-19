@@ -99,9 +99,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if self.config.rollout.parallelism.dp_shard_size == -1:
             self.config.rollout.parallelism.dp_shard_size = parallel_dims.dp_shard
         assert self.config.rollout.parallelism.dp_shard_size == parallel_dims.dp_shard
-        assert (
-            self.config.rollout.parallelism.dp_shard_size > 0
-        ), "[Rollout] dp_shard_size should be greater than 0."
+        assert self.config.rollout.parallelism.dp_shard_size > 0, (
+            "[Rollout] dp_shard_size should be greater than 0."
+        )
 
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
@@ -125,9 +125,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.batch_size = self.config.rollout.batch_size
         if self.config.validation.enable:
             self.val_batch_size = self.config.validation.batch_size or self.batch_size
-            assert (
-                self.val_batch_size > 0
-            ), "[Rollout] val_batch_size should be greater than 0."
+            assert self.val_batch_size > 0, (
+                "[Rollout] val_batch_size should be greater than 0."
+            )
         else:
             self.val_batch_size = None
         self.background_thread: threading.Thread | None = None
@@ -135,9 +135,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.teacher_interact_queue: Queue = Queue()
 
         if self.is_diffusers:
-            assert (
-                self.config.train.non_text
-            ), "[Rollout] Diffusers rollout only support non-text training now."
+            assert self.config.train.non_text, (
+                "[Rollout] Diffusers rollout only support non-text training now."
+            )
             model_type = "diffusers"
         else:
             self.eos_token = util.setup_tokenizer(
@@ -162,9 +162,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
             self.model_config = hf_config
             if self.quantization_type == "mxfp4":
-                assert (
-                    model_type == "gpt_oss"
-                ), "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
+                assert model_type == "gpt_oss", (
+                    "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
+                )
 
         atexit.register(self.handle_shutdown)
 
@@ -191,9 +191,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self._is_async_rollout = False
         self.scheduler: Optional[RolloutTaskScheduler] = None
         if self.config.rollout.mode == "async":
-            assert (
-                config.rollout.backend in self.SUPPORT_ASYNC_BACKEND
-            ), f"DisaggregatedRolloutControlWorker async mode only supports {self.SUPPORT_ASYNC_BACKEND} backends, but got {config.rollout.backend}"
+            assert config.rollout.backend in self.SUPPORT_ASYNC_BACKEND, (
+                f"DisaggregatedRolloutControlWorker async mode only supports {self.SUPPORT_ASYNC_BACKEND} backends, but got {config.rollout.backend}"
+            )
             self._is_async_rollout = True
 
         self.setup(
@@ -666,9 +666,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                 ".weight", ".weight_scale"
                             )
                             scale_tensor = model_param_map[scale_key]
-                            assert (
-                                scale_tensor.shape == weight_scale.shape
-                            ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+                            assert scale_tensor.shape == weight_scale.shape, (
+                                f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+                            )
                             scale_tensor.copy_(weight_scale)
                     elif self.quantization_type == "mxfp4":
                         # Note: For mxfp4, we don't do weight sync check for quantized weights.
@@ -719,12 +719,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                         underlying_native_weight_scale = module.quant_method.w2_precision_config.weight_scale.storage.data
                                         break
 
-                                assert (
-                                    underlying_native_weight is not None
-                                ), f"Failed to find the original weight for {inst_group_full_weight_name}"
-                                assert (
-                                    underlying_native_weight_scale is not None
-                                ), f"Failed to find the original weight scale for {inst_group_full_weight_name}"
+                                assert underlying_native_weight is not None, (
+                                    f"Failed to find the original weight for {inst_group_full_weight_name}"
+                                )
+                                assert underlying_native_weight_scale is not None, (
+                                    f"Failed to find the original weight scale for {inst_group_full_weight_name}"
+                                )
 
                                 with torch.inference_mode():
                                     _, dim_1, dim_2 = quantized_weight.shape
@@ -893,14 +893,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads, is_validation, current_step, empty = self.report_rollouts(
                 block=True
             )
-            assert (
-                (is_validation and payloads is not None or payloads is None)
-                and (not empty or len(validation_payloads) == 0)
-            ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+            assert (is_validation and payloads is not None or payloads is None) and (
+                not empty or len(validation_payloads) == 0
+            ), (
+                f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+            )
             while not empty:
-                assert (
-                    is_validation or payloads is None
-                ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+                assert is_validation or payloads is None, (
+                    f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+                )
                 if payloads is not None:
                     for i in range(len(payloads)):
                         # we don't need to upload completions, completed_conversations, completion_logprobs, completion_token_ids for validation.
@@ -925,9 +926,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         Start the async rollout scheduler.
         """
-        assert (
-            self.config.rollout.mode == "async"
-        ), "Async rollout scheduler is not enabled"
+        assert self.config.rollout.mode == "async", (
+            "Async rollout scheduler is not enabled"
+        )
 
         if self.scheduler.is_running():
             logger.info("[Rollout] Async rollout scheduler is already running")
@@ -1007,9 +1008,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
             )
         else:
-            assert (
-                command.trainable_only
-            ), "only trainable params should be transferred at the not first time P2R"
+            assert command.trainable_only, (
+                "only trainable params should be transferred at the not first time P2R"
+            )
 
         self.prepare_trainable_params()
 
@@ -1022,9 +1023,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         copy_stream = torch.cuda.Stream()
 
-        assert (
-            total_params == len(self.recv_param_key_n_rank_list)
-        ), f"Mismatch in total params and received param keys: {total_params} != {len(self.recv_param_key_n_rank_list)}"
+        assert total_params == len(self.recv_param_key_n_rank_list), (
+            f"Mismatch in total params and received param keys: {total_params} != {len(self.recv_param_key_n_rank_list)}"
+        )
 
         with torch.cuda.stream(self.inference_stream):
             logger.info(
@@ -1051,7 +1052,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
-            if self.rl_mode != "colocated_separated":
+            if (
+                self.rl_mode != "colocated_separated"
+                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+            ):
                 # Only in non-colocated-separated mode, we could use NCCL group feature.
                 nccl_group_start(comm_id)
 
@@ -1100,15 +1104,24 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 total_bytes_received += bytes_received
 
                 pending_groups += 1
-                if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                    if self.rl_mode != "colocated_separated":
+                if pending_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                    if (
+                        self.rl_mode != "colocated_separated"
+                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                    ):
                         nccl_group_end(comm_id)
                     flush_completions(pending_bytes, pending_completions)
-                    if self.rl_mode != "colocated_separated":
+                    if (
+                        self.rl_mode != "colocated_separated"
+                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                    ):
                         nccl_group_start(comm_id)
                     pending_groups = 0
 
-            if self.rl_mode != "colocated_separated":
+            if (
+                self.rl_mode != "colocated_separated"
+                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+            ):
                 nccl_group_end(comm_id)
 
             flush_completions(pending_bytes, pending_completions)
@@ -1126,12 +1139,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
             if command.trainable_only:
-                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only P2R."
+                assert self.non_trainable_params_received, (
+                    "[Rollout] Non-trainable params must be received before trainable-only P2R."
+                )
                 if not hasattr(self, "p2r_synced_trainable_params_cnt"):
                     self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
-                assert (
-                    self.p2r_synced_trainable_params_cnt == transferred_groups_cnt
-                ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
+                assert self.p2r_synced_trainable_params_cnt == transferred_groups_cnt, (
+                    f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
+                )
 
             self.state.set_weight_synced()
         if not command.trainable_only:
@@ -1164,12 +1179,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
-                assert (
-                    self.rank_in_rollout_repicas >= 0
-                ), "[Rollout] rank in rollout replicas should be set before broadcast."
-                assert (
-                    len(dst_replica_names) == len(self.replica_name_to_rank)
-                ), "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                assert self.rank_in_rollout_repicas >= 0, (
+                    "[Rollout] rank in rollout replicas should be set before broadcast."
+                )
+                assert len(dst_replica_names) == len(self.replica_name_to_rank), (
+                    "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                )
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
                 with torch.inference_mode():
@@ -1199,7 +1214,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             parameter.copy_(recv_tensor)
 
                 if not self.state.weight_synced():
-                    assert not broadcast_command.trainable_only, "[Rollout] Trainable only must be set to False for the first broadcast."
+                    assert not broadcast_command.trainable_only, (
+                        "[Rollout] Trainable only must be set to False for the first broadcast."
+                    )
                     self.state.set_weight_synced()
 
             logger.info(
@@ -1209,7 +1226,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.non_trainable_params_received = True
 
             if broadcast_command.trainable_only:
-                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only R2R."
+                assert self.non_trainable_params_received, (
+                    "[Rollout] Non-trainable params must be received before trainable-only R2R."
+                )
                 if not hasattr(self, "r2r_synced_trainable_params_cnt"):
                     self.r2r_synced_trainable_params_cnt = transferred_params_cnt
                 if hasattr(self, "p2r_synced_trainable_params_cnt"):
@@ -1217,13 +1236,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     assert (
                         self.r2r_synced_trainable_params_cnt
                         == self.p2r_synced_trainable_params_cnt + len(self.misc_params)
-                    ), f"Synced params count in R2R {self.r2r_synced_trainable_params_cnt} must match the sum of count of attribute {self.p2r_synced_trainable_params_cnt} and {len(self.misc_params)}."
+                    ), (
+                        f"Synced params count in R2R {self.r2r_synced_trainable_params_cnt} must match the sum of count of attribute {self.p2r_synced_trainable_params_cnt} and {len(self.misc_params)}."
+                    )
 
         current_step = broadcast_command.weight_step
         if current_step is not None:
-            assert (
-                current_step >= self.current_weight_version
-            ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            assert current_step >= self.current_weight_version, (
+                f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            )
             self.current_weight_version = current_step
         else:
             current_step = self.current_weight_version
@@ -1300,16 +1321,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     batch_size * self.parallel_dims.mesh["dp"].size(), **kwargs
                 )
 
-                assert all(
-                    payload["prompt_idx"] >= 0 for payload in payloads
-                ), "All payloads should have a valid prompt index"
+                assert all(payload["prompt_idx"] >= 0 for payload in payloads), (
+                    "All payloads should have a valid prompt index"
+                )
 
                 if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
                     for payload in payloads:
                         assert (
                             payload["prompt_idx"] % len(self.replica_name_to_rank)
                             == self.rank_in_rollout_repicas
-                        ), f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
+                        ), (
+                            f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
+                        )
                 is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
@@ -1398,6 +1421,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"No such command supoorted in rollout {current_command}"
                 )
             try:
+                logger.debug(
+                    f"[Rollout] Executing command: {current_command._serialize()} for rank: {self.global_rank}"
+                )
                 handler(self, current_command)
                 logger.debug(
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
@@ -1445,9 +1471,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
         payloads, is_validation, _, empty = self.report_rollouts(block=True)
-        assert (
-            not is_validation and payloads is None and empty
-        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
+        assert not is_validation and payloads is None and empty, (
+            f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
+        )
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             payloads=[],
@@ -1536,7 +1562,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 continue
 
             _, is_validation, _, _ = self.report_rollouts()
-            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
+            assert not is_validation, (
+                "Validation report should be handled in the broadcast command rather than main loop."
+            )
 
             if self._is_async_rollout:
                 # In this mode, we perform the stream generation step in the main loop.
@@ -1562,9 +1590,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             self.send_end_signal()
 
             if self.state.prompt_consume_end():
-                assert (
-                    self._prompt_queue.empty() and self.state.prompt_fetch_end()
-                ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                assert self._prompt_queue.empty() and self.state.prompt_fetch_end(), (
+                    "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                )
                 continue
             elif self._prompt_queue.empty():
                 continue
@@ -1707,9 +1735,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if len(rollout_results) == 0:
             return False
 
-        assert (
-            len(rollout_results) == len(payloads_list)
-        ), f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
+        assert len(rollout_results) == len(payloads_list), (
+            f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
+        )
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
@@ -1857,9 +1885,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         if not self.config.distillation.enable:
             return payloads
-        assert all(
-            payload.completion_token_ids is not None for payload in payloads
-        ), "All payloads must have completion token ids"
+        assert all(payload.completion_token_ids is not None for payload in payloads), (
+            "All payloads must have completion token ids"
+        )
         for payload in payloads:
             data = {
                 "prompt_idx": payload.prompt_idx,

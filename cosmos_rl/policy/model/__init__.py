@@ -13,37 +13,124 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.model.gpt import GPT
-from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
-from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-from cosmos_rl.policy.model.qwen3_vl_moe import Qwen3VLMoeModel
-from cosmos_rl.policy.model.hf_models import HFModel
-from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
-from cosmos_rl.policy.model.internvl import InternVLChatModel
-from cosmos_rl.policy.model.vla import OpenVLA
-from cosmos_rl.policy.model.pi05 import PI05
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
-from cosmos_rl.policy.model.diffusers.sana_model import SanaModel
-from cosmos_rl.policy.model.diffusers.sd3_model import SD3Model
-from cosmos_rl.policy.model.diffusers.cosmos_predict2_5_model import (
-    CosmosPredict2_5Model,
-)
+import importlib
+import inspect
+from pathlib import Path
 
-__all__ = [
-    "GPT",
-    "Qwen2_5_VLConditionalModel",
-    "Qwen3MoE",
-    "Qwen3VLMoeModel",
-    "HFModel",
-    "DeepseekV3MoEModel",
-    "InternVLChatModel",
-    "OpenVLA",
-    "PI05",
-    "SanaModel",
-    "SD3Model",
-    "CosmosPredict2_5Model",
-    "BaseModel",
-    "WeightMapper",
-    "ModelRegistry",
-    "PI05",
-]
+# Import base classes and registry
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
+
+# Import DiffuserModel base class
+from cosmos_rl.policy.model.diffusers import DiffuserModel
+
+# Dictionary to store all imported models
+__all__ = ["ModelRegistry", "BaseModel", "WeightMapper", "DiffuserModel"]
+
+
+def _discover_model_classes(module, base_class):
+    """Discover model classes that inherit from the specified base class in a module."""
+    discovered_classes = []
+    for name, obj in inspect.getmembers(module, inspect.isclass):
+        # Check if it's a subclass of the base class (but not the base class itself)
+        if obj != base_class and issubclass(obj, base_class):
+            # Ensure the class is actually defined in this module, not imported
+            if obj.__module__ == module.__name__:
+                discovered_classes.append(name)
+    return discovered_classes
+
+
+def _auto_import_models():
+    """Dynamically import all model modules from the model directory."""
+    model_dir = Path(__file__).parent
+
+    # Directories to exclude from auto-discovery
+    exclude_dirs = {"__pycache__", "base", "diffusers", "vision_encoder", "wfm"}
+
+    # ============================================================================
+    # BaseModel imports (all top-level model directories except diffusers)
+    # ============================================================================
+    print("Auto-discovering BaseModel subclasses...")
+    for item in model_dir.iterdir():
+        if item.is_dir() and item.name not in exclude_dirs:
+            module_name = item.name
+            try:
+                module = importlib.import_module(
+                    f"cosmos_rl.policy.model.{module_name}"
+                )
+                # Discover all BaseModel subclasses in the module
+                classes = _discover_model_classes(module, BaseModel)
+                for class_name in classes:
+                    if hasattr(module, class_name):
+                        globals()[class_name] = getattr(module, class_name)
+                        __all__.append(class_name)
+                        print(
+                            f"  [Model] Imported BaseModel: {class_name} from {module_name}"
+                        )
+            except ImportError as e:
+                print(f"  [Model] Warning: Could not import module {module_name}: {e}")
+
+    # ============================================================================
+    # DiffuserModel imports (from diffusers/ subdirectory)
+    # ============================================================================
+    print("Auto-discovering DiffuserModel subclasses...")
+    diffusers_dir = model_dir / "diffusers"
+    if diffusers_dir.exists():
+        for item in diffusers_dir.iterdir():
+            if (
+                item.is_file()
+                and item.suffix == ".py"
+                and item.stem not in ["__init__", "parallelize", "weight_mapper"]
+            ):
+                module_name = f"diffusers.{item.stem}"
+                try:
+                    module = importlib.import_module(
+                        f"cosmos_rl.policy.model.{module_name}"
+                    )
+                    # Discover all DiffuserModel subclasses in the module
+                    classes = _discover_model_classes(module, DiffuserModel)
+                    for class_name in classes:
+                        if hasattr(module, class_name):
+                            globals()[class_name] = getattr(module, class_name)
+                            __all__.append(class_name)
+                            print(
+                                f"  [Model] Imported DiffuserModel: {class_name} from {module_name}"
+                            )
+                except ImportError as e:
+                    print(
+                        f"  [Model] Warning: Could not import Diffusers module {module_name}: {e}"
+                    )
+
+    # ============================================================================
+    # WFM imports (from wfm/models/ subdirectory)
+    # only cosmos-policy for now, models under this folder are implemented in i4 fashion
+    # ============================================================================
+    print("Auto-discovering wfm subclasses...")
+    wfm_dir = model_dir / "wfm" / "models"
+    if wfm_dir.exists():
+        for item in wfm_dir.iterdir():
+            if (
+                item.is_file()
+                and item.suffix == ".py"
+                and item.stem in ["cosmos_policy"]
+            ):
+                module_name = f"wfm.models.{item.stem}"
+                try:
+                    module = importlib.import_module(
+                        f"cosmos_rl.policy.model.{module_name}"
+                    )
+                    classes = _discover_model_classes(module, BaseModel)
+                    for class_name in classes:
+                        if hasattr(module, class_name):
+                            globals()[class_name] = getattr(module, class_name)
+                            __all__.append(class_name)
+                            print(
+                                f"  [Model] Imported BaseModel: {class_name} from {module_name}"
+                            )
+                except ImportError as e:
+                    print(
+                        f"  [Model] Warning: Could not import WFM module {module_name}: {e}"
+                    )
+
+
+# Run auto-import on module load
+_auto_import_models()

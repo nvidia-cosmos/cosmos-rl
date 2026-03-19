@@ -1,0 +1,56 @@
+# PI05 LIBERO-10 evaluation (same script: tests/test_vla_libero.py)
+# Single GPU:  MUJOCO_GL=egl python tests/test_vla_libero.py --config configs/pi05/pi05-libero10-eval.toml
+# Multi-GPU:   MUJOCO_GL=egl torchrun --nproc-per-node 8 tests/test_vla_libero.py --config configs/pi05/pi05-libero10-eval.toml --trials 50
+
+[train]
+output_dir = "./outputs/pi05-libero10-eval"
+compile = false
+
+[train.train_policy]
+type = "grpo"
+dataset.name = "libero"
+
+[policy]
+model_name_or_path = "sunshk/pi05_libero_pytorch"
+
+[rollout]
+backend = "vla"
+n_generation = 1
+
+[rollout.sampling_config]
+temperature = 0.6
+top_p = 1.0
+top_k = 50
+
+[validation]
+enable = true
+dataset.name = "libero"
+dataset.subset = "libero_10"
+
+[vla]
+vla_type = "pi05"
+use_proprio = false
+proprio_dim = 7
+num_images_in_input = 3
+num_envs = 8
+training_chunk_size = 16
+save_video = true
+max_steps = 520
+
+[custom]
+num_steps = 10
+action_chunk = 10
+action_env_dim = 7
+replan_steps = 5
+noise_method = "flow_sde"
+noise_level = 0.5
+noise_anneal = false
+noise_params = [0.7, 0.3, 400.0]
+noise_logvar_range = [0.08, 0.16]
+joint_logprob = false
+safe_get_logprob = false
+ignore_last = false
+train_expert_only = true
+discrete_state_input = true
+max_token_len = 200
+trials_per_task = 50

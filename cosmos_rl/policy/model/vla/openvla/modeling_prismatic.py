@@ -74,9 +74,9 @@ class PrismaticVisionBackbone(nn.Module):
         # [Contract] Validate number of (fused) vision backbones, create "alpha" featurizer and Instantiate
         #   =>> Note :: Monkey-Patch the `forward()` function of the backbone to ensure FSDP-compatibility
         #               Hardcodes `get_intermediate_layers` to return the **SECOND-TO-LAST** layer patches!
-        assert (
-            len(timm_model_ids) <= 2
-        ), "Prismatic models only support up to 2 (fused) vision backbones!"
+        assert len(timm_model_ids) <= 2, (
+            "Prismatic models only support up to 2 (fused) vision backbones!"
+        )
         self.featurizer = timm.create_model(
             timm_model_ids[0],
             pretrained=False,
@@ -356,12 +356,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
             # assert input_ids.shape[0] == 1, "Generation is only currently supported for batch size of 1!"
-            assert (
-                past_key_values is not None
-            ), "You must provide `past_key_values` during cached generation!"
-            assert (
-                labels is None
-            ), "Unexpected key `labels` provided during cached generation!"
+            assert past_key_values is not None, (
+                "You must provide `past_key_values` during cached generation!"
+            )
+            assert labels is None, (
+                "Unexpected key `labels` provided during cached generation!"
+            )
 
             language_model_output = self.language_model(
                 input_ids=input_ids,
@@ -378,12 +378,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         # === Handle Unimodal Forward ===
         elif pixel_values is None:
-            assert (input_ids is not None) and (
-                inputs_embeds is None
-            ), "Missing `input_ids` in language-only forward!"
-            assert (
-                past_key_values is None
-            ), "Unexpected key `past_key_values` provided during language-only forward!"
+            assert (input_ids is not None) and (inputs_embeds is None), (
+                "Missing `input_ids` in language-only forward!"
+            )
+            assert past_key_values is None, (
+                "Unexpected key `past_key_values` provided during language-only forward!"
+            )
 
             language_model_output = self.language_model(
                 input_ids=input_ids,
@@ -402,9 +402,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         elif (input_ids.shape[0] == pixel_values.shape[0]) or (
             inputs_embeds.shape[0] == pixel_values.shape[0]
         ):
-            assert (
-                past_key_values is None
-            ), "Unexpected key `past_key_values` provided during language-only forward!"
+            assert past_key_values is None, (
+                "Unexpected key `past_key_values` provided during language-only forward!"
+            )
 
             # Visual Feature Extraction
             patch_features = self.vision_backbone(pixel_values)

@@ -6,7 +6,7 @@ import argparse
 import toml
 import json
 from types import SimpleNamespace
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, ConcatDataset
 import os
 import einops
 import numpy as np
@@ -612,4 +612,13 @@ if __name__ == "__main__":
     config = CosmosConfig.from_dict(config_dict)
 
     dataset = BehaviorSFTDataset(config)
+    add_name = config.custom.get("add_dataset_name")
+    add_dir = config.custom.get("add_dataset_local_dir")
+    mult = int(config.custom.get("add_data_multiplier", 0) or 0)
+    if add_name and add_dir and mult > 0:
+        cfg2 = config.model_copy(deep=True)
+        cfg2.train.train_policy.dataset.name = add_name
+        cfg2.train.train_policy.dataset.local_dir = add_dir
+        add_ds = BehaviorSFTDataset(cfg2)
+        dataset = ConcatDataset([dataset] + [add_ds] * mult)
     launch_dispatcher(dataset=dataset)

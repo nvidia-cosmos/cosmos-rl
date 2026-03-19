@@ -514,9 +514,9 @@ class Qwen3MoE(BaseModel):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "interested_tokens must be a local tensor"
+                assert not isinstance(h, torch.distributed.tensor.DTensor), (
+                    "interested_tokens must be a local tensor"
+                )
                 h = h[interested_tokens]
             h = self.norm(h)
             if not self.tie_embed_tokens:
@@ -697,13 +697,13 @@ class Qwen3MoE(BaseModel):
             if expert_id is not None:
                 target_tensor = target_tensor[expert_id]
             if slice_range is not None:
-                assert (
-                    target_tensor.shape[0] == 2 * self.model_args.ffn_dim
-                ), f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                assert target_tensor.shape[0] == 2 * self.model_args.ffn_dim, (
+                    f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                )
                 target_tensor = target_tensor[slice_range]
-            assert (
-                target_tensor.shape == sharded_weight.shape
-            ), f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"
+            assert target_tensor.shape == sharded_weight.shape, (
+                f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"
+            )
             with torch.no_grad():
                 target_tensor.data.copy_(sharded_weight)
 
@@ -732,9 +732,9 @@ class Qwen3MoE(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                assert (
-                    local_view.shape == sharded_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                assert local_view.shape == sharded_weight.shape, (
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
                 with torch.no_grad():
                     local_view.data.copy_(sharded_weight)
 
@@ -867,18 +867,18 @@ class Qwen3MoE(BaseModel):
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+        if not (self.model_args.n_heads % cp_size == 0):
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size})"
             )
 
     def check_tp_compatible(self, tp_size: int):
-        non_divisible_by_tp_size = (
-            self.model_args.n_heads % tp_size != 0
-            or self.model_args.n_kv_heads % tp_size != 0
-            or self.model_args.n_experts % tp_size != 0
-        )
+        non_divisible_by_tp_size = self.model_args.n_experts % tp_size != 0
         if non_divisible_by_tp_size:
             raise ValueError(
-                f"Model is not compatible with tp/ep parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} or expert number={self.model_args.n_experts} is not satisified by tp size({tp_size})"
+                f"Model is not compatible with tp/ep parallelism, model's expert number={self.model_args.n_experts} is not divisible by tp size({tp_size})"
             )
+        assert os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0").lower() in [
+            "1",
+            "true",
+        ], "TP_EP_INTERCHANGABLE_WITH_DP_FUSED must be set to 1 for Qwen3-MoE"

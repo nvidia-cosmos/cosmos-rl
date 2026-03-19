@@ -41,6 +41,7 @@ from cosmos_rl.policy.kernel.megatron_moe.moe_utils import (
 from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
+    MoEAlltoAllTokenDispatcher,
 )
 from transformers.activations import ACT2FN
 
@@ -87,6 +88,7 @@ class MoEArgs:
     enable_router_bias: bool = False
     enable_glu: bool = True
     act_fn: Optional[str] = None
+    moe_enable_deepep: bool = True
 
     def __post_init__(self):
         if self.shared_inter_dim is None:
@@ -210,9 +212,9 @@ class GroupedExperts(nn.Module):
             ep_size = 1
             ep_rank = 0
 
-        assert (
-            self.n_routed_experts % ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
+        assert self.n_routed_experts % ep_size == 0, (
+            f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
+        )
 
         # Replicate the tensor to all experts. This is sub-optimal but is
         # used by this implementation for correctness.
@@ -282,6 +284,18 @@ class GroupedExperts(nn.Module):
         return y
 
 
+class ScaleGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w, scale: Optional[float]):
+        ctx.scale = float(scale) if scale is not None else None
+        return w  # identity
+
+    @staticmethod
+    def backward(ctx, grad_w):
+        # scale ONLY the gradient for w
+        return grad_w * ctx.scale if ctx.scale is not None else grad_w, None
+
+
 class GroupedExpertsDeepEP(nn.Module):
     """
     Sparse MoE implementation using DeepEP.
@@ -322,14 +336,14 @@ class GroupedExpertsDeepEP(nn.Module):
             from transformers.activations import ACT2FN
 
             self.act_fn = ACT2FN[args.act_fn]
-            assert (
-                not self.enable_glu
-            ), "enable_glu must be False when act_fn is not None."
+            assert not self.enable_glu, (
+                "enable_glu must be False when act_fn is not None."
+            )
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
         self.ep_size = ep_mesh.size()
         self.ep_rank = ep_mesh.get_local_rank()
-
+        self.moe_weight_scale = 1.0 / self.ep_size if self.ep_size > 1 else None
         # TODO: merge with MoEArgs
         config = MoEConfig(
             moe_router_topk=self.args.n_activated_experts,
@@ -345,13 +359,21 @@ class GroupedExpertsDeepEP(nn.Module):
         local_expert_indices = [
             local_expert_indices_offset + i for i in range(num_local_experts)
         ]
-
-        self.token_dispatcher = MoEFlexTokenDispatcher(
-            num_local_experts=num_local_experts,
-            local_expert_indices=local_expert_indices,
-            config=config,
-            ep_group=ep_mesh.get_group(),
-        )
+        self.using_deepep = self.args.moe_enable_deepep
+        if self.using_deepep:
+            self.token_dispatcher = MoEFlexTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
+        else:
+            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=ep_mesh.get_group(),
+            )
 
     def forward(
         self,
@@ -377,8 +399,9 @@ class GroupedExpertsDeepEP(nn.Module):
                 Shape is [num_tokens, model_dim]
         """
         assert not isinstance(x, DTensor)
-
-        indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
+        if self.using_deepep:
+            # This a feature for deepep, it can filter out padding token for dispatching
+            indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(
@@ -392,7 +415,9 @@ class GroupedExpertsDeepEP(nn.Module):
         if torch.count_nonzero(tokens_per_expert) > 0:
             output1 = ops.gmm(
                 permuted_local_hidden_states,
-                self.gate_and_up_projs.to_local(),
+                ScaleGrad.apply(
+                    self.gate_and_up_projs.to_local(), self.moe_weight_scale
+                ),
                 tokens_per_expert,
                 trans_b=True,
             )
@@ -404,18 +429,27 @@ class GroupedExpertsDeepEP(nn.Module):
 
             output2 = ops.gmm(
                 output1_,
-                self.down_projs.to_local(),
+                ScaleGrad.apply(self.down_projs.to_local(), self.moe_weight_scale),
                 tokens_per_expert,
                 trans_b=True,
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
+            output1 = torch.matmul(
+                x[0] * 0,
+                ScaleGrad.apply(
+                    self.gate_and_up_projs.to_local()[0].t(), self.moe_weight_scale
+                ),
+            )
             if self.enable_glu:
                 output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             else:
                 output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
-
+            output2 = torch.matmul(
+                output1_,
+                ScaleGrad.apply(
+                    self.down_projs.to_local()[0].t(), self.moe_weight_scale
+                ),
+            )
         y = self.token_dispatcher.token_unpermutation(output2)
 
         return y
@@ -505,9 +539,9 @@ class Gate(nn.Module):
         self.aux_loss_coeff = args.aux_loss_coeff
 
         if self.bias_update_factor > 0:
-            assert (
-                self.train_gate
-            ), "Require train_gate to be set to True to apply the bias update"
+            assert self.train_gate, (
+                "Require train_gate to be set to True to apply the bias update"
+            )
 
         self.weight = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim), requires_grad=self.train_gate
@@ -550,7 +584,7 @@ class Gate(nn.Module):
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
-            scores = scores.sigmoid()
+            scores = scores.float().sigmoid()
         original_scores = scores
 
         # Add correction bias to balance tokens across gates.
@@ -579,10 +613,10 @@ class Gate(nn.Module):
             )
         weights = weights * self.route_scale
 
-        if self.bias_update_factor > 0 or self.aux_loss_coeff > 0:
+        if self.bias_update_factor >= 0 or self.aux_loss_coeff > 0:
             expert_load = self._compute_expert_load(indices, token_mask)
 
-        if self.bias_update_factor > 0 and self.training:
+        if self.bias_update_factor >= 0 and self.training:
             if self._cumulative_expert_load is None:
                 self._cumulative_expert_load = expert_load.detach()
             else:
@@ -613,14 +647,14 @@ class Gate(nn.Module):
         This encourages the model to route tokens to less popular experts, promoting
         better load balance.
         """
-        assert (
-            self.train_gate and self.bias_update_factor > 0
-        ), "Gate bias update is disabled"
+        assert self.train_gate and self.bias_update_factor >= 0, (
+            "Gate bias update is disabled"
+        )
 
         assert self.training, "Gate bias update is only supported during training"
-        assert (
-            self._cumulative_expert_load is not None
-        ), "Score correction bias cannot be updated without the current expert load"
+        assert self._cumulative_expert_load is not None, (
+            "Score correction bias cannot be updated without the current expert load"
+        )
 
         # 1) Compute the expert load across all DP ranks.
         # Copy the cumulative load into a local variable, and set the stored load to None.

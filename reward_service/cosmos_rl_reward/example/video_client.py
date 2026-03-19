@@ -25,9 +25,14 @@ def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
+
 """
 Cosmos-Reason1, DanceGRPO VQ and MQ reward functions are supported currently.
+Supports both Wan2.1 (z_dim=16) and Wan2.2 (z_dim=48) latent formats.
 """
+
+# ---- Configuration ----
+wan_version = "2.1"  # "2.1" or "2.2"
 
 # Example prompts.
 prompts = [
@@ -57,86 +62,84 @@ def make_headers(replica_id: str | None = None, extra: dict | None = None) -> di
         headers.update(extra)
     return headers
 
-# The folllowing code is an example of how to generate encoded latents from video using the Wan2pt1TokenizerHelper.
+
+# The following code is an example of how to generate encoded latents from video.
 # The generated latents can be sent to the "/api/reward/enqueue" endpoint for calculating rewards.
 # "api/reward/enqueue" endpoint expects only encoded latent tensor in the request body.
+#
+# Wan2.1: z_dim=16, latent shape [B, 16, T, H, W]   (temporal downsample 4x, spatial 8x)
+# Wan2.2: z_dim=48, latent shape [B, 48, T, H, W]   (temporal downsample 4x, spatial 16x via patchify)
 use_fake = True  # Set to True to use a fake video tensor for demonstration purposes.
 if use_fake:
-    # Example fake video info data.
-    # This is a dictionary containing video information such as FPS.
-    # The video info is used to provide additional context about the video.
-    # Example: {'video_fps': 16.0}
     video_infos = [
-        {
-            "video_fps": 16.0,  # Example FPS for the fake video
-        },
-        {
-            "video_fps": 16.0,  # Example FPS for the fake video
-        },
+        {"video_fps": 16.0},
+        {"video_fps": 16.0},
     ]
 
-    # Fake a latent tensor for demonstration purposes.
-    # Example fake latent tensor shape [2, 16, 24, 54, 96]
-    latents = torch.from_numpy(np.random.rand(2, 16, 24, 54, 96).astype(np.float16)).to(
-        torch.bfloat16
-    )
+    if wan_version == "2.2":
+        # Wan2.2 fake latent: z_dim=48, example shape [2, 48, 8, 44, 80]
+        # Matches Cosmos3 training output dimensions for 720p video
+        latents = torch.from_numpy(
+            np.random.rand(2, 48, 8, 44, 80).astype(np.float16)
+        ).to(torch.bfloat16)
+    else:
+        # Wan2.1 fake latent: z_dim=16, example shape [2, 16, 24, 54, 96]
+        latents = torch.from_numpy(
+            np.random.rand(2, 16, 24, 54, 96).astype(np.float16)
+        ).to(torch.bfloat16)
 else:
-    from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
     import torchvision
     import numpy as np
 
-    # Initialize the tokenizer for latent encoding.
-    # The Wan2pt1TokenizerHelper is used to encode video tensors into latents.
-    # The tokenizer requires a VAE checkpoint path and other parameters.
-    demo = Wan2pt1TokenizerHelper(
-        chunk_duration=81,
-        load_mean_std=False,
-        vae_pth="/workspace/tokenizer_ckpt.pth",
-        temporal_window=16,
-        device="cuda",
-    )
-
-    # Read a real video tensor using torchvision.io.read_video.
-    # This is an example of how to read a video file and convert it to a tensor.
-    # The video tensor will be in the shape [B, T, C, H, W] after reading.
-    # The range of the sample video tensor is [-1, 1] after normalization.
     with torch.no_grad():
         video, audio, info = torchvision.io.read_video(
-            "sample.mp4",  # Path to video file
+            "sample.mp4",
             start_pts=0.0,
-            end_pts=None,  # Read the entire video
-            pts_unit="sec",  # Time unit is seconds
-            output_format="TCHW",  # Output format: Time, Channels, Height, Width
+            end_pts=None,
+            pts_unit="sec",
+            output_format="TCHW",
         )
     video = video.detach().cpu()
-    video = video.permute(1, 0, 2, 3).contiguous()  # Change to CTHW format
-    video = video.unsqueeze(0)  # Add batch dimension
-    # The video tensor is now in the shape [B, C, T, H, W]
+    video = video.permute(1, 0, 2, 3).contiguous()  # TCHW -> CTHW
+    video = video.unsqueeze(0)  # [B, C, T, H, W]
 
-    # Record the sample video tensor without normalization for later use.
-    # The sample video tensor is in the range of [0, 255] and in uint8 format.
     sample_video = video.clone().clamp(0, 255).to(torch.uint8)
 
-    # Normalize the video tensor to [-1, 1] range.
-    # This is required for the Wan2pt1TokenizerHelper to work correctly.
-    # The video tensor should be in the range of [0, 255] before normalization.
-    video = video.float()  # Ensure the video tensor is in float format
+    video = video.float()
     video = (video - 127.5) / 127.5  # Normalize to [-1, 1]
     log(f"Sample video shape: {video.shape}")
     log(f"Sample video range: [{video.min():.3f}, {video.max():.3f}]")
 
-    # Create video info dictionary to record the video info data from the read_video function.
-    # The info usually contains fps about the video, Example: {'video_fps': 30.0}
     video_infos = [info, info]
 
-    # Encode the normalized [-1, 1] video tensor to latents.
-    latents = demo.encode_video(video)
+    if wan_version == "2.2":
+        from cosmos_rl.policy.model.wfm.tokenizer.wan2pt2 import WanVAE
+
+        demo = WanVAE(
+            z_dim=48,
+            vae_pth="Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        latents = demo.encode(video.to("cuda").to(torch.bfloat16))
+    else:
+        from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+
+        demo = Wan2pt1TokenizerHelper(
+            chunk_duration=81,
+            load_mean_std=False,
+            vae_pth="/workspace/tokenizer_ckpt.pth",
+            temporal_window=16,
+            device="cuda",
+        )
+        latents = demo.encode_video(video)
+
     log(
         f"Latent range: [{latents.min():.3f}, {latents.max():.3f}] shape: {latents.shape} dtype: {latents.dtype}"
     )
 
     # Duplicate the latents for batch size of 2 to demonstrate batch processing.
-    latents = torch.cat([latents, latents], dim=0)  # Duplicate for batch size of 2
+    latents = torch.cat([latents, latents], dim=0)
 
 
 # Convert the latents to a numpy array for sending to the API.
@@ -148,6 +151,7 @@ tensor = latents[0:1].cpu()
 
 # Example json format to be sent together with the encoded latents to the "/api/reward/enqueue" endpoint for calculating rewards.
 data = {
+    "media_type": "latent",
     "prompts": prompts[0:1],  # List of prompts corresponding to the batch size.
     "reward_fn": {
         "cosmos_reason1": 1.0,  # Cosmos-Reason1 function and all Cosmos-Reason1 related reward will be calculated.

@@ -89,7 +89,9 @@ def _format_json_for_log(obj: object, max_chars: int) -> str:
     return s
 
 
-def _recommend_enqueue_timeout_s(payload_bytes: int, assume_upload_mbps: float) -> float:
+def _recommend_enqueue_timeout_s(
+    payload_bytes: int, assume_upload_mbps: float
+) -> float:
     """Heuristic to avoid socket write timeouts for large uploads.
 
     requests/urllib3 doesn't expose an explicit "write timeout"; the socket timeout can still
@@ -122,7 +124,9 @@ def _parse_shape(shape: str) -> Tuple[int, ...]:
     return dims
 
 
-def _parse_reward_fn_specs(specs: Optional[List[str]], default_name: str) -> Dict[str, float]:
+def _parse_reward_fn_specs(
+    specs: Optional[List[str]], default_name: str
+) -> Dict[str, float]:
     # Allow repeated flags: --reward-fn hpsv2 or --reward-fn hpsv2=1.0
     if not specs:
         return {default_name: 1.0}
@@ -149,9 +153,7 @@ def _parse_reward_fn_specs(specs: Optional[List[str]], default_name: str) -> Dic
 def build_fake_image_npy_bytes(shape: Tuple[int, ...]) -> bytes:
     # Matches image_client.py: np.save(uint8 array) and send as .npy bytes.
     if len(shape) != 4 or shape[-1] != 3:
-        raise ValueError(
-            f"Image shape must be [B,H,W,3]. Got {shape}"
-        )
+        raise ValueError(f"Image shape must be [B,H,W,3]. Got {shape}")
     arr = ((np.random.rand(*shape) * 255.0).clip(0, 255)).astype(np.uint8)
     buf = io.BytesIO()
     np.save(buf, arr, allow_pickle=False)
@@ -174,10 +176,14 @@ def build_fake_video_torch_bytes(shape: Tuple[int, ...], dtype: str) -> bytes:
         "float32": torch.float32,
     }
     if dtype not in dtype_map:
-        raise ValueError(f"Unsupported --video-dtype: {dtype!r}. Choose from {sorted(dtype_map)}")
+        raise ValueError(
+            f"Unsupported --video-dtype: {dtype!r}. Choose from {sorted(dtype_map)}"
+        )
 
     # Use rand() in float32 then cast; avoids bfloat16 rand limitations on some backends.
-    tensor = torch.from_numpy(np.random.rand(*shape).astype(np.float32)).to(dtype_map[dtype])
+    tensor = torch.from_numpy(np.random.rand(*shape).astype(np.float32)).to(
+        dtype_map[dtype]
+    )
     buf = io.BytesIO()
     torch.save(tensor, buf)
     return buf.getvalue()
@@ -257,9 +263,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Benchmark average end-to-end latency of reward server (enqueue + poll pull until ready)."
     )
-    parser.add_argument("--host", type=str, required=True, help="Server host, e.g. https://... (no trailing slash)")
+    parser.add_argument(
+        "--host",
+        type=str,
+        required=True,
+        help="Server host, e.g. https://... (no trailing slash)",
+    )
     parser.add_argument("--token", type=str, default="", help="Bearer token (optional)")
-    parser.add_argument("--num-requests", type=int, default=10, help="Number of benchmark requests")
+    parser.add_argument(
+        "--num-requests", type=int, default=10, help="Number of benchmark requests"
+    )
     parser.add_argument(
         "--media-type",
         type=str,
@@ -286,7 +299,9 @@ def main() -> None:
         default=None,
         help="Reward function spec. Repeatable. Format: name or name=weight (e.g. --reward-fn hpsv2 --reward-fn ocr=1.0)",
     )
-    parser.add_argument("--poll-interval", type=float, default=0.5, help="Seconds between pull retries")
+    parser.add_argument(
+        "--poll-interval", type=float, default=0.5, help="Seconds between pull retries"
+    )
     parser.add_argument(
         "--max-wait",
         type=float,
@@ -357,12 +372,11 @@ def main() -> None:
         payload_bytes = build_fake_video_torch_bytes(shape, dtype=args.video_dtype)
         # Matches video_client.py: include video_infos; also include media_type for clarity.
         meta = {
-            "media_type": "video",
+            "media_type": "latent",
             "prompts": ["Latency benchmark prompt." for _ in range(batch)],
             "reward_fn": reward_fn,
             "video_infos": [{"video_fps": 16.0} for _ in range(batch)],
         }
-
     log(
         f"[LatencyBenchmark] Prepared payload: media_type={args.media_type}, shape={shape}, bytes={len(payload_bytes)}"
     )
@@ -371,7 +385,9 @@ def main() -> None:
         payload_bytes=len(payload_bytes),
         assume_upload_mbps=args.assume_upload_mbps,
     )
-    effective_enqueue_timeout = max(float(args.enqueue_timeout), recommended_enqueue_timeout)
+    effective_enqueue_timeout = max(
+        float(args.enqueue_timeout), recommended_enqueue_timeout
+    )
     if effective_enqueue_timeout != float(args.enqueue_timeout):
         log(
             "[LatencyBenchmark] Auto-increasing enqueue timeout to reduce write timeouts: "
@@ -423,7 +439,9 @@ def main() -> None:
         t1 = time.perf_counter()
         dt = t1 - t0
         latencies_s.append(dt)
-        log(f"[LatencyBenchmark] {i+1}/{args.num_requests}: uuid={uuid}, latency={dt:.3f}s")
+        log(
+            f"[LatencyBenchmark] {i + 1}/{args.num_requests}: uuid={uuid}, latency={dt:.3f}s"
+        )
         if args.print_response == "last":
             log(
                 "[LatencyBenchmark] last pull responses "

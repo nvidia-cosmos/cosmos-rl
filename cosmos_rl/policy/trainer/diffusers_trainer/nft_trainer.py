@@ -29,14 +29,20 @@ from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.trainer.optm import (
+    build_lr_schedulers as common_build_lr_schedulers,
+)
 from cosmos_rl.policy.trainer.diffusers_trainer.diffusers_trainer import (
     DiffusersTrainer,
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.util import copy_weights_with_decay, is_master_rank
+from cosmos_rl.utils.util import (
+    copy_weights_with_decay,
+    is_master_rank,
+    str2torch_dtype,
+)
 from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
 
@@ -107,16 +113,12 @@ class NFTTrainer(DiffusersTrainer):
             tgt_params=self.old_trainable_params,
         )
 
-        # Create ema if needed
-        if self.config.train.ema_enable:
-            self.ema = EMAModuleWrapper(
-                parameters=self.trainable_params,
-                decay=self.config.train.ema_decay,
-                update_step_interval=self.config.train.ema_update_step_interval,
-                device=self.device,
-            )
-
         self.grpo_config = self.config.train.train_policy
+
+        # For optimizers
+        self.lr_schedulers = self.build_lr_schedulers()
+        self.lr_schedulers_updated = False
+        self.optimizers.zero_grad()
 
         # For iteration control
         self.mini_batch = self.grpo_config.mini_batch
@@ -128,32 +130,6 @@ class NFTTrainer(DiffusersTrainer):
             self.config.policy.diffusers.sample.num_steps
             * self.config.policy.diffusers.timesteps_fraction
         )
-        self.optimizers.zero_grad()
-
-    def save_checkpoint(
-        self,
-        current_step: int,
-        total_steps: int,
-        remain_samples_num: int,
-    ):
-        logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-        if self.config.train.ema_enable and self.ema is not None:
-            self.ema.copy_ema_to(self.trainable_params, store_temp=True)
-        model_state_dict = self.model.get_trained_model_state_dict()
-        self.ckpt_manager.save_checkpoint(
-            model=model_state_dict,
-            optimizer=self.optimizers,
-            scheduler=self.lr_schedulers,
-            step=current_step,
-            total_steps=total_steps,
-            **{
-                "remain_samples_num": remain_samples_num,
-                "is_final": current_step == total_steps,
-            },
-        )
-        self.ckpt_manager.save_check(step=current_step)
-        if self.config.train.ema_enable and self.ema is not None:
-            self.ema.copy_temp_to(self.trainable_params)
 
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
@@ -168,10 +144,11 @@ class NFTTrainer(DiffusersTrainer):
 
     def weight_resume(self):
         model_loaded = False
+        ckpt_extra_info = {}
         if self.config.train.resume:
             try:
                 # Need to reload again from checkpoint to make sure the model is in the correct state
-                self.model_resume_from_checkpoint()
+                ckpt_extra_info = self.model_resume_from_checkpoint()
                 model_loaded = True
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
@@ -193,10 +170,31 @@ class NFTTrainer(DiffusersTrainer):
         assert model_loaded, "Model weight must be populated before training starts."
         self.model.transformer.train()
 
-        return False
+        return ckpt_extra_info
+
+    def build_lr_schedulers(self, total_steps: int = int(1e6)):
+        return common_build_lr_schedulers(self.optimizers, self.config, total_steps)
 
     def update_lr_schedulers(self, total_steps: Optional[int] = None):
-        pass
+        if not self.lr_schedulers_updated:
+            assert total_steps is not None and total_steps > 0, (
+                "Total steps must be set for lr scheduler"
+            )
+            logger.info(
+                f"[Policy] Building lr schedulers for total steps {total_steps}"
+            )
+
+            # TODO(jiaxinc): This is a tricky part:
+            # Rebuild lr schedulers for the very first step because
+            # only until the first step, we can know the exact total steps from the controller
+            new_lr_schedulers = self.build_lr_schedulers(total_steps)
+            with torch.no_grad():
+                # Note: we need to load the state dict of the old lr schedulers
+                # in case it is resumed from a checkpoint,
+                # otherwise, the lr scheduler will be reset to the initial value
+                new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+            self.lr_schedulers = new_lr_schedulers
+            self.lr_schedulers_updated = True
 
     def all_reduce_states(self, inter_policy_nccl: HighAvailabilitylNccl) -> float:
         """
@@ -234,7 +232,7 @@ class NFTTrainer(DiffusersTrainer):
     ):
         """Log multimodal data to Weights & Biases (Wandb) for visualization."""
 
-        mm_datas_cpu = mm_datas.detach().cpu()
+        mm_datas_cpu = mm_datas.detach().to(torch.float16).cpu()
         num_to_log = min(15, len(mm_datas_cpu))
         rewards_cpu = rewards.detach().cpu()
 
@@ -293,9 +291,12 @@ class NFTTrainer(DiffusersTrainer):
         neg_text_embedding_dict = self.model.text_embedding(
             [""],
             device=self.device,
-            max_sequence_length=128,
+            max_sequence_length=self.config.policy.diffusers.max_prompt_length,
         )
         self.neg_prompt_embed = neg_text_embedding_dict["encoder_hidden_states"]
+        self.neg_prompt_attention_mask = neg_text_embedding_dict[
+            "encoder_attention_mask"
+        ]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
     def step_training(
@@ -325,9 +326,9 @@ class NFTTrainer(DiffusersTrainer):
             A dictionary of training metrics used for logging and reporting.
         """
         logger.debug(f"Starting training step {current_step}/{total_steps}")
-        assert (
-            self.config.train.train_policy.kl_beta > 0.0
-        ), "KL beta must be greater than 0 for diffusion NFT training."
+        assert self.config.train.train_policy.kl_beta > 0.0, (
+            "KL beta must be greater than 0 for diffusion NFT training."
+        )
         if current_step == 1:
             self.set_neg_prompt_embed()
         # Pack the list of rollouts into a batch for training
@@ -446,6 +447,18 @@ class NFTTrainer(DiffusersTrainer):
                                     mini_batch["prompt_embeds"],
                                 ]
                             )
+                            if self.neg_prompt_attention_mask is not None:
+                                prompt_attention_mask = torch.cat(
+                                    [
+                                        self.neg_prompt_attention_mask.repeat(
+                                            cur_mini_size, 1
+                                        ),
+                                        mini_batch["prompt_attention_mask"],
+                                    ],
+                                    dim=1,
+                                )
+                            else:
+                                prompt_attention_mask = None
                             if self.neg_pooled_prompt_embed is not None:
                                 pooled_embeds = torch.cat(
                                     [
@@ -460,6 +473,7 @@ class NFTTrainer(DiffusersTrainer):
                         else:
                             embeds = mini_batch["prompt_embeds"]
                             pooled_embeds = mini_batch["pooled_prompt_embeds"]
+                            prompt_attention_mask = mini_batch["prompt_attention_mask"]
 
                         for j_idx, j_timestep_orig_idx in enumerate(
                             range(self.num_train_timesteps)
@@ -477,6 +491,9 @@ class NFTTrainer(DiffusersTrainer):
                                 self.model.nft_prepare_transformer_input(
                                     latents=xt,
                                     prompt_embeds=embeds,
+                                    prompt_attention_mask=prompt_attention_mask
+                                    if prompt_attention_mask is not None
+                                    else None,
                                     pooled_prompt_embeds=pooled_embeds
                                     if pooled_embeds is not None
                                     else None,
@@ -526,15 +543,15 @@ class NFTTrainer(DiffusersTrainer):
                             r = torch.clamp(normalized_advantages_clip, 0, 1)
 
                             positive_prediction = (
-                                self.config.train.train_policy.kl_beta
+                                self.config.policy.diffusers.nft_beta
                                 * forward_prediction
-                                + (1 - self.config.train.train_policy.kl_beta)
+                                + (1 - self.config.policy.diffusers.nft_beta)
                                 * old_prediction.detach()
                             )
                             implicit_negative_prediction = (
-                                (1.0 + self.config.train.train_policy.kl_beta)
+                                (1.0 + self.config.policy.diffusers.nft_beta)
                                 * old_prediction.detach()
-                                - self.config.train.train_policy.kl_beta
+                                - self.config.policy.diffusers.nft_beta
                                 * forward_prediction
                             )
 
@@ -568,10 +585,10 @@ class NFTTrainer(DiffusersTrainer):
                             ori_policy_loss = (
                                 r
                                 * positive_loss
-                                / self.config.train.train_policy.kl_beta
+                                / self.config.policy.diffusers.nft_beta
                                 + (1.0 - r)
                                 * negative_loss
-                                / self.config.train.train_policy.kl_beta
+                                / self.config.policy.diffusers.nft_beta
                             )
                             policy_loss = (
                                 ori_policy_loss
@@ -684,7 +701,6 @@ class NFTTrainer(DiffusersTrainer):
         old_deviation_max = metrics_collection.mean_or_zero(
             info_accumulated, "old_deviation_max", self.device
         )
-        kl = metrics_collection.mean_or_zero(info_accumulated, "kl", self.device)
         old_kl = metrics_collection.mean_or_zero(
             info_accumulated, "old_kl", self.device
         )
@@ -700,7 +716,6 @@ class NFTTrainer(DiffusersTrainer):
             "loss": loss,
             "policy_loss": policy_loss,
             "unweighted_policy_loss": unweighted_policy_loss,
-            "kl": kl,
             "old_kl": old_kl,
             "x0_norm": x0_norm,
             "old_deviation": old_deviation,
@@ -734,8 +749,7 @@ class NFTTrainer(DiffusersTrainer):
                 # Calculate the iteration time
                 assert end_event.query()
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
-                # TODO(dinghaoy): support lr schedulers
-                report_data["train/learning_rate"] = self.config.train.optm_lr
+                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
                 report_data["train/iteration_time"] = iter_time
 
                 for k, v in reduced_avg.items():
@@ -768,12 +782,48 @@ class NFTTrainer(DiffusersTrainer):
                         )
                         report_data[f"rollout_{modality}s"] = mm_report_data
 
-        # checkpointing
+        # Only step lr scheduler when all the mini-batches are processed
+        self.lr_schedulers.step()
+
+        # Checkpointing
         if is_master_replica and (do_save_checkpoint):
-            self.save_checkpoint(
-                current_step=current_step,
+            is_last_step = current_step == total_steps
+            # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_ema_to(self.trainable_params, store_temp=True)
+
+            if is_last_step or self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{current_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=is_last_step,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
+                )
+
+            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+            model_state_dict = self.model.get_trained_model_state_dict()
+            self.ckpt_manager.save_checkpoint(
+                model=model_state_dict,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
                 total_steps=total_steps,
-                remain_samples_num=remain_samples_num,
+                **{
+                    "remain_samples_num": remain_samples_num,
+                    "is_final": is_last_step,
+                },
             )
+            self.ckpt_manager.save_check(step=current_step)
+
+            # Restore current weights after saving ema weights to checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_temp_to(self.trainable_params)
 
         return report_data

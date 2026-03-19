@@ -27,6 +27,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.profiler import CosmosProfiler
+from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 
 
 class PolicyWorkerBase(WorkerBase, CommMixin):
@@ -82,6 +83,12 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
 
         self.rl_mode = self.config.mode
 
+        self.signal_handler = None
+        if self.config.train.save_ckpt_at_exit:
+            self.signal_handler = DistributedSignalHandler.get_instance(
+                self.config.train.signal_to_handle
+            )
+
     def check_config(self):
         mini_batch = 1
         policy_type = self.config.train.train_policy.type
@@ -93,16 +100,16 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             error_msg += f" * mini_batch({mini_batch})"
             assert dp_shard_size == self.parallel_dims.dp_shard
             assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-            assert (
-                train_batch_per_replica % (dp_shard_size * mini_batch) == 0
-            ), error_msg
+            assert train_batch_per_replica % (dp_shard_size * mini_batch) == 0, (
+                error_msg
+            )
         else:
             # TODO(jiaxinc): Optimize this:
             #  for SFT,`train_batch_per_replica` stands for the batch_size for a DP worker,
             #  not really for a training replica
-            assert (
-                train_batch_per_replica % mini_batch == 0
-            ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
+            assert train_batch_per_replica % mini_batch == 0, (
+                f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
+            )
         logger.info("Config checked successfully")
 
     def execute(self):
@@ -126,3 +133,6 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 except Exception as e:
                     logger.error(f"Failed to finalize checkpoint manager: {e}")
             self.destroy_worker()
+
+    def handle_shutdown(self):
+        pass

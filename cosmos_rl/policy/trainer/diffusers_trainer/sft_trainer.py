@@ -64,6 +64,7 @@ class SFTTrainer(DiffusersTrainer):
     def load_model(self):
         ckpt_total_steps = 0
         train_step = 0
+        ckpt_extra_vars = {}
         if (
             not self.parallel_dims.dp_replicate_enabled
         ) or self.parallel_dims.dp_replicate_coord[0] == 0:
@@ -89,7 +90,7 @@ class SFTTrainer(DiffusersTrainer):
                 self.model_load_from_hf()
 
             # TODO (yy) support multi-replica
-        return ckpt_total_steps, train_step
+        return ckpt_total_steps, train_step, ckpt_extra_vars
 
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
@@ -111,36 +112,59 @@ class SFTTrainer(DiffusersTrainer):
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
     ):
-        # Support save safetensor
         if (
-            is_last_step or (train_step % save_freq == 0 and train_step > 0)
-        ) and self.parallel_dims.dp_replicate_coord[0] == 0:
-            if self.config.train.ckpt.enable_checkpoint:
-                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
-                model_state_dict = self.model.get_trained_model_state_dict()
-                self.ckpt_manager.save_checkpoint(
-                    model=model_state_dict,
-                    optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
-                    step=train_step,
-                    total_steps=total_steps,
-                    is_final=is_last_step,
-                )
-                # TODO(yy): support save safetensor
-                # self.ckpt_manager.save_check(
-                #     step=train_step,
-                #     val_score=val_score,
-                #     pp_enabled=self.parallel_dims.pp_enabled,
-                #     pp_last_stage=pp_last_stage,
-                #     pp_master_rank=self.parallel_dims.world_size
-                #     - self.parallel_dims.world_size / self.parallel_dims.pp,
-                # )
+            (is_last_step or (train_step % save_freq == 0 and train_step > 0))
+            and self.parallel_dims.dp_replicate_coord[0] == 0
+            and self.config.train.ckpt.enable_checkpoint
+        ):
+            # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_ema_to(self.model.trainable_params, store_temp=True)
 
-    def step_training(self, global_batch, total_steps, train_step, save_freq):
+            if is_last_step or self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{train_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=is_last_step,
+                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                )
+
+            logger.info(f"[Policy] Saving cosmos checkpoint at step {train_step}...")
+            model_state_dict = self.model.get_trained_model_state_dict()
+            self.ckpt_manager.save_checkpoint(
+                model=model_state_dict,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=train_step,
+                total_steps=total_steps,
+                is_final=is_last_step,
+            )
+            self.ckpt_manager.save_check(step=train_step)
+
+            # Restore current weights after saving ema weights to checkpoint
+            if self.config.train.ema_enable and self.ema is not None:
+                self.ema.copy_temp_to(self.model.trainable_params)
+
+    def step_training(
+        self,
+        global_batch,
+        total_steps: int,
+        train_step: int,
+        save_freq: int,
+        inter_policy_nccl: Optional[dist_util.HighAvailabilitylNccl] = None,
+        data_arrival_event: Optional[torch.cuda.Event] = None,
+    ):
         if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            assert train_step == 0, (
+                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            )
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
@@ -183,6 +207,8 @@ class SFTTrainer(DiffusersTrainer):
 
         self.optimizers.step()
         self.lr_schedulers.step()
+        if self.config.train.ema_enable and self.ema is not None:
+            self.ema.step(self.trainable_params, train_step)
 
         end_event.record()
 
@@ -210,7 +236,7 @@ class SFTTrainer(DiffusersTrainer):
                     "train/loss_avg": global_avg_loss,
                     "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                    "optimizer/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
                 # TODO (yy): support MFU calculation for diffusers

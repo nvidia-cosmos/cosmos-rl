@@ -129,7 +129,9 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
                 q = lastdim_contig(q)
                 k = lastdim_contig(k)
                 v = lastdim_contig(v)
-            return flash_attn_func(q, k, v, *args, **kwargs)
+            out = flash_attn_func(q, k, v, *args, **kwargs)
+            # some version flash_attn_3 returns a tuple while flash_attn_2 returns a tensor, we unify the output to be a tensor
+            return out[0] if isinstance(out, tuple) else out
 
         def _flash_attn_varlen_func(
             q,
@@ -148,7 +150,7 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
                 v = lastdim_contig(v)
                 cu_seqlens_q = cu_seqlens_q.to(torch.int32).contiguous()
                 cu_seqlens_k = cu_seqlens_k.to(torch.int32).contiguous()
-            return flash_attn_varlen_func(
+            out = flash_attn_varlen_func(
                 q,
                 k,
                 v,
@@ -159,6 +161,8 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
                 *args,
                 **kwargs,
             )
+            # some version flash_attn_3 returns a tuple while flash_attn_2 returns a tensor, we unify the output to be a tensor
+            return out[0] if isinstance(out, tuple) else out
 
         self.flash_attn_func = partial(
             _flash_attn_func, deterministic=self.deterministic
