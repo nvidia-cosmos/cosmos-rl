@@ -230,7 +230,10 @@ class LLMTrainer(Trainer):
             raise e
 
         self.ckpt_manager = CheckpointMananger(
-            self.config, self.parallel_dims, self.global_rank
+            self.config,
+            self.parallel_dims,
+            self.global_rank,
+            hook_fns=kwargs.get("hook_fns", {}),
         )
         # FIXME: (lms) use_streams=True could cause NaN in backward. Fix this later.
         self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
