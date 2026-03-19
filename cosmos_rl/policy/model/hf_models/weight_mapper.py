@@ -27,6 +27,7 @@ class HFModelWeightMapper(WeightMapper):
         super().__init__(hf_config)
         self.kv_head_ratio = 1
         self.head_dim = 1
+
         if getattr(self.config, "num_key_value_heads", None) is not None:
             self.kv_head_ratio = (
                 self.config.num_attention_heads // self.config.num_key_value_heads
@@ -77,7 +78,7 @@ class HFModelWeightMapper(WeightMapper):
                 return rollout_weight_name.replace("w2_bias", "down_proj_bias")
             else:
                 pass
-        elif model_type == "qwen3_vl":
+        elif model_type in ["qwen3_vl", "qwen3_5", "qwen3_5_moe"]:
             # Special case for Qwen3-VL
             if rollout_weight_name.startswith("language_model.model."):
                 rollout_weight_name = rollout_weight_name.replace(
@@ -131,6 +132,42 @@ class HFModelWeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
+    # For Qwen3-5 and Qwen3-5-MoE, we need to split the in_proj_qkvz weight into in_proj_q/k/v and in_proj_z
+    # self.in_proj_qkv = nn.Linear(self.hidden_size, self.key_dim * 2 + self.value_dim)
+    # self.in_proj_z   = nn.Linear(self.hidden_size, self.value_dim)
+    def _split_in_proj_qkvz_weight(self, name, weight: torch.Tensor):
+        # weight has shape [2 * head_dim, hidden_dim]
+        num_v_heads = self.config.text_config.linear_num_value_heads
+        num_k_heads = self.config.text_config.linear_num_key_heads
+        head_v_dim = self.config.text_config.linear_value_head_dim
+        value_dim = head_v_dim * num_v_heads
+        head_k_dim = self.config.text_config.linear_key_head_dim
+        key_dim = head_k_dim * num_k_heads
+
+        total_size = 2 * key_dim + 2 * value_dim
+        output_sizes_ratio = [
+            key_dim / total_size,
+            key_dim / total_size,
+            value_dim / total_size,
+            value_dim / total_size,
+        ]
+        output_dim = weight.shape[0]
+        split_outputs = []
+        for i in range(4):
+            output_size = int(output_dim * output_sizes_ratio[i])
+            if output_size > 0:
+                split_outputs.append(weight[:output_size])
+                weight = weight[output_size:]
+        return split_outputs
+
+    # For Qwen3-5 and Qwen3-5-MoE, we need to split the in_proj_ba weight into in_proj_b and in_proj_a
+    def _split_in_proj_ba_weight(self, name, weight: torch.Tensor):
+        # weight has shape [2 * head_dim, hidden_dim]
+        dim_0 = weight.shape[0]
+        in_proj_b_weight = weight[: dim_0 // 2]
+        in_proj_a_weight = weight[dim_0 // 2 :]
+        return in_proj_b_weight, in_proj_a_weight
+
     def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
     ) -> List[Tuple[str, torch.Tensor]]:
@@ -155,6 +192,18 @@ class HFModelWeightMapper(WeightMapper):
             group_keys.append((q_proj_weight_key, q_weight))
             group_keys.append((k_proj_weight_key, k_weight))
             group_keys.append((v_proj_weight_key, v_weight))
+        elif "in_proj_qkvz" in compatible_key:
+            [in_proj_q_weight, in_proj_k_weight, in_proj_v_weight, in_proj_z_weight] = (
+                self._split_in_proj_qkvz_weight(compatible_key, param)
+            )
+            in_proj_q_weight_key = compatible_key.replace("in_proj_qkvz", "in_proj_q")
+            in_proj_k_weight_key = compatible_key.replace("in_proj_qkvz", "in_proj_k")
+            in_proj_v_weight_key = compatible_key.replace("in_proj_qkvz", "in_proj_v")
+            in_proj_z_weight_key = compatible_key.replace("in_proj_qkvz", "in_proj_z")
+            group_keys.append((in_proj_q_weight_key, in_proj_q_weight))
+            group_keys.append((in_proj_k_weight_key, in_proj_k_weight))
+            group_keys.append((in_proj_v_weight_key, in_proj_v_weight))
+            group_keys.append((in_proj_z_weight_key, in_proj_z_weight))
         elif (
             "gate_up_proj" in compatible_key
             and self.config.model_type not in models_do_not_split_gate_up_proj
@@ -167,6 +216,14 @@ class HFModelWeightMapper(WeightMapper):
             group_keys.append((gate_proj_weight_key, gate_proj_weight))
             up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
             group_keys.append((up_proj_weight_key, up_proj_weight))
+        elif "in_proj_ba" in compatible_key:
+            in_proj_b_weight, in_proj_a_weight = self._split_in_proj_ba_weight(
+                compatible_key, param
+            )
+            in_proj_b_weight_key = compatible_key.replace("in_proj_ba", "in_proj_b")
+            in_proj_a_weight_key = compatible_key.replace("in_proj_ba", "in_proj_a")
+            group_keys.append((in_proj_b_weight_key, in_proj_b_weight))
+            group_keys.append((in_proj_a_weight_key, in_proj_a_weight))
         elif "qkv" in compatible_key:
             q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
                 compatible_key, param
@@ -313,6 +370,56 @@ class HFModelWeightMapper(WeightMapper):
                 )
             )
             return split_strategy
+        elif match := re.search(  # noqa: F841
+            r"model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_qkv\.weight",
+            name,
+        ):
+            num_v_heads = self.config.text_config.linear_num_value_heads
+            num_k_heads = self.config.text_config.linear_num_key_heads
+            head_v_dim = self.config.text_config.linear_value_head_dim
+            value_dim = head_v_dim * num_v_heads
+            head_k_dim = self.config.text_config.linear_key_head_dim
+            key_dim = head_k_dim * num_k_heads
+            total_size = 2 * key_dim + value_dim
+
+            split_strategy = []
+            # The first part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 0 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "q"),
+                    {0: {"offset": 0, "total_size": total_size, "length": key_dim}},
+                )
+            )
+            # The second part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 1 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "k"),
+                    {
+                        0: {
+                            "offset": key_dim,
+                            "total_size": total_size,
+                            "length": key_dim,
+                        }
+                    },
+                )
+            )
+            # The third part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 2 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "v"),
+                    {
+                        0: {
+                            "offset": key_dim * 2,
+                            "total_size": total_size,
+                            "length": value_dim,
+                        }
+                    },
+                )
+            )
+            return split_strategy
         return []
 
     @cached_property
@@ -335,6 +442,15 @@ class HFModelWeightMapper(WeightMapper):
         }
         if self.config.model_type == "gpt_oss":
             mapping_dict["qkv"] = ["q_proj", "k_proj", "v_proj"]
+        elif self.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+            mapping_dict["in_proj_qkvz"] = [
+                "in_proj_q",
+                "in_proj_k",
+                "in_proj_v",
+                "in_proj_z",
+            ]
+            mapping_dict["in_proj_ba"] = ["in_proj_b", "in_proj_a"]
+
         return mapping_dict
 
     def update_tensor_view(
