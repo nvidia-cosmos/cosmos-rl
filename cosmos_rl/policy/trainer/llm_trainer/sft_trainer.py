@@ -675,6 +675,7 @@ class SFTTrainer(LLMTrainer):
                     step=train_step,
                     total_steps=total_steps,
                     is_final=is_last_step,
+                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
                     **kwargs,
                 )
                 self.ckpt_manager.save_check(
