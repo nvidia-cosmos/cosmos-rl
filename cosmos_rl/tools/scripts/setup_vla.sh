@@ -288,6 +288,13 @@ setup_libero() {
     fi
 }
 
+# ── setup_maniskill: ManiSkill3 Python deps ──────────────────────────────────────
+setup_maniskill() {
+    banner "Setting up ManiSkill3 Python environment"
+    $PIP_CMD install mani-skill
+    ok "ManiSkill3 Python environment ready"
+}
+
 # ── setup_robotwin: RoboTwin Python deps + sapien/mplib patches ─────────────────
 setup_robotwin() {
     banner "Setting up RoboTwin Python environment"
@@ -349,7 +356,8 @@ banner "Python/pip"
 ok "Using PIP_CMD=${PIP_CMD} PYTHON_CMD=${PYTHON_CMD}"
 
 setup_libero
-setup_robotwin
+setup_maniskill
+# setup_robotwin
 
 echo ""
 ok "VLA environment setup complete"
