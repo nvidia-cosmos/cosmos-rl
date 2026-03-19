@@ -24,6 +24,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache  # we need __iter__ and __len__ of pkv
@@ -167,11 +168,11 @@ def segment_sum(input_tensor):
     return tensor_segsum
 
 
-def apply_mask_to_padding_states(hidden_states, attention_mask):
+def apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx = None):
     """
     Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
     """
-    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1 and seq_idx is None:
         dtype = hidden_states.dtype
         hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
 
@@ -386,9 +387,10 @@ class NemotronHMamba2Mixer(nn.Module):
         past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        seq_idx: Optional[torch.Tensor] = None,
     ):
         # 1. Gated MLP's linear projection
-        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask, seq_idx)
         projected_states = self.in_proj(hidden_states)
 
         # Set up dimensions for reshapes later
@@ -476,7 +478,7 @@ class NemotronHMamba2Mixer(nn.Module):
                     A,
                     D=self.D,
                     chunk_size=self.chunk_size,
-                    seq_idx=None,  # was seq_idx
+                    seq_idx=seq_idx,  # was seq_idx
                     activation=self.activation,
                     rmsnorm_weight=self.norm.weight,
                     rmsnorm_eps=self.norm.variance_epsilon,
@@ -534,7 +536,7 @@ class NemotronHMamba2Mixer(nn.Module):
                     chunk_size=self.chunk_size,
                     D=self.D,
                     z=None,
-                    seq_idx=None,
+                    seq_idx=seq_idx,
                     return_final_states=True,
                     dt_bias=self.dt_bias,
                     dt_softplus=True,
@@ -752,15 +754,45 @@ class NemotronHMamba2Mixer(nn.Module):
         past_key_values: Optional[HybridMambaAttentionDynamicCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        packing_args = None
     ):
+        seq_idx = None
+        if packing_args is not None:
+            assert is_fast_path_available, "sequence_packing only support fast path"
+            total_tokens = hidden_states.shape[1] # (bsz, seq_len, hidden_dim)
+            seq_idx = self.get_packing_seq_idx(total_tokens, packing_args)
+
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
-            return self.cuda_kernels_forward(hidden_states, past_key_values, cache_position, attention_mask)
+            return self.cuda_kernels_forward(hidden_states, past_key_values, cache_position, attention_mask, seq_idx)
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
             hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
 
         return self.torch_forward(hidden_states, past_key_values, cache_position, attention_mask)
+
+    def get_packing_seq_idx(self, total_tokens, packing_args):
+        """
+        If total_tokens is 16 (for example), this method takes packed_seq_params.cu_seqlens_q_padded
+        (or cu_seqlens_q) which is of the form [0, 5, 7, 11] and returns a tensor of the form
+        [0, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3],
+        which is [0]*(5-0) + [1]*(7-5) + [2]*(11-7) + [3]*(16-11)
+        In the above example, there are three sequences in the pack.
+        In general, the output has an additional sequence index (e.g. 0, 1, 2, 3) so that any tokens
+        beyond the last padded input sequence are accounted for as an extra sequence. However, If
+        cu_seqlens_q_padded[-1] == max_seqlen then this additional sequence index will not be
+        included.
+        """
+        # Example: [0, 5, 7, 11] -> [0, 5, 7, 11, 16]
+        cu_seqlens = packing_args['cu_seqlens']
+        # Example: [0, 5, 7, 11, 16] -> [5, 2, 4, 5]
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        # Example: [5, 2, 4, 5] -> [0, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+        seq_idx = torch.repeat_interleave(
+            torch.arange(seq_lengths.numel(), device=cu_seqlens.device), seq_lengths
+        )
+        seq_idx = seq_idx.to(torch.int32).unsqueeze(0)  # Add a batch dimension
+        return seq_idx
 
 
 class NemotronHRMSNorm(nn.Module):
@@ -809,6 +841,7 @@ class NemotronHBlock(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None, # [batch_size, seq_len] for MoE expert load computation and filtering padding tokens
+        packing_args = None,
     ):
         moe_aux_loss = None
         with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
@@ -820,7 +853,7 @@ class NemotronHBlock(nn.Module):
 
             if self.block_type == "mamba":
                 hidden_states = self.mixer(
-                    hidden_states, past_key_values=past_key_values, cache_position=cache_position, attention_mask=attention_mask
+                    hidden_states, past_key_values=past_key_values, cache_position=cache_position, attention_mask=attention_mask, packing_args=packing_args
                 )
             elif self.block_type == "attention":
                 attn_out, _ = self.mixer(
@@ -828,6 +861,7 @@ class NemotronHBlock(nn.Module):
                     position_embeddings=position_embeddings,
                     attention_mask=attention_mask,
                     past_key_value=past_key_values,   # <-- critical
+                    packing_args=packing_args
                 )
                 hidden_states = attn_out
             elif self.block_type in ["mlp", "moe"]:
@@ -1047,6 +1081,7 @@ class NemotronHAttention(nn.Module):
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             attention_mask: Optional[torch.Tensor] = None,
             past_key_value: Optional[HybridMambaAttentionDynamicCache] = None,
+            packing_args = None,
             **kwargs: Any,
         ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
             input_shape = hidden_states.shape[:-1]
@@ -1069,17 +1104,36 @@ class NemotronHAttention(nn.Module):
             if self.config._attn_implementation != "eager":
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-            attn_output, attn_weights = attention_interface(
-                self,
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                dropout=0.0 if not self.training else self.attention_dropout,
-                scaling=self.scaling,
-                sliding_window=self.sliding_window,  # main diff with Llama
-                **kwargs,
-            )
+            if packing_args is not None:
+                cu_seqlens = packing_args['cu_seqlens']
+                max_seqlen = packing_args['max_seqlen_in_batch']
+                attn_output, attn_weights = attention_interface(
+                    self,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask=None,
+                    cu_seq_lens_q = cu_seqlens,
+                    cu_seq_lens_k = cu_seqlens,
+                    max_length_q=max_seqlen,
+                    max_length_k=max_seqlen,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    scaling=self.scaling,
+                    sliding_window=self.sliding_window,  # main diff with Llama
+                    **kwargs,
+                )
+            else:
+                attn_output, attn_weights = attention_interface(
+                    self,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask=attention_mask,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    scaling=self.scaling,
+                    sliding_window=self.sliding_window,  # main diff with Llama
+                    **kwargs,
+                )
 
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
@@ -1661,6 +1715,7 @@ class NemotronHModel(NemotronSiglip2PreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        packing_args = None,
         **kwargs,
     ) -> Union[Tuple, NemotronHOutput]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1735,7 +1790,7 @@ class NemotronHModel(NemotronSiglip2PreTrainedModel):
 
             if self.gradient_checkpointing and self.training:
                 hidden_states, local_aux_loss = self._gradient_checkpointing_func(
-                    mixer_block.__call__, hidden_states, past_key_values, cache_position, layer_mask, position_embeddings, padding_mask
+                    mixer_block.__call__, hidden_states, past_key_values, cache_position, layer_mask, position_embeddings, padding_mask, packing_args
                 )
             else:
                 hidden_states, local_aux_loss = mixer_block(
@@ -1744,7 +1799,8 @@ class NemotronHModel(NemotronSiglip2PreTrainedModel):
                     cache_position=cache_position,
                     attention_mask=layer_mask,
                     position_embeddings=position_embeddings,
-                    padding_mask=padding_mask
+                    padding_mask=padding_mask,
+                    packing_args=packing_args
                 )
             if local_aux_loss is not None:
                 aux_loss = (aux_loss + local_aux_loss) if aux_loss is not None else local_aux_loss
@@ -1887,6 +1943,7 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Different from the original implementation, Qwen3VL use timestamps rather than absolute time position ids."""
 
@@ -1894,30 +1951,34 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
         if video_grid_thw is not None:
             video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
             video_grid_thw[:, 0] = 1
-
-        spatial_merge_size = self.config.vision_config.spatial_merge_size
+        spatial_merge_size = self.config.projector_config.spatial_merge_size
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
         mrope_position_deltas = []
-        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
-            total_input_ids = input_ids
-            if attention_mask is None:
-                attention_mask = torch.ones_like(total_input_ids)
-            position_ids = torch.ones(
-                3,
-                input_ids.shape[0],
-                input_ids.shape[1],
-                dtype=input_ids.dtype,
-                device=input_ids.device,
-            )
+        if input_ids is not None:
+            if cu_seqlens is None:
+                total_input_ids = input_ids
+                if attention_mask is None:
+                    total_attention_mask = torch.ones_like(total_input_ids)
+                total_attention_mask = total_attention_mask.to(total_input_ids.device)
+            else:
+                varlen = cu_seqlens.cpu().tolist()
+                total_input_ids = []
+                total_attention_mask = []
+                for start, end in zip(varlen[:-1],varlen[1:]):
+                    total_input_ids.append(input_ids[:, start:end])
+                    total_attention_mask.append(torch.ones_like(total_input_ids[-1]).to(input_ids.device))
+            position_ids = []
             image_index, video_index = 0, 0
-            attention_mask = attention_mask.to(total_input_ids.device)
-            for i, input_ids in enumerate(total_input_ids):
-                input_ids = input_ids[attention_mask[i] == 1]
+            for input_ids, attention_mask in zip(total_input_ids, total_attention_mask):
+                # flatten
+                input_ids = input_ids[attention_mask == 1]
                 image_nums, video_nums = 0, 0
+                # Get all 
                 vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
                 vision_tokens = input_ids[vision_start_indices + 1]
+                # Find num of video and num of images
                 image_nums = (vision_tokens == image_token_id).sum()
                 video_nums = (vision_tokens == video_token_id).sum()
                 input_tokens = input_ids.tolist()
@@ -1926,6 +1987,7 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
                 remain_images, remain_videos = image_nums, video_nums
                 for _ in range(image_nums + video_nums):
                     if image_token_id in input_tokens and remain_images > 0:
+                        # find start position of image
                         ed_image = input_tokens.index(image_token_id, st)
                     else:
                         ed_image = len(input_tokens) + 1
@@ -1966,6 +2028,8 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
                     t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
                     h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
                     w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                    # 3d rope will be loook like this:
+                    # rope_3d[i] = [patch_index_t, patch_index_h, patch_index_w] with text offset
                     llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
@@ -1975,31 +2039,18 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
                     llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
                 llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
+                position_ids.append(llm_positions.to(input_ids.device))
+                mrope_position_deltas.append(llm_positions.max() + 1 - len(input_ids))
             mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
+            if cu_seqlens is None:
+                # Batching on second dim (batch) for batch seq
+                position_ids = pad_sequence(position_ids, batch_first=False, padding_value=1)
+            else:
+                # Concat on last dim (seq_len) for packing seq
+                position_ids = torch.cat(position_ids, dim=-1)
             return position_ids, mrope_position_deltas
         else:
-            if attention_mask is not None:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 1)
-                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-                max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
-                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
-            else:
-                position_ids = (
-                    torch.arange(input_ids.shape[1], device=input_ids.device)
-                    .view(1, 1, -1)
-                    .expand(3, input_ids.shape[0], -1)
-                )
-                mrope_position_deltas = torch.zeros(
-                    [input_ids.shape[0], 1],
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
-                )
-
-            return position_ids, mrope_position_deltas
-    
+            raise ValueError("input_ids is None")
 
     def patch_merging_by_param(self, image_embeds, image_grid_thw, merge_size=2):
         """
@@ -2127,6 +2178,7 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
         video_grid_thw: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
+        packing_args = None,
         **kwargs,
     ) -> Union[tuple, NemotronHOutput]:
         r"""
@@ -2272,6 +2324,7 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
             cache_position=cache_position,
             visual_pos_masks=visual_pos_masks,
             use_cache=use_cache,
+            packing_args=packing_args,
             **kwargs,
         )
 
@@ -2448,6 +2501,28 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        packing_args = None
+        valid_input_len = kwargs.get("valid_input_len", None)
+
+        if valid_input_len is not None:
+            batch_size = valid_input_len.shape[0]
+
+            input_ids_list = []
+            for i in range(batch_size):
+                valid_len = valid_input_len[i].item()
+                cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
+                input_ids_list.append(cur_input_ids)
+            cu_seqlens = torch.cumsum(valid_input_len, dim=0).to(torch.int32)
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+            max_seqlen_in_batch = torch.max(valid_input_len).cpu().item()
+
+            packing_args = {
+                "cu_seqlens": cu_seqlens,
+                "max_seqlen_in_batch": max_seqlen_in_batch
+            }
+            input_ids = torch.cat(input_ids_list, dim=1)
+
         nemotron_h_outputs = self.model(
             input_ids,
             attention_mask = attention_mask,
@@ -2460,6 +2535,7 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
             video_grid_thw=video_grid_thw,
             cache_position=cache_position,
             use_cache=use_cache,
+            packing_args=packing_args,
         )
         hidden_states = nemotron_h_outputs[0]
 

@@ -239,7 +239,9 @@ _tarfile_to_samples_tolerant = wds.filters.pipelinefilter(
 IMAGE_MAX_PIXELS = 1960 * 32 * 32
 # Reduced per-image cap when >=4 images in a message (matches siglip2 strategy).
 IMAGE_MAX_PIXELS_MULTI = 196 * 32 * 32
-VIDEO_MAX_PIXELS = 196 * 30 * 32 * 32
+VIDEO_MAX_FRAME_PIXEL = 196 * 32 * 32
+MAX_FRAME = 30
+VIDEO_MAX_PIXELS = VIDEO_MAX_FRAME_PIXEL * MAX_FRAME
 
 
 def approx_max_pixels(messages, max_seq_len):
@@ -738,12 +740,12 @@ class CustomWebDatasetDataset(Dataset):
 
         # Max video frames: use config value,
         # falling back to 30 to match launcher.py's hardcoded default.
-        self.max_video_frames = int(custom.get('video_max_frames', 30))
+        self.max_video_frames = int(custom.get('video_max_frames', MAX_FRAME))
 
         # Pixel budgets for vision content (configurable, with sensible defaults).
         self.image_max_pixels = int(custom.get('image_max_pixels', IMAGE_MAX_PIXELS))
         self.image_max_pixels_multi = int(custom.get('image_max_pixels_multi', IMAGE_MAX_PIXELS_MULTI))
-        self.video_total_pixels = int(custom.get('video_total_pixels', VIDEO_MAX_PIXELS))
+        self.video_total_pixels = int(custom.get('video_total_pixels', self.max_video_frames * VIDEO_MAX_FRAME_PIXEL))
         self.setup_wds_dataset()
 
     def setup_wds_dataset(self):
