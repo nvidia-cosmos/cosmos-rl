@@ -61,6 +61,9 @@ def pipeline_model(
         parallel_dims=parallel_dims,
     )
 
+    # TODO: Re-evaluate whether _setup_communication_channels can be removed
+    # with PyTorch >= 2.10, where lazy P2P process group initialization may
+    # make this warmup unnecessary.
     _setup_communication_channels(pp_mesh, device)
 
     return model_parts
