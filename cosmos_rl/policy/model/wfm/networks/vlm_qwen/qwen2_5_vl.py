@@ -74,9 +74,8 @@ else:
     print("flash_attn_2 not available")
     flash_attn_varlen_func = None
 
-assert is_flash_attn_2_available(), (
-    "flash_attn_2 not available. run pip install flash_attn"
-)
+if not is_flash_attn_2_available():
+    raise ImportError("flash_attn_2 not available. run pip install flash_attn")
 
 logger = logging.get_logger(__name__)
 
