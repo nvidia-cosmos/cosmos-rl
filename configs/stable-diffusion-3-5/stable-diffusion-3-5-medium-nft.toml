@@ -100,6 +100,9 @@ save_mode = "async"
 
 [validation]
 enable = false
+val_before_train = true
+freq = 10
+batch_size = 128  # 16*8
 dataset.name = "pickscore"
 dataset.split = "test"
 

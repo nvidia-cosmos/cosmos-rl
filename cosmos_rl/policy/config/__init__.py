@@ -1319,7 +1319,7 @@ class ValidationConfig(BaseModel):
     )
     batch_size: Optional[int] = Field(
         default=None,
-        description="Batch size for validation, will use the same batch size as training if not set.",
+        description="Batch size for validation, will use the same rollout batch size as training if not set.",
     )
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
@@ -1349,6 +1349,14 @@ class ValidationConfig(BaseModel):
     reward_function: Union[str, List[str], Dict[str, float]] = Field(
         default=[],
         description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
+    )
+    use_remote_reward: Optional[bool] = Field(
+        default=None,
+        description="Whether to use remote reward calculation. If None, will use the same as training policy. If set to True, the reward calculation will be done in a remote worker. If False, the reward calculation will be done in the local process.",
+    )
+    remote_reward: Optional[RemoteRewardConfig] = Field(
+        default=None,
+        description="Configuration for remote reward calculation. If None, will use the same as training policy.",
     )
 
     @model_validator(mode="after")
@@ -1808,6 +1816,21 @@ class Config(BaseModel):
         # Handle for evaludation configuration.
         if isinstance(self.validation.dataset.split, str):
             self.validation.dataset.split = [self.validation.dataset.split]
+
+        if self.train.train_policy.type == "grpo":
+            if self.validation.use_remote_reward is None:
+                self.validation.use_remote_reward = (
+                    self.train.train_policy.use_remote_reward
+                )
+            else:
+                assert (
+                    self.train.train_policy.use_remote_reward
+                    == self.validation.use_remote_reward
+                ), (
+                    "train.train_policy.use_remote_reward and validation.use_remote_reward must be the same."
+                )
+            if self.validation.remote_reward is None:
+                self.validation.remote_reward = self.train.train_policy.remote_reward
 
         if self.train.transfer_dtype is None:
             # Default use master_dtype as transfer_dtype
