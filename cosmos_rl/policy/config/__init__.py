@@ -1817,19 +1817,20 @@ class Config(BaseModel):
         if isinstance(self.validation.dataset.split, str):
             self.validation.dataset.split = [self.validation.dataset.split]
 
-        if self.validation.use_remote_reward is None:
-            self.validation.use_remote_reward = (
-                self.train.train_policy.use_remote_reward
-            )
-        else:
-            assert (
-                self.train.train_policy.use_remote_reward
-                == self.validation.use_remote_reward
-            ), (
-                "train.train_policy.use_remote_reward and validation.use_remote_reward must be the same."
-            )
-        if self.validation.remote_reward is None:
-            self.validation.remote_reward = self.train.train_policy.remote_reward
+        if self.train.train_policy.type == "grpo":
+            if self.validation.use_remote_reward is None:
+                self.validation.use_remote_reward = (
+                    self.train.train_policy.use_remote_reward
+                )
+            else:
+                assert (
+                    self.train.train_policy.use_remote_reward
+                    == self.validation.use_remote_reward
+                ), (
+                    "train.train_policy.use_remote_reward and validation.use_remote_reward must be the same."
+                )
+            if self.validation.remote_reward is None:
+                self.validation.remote_reward = self.train.train_policy.remote_reward
 
         if self.train.transfer_dtype is None:
             # Default use master_dtype as transfer_dtype
