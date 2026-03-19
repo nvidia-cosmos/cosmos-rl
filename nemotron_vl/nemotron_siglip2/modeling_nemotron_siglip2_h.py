@@ -1310,29 +1310,51 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads, self.head_dim).transpose(0, 1).unsqueeze(0)
 
         attention_interface: Callable = eager_attention_forward
-        assert self.config._attn_implementation== "flash_attention_2", "Only flash attention 2 is supported for Siglip2Attention for now for var-length input. Please set `_attn_implementation` to `flash_attention_2` in the config."
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        attn_output, attn_weights = attention_interface(
-            self,
-            queries,
-            keys,
-            values,
-            attention_mask=None,
-            is_causal=self.is_causal,
-            scaling=self.scale,
-            dropout=0.0 if not self.training else self.dropout,
-            cu_seq_lens_q=cu_seqlens,
-            cu_seq_lens_k=cu_seqlens,
-            max_length_q=max_seqlen,
-            max_length_k=max_seqlen,
-        )
+        if self.config._attn_implementation == "flash_attention_2":
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            attn_output, _ = attention_interface(
+                self,
+                queries,
+                keys,
+                values,
+                attention_mask=None,
+                is_causal=self.is_causal,
+                scaling=self.scale,
+                dropout=0.0 if not self.training else self.dropout,
+                cu_seq_lens_q=cu_seqlens,
+                cu_seq_lens_k=cu_seqlens,
+                max_length_q=max_seqlen,
+                max_length_k=max_seqlen,
+            )
+        else:
+            # Other implementations: Process each chunk separately
+            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            splits = [
+                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (queries, keys, values)
+            ]
+
+            attn_outputs = [
+                attention_interface(
+                    self,
+                    q,
+                    k,
+                    v,
+                    attention_mask=None,
+                    scaling=self.scale,
+                    dropout=0.0 if not self.training else self.dropout,
+                    is_causal=self.is_causal,
+                    **kwargs,
+                )[0]
+                for q, k, v in zip(*splits)
+            ]
+            attn_output = torch.cat(attn_outputs, dim=1)
 
         attn_output = attn_output.reshape(seq_length, embed_dim).contiguous()
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights
+        return attn_output
 
 class Siglip2MLP(nn.Module):
     def __init__(self, config):
@@ -1367,7 +1389,7 @@ class Siglip2EncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
             **kwargs,
