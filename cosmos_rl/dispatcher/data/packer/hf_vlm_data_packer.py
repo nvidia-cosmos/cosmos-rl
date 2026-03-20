@@ -38,7 +38,7 @@ from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 from qwen_vl_utils import fetch_image, fetch_video
-from qwen_vl_utils.vision_process import smart_nframes
+import qwen_vl_utils.vision_process as vision_process
 
 IGNORE_LABEL_ID = -100
 
@@ -65,7 +65,7 @@ def fetch_video_frames(vision_info, image_patch_size, return_video_metadata):
         )
         sample_fps = extracted_fps
     else:
-        nframes = smart_nframes(
+        nframes = vision_process.smart_nframes(
             vision_info, total_frames=total_frames, video_fps=extracted_fps
         )
         idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
@@ -229,6 +229,13 @@ class HFVLMDataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
+        self.image_min_pixels = getattr(
+            self.hf_processor.image_processor, "size", {}
+        ).get("shortest_edge", None)
+        self.longest_edge = getattr(self.hf_processor.image_processor, "size", {}).get(
+            "longest_edge", None
+        )
+
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -248,6 +255,7 @@ class HFVLMDataPacker(DataPacker):
             hf_config, "img_context_token", None
         )
 
+        vit_type = getattr(hf_config.vision_config, "model_type", None)
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None
         )
@@ -264,20 +272,34 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type in [
-            "qwen3_vl",
-            "qwen3_5",
-            "qwen3_5_moe",
-        ] or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
-        self.use_siglip2_process = os.environ.get("USE_SIGLIP2_PROCESS", "0") in [
-            "1",
-            "true",
-            "True",
-        ]
+        self.use_qwen_vl_process = (
+            self.model_type
+            in [
+                "qwen3_vl",
+                "qwen3_5",
+                "qwen3_5_moe",
+            ]
+            or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
+            or vit_type in ["qwen3_vl", "siglip2"]
+        )
+        if self.use_qwen_vl_process:
+            real_temp_patch_size = getattr(
+                self.hf_processor.video_processor, "temporal_patch_size", None
+            )
+            if (
+                real_temp_patch_size is not None
+                and real_temp_patch_size != vision_process.FRAME_FACTOR
+            ):
+                vision_process.FRAME_FACTOR = real_temp_patch_size
+                logger.warning(
+                    f"The temporal patch size used in Qwen-VL process ({vision_process.FRAME_FACTOR}) is different from the one in the processor ({real_temp_patch_size})."
+                    " Overriding the default temporal patch size in Qwen-VL process with the one from processor."
+                )
+
         logger.info(
             f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "
             f"and video_token_id={self.video_token_id}, model_type={self.model_type}, "
-            f"use_qwen_vl_process={self.use_qwen_vl_process}, use_siglip2_process={self.use_siglip2_process}"
+            f"use_qwen_vl_process={self.use_qwen_vl_process}"
         )
 
     def get_rollout_input(self, sample: Payload) -> Any:
@@ -333,7 +355,7 @@ class HFVLMDataPacker(DataPacker):
         video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
         if (
-            (self.use_qwen_vl_process or self.use_siglip2_process)
+            self.use_qwen_vl_process
             and len(image_inputs) == 0
             and len(video_inputs) == 0
         ):
@@ -457,15 +479,48 @@ class HFVLMDataPacker(DataPacker):
                     for x in messages:
                         if x["role"] == "user":
                             contents = x["content"]
-                            for idx, content in enumerate(contents):
-                                if (
-                                    content["type"] == "text"
-                                    and self.image_token in content["text"]
-                                ):
-                                    new_content = content.copy()
-                                    contents[idx]["text"] = new_content["text"].replace(
-                                        self.image_token, ""
-                                    )
+                            # remove the image token from text content, which is old-conversion-style and may exist in some datasets
+                            # We only keep the image in ways like:
+                            # [
+                            #     {
+                            #         "role": "user",
+                            #         "content": [
+                            # HERE!!!     {
+                            # HERE!!!         "type": "image",
+                            # HERE!!!         "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                            # HERE!!!     },
+                            #             {"type": "text", "text": "Describe this image <|image_pad|> in detail."},
+                            #                                               |
+                            #               EDIT OLD CONVERSION STYLE       |
+                            #                                               v
+                            #             {"type": "text", "text": "Describe this image in detail."}, NEW CONVERSION STYLE
+                            #         ],
+                            #     }
+                            # ]
+                            if isinstance(contents, list):
+                                for idx, content in enumerate(contents):
+                                    if (
+                                        content["type"] == "text"
+                                        and self.image_token in content["text"]
+                                    ):
+                                        new_content = content.copy()
+                                        contents[idx]["text"] = new_content[
+                                            "text"
+                                        ].replace(self.image_token, "")
+                                    elif content["type"] == "image":
+                                        if (
+                                            "min_pixels" not in content
+                                            and self.image_min_pixels is not None
+                                        ):
+                                            content["min_pixels"] = (
+                                                self.image_min_pixels
+                                            )
+                                        if (
+                                            "max_pixels" not in content
+                                            and self.longest_edge is not None
+                                        ):
+                                            content["max_pixels"] = self.longest_edge
+
                 for x in messages:
                     if x["role"] == "assistant":
                         content = x["content"]
@@ -502,9 +557,7 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
-            if (self.use_qwen_vl_process or self.use_siglip2_process) and isinstance(
-                messages, list
-            ):
+            if self.use_qwen_vl_process and isinstance(messages, list):
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     messages,
                     image_patch_size=16,  # TODO: hardcode

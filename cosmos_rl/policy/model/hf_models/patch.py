@@ -196,6 +196,14 @@ def make_new_self_attn_forward(original_attn_forward):
 
 def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     patch_success = False
+    attn_implementation = getattr(hfmodel.model.config, "_attn_implementation", "")
+    if not attn_implementation.startswith("flash_attention"):
+        hfmodel.model.set_attn_implementation("flash_attention_2")
+        logger.warning(
+            f"Model {hf_config.model_type} is not using flash attention by default for sequence packing, switched to flash_attention_2. "
+            f"Original attn implementation: {attn_implementation}"
+        )
+
     try:
         if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
             SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](
