@@ -1983,6 +1983,8 @@ class NemotronSiglip2Model(NemotronSiglip2PreTrainedModel):
                 total_input_ids = input_ids
                 if attention_mask is None:
                     total_attention_mask = torch.ones_like(total_input_ids)
+                else:
+                    total_attention_mask = attention_mask
                 total_attention_mask = total_attention_mask.to(total_input_ids.device)
             else:
                 varlen = cu_seqlens.cpu().tolist()

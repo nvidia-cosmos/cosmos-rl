@@ -38,7 +38,7 @@ from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 from qwen_vl_utils import fetch_image, fetch_video
-from qwen_vl_utils.vision_process import smart_nframes
+import qwen_vl_utils.vision_process as vision_process
 
 IGNORE_LABEL_ID = -100
 
@@ -65,7 +65,7 @@ def fetch_video_frames(vision_info, image_patch_size, return_video_metadata):
         )
         sample_fps = extracted_fps
     else:
-        nframes = smart_nframes(
+        nframes = vision_process.smart_nframes(
             vision_info, total_frames=total_frames, video_fps=extracted_fps
         )
         idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
@@ -282,6 +282,19 @@ class HFVLMDataPacker(DataPacker):
             or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
             or vit_type in ["qwen3_vl", "siglip2"]
         )
+        if self.use_qwen_vl_process:
+            real_temp_patch_size = getattr(
+                self.hf_processor.video_processor, "temporal_patch_size", None
+            )
+            if (
+                real_temp_patch_size is not None
+                and real_temp_patch_size != vision_process.FRAME_FACTOR
+            ):
+                vision_process.FRAME_FACTOR = real_temp_patch_size
+                logger.warning(
+                    f"The temporal patch size used in Qwen-VL process ({vision_process.FRAME_FACTOR}) is different from the one in the processor ({real_temp_patch_size})."
+                    " Overriding the default temporal patch size in Qwen-VL process with the one from processor."
+                )
 
         logger.info(
             f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "

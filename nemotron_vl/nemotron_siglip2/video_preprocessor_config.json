@@ -3,6 +3,7 @@
         "longest_edge": 25165824,
         "shortest_edge": 4096
     },
+    "temporal_patch_size": 1,
     "patch_size": 16,
     "merge_size": 2,
     "image_mean": [
