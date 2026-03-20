@@ -137,7 +137,7 @@ class DiffusersTrainer(Trainer):
                 logger.info(
                     f"Creating EMA for model with decay {self.config.train.ema_decay} and update step interval {self.config.train.ema_update_step_interval}"
                 )
-            self.ema = EMAModuleWrapper(
+            self.model.ema = EMAModuleWrapper(
                 parameters=self.model.trainable_params,
                 decay=self.config.train.ema_decay,
                 update_step_interval=self.config.train.ema_update_step_interval,
@@ -145,7 +145,10 @@ class DiffusersTrainer(Trainer):
             )
 
         self.ckpt_manager = CheckpointMananger(
-            self.config, self.parallel_dims, self.global_rank
+            self.config,
+            self.parallel_dims,
+            self.global_rank,
+            hook_fns=kwargs.get("hook_fns", {}),
         )
 
         self.build_optimizers()

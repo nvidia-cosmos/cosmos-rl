@@ -54,6 +54,7 @@ class CheckpointMananger:
         parallel_dims: Optional[ParallelDims] = None,
         global_rank: int = 0,
         metric: str = "val_loss",
+        hook_fns: Dict[str, Callable] = {},
     ):
         self.config = config
         self.parallel_dims = parallel_dims
@@ -80,6 +81,15 @@ class CheckpointMananger:
             self._prune_corrupted_ckpts()
             # Load best score from file if exists (persists across resumes)
             self.best_score, self.best_ckpt_abs_dir = self._load_best_score()
+        if "save_checkpoint_hook" in hook_fns:
+            self.save_checkpoint_hook = hook_fns["save_checkpoint_hook"]
+        else:
+            self.save_checkpoint_hook = None
+
+        if "load_checkpoint_hook" in hook_fns:
+            self.load_checkpoint_hook = hook_fns["load_checkpoint_hook"]
+        else:
+            self.load_checkpoint_hook = None
 
     def _is_master_rank(self) -> bool:
         return (self.parallel_dims is None and self.global_rank == 0) or (
@@ -437,6 +447,8 @@ class CheckpointMananger:
             scheduler (torch.optim.lr_scheduler._LRScheduler): The scheduler to save.
             step (int): The current training step.
             **kwargs: Additional information to save, e.g., is_final.
+        Returns:
+            str: The path to the saved checkpoint directory.
         """
 
         def _save_upload(state_dict, local_rel_path, is_final=False):
@@ -594,6 +606,19 @@ class CheckpointMananger:
         logger.info(
             f"[Policy] Step: {step}, checkpoint saved successfully at {os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir)}."
         )
+        if self.save_checkpoint_hook is not None:
+            self.save_checkpoint_hook(
+                self,
+                data={
+                    "checkpoint_path": os.path.join(
+                        self.ckpt_output_dir, cur_step_ckpt_dir
+                    ),
+                    "step": step,
+                    "total_steps": total_steps,
+                    **kwargs,
+                },
+            )
+        return os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir)
 
     def load_checkpoint(
         self,
@@ -671,6 +696,14 @@ class CheckpointMananger:
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
+                    if self.load_checkpoint_hook is not None:
+                        self.load_checkpoint_hook(
+                            self,
+                            data={
+                                "checkpoint_path": base_path,
+                                "extra_vars": extra_vars,
+                            },
+                        )
                     return extra_vars, new_scheduler
             except Exception as e:
                 import traceback

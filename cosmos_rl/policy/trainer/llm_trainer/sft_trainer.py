@@ -685,7 +685,15 @@ class SFTTrainer(LLMTrainer):
                     ),
                     trainable_only=False,
                     is_final=is_last_step,
-                    dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                    **kwargs,
+                )
+                self.ckpt_manager.save_check(
+                    step=train_step,
+                    val_score=val_score,
+                    pp_enabled=self.parallel_dims.pp_enabled,
+                    pp_last_stage=pp_last_stage,
+                    pp_master_rank=self.parallel_dims.world_size
+                    - self.parallel_dims.world_size / self.parallel_dims.pp,
                 )
             # save checkpoint
             if self.config.train.ckpt.enable_checkpoint:

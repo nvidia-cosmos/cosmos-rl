@@ -887,6 +887,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             train_stream=self.train_stream,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
+            hook_fns=self.hook_fns,
         )
 
     def destroy_worker(self):

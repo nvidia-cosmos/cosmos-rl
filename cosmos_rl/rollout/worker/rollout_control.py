@@ -911,6 +911,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         payloads[i].completion_logprobs = None
                         payloads[i].completion_token_ids = None
 
+                        # For diffusers rollout, we don't need to upload extra_info for validation.
+                        if self.is_diffusers:
+                            payloads[i].extra_info = None
+
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
                         validation_step=current_step,
