@@ -232,6 +232,9 @@ class HFVLMDataPacker(DataPacker):
         self.image_min_pixels = getattr(
             self.hf_processor.image_processor, "size", {}
         ).get("shortest_edge", None)
+        self.longest_edge = getattr(self.hf_processor.image_processor, "size", {}).get(
+            "longest_edge", None
+        )
 
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
@@ -499,10 +502,11 @@ class HFVLMDataPacker(DataPacker):
                                             content["min_pixels"] = (
                                                 self.image_min_pixels
                                             )
-                                            content["max_pixels"] = max(
-                                                content.get("max_pixels", 0),
-                                                self.image_min_pixels,
-                                            )
+                                        if (
+                                            "max_pixels" not in content
+                                            and self.longest_edge is not None
+                                        ):
+                                            content["max_pixels"] = self.longest_edge
 
                 for x in messages:
                     if x["role"] == "assistant":
