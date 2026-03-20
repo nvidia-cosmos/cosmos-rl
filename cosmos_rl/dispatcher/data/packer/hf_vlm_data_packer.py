@@ -229,6 +229,10 @@ class HFVLMDataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
+        self.image_min_pixels = getattr(
+            self.hf_processor.image_processor, "size", {}
+        ).get("shortest_edge", None)
+
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -248,6 +252,7 @@ class HFVLMDataPacker(DataPacker):
             hf_config, "img_context_token", None
         )
 
+        vit_type = getattr(hf_config.vision_config, "model_type", None)
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None
         )
@@ -264,11 +269,17 @@ class HFVLMDataPacker(DataPacker):
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
         self.model_type = hf_config.model_type
-        self.use_qwen_vl_process = self.model_type in [
-            "qwen3_vl",
-            "qwen3_5",
-            "qwen3_5_moe",
-        ] or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
+        self.use_qwen_vl_process = (
+            self.model_type
+            in [
+                "qwen3_vl",
+                "qwen3_5",
+                "qwen3_5_moe",
+            ]
+            or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
+            or vit_type in ["qwen3_vl", "siglip2"]
+        )
+
         logger.info(
             f"Initialized HFVLMDataPacker with image_token_id={self.image_token_id} "
             f"and video_token_id={self.video_token_id}, model_type={self.model_type}, "
@@ -452,15 +463,47 @@ class HFVLMDataPacker(DataPacker):
                     for x in messages:
                         if x["role"] == "user":
                             contents = x["content"]
-                            for idx, content in enumerate(contents):
-                                if (
-                                    content["type"] == "text"
-                                    and self.image_token in content["text"]
-                                ):
-                                    new_content = content.copy()
-                                    contents[idx]["text"] = new_content["text"].replace(
-                                        self.image_token, ""
-                                    )
+                            # remove the image token from text content, which is old-conversion-style and may exist in some datasets
+                            # We only keep the image in ways like:
+                            # [
+                            #     {
+                            #         "role": "user",
+                            #         "content": [
+                            # HERE!!!     {
+                            # HERE!!!         "type": "image",
+                            # HERE!!!         "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                            # HERE!!!     },
+                            #             {"type": "text", "text": "Describe this image <|image_pad|> in detail."},
+                            #                                               |
+                            #               EDIT OLD CONVERSION STYLE       |
+                            #                                               v
+                            #             {"type": "text", "text": "Describe this image in detail."}, NEW CONVERSION STYLE
+                            #         ],
+                            #     }
+                            # ]
+                            if isinstance(contents, list):
+                                for idx, content in enumerate(contents):
+                                    if (
+                                        content["type"] == "text"
+                                        and self.image_token in content["text"]
+                                    ):
+                                        new_content = content.copy()
+                                        contents[idx]["text"] = new_content[
+                                            "text"
+                                        ].replace(self.image_token, "")
+                                    elif content["type"] == "image":
+                                        if (
+                                            "min_pixels" not in content
+                                            and self.image_min_pixels is not None
+                                        ):
+                                            content["min_pixels"] = (
+                                                self.image_min_pixels
+                                            )
+                                            content["max_pixels"] = max(
+                                                content.get("max_pixels", 0),
+                                                self.image_min_pixels,
+                                            )
+
                 for x in messages:
                     if x["role"] == "assistant":
                         content = x["content"]
