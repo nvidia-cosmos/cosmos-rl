@@ -67,14 +67,9 @@ def parallelize(
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims=parallel_dims,
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
             pp_enabled=False,
@@ -133,7 +128,7 @@ def apply_tp(
 
 def apply_fsdp(
     model: nn.Module,
-    dp_mesh: DeviceMesh,
+    parallel_dims: ParallelDims,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
@@ -145,7 +140,7 @@ def apply_fsdp(
 
     Args:
         model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        parallel_dims (ParallelDims): device mesh to use for data parallelism/tp fused into dp_shard.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
@@ -157,6 +152,13 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
+    world_mesh = parallel_dims.mesh
+    if parallel_dims.dp_replicate_enabled:
+        dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+    else:
+        dp_mesh_dim_names = ("dp_shard_cp",)
+    dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
@@ -209,10 +211,27 @@ def apply_fsdp(
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
+        ignored_params = None
+        linear_attn = getattr(transformer_block, "linear_attn", None)
+        if parallel_dims.tp_enabled and linear_attn is not None:
+            # FSDP over dp_shard × tp (and cp if enabled), same mesh name as build_mesh "dp_cp_tp".
+            fsdp_config_linear = {
+                "mesh": world_mesh["dp_cp_tp"],
+                "mp_policy": mp_policy,
+            }
+            if cpu_offload:
+                fsdp_config_linear["offload_policy"] = CPUOffloadPolicy()
+            fully_shard(
+                linear_attn,
+                **fsdp_config_linear,
+                reshard_after_forward=reshard_after_forward,
+            )
+            ignored_params = set(linear_attn.parameters())
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
+            ignored_params=ignored_params,
         )
     if model.embed_tokens is not None:
         logger.info("Applying FSDP to the language model embed_tokens")
