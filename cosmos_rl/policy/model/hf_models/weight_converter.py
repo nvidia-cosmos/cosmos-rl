@@ -28,9 +28,17 @@ def convert_weight_from_hf(
     hf_config: Optional[Any] = None,
 ) -> Tuple[str, torch.Tensor]:
     load_weight_test = not hasattr(parallel_dims, "mesh")
+    # Qwen3-5 / Qwen3-5-MoE linear_attn (GatedDeltaNet) is not tensor-parallelized; TP is
+    # fused into the same FSDP mesh as dp_shard.
+    is_linear_attn_fused_into_dp_shard = "linear_attn" in name
+
     if not load_weight_test:
-        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
-        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+        if is_linear_attn_fused_into_dp_shard:
+            dp_shard_rank = parallel_dims.mesh["dp_cp_tp"].get_local_rank()
+            dp_shard_size = parallel_dims.mesh["dp_cp_tp"].size()
+        else:
+            dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
+            dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:
         dp_shard_rank = 0
         dp_shard_size = 1
