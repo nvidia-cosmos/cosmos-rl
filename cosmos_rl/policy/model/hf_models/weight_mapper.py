@@ -158,6 +158,7 @@ class HFModelWeightMapper(WeightMapper):
             if output_size > 0:
                 split_outputs.append(weight[:output_size])
                 weight = weight[output_size:]
+        assert len(split_outputs) == 4, "_split_in_proj_qkvz_weight outputs should be 4"
         return split_outputs
 
     # For Qwen3-5 and Qwen3-5-MoE, we need to split the in_proj_ba weight into in_proj_b and in_proj_a
@@ -425,10 +426,10 @@ class HFModelWeightMapper(WeightMapper):
     @cached_property
     def packed_modules_mapping(self):
         mapping_dict = {
-            "qkv": [
-                "q",
-                "k",
-                "v",
+            "qkv.": [
+                "q.",
+                "k.",
+                "v.",
             ],
             "gate_up_proj": [
                 "gate_proj",
@@ -441,7 +442,7 @@ class HFModelWeightMapper(WeightMapper):
             ],
         }
         if self.config.model_type == "gpt_oss":
-            mapping_dict["qkv"] = ["q_proj", "k_proj", "v_proj"]
+            mapping_dict["qkv."] = ["q_proj.", "k_proj.", "v_proj."]
         elif self.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
             mapping_dict["in_proj_qkvz"] = [
                 "in_proj_q",
