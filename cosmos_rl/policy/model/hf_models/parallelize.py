@@ -214,25 +214,56 @@ def apply_fsdp(
         ignored_params = None
         linear_attn = getattr(transformer_block, "linear_attn", None)
         if parallel_dims.tp_enabled and linear_attn is not None:
-            # FSDP over dp_shard × tp (and cp if enabled), same mesh name as build_mesh "dp_cp_tp".
-            fsdp_config_linear = {
-                "mesh": world_mesh["dp_cp_tp"],
+            dp_group_names = ["dp_shard"]
+            # FSDP over dp_shard × tp, named as "fsdp_linear_attn" to avoid confusion with the original "dp_cp_tp".
+            fsdp_mesh_linear_attn_name = "fsdp_linear_attn"
+            world_mesh[tuple(dp_group_names + ["tp"])]._flatten(
+                mesh_dim_name=fsdp_mesh_linear_attn_name
+            )
+            flash_mesh_no_linear_attn_name = "fsdp_no_linear_attn"
+            world_mesh[tuple(dp_group_names)]._flatten(
+                mesh_dim_name=flash_mesh_no_linear_attn_name
+            )
+            if parallel_dims.dp_replicate_enabled:
+                dp_mesh_dim_names_for_no_la = (
+                    "dp_replicate",
+                    flash_mesh_no_linear_attn_name,
+                )
+                dp_mesh_dim_names_for_la = ("dp_replicate", fsdp_mesh_linear_attn_name)
+            else:
+                dp_mesh_dim_names_for_no_la = (flash_mesh_no_linear_attn_name,)
+                dp_mesh_dim_names_for_la = (fsdp_mesh_linear_attn_name,)
+
+            fsdp_config_linear_attn = {
+                "mesh": world_mesh[tuple(dp_mesh_dim_names_for_la)],
+                "mp_policy": mp_policy,
+            }
+            fsdp_config_no_linear_attn = {
+                "mesh": world_mesh[tuple(dp_mesh_dim_names_for_no_la)],
                 "mp_policy": mp_policy,
             }
             if cpu_offload:
-                fsdp_config_linear["offload_policy"] = CPUOffloadPolicy()
+                fsdp_config_linear_attn["offload_policy"] = CPUOffloadPolicy()
+                fsdp_config_no_linear_attn["offload_policy"] = CPUOffloadPolicy()
             fully_shard(
                 linear_attn,
-                **fsdp_config_linear,
+                **fsdp_config_linear_attn,
                 reshard_after_forward=reshard_after_forward,
             )
             ignored_params = set(linear_attn.parameters())
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-            ignored_params=ignored_params,
-        )
+            fully_shard(
+                transformer_block,
+                **fsdp_config_no_linear_attn,
+                reshard_after_forward=reshard_after_forward,
+                ignored_params=ignored_params,
+            )
+        else:
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+                ignored_params=ignored_params,
+            )
     if model.embed_tokens is not None:
         logger.info("Applying FSDP to the language model embed_tokens")
         fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
