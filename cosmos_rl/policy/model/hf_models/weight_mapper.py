@@ -169,6 +169,44 @@ class HFModelWeightMapper(WeightMapper):
         in_proj_a_weight = weight[dim_0 // 2 :]
         return in_proj_b_weight, in_proj_a_weight
 
+    def _linear_attn_key_value_dims(self) -> Tuple[int, int]:
+        """Linear attention Q/K/V channel dims (same as conv_dim = 2 * key_dim + value_dim)."""
+        tc = self.config.text_config
+        num_v_heads = tc.linear_num_value_heads
+        num_k_heads = tc.linear_num_key_heads
+        head_v_dim = tc.linear_value_head_dim
+        head_k_dim = tc.linear_key_head_dim
+        value_dim = head_v_dim * num_v_heads
+        key_dim = head_k_dim * num_k_heads
+        return key_dim, value_dim
+
+    def _split_linear_attn_conv1d_weight(self, weight: torch.Tensor):
+        """Split fused conv1d along dim 0 into Q, K, V blocks.
+
+        Matches vLLM `mamba_v2_sharded_weight_loader` layout: checkpoint order is
+        Q | K | V; each block is column-sharded by TP independently so that
+        policy/rollout sync slices align with `in_proj_qkv`.
+        """
+        key_dim, value_dim = self._linear_attn_key_value_dims()
+        conv_dim = 2 * key_dim + value_dim
+        dim0 = weight.shape[0]
+        if conv_dim % dim0 != 0:
+            raise ValueError(
+                f"linear_attn conv1d dim0 {dim0} is not a divisor of conv_dim {conv_dim}"
+            )
+        tp_equiv = conv_dim // dim0
+        q_len = key_dim // tp_equiv
+        k_len = key_dim // tp_equiv
+        v_len = value_dim // tp_equiv
+        if q_len + k_len + v_len != dim0:
+            raise ValueError(
+                f"linear_attn conv1d split lengths {q_len},{k_len},{v_len} do not sum to {dim0}"
+            )
+        q_w = weight[:q_len]
+        k_w = weight[q_len : q_len + k_len]
+        v_w = weight[q_len + k_len :]
+        return q_w, k_w, v_w
+
     def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
     ) -> List[Tuple[str, torch.Tensor]]:
@@ -225,6 +263,11 @@ class HFModelWeightMapper(WeightMapper):
             in_proj_a_weight_key = compatible_key.replace("in_proj_ba", "in_proj_a")
             group_keys.append((in_proj_b_weight_key, in_proj_b_weight))
             group_keys.append((in_proj_a_weight_key, in_proj_a_weight))
+        elif "linear_attn.conv1d." in compatible_key:
+            q_w, k_w, v_w = self._split_linear_attn_conv1d_weight(param)
+            group_keys.append((compatible_key.replace("conv1d", "conv1d_q"), q_w))
+            group_keys.append((compatible_key.replace("conv1d", "conv1d_k"), k_w))
+            group_keys.append((compatible_key.replace("conv1d", "conv1d_v"), v_w))
         elif "qkv" in compatible_key:
             q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
                 compatible_key, param
@@ -375,12 +418,7 @@ class HFModelWeightMapper(WeightMapper):
             r"model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_qkv\.weight",
             name,
         ):
-            num_v_heads = self.config.text_config.linear_num_value_heads
-            num_k_heads = self.config.text_config.linear_num_key_heads
-            head_v_dim = self.config.text_config.linear_value_head_dim
-            value_dim = head_v_dim * num_v_heads
-            head_k_dim = self.config.text_config.linear_key_head_dim
-            key_dim = head_k_dim * num_k_heads
+            key_dim, value_dim = self._linear_attn_key_value_dims()
             total_size = 2 * key_dim + value_dim
 
             split_strategy = []
@@ -421,6 +459,44 @@ class HFModelWeightMapper(WeightMapper):
                 )
             )
             return split_strategy
+        elif match := re.search(  # noqa: F841
+            r"model\.language_model\.layers\.(\d+)\.linear_attn\.conv1d\.(weight|bias)",
+            name,
+        ):
+            key_dim, value_dim = self._linear_attn_key_value_dims()
+            total_size = 2 * key_dim + value_dim
+            split_strategy = []
+            split_strategy.append(
+                (
+                    name.replace("conv1d", "conv1d_q"),
+                    {0: {"offset": 0, "total_size": total_size, "length": key_dim}},
+                )
+            )
+            split_strategy.append(
+                (
+                    name.replace("conv1d", "conv1d_k"),
+                    {
+                        0: {
+                            "offset": key_dim,
+                            "total_size": total_size,
+                            "length": key_dim,
+                        }
+                    },
+                )
+            )
+            split_strategy.append(
+                (
+                    name.replace("conv1d", "conv1d_v"),
+                    {
+                        0: {
+                            "offset": key_dim * 2,
+                            "total_size": total_size,
+                            "length": value_dim,
+                        }
+                    },
+                )
+            )
+            return split_strategy
         return []
 
     @cached_property
@@ -451,6 +527,11 @@ class HFModelWeightMapper(WeightMapper):
                 "in_proj_z",
             ]
             mapping_dict["in_proj_ba"] = ["in_proj_b", "in_proj_a"]
+            mapping_dict["linear_attn.conv1d"] = [
+                "linear_attn.conv1d_q",
+                "linear_attn.conv1d_k",
+                "linear_attn.conv1d_v",
+            ]
 
         return mapping_dict
 
