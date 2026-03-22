@@ -27,6 +27,8 @@ class HFModelWeightMapper(WeightMapper):
         super().__init__(hf_config)
         self.kv_head_ratio = 1
         self.head_dim = 1
+        self.attn_output_gate = False
+        self.text_config = None
 
         if getattr(self.config, "num_key_value_heads", None) is not None:
             self.kv_head_ratio = (
@@ -35,18 +37,26 @@ class HFModelWeightMapper(WeightMapper):
             self.head_dim = self.config.hidden_size // self.config.num_attention_heads
         elif getattr(self.config, "text_config", None) is not None:
             # VLM models like Gemma3-12b-it has num_attention_heads in text_config
-            text_config = self.config.text_config
+            self.text_config = self.config.text_config
             self.kv_head_ratio = (
-                text_config.num_attention_heads // text_config.num_key_value_heads
+                self.text_config.num_attention_heads
+                // self.text_config.num_key_value_heads
             )
-            self.head_dim = text_config.hidden_size // text_config.num_attention_heads
+            self.head_dim = (
+                self.text_config.hidden_size // self.text_config.num_attention_heads
+            )
+            # Qwen3-5 enabled attn_output_gate which fused q+gate in q_proj
+            self.attn_output_gate = getattr(self.text_config, "attn_output_gate", False)
         elif getattr(self.config, "llm_config", None) is not None:
             # VLM models like InternVL could has num_attention_heads in llm_config
-            text_config = self.config.llm_config
+            self.text_config = self.config.llm_config
             self.kv_head_ratio = (
-                text_config.num_attention_heads // text_config.num_key_value_heads
+                self.text_config.num_attention_heads
+                // self.text_config.num_key_value_heads
             )
-            self.head_dim = text_config.hidden_size // text_config.num_attention_heads
+            self.head_dim = (
+                self.text_config.hidden_size // self.text_config.num_attention_heads
+            )
         else:
             raise ValueError(
                 f"Can not determine kv_head_ratio and head_dim from config: {self.config}"
@@ -112,6 +122,22 @@ class HFModelWeightMapper(WeightMapper):
             k_weight = weight[unit_dim : unit_dim * 2]
             v_weight = weight[unit_dim * 2 :]
             return q_weight, k_weight, v_weight
+
+        # Qwen3-5 / Qwen3-5-MoE (Qwen3Next-style): vLLM qkv_proj is [Q+gate | K | V] with
+        # row sizes 2*Nq*d, Nkv*d, Nkv*d (see QKVParallelLinear(total_num_heads * (1+gate), ...)).
+        # The generic GQA split (kv_head_ratio:1:1) assumes Q has Nq*d rows only — wrong here.
+        if self.attn_output_gate:
+            n_q = self.text_config.num_attention_heads
+            n_kv = self.text_config.num_key_value_heads
+            dim_0 = weight.shape[0]
+            # Same integer recipe as linear_attn conv1d: ratios from global row counts.
+            q_len = (dim_0 * n_q) // (n_q + n_kv)
+            k_len = (dim_0 * n_kv) // (2 * (n_q + n_kv))
+            q_weight = weight[:q_len]
+            k_weight = weight[q_len : q_len + k_len]
+            v_weight = weight[q_len + k_len :]
+            return q_weight, k_weight, v_weight
+
         # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
         # bias has shape [(q_num_heads + k_num_heads + v_num_heads) * head_dim]
         shares = self.kv_head_ratio + 2
