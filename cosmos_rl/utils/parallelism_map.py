@@ -616,6 +616,12 @@ class ParallelTopoMapper:
                         logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
+                elif self.hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+                    if isinstance(
+                        part, vllm_model_classes.qwen3_5.Qwen3_5GatedDeltaNet
+                    ):
+                        if "A_log" in param_name or "dt_bias" in param_name:
+                            tp_dim = 0
                 else:
                     assert "Parallel" not in part.__class__.__name__, (
                         f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
