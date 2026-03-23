@@ -30,10 +30,22 @@ def convert_weight_from_hf(
     load_weight_test = not hasattr(parallel_dims, "mesh")
     # Qwen3-5 / Qwen3-5-MoE linear_attn (GatedDeltaNet) is not tensor-parallelized; TP is
     # fused into the same FSDP mesh as dp_shard.
+    # Qwen3-5-MoE: experts + shared_expert use FSDP with TP fused into dp (see parallelize.apply_fsdp).
+    # gate + shared_expert_gate match vLLM ReplicatedLinear: full weights on every rank (no TP slice,
+    # no FSDP slice on dp).
     is_linear_attn_fused_into_dp_shard = "linear_attn" in name
+    is_moe_mlp_fused_into_dp_shard = (
+        ".mlp.experts." in name or ".mlp.shared_expert." in name
+    )
+    is_moe_replicated_linear = (
+        ".mlp.gate." in name or ".mlp.shared_expert_gate." in name
+    )
+    is_tp_fused_into_dp_shard = (
+        is_linear_attn_fused_into_dp_shard or is_moe_mlp_fused_into_dp_shard
+    )
 
     if not load_weight_test:
-        if is_linear_attn_fused_into_dp_shard:
+        if is_tp_fused_into_dp_shard:
             dp_shard_rank = parallel_dims.mesh["dp_cp_tp"].get_local_rank()
             dp_shard_size = parallel_dims.mesh["dp_cp_tp"].size()
         else:
@@ -50,6 +62,9 @@ def convert_weight_from_hf(
         shard = tensor
 
     dest_name = name
+    if is_moe_replicated_linear:
+        return dest_name, shard.contiguous()
+
     # Do FSDP sharding
     shard = shard.contiguous()
     row_size = shard.shape[0]

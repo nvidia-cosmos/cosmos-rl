@@ -164,6 +164,33 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
+    fsdp_config_dp_shard_tp = None
+    if parallel_dims.tp_enabled:
+        dp_group_names = ["dp_shard"]
+        # Flatten dp_shard × tp into one mesh dim: FSDP shards submodules that do *not* use TP
+        # (GatedDeltaNet linear_attn, MoE experts) across both ranks — distinct from mesh "dp_cp_tp".
+        mesh_dim_name_dp_shard_tp = "fsdp_dp_shard_tp"
+        world_mesh[tuple(dp_group_names + ["tp"])]._flatten(
+            mesh_dim_name=mesh_dim_name_dp_shard_tp
+        )
+        # For transformer_block (TP-sharded attention / rest): reuse top-level ``fsdp_config`` (``dp_mesh``).
+        # HFModel asserts ``not cp_enabled``, so ``dp_shard_cp`` is only the ``dp_shard`` axis — same
+        # process group as the old separate ``fsdp_dp_shard_only`` flatten; no second mesh needed.
+        if parallel_dims.dp_replicate_enabled:
+            mesh_dim_names_dp_shard_tp = (
+                "dp_replicate",
+                mesh_dim_name_dp_shard_tp,
+            )
+        else:
+            mesh_dim_names_dp_shard_tp = (mesh_dim_name_dp_shard_tp,)
+
+        fsdp_config_dp_shard_tp = {
+            "mesh": world_mesh[tuple(mesh_dim_names_dp_shard_tp)],
+            "mp_policy": mp_policy,
+        }
+        if cpu_offload:
+            fsdp_config_dp_shard_tp["offload_policy"] = CPUOffloadPolicy()
+
     # 1. First shard the multi-modal projector
     # Since it could be a submodule of the vision model, we shard it before sharding the vision model to avoid redundant FSDP wrapping and potential FSDP assertion error.
     if model.multi_modal_projector is not None:
@@ -211,59 +238,64 @@ def apply_fsdp(
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
-        ignored_params = None
-        linear_attn = getattr(transformer_block, "linear_attn", None)
-        if parallel_dims.tp_enabled and linear_attn is not None:
-            dp_group_names = ["dp_shard"]
-            # FSDP over dp_shard × tp, named as "fsdp_linear_attn" to avoid confusion with the original "dp_cp_tp".
-            fsdp_mesh_linear_attn_name = "fsdp_linear_attn"
-            world_mesh[tuple(dp_group_names + ["tp"])]._flatten(
-                mesh_dim_name=fsdp_mesh_linear_attn_name
-            )
-            flash_mesh_no_linear_attn_name = "fsdp_no_linear_attn"
-            world_mesh[tuple(dp_group_names)]._flatten(
-                mesh_dim_name=flash_mesh_no_linear_attn_name
-            )
-            if parallel_dims.dp_replicate_enabled:
-                dp_mesh_dim_names_for_no_la = (
-                    "dp_replicate",
-                    flash_mesh_no_linear_attn_name,
-                )
-                dp_mesh_dim_names_for_la = ("dp_replicate", fsdp_mesh_linear_attn_name)
-            else:
-                dp_mesh_dim_names_for_no_la = (flash_mesh_no_linear_attn_name,)
-                dp_mesh_dim_names_for_la = (fsdp_mesh_linear_attn_name,)
 
-            fsdp_config_linear_attn = {
-                "mesh": world_mesh[tuple(dp_mesh_dim_names_for_la)],
-                "mp_policy": mp_policy,
-            }
-            fsdp_config_no_linear_attn = {
-                "mesh": world_mesh[tuple(dp_mesh_dim_names_for_no_la)],
-                "mp_policy": mp_policy,
-            }
-            if cpu_offload:
-                fsdp_config_linear_attn["offload_policy"] = CPUOffloadPolicy()
-                fsdp_config_no_linear_attn["offload_policy"] = CPUOffloadPolicy()
+        ignored_params = set()
+        linear_attn = getattr(transformer_block, "linear_attn", None)
+        mlp = getattr(transformer_block, "mlp", None)
+        moe_mlp = (
+            mlp
+            if mlp is not None and getattr(mlp, "experts", None) is not None
+            else None
+        )
+
+        if linear_attn is not None:
+            # With TP: dp_shard×tp mesh; without TP: same as rest of LM (dp_shard_cp only).
+            config = (
+                fsdp_config_dp_shard_tp
+                if fsdp_config_dp_shard_tp is not None
+                else fsdp_config
+            )
             fully_shard(
                 linear_attn,
-                **fsdp_config_linear_attn,
+                **config,
                 reshard_after_forward=reshard_after_forward,
             )
-            ignored_params = set(linear_attn.parameters())
+            ignored_params |= set(linear_attn.parameters())
+
+        if moe_mlp is not None:
+            # HF may leave gate / shared_expert_gate in fp32; align with param_dtype before
+            # FSDP (ReplicatedLinear-style: not managed by MixedPrecisionPolicy).
+            for name in ("gate", "shared_expert_gate"):
+                mod = getattr(moe_mlp, name, None)
+                if mod is not None:
+                    mod.to(dtype=param_dtype)
+            # Match vLLM ReplicatedLinear: gate + shared_expert_gate are full replicas on every
+            # rank (no TP slice, no FSDP shard on dp). Only list them in ignored_params so
+            # transformer_block's fully_shard leaves them as unsharded parameters.
+            # experts + shared_expert use fsdp_config_dp_shard_tp (FSDP over flattened dp_shard×tp).
+            config = (
+                fsdp_config_dp_shard_tp
+                if fsdp_config_dp_shard_tp is not None
+                else fsdp_config
+            )
             fully_shard(
-                transformer_block,
-                **fsdp_config_no_linear_attn,
+                moe_mlp.experts,
+                **config,
                 reshard_after_forward=reshard_after_forward,
-                ignored_params=ignored_params,
             )
-        else:
             fully_shard(
-                transformer_block,
-                **fsdp_config,
+                moe_mlp.shared_expert,
+                **config,
                 reshard_after_forward=reshard_after_forward,
-                ignored_params=ignored_params,
             )
+            ignored_params |= set(moe_mlp.parameters())
+        fully_shard(
+            transformer_block,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+            ignored_params=ignored_params,
+        )
+
     if model.embed_tokens is not None:
         logger.info("Applying FSDP to the language model embed_tokens")
         fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
