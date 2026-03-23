@@ -105,6 +105,12 @@ class HFModelWeightMapper(WeightMapper):
                     "language_model.lm_head.", "lm_head."
                 )
 
+            # gate_up_proj
+            if "w13_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w13_weight", "gate_up_proj")
+            elif "w2_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w2_weight", "down_proj")
+
             return rollout_weight_name
 
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
@@ -151,12 +157,19 @@ class HFModelWeightMapper(WeightMapper):
         v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
         return q_weight, k_weight, v_weight
 
-    def _split_gate_proj_weight(self, name, weight: torch.Tensor):
-        # weight has shape [2 * x, hidden_dim]
-        dim_0 = weight.shape[0]
-        gate_proj_weight = weight[: dim_0 // 2]
-        up_proj_weight = weight[dim_0 // 2 :]
-        return gate_proj_weight, up_proj_weight
+    def _split_gate_proj_weight(self, name, weight: torch.Tensor, is_moe: bool = False):
+        if is_moe:
+            # weight has shape [num_experts, 2 * intermediate_size, hidden_dim]
+            intermediate_size = weight.shape[1] // 2
+            gate_proj_weight = weight[:, :intermediate_size]
+            up_proj_weight = weight[:, intermediate_size:]
+            return gate_proj_weight, up_proj_weight
+        else:
+            # weight has shape [2 * x, hidden_dim]
+            dim_0 = weight.shape[0]
+            gate_proj_weight = weight[: dim_0 // 2]
+            up_proj_weight = weight[dim_0 // 2 :]
+            return gate_proj_weight, up_proj_weight
 
     # For Qwen3-5 and Qwen3-5-MoE, we need to split the in_proj_qkvz weight into in_proj_q/k/v and in_proj_z
     # self.in_proj_qkv = nn.Linear(self.hidden_size, self.key_dim * 2 + self.value_dim)
@@ -275,7 +288,7 @@ class HFModelWeightMapper(WeightMapper):
         ):
             # split gate and up proj
             gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                compatible_key, param
+                compatible_key, param, is_moe=".experts." in compatible_key
             )
             gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
             group_keys.append((gate_proj_weight_key, gate_proj_weight))
@@ -520,6 +533,24 @@ class HFModelWeightMapper(WeightMapper):
                             "length": value_dim,
                         }
                     },
+                )
+            )
+            return split_strategy
+        elif match := re.search(  # noqa: F841
+            r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.gate_up_proj",
+            name,
+        ):
+            split_strategy = []
+            split_strategy.append(
+                (
+                    name.replace("gate_up_proj", "gate_proj"),
+                    {1: {"offset": 0, "total_size": 2, "length": 1}},
+                )
+            )
+            split_strategy.append(
+                (
+                    name.replace("gate_up_proj", "up_proj"),
+                    {1: {"offset": 1, "total_size": 2, "length": 1}},
                 )
             )
             return split_strategy
