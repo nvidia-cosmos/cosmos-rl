@@ -14,7 +14,7 @@
 from typing import Union, Optional
 import torch
 import numpy as np
-
+import math
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, PILImageResampling, ChannelDimension
 from transformers.processing_utils import ImagesKwargs, MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
@@ -22,7 +22,8 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.video_utils import VideoInput, group_videos_by_shape, reorder_videos
 from transformers.utils import logging
 from transformers.video_utils import VideoInput
-from transformers.models.siglip2.image_processing_siglip2_fast import Siglip2ImageProcessorFast,convert_image_to_patches, pad_along_first_dim, Siglip2FastImageProcessorKwargs
+from transformers.models.siglip2.image_processing_siglip2_fast import Siglip2ImageProcessorFast, convert_image_to_patches
+
 from transformers.utils import TensorType
 from transformers.image_processing_utils_fast import SizeDict
 from torchvision.transforms.v2 import functional as F
@@ -32,8 +33,24 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoP
 logger = logging.get_logger(__name__)
 
 
-class NemotronImagesKwargs(ImagesKwargs, total=False):
+def round_by_factor(number: int, factor: int) -> int:
+    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: int, factor: int) -> int:
+    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    return math.floor(number / factor) * factor
+
+
+class NemotronImagesKwargs(Siglip2ImageProcessorFast.valid_kwargs, total=False):
     max_pixels: Optional[int]
+    min_pixels: Optional[int]
 
 
 class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
@@ -49,9 +66,45 @@ class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
 
 
 class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
-    def __init__(self, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]):
+    resample = PILImageResampling.BICUBIC
+    valid_kwargs = NemotronImagesKwargs
+
+    def __init__(self, **kwargs: Unpack[NemotronImagesKwargs]):
         super().__init__(**kwargs)
-    
+
+    def _resize_image(self, image: torch.Tensor, max_ratio=200, interpolation: Optional[PILImageResampling] = None, **kwargs) -> torch.Tensor:
+        """
+        Rescales the image so that the following conditions are met:
+
+        1. Both dimensions (height and width) are divisible by 'factor'.
+        2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+        3. The aspect ratio of the image is maintained as closely as possible.
+        """
+        image_min_pixels = kwargs.get("min_pixels", None) or self.size.get("shortest_edge", None)
+        image_max_pixels = kwargs.get("max_pixels", None) or self.size.get("longest_edge", None)
+        assert image_min_pixels is not None and image_max_pixels is not None, "When do_resize is True, min_pixels and max_pixels must be provided."
+        assert image_max_pixels >= image_min_pixels, "The max_pixels of image must be greater than or equal to min_pixels."
+        
+        _, height, width = image.shape
+        if max(height, width) / min(height, width) > max_ratio:
+            raise ValueError(
+                f"absolute aspect ratio must be smaller than {max_ratio}, got {max(height, width) / min(height, width)}"
+            )
+        factor = self.merge_size * self.patch_size
+        h_bar = max(factor, round_by_factor(height, factor))
+        w_bar = max(factor, round_by_factor(width, factor))
+        if h_bar * w_bar > image_max_pixels:
+            beta = math.sqrt((height * width) / image_max_pixels)
+            h_bar = floor_by_factor(height / beta, factor)
+            w_bar = floor_by_factor(width / beta, factor)
+        elif h_bar * w_bar < image_min_pixels:
+            beta = math.sqrt(image_min_pixels / (height * width))
+            h_bar = ceil_by_factor(height * beta, factor)
+            w_bar = ceil_by_factor(width * beta, factor)
+
+        image = self.resize(image, size=SizeDict(height=h_bar, width=w_bar), interpolation=interpolation)
+        return image
+
     def _preprocess(
         self,
         images: list["torch.Tensor"],
@@ -71,7 +124,8 @@ class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
         spatial_shapes = []
         for image in images:
             if do_resize:
-                raise RuntimeError("do_resize=True is not supported in Siglip2ImageProcessorCustom. Please resize outside of this processor.")
+                image = self._resize_image(image, max_ratio=200, interpolation=interpolation, **kwargs)
+
             image = self.rescale_and_normalize(image, do_rescale, rescale_factor, do_normalize, image_mean, image_std)
 
             # (num_channels, height, width) -> (num_patches, patch_size * patch_size * num_channels)
@@ -214,15 +268,13 @@ class NemotronNanoV3BridgeProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer", "video_processor"]
 
     # 使用自定义 image processor：通过 from_pretrained 重写加载
-    image_processor_class = "Siglip2Processor"
-    video_processor_class = "Qwen3VLVideoProcessor"
+    image_processor_class = "AutoImageProcessor"
+    video_processor_class = "AutoVideoProcessor"
     tokenizer_class = ("AutoTokenizer")
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        """加载时使用自定义 Siglip2ImageProcessorCustom 作为 image_processor。"""
         processor = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-        # 用自定义 image processor 替换默认加载的 image processor（配置与 Siglip2ImageProcessorFast 兼容）
         processor.image_processor = Siglip2ImageProcessorCustom.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )

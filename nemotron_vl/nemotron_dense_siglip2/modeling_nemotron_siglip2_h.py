@@ -1180,7 +1180,7 @@ class MultiModalRotaryEmbedding(nn.Module):
         """
         rope_theta = config.rope_theta
         dim = config.head_dim
-        attention_factor = config.rope_scaling if config.rope_scaling is not None else 1.0
+        attention_factor = 1.0#config.rope_scaling if config.rope_scaling is not None else 1.0
 
         # Compute the inverse frequencies
         inv_freq = 1.0 / (
@@ -2438,9 +2438,10 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
             if inputs_embeds is not None or (cache_position is not None and cache_position[-1] >= input_ids.shape[1]):
                 # Keep the last `len(cache_position)` tokens (or whatever fits)
                 input_ids = input_ids[:, -cache_position.shape[0] :]
-            elif cache_position is not None and input_ids.shape[1] != cache_position.shape[0]:
+            elif cache_position is not None:
+            # elif cache_position is not None and input_ids.shape[1] != cache_position.shape[0]:
                 # Default: pick only the positions in cache_position
-                input_ids = input_ids[:, cache_position]
+                input_ids = input_ids[:, cache_position[-1]:]
         else:
             # Initialize our hybrid cache container on first step
             past_key_values = HybridMambaAttentionDynamicCache(
@@ -2471,7 +2472,8 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
             del model_inputs["input_ids"]
         else:
             model_inputs["input_ids"] = input_ids.contiguous()  # contiguous needed for compile-friendly paths
-            del model_inputs["inputs_embeds"]
+            if "inputs_embeds" in model_inputs:
+                del model_inputs["inputs_embeds"]
 
         # IMPORTANT: our forward() expects cache under `past_key_values`, not `past_key_values`
         if self.config.text_config.enable_mrope:
