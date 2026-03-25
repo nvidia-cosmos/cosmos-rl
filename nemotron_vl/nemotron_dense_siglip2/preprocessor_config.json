@@ -17,8 +17,9 @@
         0.5
     ],
     "processor_class": "NemotronNanoV3BridgeProcessor",
-    "image_processor_type": "Siglip2ImageProcessorFast",
+    "image_processor_type": "Siglip2ImageProcessorCustom",
     "auto_map": {
-        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor"
+        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor",
+        "AutoImageProcessor": "processing.Siglip2ImageProcessorCustom"
     }
 }

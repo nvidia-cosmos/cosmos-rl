@@ -19,6 +19,7 @@
     "processor_class": "NemotronNanoV3BridgeProcessor",
     "video_processor_type": "Qwen3VLVideoProcessor",
     "auto_map": {
-        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor"
+        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor",
+        "AutoVideoProcessor": "processing.Qwen3VLVideoProcessorCustom"
     }
 }

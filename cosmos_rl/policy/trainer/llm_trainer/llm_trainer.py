@@ -20,6 +20,8 @@ import random
 import numpy as np
 import json
 import threading
+import shutil
+import glob
 from typing import Optional, Dict
 from transformers import AutoConfig, GenerationConfig
 
@@ -586,6 +588,41 @@ class LLMTrainer(Trainer):
             # save the generation config to get the generation aligned with HF.
             if generation_config is not None:
                 generation_config.save_pretrained(path)
+
+            # Copy missing .py and .json files from source model directory
+            # This is needed for models loaded with trust_remote_code=True
+            # Only copy files that don't exist in destination to avoid overwriting
+            try:
+                from cosmos_rl.utils.util import resolve_model_path
+
+                source_model_path = resolve_model_path(
+                    config.policy.model_name_or_path,
+                    revision=config.policy.model_revision,
+                )
+
+                # Find all .py and .json files in source
+                source_files = []
+                source_files.extend(glob.glob(os.path.join(source_model_path, "*.py")))
+                source_files.extend(
+                    glob.glob(os.path.join(source_model_path, "*.json"))
+                )
+
+                copied_files = []
+                for src_file in source_files:
+                    filename = os.path.basename(src_file)
+                    dst_file = os.path.join(path, filename)
+
+                    # Only copy if file doesn't exist in destination
+                    if not os.path.exists(dst_file):
+                        shutil.copy2(src_file, dst_file)
+                        copied_files.append(filename)
+
+                if copied_files:
+                    logger.info(
+                        f"Copied missing files from source model: {copied_files}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to copy missing files from source model: {e}")
 
             if config.train.ckpt.upload_hf and is_final:
                 username = whoami()["name"]

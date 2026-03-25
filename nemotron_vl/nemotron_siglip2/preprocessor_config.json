@@ -3,8 +3,8 @@
         "longest_edge": 16777216,
         "shortest_edge": 65536
     },
-    "patch_size": 16,
     "do_resize": true,
+    "patch_size": 16,
     "merge_size": 2,
     "image_mean": [
         0.5,
@@ -17,8 +17,9 @@
         0.5
     ],
     "processor_class": "NemotronNanoV3BridgeProcessor",
-    "image_processor_type": "Siglip2ImageProcessorFast",
+    "image_processor_type": "Siglip2ImageProcessorCustom",
     "auto_map": {
-        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor"
+        "AutoProcessor": "processing.NemotronNanoV3BridgeProcessor",
+        "AutoImageProcessor": "processing.Siglip2ImageProcessorCustom"
     }
 }
