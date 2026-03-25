@@ -566,8 +566,8 @@ class ParallelTopoMapper:
         # Example tp=4, n_kv=2 → replicas=2: ranks (0,1) share KV shard 0, (2,3) share shard 1.
         # Wrong: offset = tp_rank % n_kv → (0,1,0,1) — pairs (0,2) and (1,3) instead.
         n_kv_head = part.total_num_kv_heads
-        tp_rank, _ = self.parallelism.tp_coord
         replicas = part.num_kv_head_replicas
+        tp_rank, _ = self.parallelism.tp_coord
         kv_shard = tp_rank // replicas
         dims_rank_info = {}
         dims_rank_info[q_proj_name] = None
