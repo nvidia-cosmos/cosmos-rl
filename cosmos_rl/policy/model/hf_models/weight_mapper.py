@@ -115,6 +115,52 @@ class HFModelWeightMapper(WeightMapper):
 
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
+    def _vllm_qkv_column_parallel_shard_lens(
+        self, dim_0: int, total_q_heads: int
+    ) -> Tuple[int, int, int]:
+        """Row splits for one TP rank of vLLM ``QKVParallelLinear`` fused ``[Q(+gate) | K | V]``.
+
+        ``total_q_heads`` is the logical Q row count in **head** units: ``Nq`` without
+        ``attn_output_gate``, or ``Nq * (1 + gate)`` when the gate doubles the Q block.
+
+        When ``tp_size >= num_key_value_heads``, K/V are replicated (``num_kv_heads==1`` per
+        rank); the uniform ``kv_head_ratio:1:1`` split does **not** match local row sizes.
+        We infer ``tp`` from ``dim_0`` and ``head_dim`` (same layout as vLLM).
+
+        ``tc`` is ``text_config`` / ``llm_config`` when present, otherwise the root HF
+        ``config`` (models with ``num_key_value_heads`` on the top-level config).
+        """
+        tc = self.text_config if self.text_config is not None else self.config
+        head_dim = getattr(tc, "head_dim", None) or (
+            tc.hidden_size // tc.num_attention_heads
+        )
+        n_kv = max(1, tc.num_key_value_heads)
+        if head_dim <= 0 or dim_0 % head_dim != 0:
+            raise ValueError(
+                f"vLLM qkv split: dim_0={dim_0} not divisible by head_dim={head_dim}"
+            )
+        units = dim_0 // head_dim
+        for tp in range(1, total_q_heads + 1):
+            if total_q_heads % tp != 0:
+                continue
+            num_heads_local = total_q_heads // tp
+            if tp >= n_kv:
+                num_kv_local = 1
+            else:
+                if n_kv % tp != 0:
+                    continue
+                num_kv_local = n_kv // tp
+            if num_heads_local + 2 * num_kv_local == units:
+                q_len = num_heads_local * head_dim
+                k_len = num_kv_local * head_dim
+                v_len = num_kv_local * head_dim
+                assert q_len + k_len + v_len == dim_0
+                return q_len, k_len, v_len
+        raise ValueError(
+            "vLLM qkv: cannot infer TP shard layout from "
+            f"dim_0={dim_0}, head_dim={head_dim}, total_q_heads={total_q_heads}, n_kv={n_kv}"
+        )
+
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         if "visual" in name or "vision_tower" in name:
             # split qkv weight for visual
@@ -129,32 +175,17 @@ class HFModelWeightMapper(WeightMapper):
             v_weight = weight[unit_dim * 2 :]
             return q_weight, k_weight, v_weight
 
-        # Qwen3-5 / Qwen3-5-MoE (Qwen3Next-style): vLLM qkv_proj is [Q+gate | K | V] with
-        # row sizes 2*Nq*d, Nkv*d, Nkv*d (see QKVParallelLinear(total_num_heads * (1+gate), ...)).
-        # The generic GQA split (kv_head_ratio:1:1) assumes Q has Nq*d rows only — wrong here.
-        if self.attn_output_gate:
-            n_q = self.text_config.num_attention_heads
-            n_kv = self.text_config.num_key_value_heads
-            dim_0 = weight.shape[0]
-            # Same integer recipe as linear_attn conv1d: ratios from global row counts.
-            q_len = (dim_0 * n_q) // (n_q + n_kv)
-            k_len = (dim_0 * n_kv) // (2 * (n_q + n_kv))
-            q_weight = weight[:q_len]
-            k_weight = weight[q_len : q_len + k_len]
-            v_weight = weight[q_len + k_len :]
-            return q_weight, k_weight, v_weight
-
-        # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
-        # bias has shape [(q_num_heads + k_num_heads + v_num_heads) * head_dim]
-        shares = self.kv_head_ratio + 2
-        dim_0 = weight.shape[0]  # for both weight and bias
-        unit_dim = dim_0 // shares
-
-        q_weight = weight[: unit_dim * self.kv_head_ratio]
-        k_weight = weight[
-            unit_dim * self.kv_head_ratio : unit_dim * (self.kv_head_ratio + 1)
-        ]
-        v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
+        # vLLM QKVParallelLinear: local [Q(+gate) | K | V]. Same layout for nested
+        # ``text_config`` / ``llm_config`` and top-level GQA configs (Llama, etc.).
+        tc = self.text_config if self.text_config is not None else self.config
+        dim_0 = weight.shape[0]
+        total_q = tc.num_attention_heads * (
+            1 + int(getattr(tc, "attn_output_gate", False))
+        )
+        q_len, k_len, _ = self._vllm_qkv_column_parallel_shard_lens(dim_0, total_q)
+        q_weight = weight[:q_len]
+        k_weight = weight[q_len : q_len + k_len]
+        v_weight = weight[q_len + k_len :]
         return q_weight, k_weight, v_weight
 
     def _split_gate_proj_weight(self, name, weight: torch.Tensor, is_moe: bool = False):
