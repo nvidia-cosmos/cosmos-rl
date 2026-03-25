@@ -358,8 +358,10 @@ class RemoteRewardConfig(BaseModel):
     )
     batch_size: int = Field(
         default=1,
-        description="Number of payloads to batch together per remote reward request. "
-        "Higher values reduce the number of HTTP requests but increase per-request payload size.",
+        description="Max number of completions per remote reward request. "
+        "Payloads are accumulated until their total completions reach this limit. "
+        "For example, with batch_size=48: training (24 completions/payload) sends 2 payloads per request; "
+        "validation (1 completion/payload) sends 48 payloads per request.",
     )
 
 
