@@ -356,6 +356,13 @@ class RemoteRewardConfig(BaseModel):
     reward_clip_max: float = Field(
         description="Clip maximum of the total reward result.", default=5.0
     )
+    batch_size: int = Field(
+        default=1,
+        description="Max number of completions per remote reward request. "
+        "Payloads are accumulated until their total completions reach this limit. "
+        "For example, with batch_size=48: training (24 completions/payload) sends 2 payloads per request; "
+        "validation (1 completion/payload) sends 48 payloads per request.",
+    )
 
 
 class GrpoConfig(BaseModel):

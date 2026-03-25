@@ -58,6 +58,8 @@ class RewardDispatcher:
         """
 
         self.is_remote = config.train.train_policy.use_remote_reward
+        if self.is_remote:
+            self.remote_batch_size = config.train.train_policy.remote_reward.batch_size
 
         def worker_init(
             config,
@@ -178,13 +180,29 @@ class RewardDispatcher:
                     )
                 )
         else:
-            # For the remote reward, we send one payload at a time, and get the uuid back.
-            # Save the uuid in the task queue to track the result later.
+            # For the remote reward, we batch payloads by total completions count.
+            # remote_batch_size refers to the max number of completions per request,
+            # so the number of payloads per batch varies depending on each payload's
+            # completion count.
             if self.is_remote:
+                batch = []
+                batch_completions = 0
                 for payload in payloads:
+                    n = len(payload.completions)
+                    if batch and batch_completions + n > self.remote_batch_size:
+                        self.task_queue.put(
+                            RewardDispatcher.compute_rewards(
+                                batch, is_validation, step, self.is_remote
+                            )
+                        )
+                        batch = []
+                        batch_completions = 0
+                    batch.append(payload)
+                    batch_completions += n
+                if batch:
                     self.task_queue.put(
                         RewardDispatcher.compute_rewards(
-                            [payload], is_validation, step, self.is_remote
+                            batch, is_validation, step, self.is_remote
                         )
                     )
             # For the local reward, the task will be executed in a separate process.
