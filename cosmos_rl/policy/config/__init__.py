@@ -356,6 +356,11 @@ class RemoteRewardConfig(BaseModel):
     reward_clip_max: float = Field(
         description="Clip maximum of the total reward result.", default=5.0
     )
+    batch_size: int = Field(
+        default=1,
+        description="Number of payloads to batch together per remote reward request. "
+        "Higher values reduce the number of HTTP requests but increase per-request payload size.",
+    )
 
 
 class GrpoConfig(BaseModel):

@@ -88,6 +88,7 @@ class RemoteRewardCalculator:
         self.uuid2replica = dict()
         self.uuid2stage = dict()
         self.uuid2step = dict()
+        self.uuid2completions_per_payload = dict()
 
     @classmethod
     def get_instance(cls) -> "RemoteRewardCalculator":
@@ -184,8 +185,8 @@ class RemoteRewardCalculator:
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Send reward calculation request to remote server and get UUID.
-        If is_validation is True, use the validation reward function and return all rollouts.
-        If is_validation is False, use the training reward function and apply dynamic sampling.
+        Supports batching multiple payloads into a single request by concatenating
+        their completions together.
         Args:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
@@ -194,37 +195,45 @@ class RemoteRewardCalculator:
             uuid (str): The UUID of the enqueued reward calculation request.
         """
 
-        # Only support batch-level image/video reward calculation for now.
         modality = payloads[0].extra_info.get("modality", "image")
 
-        payload = payloads[0]
-        mm_datas = payload.completions
-        prompts = [payload.prompt["prompt"]] * len(mm_datas)
+        # Concatenate completions and prompts from all payloads in the batch
+        all_mm_datas = []
+        all_prompts = []
+        completions_per_payload = []
+        for payload in payloads:
+            mm_datas = payload.completions
+            all_mm_datas.append(mm_datas)
+            all_prompts.extend([payload.prompt["prompt"]] * len(mm_datas))
+            completions_per_payload.append(len(mm_datas))
+        all_mm_datas = torch.cat(all_mm_datas, dim=0)
+
         if is_validation:
             reward_fns = {fn.name: fn.weight for fn in self.val_config.reward_fns}
         else:
             reward_fns = {fn.name: fn.weight for fn in self.train_config.reward_fns}
         data = {
-            "prompts": prompts,
+            "prompts": all_prompts,
             "reward_fn": reward_fns,
         }
         logger.debug(
-            f"[RemoteRewardCalculator] Enqueuing reward request. prompts: {prompts}, reward_fn: {reward_fns}"
+            f"[RemoteRewardCalculator] Enqueuing reward request. num_payloads: {len(payloads)}, "
+            f"total_completions: {len(all_prompts)}, reward_fn: {reward_fns}"
         )
 
         if modality == "video":
-            # Acquire fps info from extra_info
-            video_fps = payload.extra_info.get("video_fps", 16.0)
+            # Acquire fps info from the first payload (all payloads should share the same fps)
+            video_fps = payloads[0].extra_info.get("video_fps", 16.0)
             # Encode video data, convert shape to (B, C, T, H, W) and normalize to [-1, 1]
             latents = self.tokenizer.encode(
-                (mm_datas.permute(0, 2, 1, 3, 4) - 0.5) * 2
+                (all_mm_datas.permute(0, 2, 1, 3, 4) - 0.5) * 2
             )  # (B, T, C, H, W) -> (B, C, T, H, W)
             batch_size = latents.shape[0]
             mm_tensor = latents.to(torch.float16).detach().cpu().numpy()
             # Free large intermediates early
             del latents
 
-            # Create video info for entire batch (assuming 16 FPS as default)
+            # Create video info for entire batch
             video_infos = []
             for _ in range(batch_size):
                 video_infos.append({"video_fps": video_fps})
@@ -233,13 +242,16 @@ class RemoteRewardCalculator:
         else:  # image
             data["media_type"] = "image"
             mm_tensor = (
-                (mm_datas.permute(0, 2, 3, 1) * 255)
+                (all_mm_datas.permute(0, 2, 3, 1) * 255)
                 .round()
                 .clamp(0, 255)
                 .to(torch.uint8)
                 .cpu()
                 .numpy()
             )  # B,C,H,W -> B,H,W,C
+
+        # Free concatenated tensor early
+        del all_mm_datas
 
         logger.debug(
             "[RemoteRewardCalculator] Prepared mm_tensor for enqueue. "
@@ -248,10 +260,11 @@ class RemoteRewardCalculator:
 
         # Enqueue request (single call for entire batch)
         uuid, replica_id = self.enqueue_request(mm_tensor, data)
-        self.uuid2payload[uuid] = payload
+        self.uuid2payload[uuid] = payloads
         self.uuid2replica[uuid] = replica_id
         self.uuid2stage[uuid] = "validation" if is_validation else "training"
         self.uuid2step[uuid] = step
+        self.uuid2completions_per_payload[uuid] = completions_per_payload
         return uuid
 
     def fetch_reward(self, uuid, is_validation):
@@ -336,6 +349,8 @@ class RemoteRewardCalculator:
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Get the results from remote server using the UUIDs.
+        Each UUID may correspond to a batch of payloads. The rewards are split
+        back to individual payloads using the stored completions_per_payload counts.
         Args:
             uuids (Queue[str]): Queue of UUIDs to fetch results for.
         Returns:
@@ -345,8 +360,9 @@ class RemoteRewardCalculator:
                 step: the weight step where the payloads are generated
         """
         # Try to fetch results from the first uuid until failed.
-        valid_results = []
-        valid_payloads = []
+        # Each uuid maps to a list of payloads (batched) and their completion counts.
+        valid_results = []  # List of (rewards_tensor, completions_per_payload)
+        valid_payloads = []  # Flattened list of payloads
         valid_stages = []
         valid_steps = []
         while not uuids.empty():
@@ -356,15 +372,27 @@ class RemoteRewardCalculator:
                 is_validation = self.uuid2stage[uuid] == "validation"
                 rewards = self.fetch_reward(uuid, is_validation)
                 uuids.get()  # remove the uuid from the queue
-                valid_results.append(rewards)
-                valid_payloads.append(self.uuid2payload[uuid])
-                valid_stages.append(self.uuid2stage[uuid])
-                valid_steps.append(self.uuid2step[uuid])
+                payloads_for_uuid = self.uuid2payload[uuid]
+                completions_per_payload = self.uuid2completions_per_payload[uuid]
+
+                # Split the batched rewards back to individual payloads
+                offset = 0
+                for payload, n_completions in zip(
+                    payloads_for_uuid, completions_per_payload
+                ):
+                    payload_rewards = rewards[offset : offset + n_completions]
+                    offset += n_completions
+                    valid_results.append(payload_rewards)
+                    valid_payloads.append(payload)
+                    valid_stages.append(self.uuid2stage[uuid])
+                    valid_steps.append(self.uuid2step[uuid])
+
                 # Remove the payload from the dict to save memory
                 del self.uuid2payload[uuid]
                 del self.uuid2replica[uuid]
                 del self.uuid2stage[uuid]
                 del self.uuid2step[uuid]
+                del self.uuid2completions_per_payload[uuid]
             except Exception as e:
                 logger.info(
                     f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
