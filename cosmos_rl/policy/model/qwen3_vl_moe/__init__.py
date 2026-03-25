@@ -21,7 +21,6 @@ from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -59,6 +58,10 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
     Qwen3VLMoeVisionModel,
 )
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
+    get_rope_theta,
+)
 
 
 @dataclass
@@ -74,7 +77,7 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.max_seq_len_cached = config.max_seq_len
         self.original_max_seq_len = config.max_seq_len
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        self.rope_init_fn = get_rope_init_fn(config.rope_type)
         self.mrope_section = config.hf_config.rope_scaling.get(
             "mrope_section", [24, 20, 20]
         )
@@ -993,7 +996,7 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim=head_dim,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=lm_config.rope_theta,
+            rope_theta=get_rope_theta(lm_config),
             q_k_norm_enabled=True,
             norm_type="rmsnorm",
             rope_type=rope_type,

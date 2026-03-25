@@ -32,7 +32,6 @@ from transformers.cache_utils import (
 )
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 try:
     from torch.distributed.tensor import Shard
@@ -76,6 +75,10 @@ else:
 
 if not is_flash_attn_2_available():
     raise ImportError("flash_attn_2 not available. run pip install flash_attn")
+
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -642,7 +645,7 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rope_init_fn = get_rope_init_fn(self.rope_type)
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
