@@ -17,13 +17,13 @@ import math
 from typing import Callable
 
 import torch
-from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
+from torch.distributed.pipelining.schedules import (
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
     _PipelineSchedule,
     get_schedule_class,
 )
-from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
+from torch.distributed.pipelining.stage import (
     PipelineStage,
 )
 from cosmos_rl.utils.logging import logger
