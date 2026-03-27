@@ -13,10 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.tools.custom_example.custom_grpo_trainer import (
-    CustomGRPOTrainer,
+from cosmos_rl.tools.custom_hooks.custom_loggers_and_hooks import (
+    create_status_logger,
+    create_validation_hooks,
+    create_training_hooks,
+    create_all_hooks,
+    TAOStatusLogger,
 )
 
 __all__ = [
-    "CustomGRPOTrainer",
+    "create_status_logger",
+    "create_validation_hooks",
+    "create_training_hooks",
+    "create_all_hooks",
+    "TAOStatusLogger",
 ]

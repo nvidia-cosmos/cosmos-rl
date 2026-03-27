@@ -1,0 +1,98 @@
+redis = "12800"
+results_dir = "/results/e4291737-2b88-4dfe-82ef-6eaad77f3e88"
+
+[train]
+resume = false
+epoch = 2
+compile = false
+train_batch_per_replica = 4
+output_dir = "/results/e4291737-2b88-4dfe-82ef-6eaad77f3e88"
+optm_lr = 0.0001
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_min_lr_factor = 0.0
+optm_grad_norm_clip = 1.0
+epsilon = 1e-8
+optm_name = "AdamW"
+optm_betas = [ 0.9, 0.999,]
+optm_warmup_epochs = 0
+optm_decay_type = "linear"
+async_tp_enabled = false
+master_dtype = "float32"
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+sync_weight_interval = 1
+deterministic = true
+
+
+[validation]
+enable = true
+freq_in_epoch = 1
+batch_size = 1
+dataloader_num_workers = 1
+dataloader_prefetch_factor = 1
+
+
+[policy]
+model_name_or_path = "/ptm/huggingface_models"
+model_max_length = 81920
+model_gradient_checkpointing = true
+
+[logging]
+logger = [ "console", "tao",]
+project_name = "cosmos-rl"
+experiment_name = "cosmos-rl"
+
+[custom]
+system_prompt = "You are a helpful assistant that can answer questions about a street-view CCTV footage."
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq_in_epoch = 2
+save_mode = "sync"
+max_keep = 8
+export_safetensors = true
+
+[train.train_policy]
+type = "sft"
+enable_dataset_cache = false
+dataloader_num_workers = 2
+dataloader_prefetch_factor = 2
+conversation_column_name = "conversations"
+mini_batch = 1
+
+[train.fp8]
+enable_fp8 = false
+fp8_recipe = "dynamic_scaling"
+quant_recipe = "rowwise"
+
+[validation.dataset]
+name = ""
+subset = ""
+split = "train"
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 4
+dp_replicate_size = 1
+pp_size = 1
+cp_rotate_method = "allgather"
+
+[custom.train_dataset]
+annotation_path = "/data/wts_train/annotations.json"
+media_path = "/data/wts_train/videos"
+
+[custom.vision]
+n_frames = 8
+
+[custom.val_dataset]
+annotation_path = "/data/wts_eval/annotations.json"
+media_path = "/data/wts_eval/videos"
+
+[train.train_policy.dataset]
+name = "0108_cr2_sft_8"
+test_size = 0
