@@ -179,9 +179,7 @@ class HFModelWeightMapper(WeightMapper):
         # ``text_config`` / ``llm_config`` and top-level GQA configs (Llama, etc.).
         tc = self.text_config if self.text_config is not None else self.config
         dim_0 = weight.shape[0]
-        total_q = tc.num_attention_heads * (
-            1 + int(getattr(tc, "attn_output_gate", False))
-        )
+        total_q = tc.num_attention_heads * (1 + int(self.attn_output_gate))
         q_len, k_len, _ = self._vllm_qkv_column_parallel_shard_lens(dim_0, total_q)
         q_weight = weight[:q_len]
         k_weight = weight[q_len : q_len + k_len]
