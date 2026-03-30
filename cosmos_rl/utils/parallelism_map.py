@@ -602,7 +602,7 @@ class ParallelTopoMapper:
             MergedColumnParallelLinear,
         )
         from vllm.model_executor import models as vllm_model_classes
-        from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.vocab_parallel_embedding import (
             VocabParallelEmbedding,
         )
@@ -675,7 +675,7 @@ class ParallelTopoMapper:
                     ):
                         if "A_log" in param_name or "dt_bias" in param_name:
                             tp_dim = 0
-                    elif isinstance(part, SharedFusedMoE):
+                    elif isinstance(part, FusedMoE):
                         if "w13_weight" in param_name or "w2_weight" in param_name:
                             tp_dim = 0
                 else:
