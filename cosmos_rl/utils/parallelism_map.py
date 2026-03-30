@@ -437,9 +437,6 @@ class ParallelTopoMapper:
             tensor_dim_to_parallel_map[v].append(k)
         p_rank = self.parallelism.pp_coord[0]
         for k, v in packed_modules_mapping.items():
-            assert dims_rank_info is None, (
-                f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
-            )
             hf_name = name_to_hf(param_name)
             if k in hf_name:
                 for rename in v:
@@ -448,7 +445,9 @@ class ParallelTopoMapper:
                         dims_map,
                         tensor_dim_to_parallel_map,
                         p_rank,
-                        dims_rank_info,
+                        dims_rank_info[rename]
+                        if dims_rank_info and rename in dims_rank_info
+                        else dims_rank_info,
                     )
                 return
         name = name_to_hf(param_name)
@@ -538,6 +537,56 @@ class ParallelTopoMapper:
                 dims_rank_info=dims_rank_info,
             )
 
+    def generate_kv_relicas_dim_rank_info(
+        self,
+        part: torch.nn.Module,
+        param_name: str,
+        output_dim: int,
+        packed_modules_mapping: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], int]:
+        q_proj_name = None
+        k_proj_name = None
+        v_proj_name = None
+        for k, v in packed_modules_mapping.items():
+            if k in param_name:
+                q_proj_name = v[0]
+                k_proj_name = v[1]
+                v_proj_name = v[2]
+                break
+        assert (
+            q_proj_name is not None
+            and k_proj_name is not None
+            and v_proj_name is not None
+        ), (
+            f"Packed modules mapping {packed_modules_mapping} should contain the q_proj_name, k_proj_name, and v_proj_name for the parameter {param_name}."
+        )
+
+        # vLLM QKVParallelLinear: when tp_size >= n_kv, each KV logical head is replicated
+        # across num_kv_head_replicas consecutive ranks (see weight_loader shard_rank for k/v).
+        # Example tp=4, n_kv=2 → replicas=2: ranks (0,1) share KV shard 0, (2,3) share shard 1.
+        # Wrong: offset = tp_rank % n_kv → (0,1,0,1) — pairs (0,2) and (1,3) instead.
+        n_kv_head = part.total_num_kv_heads
+        replicas = part.num_kv_head_replicas
+        tp_rank, _ = self.parallelism.tp_coord
+        kv_shard = tp_rank // replicas
+        dims_rank_info = {}
+        dims_rank_info[q_proj_name] = None
+        dims_rank_info[k_proj_name] = {
+            output_dim: DimSliceInfo(
+                offset=kv_shard,
+                total_size=n_kv_head,
+                length=1,
+            ).__dict__
+        }
+        dims_rank_info[v_proj_name] = {
+            output_dim: DimSliceInfo(
+                offset=kv_shard,
+                total_size=n_kv_head,
+                length=1,
+            ).__dict__
+        }
+        return dims_rank_info
+
     def determine_tp_dim(
         self,
         part: torch.nn.Module,
@@ -568,6 +617,10 @@ class ParallelTopoMapper:
                     f"QKVParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
                 )
                 tp_dim = output_dim
+                if part.num_kv_head_replicas > 1:
+                    dims_rank_info = self.generate_kv_relicas_dim_rank_info(
+                        part, param_name, output_dim, packed_modules_mapping
+                    )
             elif isinstance(part, (MergedColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any([k in param_name for k in packed_modules_mapping.keys()]), (
@@ -616,6 +669,15 @@ class ParallelTopoMapper:
                         logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
+                elif self.hf_config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+                    if isinstance(
+                        part, vllm_model_classes.qwen3_5.Qwen3_5GatedDeltaNet
+                    ):
+                        if "A_log" in param_name or "dt_bias" in param_name:
+                            tp_dim = 0
+                    elif isinstance(part, FusedMoE):
+                        if "w13_weight" in param_name or "w2_weight" in param_name:
+                            tp_dim = 0
                 else:
                     assert "Parallel" not in part.__class__.__name__, (
                         f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
