@@ -260,7 +260,10 @@ class LLMTrainer(Trainer):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(
-            self.model_parts, self.config, model_modpath=self.model_modpath
+            self.model_parts,
+            self.config,
+            model_modpath=self.model_modpath,
+            distributed_mesh=self.parallel_dims,
         )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(

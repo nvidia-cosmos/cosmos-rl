@@ -757,7 +757,7 @@ class TrainingConfig(BaseModel):
     optm_name: str = Field(
         default="AdamW",
         description="Optimizer name",
-        choices=["AdamW", "Adam"],
+        choices=["AdamW", "Adam", "Muon", "NorMuon", "Dion", "Dion2"],
     )
     optm_lr: Union[float, List[float], Dict[str, float]] = Field(
         default=1e-6,
@@ -792,6 +792,87 @@ class TrainingConfig(BaseModel):
     )
     optm_grad_norm_clip: float = Field(
         default=1.0, description="Gradient norm clip for optimizer"
+    )
+
+    # --------- Orthonormal (dion package: Muon, NorMuon, Dion2, Dion) ---------
+    optm_scalar_opt: Optional[str] = Field(
+        default="adamw",
+        description="Scalar algorithm for vector/embed/lm_head: adamw or lion.",
+    )
+    optm_scalar_betas: Optional[tuple[float, float]] = Field(
+        default=None,
+        description="Betas for scalar groups; default from optm_betas.",
+    )
+    optm_scalar_eps: Optional[float] = Field(
+        default=None,
+        description="Epsilon for scalar groups; default from epsilon.",
+    )
+    optm_scalar_lr: Optional[float] = Field(
+        default=None, description="LR for scalar groups."
+    )
+    optm_embed_lr: Optional[float] = Field(
+        default=None, description="LR for embed group."
+    )
+    optm_lm_head_lr: Optional[float] = Field(
+        default=None, description="LR for lm_head group."
+    )
+    optm_adjust_lr: Optional[str] = Field(
+        default=None,
+        description="LR adjustment: spectral_norm, rms_norm, or None.",
+    )
+    optm_flatten: Optional[bool] = Field(
+        default=None,
+        description="Flatten 3D+ tensors to 2D (Muon, NorMuon, Dion2).",
+    )
+    optm_use_triton: Optional[bool] = Field(
+        default=None,
+        description="Use Triton kernel for Newton-Schulz (Muon, NorMuon, Dion2).",
+    )
+    # Muon
+    optm_mu: Optional[float] = Field(
+        default=None, description="Momentum (Muon, NorMuon, Dion)."
+    )
+    optm_nesterov: Optional[bool] = Field(
+        default=None, description="Nesterov momentum (Muon, NorMuon)."
+    )
+    optm_cautious_wd: Optional[bool] = Field(
+        default=None,
+        description="Weight decay only where update and param signs align (Muon, NorMuon).",
+    )
+    # NorMuon
+    optm_muon_beta2: Optional[float] = Field(
+        default=None,
+        description="NorMuon second beta for adaptive updates.",
+    )
+    # Dion
+    optm_rank_fraction: Optional[float] = Field(
+        default=None,
+        description="Dion: r/d rank fraction (0 < rank_fraction <= 1).",
+    )
+    optm_rank_multiple_of: Optional[int] = Field(
+        default=None,
+        description="Dion: round low-rank dimension to multiple of this.",
+    )
+    optm_power_iters: Optional[int] = Field(
+        default=None,
+        description="Dion: number of power iterations for low-rank approx.",
+    )
+    optm_qr_method: Optional[str] = Field(
+        default=None,
+        description="Dion: QR method (e.g. rcqr).",
+    )
+    optm_rcqr_oversample: Optional[float] = Field(
+        default=None,
+        description="Dion: RCQR random sketch oversampling factor.",
+    )
+    # Dion2
+    optm_fraction: Optional[float] = Field(
+        default=None,
+        description="Dion2: fraction of submatrix to orthogonalize per update (0 < fraction <= 1).",
+    )
+    optm_ef_decay: Optional[float] = Field(
+        default=None,
+        description="Dion2: error-feedback decay for selected submatrix.",
     )
 
     # --------- EMA ---------
@@ -1808,6 +1889,15 @@ class Config(BaseModel):
                 raise ValueError(
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
+
+        # Only Dion supports Tensor Parallelism (TP) among the orthonormal optimizers.
+        if self.policy.parallelism.tp_size > 1:
+            # TODO: add support for Muon, NorMuon, Dion2 with TP.
+            if self.train.optm_name in {"Muon", "NorMuon", "Dion2"}:
+                raise ValueError(
+                    f"Invalid config: Optimizer '{self.train.optm_name}' does not support Tensor Parallelism (tp_size > 1)."
+                )
+
         if (
             self.train.train_policy.type == "grpo"
             and self.train.train_policy.allowed_outdated_steps + 1
