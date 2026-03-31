@@ -4190,7 +4190,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="255"><ul class="simple">
+<tr class="row-even"><td rowspan="259"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -4540,6 +4540,20 @@
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>optm_warmup_start_factor</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Optm Warmup Start Factor</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The initial learning rate will be <cite>optm_warmup_start_factor * optm_lr</cite> at the beginning of training, and then linearly increase to <cite>optm_lr</cite> in <cite>optm_warmup_steps</cite> steps.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>0.0</p></td>
 </tr>
 <tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>optm_decay_ratio</p></li>
