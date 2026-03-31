@@ -67,14 +67,9 @@ def parallelize(
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims=parallel_dims,
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
             pp_enabled=False,
@@ -133,7 +128,7 @@ def apply_tp(
 
 def apply_fsdp(
     model: nn.Module,
-    dp_mesh: DeviceMesh,
+    parallel_dims: ParallelDims,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
@@ -145,7 +140,7 @@ def apply_fsdp(
 
     Args:
         model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        parallel_dims (ParallelDims): device mesh to use for data parallelism/tp fused into dp_shard.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
@@ -157,10 +152,44 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
+    world_mesh = parallel_dims.mesh
+    if parallel_dims.dp_replicate_enabled:
+        dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+    else:
+        dp_mesh_dim_names = ("dp_shard_cp",)
+    dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+    fsdp_config_dp_shard_tp = None
+    if parallel_dims.tp_enabled:
+        dp_group_names = ["dp_shard"]
+        # Flatten dp_shard × tp into one mesh dim: FSDP shards submodules that do *not* use TP
+        # (GatedDeltaNet linear_attn, MoE experts) across both ranks — distinct from mesh "dp_cp_tp".
+        mesh_dim_name_dp_shard_tp = "fsdp_dp_shard_tp"
+        world_mesh[tuple(dp_group_names + ["tp"])]._flatten(
+            mesh_dim_name=mesh_dim_name_dp_shard_tp
+        )
+        # For transformer_block (TP-sharded attention / rest): reuse top-level ``fsdp_config`` (``dp_mesh``).
+        # HFModel asserts ``not cp_enabled``, so ``dp_shard_cp`` is only the ``dp_shard`` axis — same
+        # process group as the old separate ``fsdp_dp_shard_only`` flatten; no second mesh needed.
+        if parallel_dims.dp_replicate_enabled:
+            mesh_dim_names_dp_shard_tp = (
+                "dp_replicate",
+                mesh_dim_name_dp_shard_tp,
+            )
+        else:
+            mesh_dim_names_dp_shard_tp = (mesh_dim_name_dp_shard_tp,)
+
+        fsdp_config_dp_shard_tp = {
+            "mesh": world_mesh[tuple(mesh_dim_names_dp_shard_tp)],
+            "mp_policy": mp_policy,
+        }
+        if cpu_offload:
+            fsdp_config_dp_shard_tp["offload_policy"] = CPUOffloadPolicy()
 
     # 1. First shard the multi-modal projector
     # Since it could be a submodule of the vision model, we shard it before sharding the vision model to avoid redundant FSDP wrapping and potential FSDP assertion error.
@@ -209,11 +238,64 @@ def apply_fsdp(
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
+
+        ignored_params = set()
+        linear_attn = getattr(transformer_block, "linear_attn", None)
+        mlp = getattr(transformer_block, "mlp", None)
+        moe_mlp = (
+            mlp
+            if mlp is not None and getattr(mlp, "experts", None) is not None
+            else None
+        )
+
+        if linear_attn is not None:
+            # With TP: dp_shard×tp mesh; without TP: same as rest of LM (dp_shard_cp only).
+            config = (
+                fsdp_config_dp_shard_tp
+                if fsdp_config_dp_shard_tp is not None
+                else fsdp_config
+            )
+            fully_shard(
+                linear_attn,
+                **config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            ignored_params |= set(linear_attn.parameters())
+
+        if moe_mlp is not None:
+            # HF may leave gate / shared_expert_gate in fp32; align with param_dtype before
+            # FSDP (ReplicatedLinear-style: not managed by MixedPrecisionPolicy).
+            for name in ("gate", "shared_expert_gate"):
+                mod = getattr(moe_mlp, name, None)
+                if mod is not None:
+                    mod.to(dtype=param_dtype)
+            # Match vLLM ReplicatedLinear: gate + shared_expert_gate are full replicas on every
+            # rank (no TP slice, no FSDP shard on dp). Only list them in ignored_params so
+            # transformer_block's fully_shard leaves them as unsharded parameters.
+            # experts + shared_expert use fsdp_config_dp_shard_tp (FSDP over flattened dp_shard×tp).
+            config = (
+                fsdp_config_dp_shard_tp
+                if fsdp_config_dp_shard_tp is not None
+                else fsdp_config
+            )
+            fully_shard(
+                moe_mlp.experts,
+                **config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            fully_shard(
+                moe_mlp.shared_expert,
+                **config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            ignored_params |= set(moe_mlp.parameters())
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
+            ignored_params=ignored_params,
         )
+
     if model.embed_tokens is not None:
         logger.info("Applying FSDP to the language model embed_tokens")
         fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
