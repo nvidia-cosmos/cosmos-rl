@@ -3,6 +3,8 @@ from enum import Enum
 
 import torch
 from torch.nn import functional as F
+import torch.distributed as dist
+from torch.distributed._tensor.placement_types import Partial
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 
@@ -15,7 +17,6 @@ def liger_cross_entropy(
     label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     from liger_kernel.ops.cross_entropy import LigerCrossEntropyFunction
-
     loss, _, _ = LigerCrossEntropyFunction.apply(
         input,
         target,
@@ -111,7 +112,13 @@ class CrossEntropyLoss(torch.nn.Module):
     ) -> torch.Tensor:
         if lin_weight is not None:
             if isinstance(lin_weight, torch.distributed.tensor.DTensor):
-                lin_weight = lin_weight.to(input.dtype).full_tensor()
+                # Ref: https://github.com/pytorch/pytorch/blob/449b1768410104d3ed79d3bcfe4ba1d65c7f22c0/torch/distributed/tensor/_api.py#L590
+                # We should set grad_placements to be Partial("avg") for each placements of original weight rensor, 
+                # to let full_tensor()'s backward do reduce scatter instead of scatter only
+                grad_placements = [Partial("avg") for _ in range(len(lin_weight.placements))]
+                lin_weight = lin_weight.to(input.dtype).full_tensor(grad_placements=grad_placements)
+            else:
+                lin_weight = lin_weight.to(input.dtype)
             return self.ce_impl(
                 lin_weight,
                 input,

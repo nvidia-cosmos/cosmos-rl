@@ -487,7 +487,9 @@ def apply_fsdp(
         )
 
     embed_tokens = model.embed_tokens
-
+    for name, module in model.named_modules():
+        if 'lm_head' in name:
+            fully_shard(module, **fsdp_config_no_moe, reshard_after_forward=False)
     if embed_tokens is not None:
         logger.info("Applying FSDP to the language model embeddings")
         fully_shard(embed_tokens, **fsdp_config_no_moe, reshard_after_forward=True)

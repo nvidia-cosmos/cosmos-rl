@@ -21,7 +21,13 @@ import torch.nn.functional as F
 # TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
 from contextlib import contextmanager
 from importlib.metadata import version as get_pkg_version, PackageNotFoundError
-
+from .te_permutation import (
+    moe_permute,
+    moe_permute_with_probs,
+    moe_unpermute,
+    moe_sort_chunks_by_index,
+    moe_sort_chunks_by_index_with_probs,
+)
 
 @contextmanager
 def importlib_metadata_version_context():
@@ -39,22 +45,6 @@ def importlib_metadata_version_context():
         yield
     finally:
         importlib.metadata.version = original_version
-
-
-with importlib_metadata_version_context():
-    try:
-        from transformer_engine.pytorch import (
-            moe_permute,
-            moe_permute_with_probs,
-            moe_unpermute,
-            moe_sort_chunks_by_index,
-            moe_sort_chunks_by_index_with_probs,
-        )
-
-        HAVE_TE = True
-    except ImportError:
-        HAVE_TE = False
-
 
 def permute(
     tokens,
@@ -90,20 +80,12 @@ def permute(
         sorted_indices (torch.Tensor): The tensor of a mapping table for sorted indices used to unpermute the tokens.
     """
     if fused and probs is None:
-        if not HAVE_TE or moe_permute is None:
-            raise ValueError(
-                "moe_permute is not available. Please install TE >= 2.1.0."
-            )
         permuted_input, sorted_indices = moe_permute(
             tokens, routing_map, num_out_tokens=num_out_tokens
         )
         return permuted_input, None, sorted_indices
 
     if fused and probs is not None:
-        if not HAVE_TE or moe_permute_with_probs is None:
-            raise ValueError(
-                "moe_permute_with_probs is not available. Please install TE >= 2.1.0."
-            )
         return moe_permute_with_probs(
             tokens, probs, routing_map, num_out_tokens=num_out_tokens
         )
@@ -190,10 +172,6 @@ def unpermute(
         torch.Tensor: The tokens restored to their original order.
     """
     if fused:
-        if not HAVE_TE or moe_unpermute is None:
-            raise ValueError(
-                "moe_unpermute is not available. Please install TE >= 2.1.0."
-            )
         return moe_unpermute(
             permuted_tokens,
             sorted_indices,
@@ -266,18 +244,9 @@ def sort_chunks_by_idxs(
         Tuple[torch.Tensor, Optional[torch.Tensor]]: The sorted output tensor and permuted probs.
     """
     if fused and probs is None:
-        if not HAVE_TE or moe_sort_chunks_by_index is None:
-            raise ValueError(
-                "fused_sort_chunks_by_index is not available. Please install TE >= 2.1.0."
-            )
         return moe_sort_chunks_by_index(input, split_sizes, sorted_idxs), None
 
     if fused and probs is not None:
-        if not HAVE_TE or moe_sort_chunks_by_index_with_probs is None:
-            raise ValueError(
-                "fused_sort_chunks_by_index_with_probs is not available. "
-                "Please install TE >= 2.1.0."
-            )
         return moe_sort_chunks_by_index_with_probs(
             input, probs, split_sizes, sorted_idxs
         )

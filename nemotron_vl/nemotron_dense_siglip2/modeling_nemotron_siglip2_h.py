@@ -2567,7 +2567,7 @@ class NemotronSiglip2ForConditionCausalLM(NemotronSiglip2PreTrainedModel, Genera
 
         # TODO: Check zamba_modeling.py: https://github.com/huggingface/transformers/blob/d7188ba600e36d3fd191b12e19f1b3bb81a8404f/src/transformers/models/zamba/modeling_zamba.py#L1284C1-L1286C2
         #logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
-        logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
+        logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype))#.float()
 
         loss = None
         if labels is not None:
