@@ -1246,19 +1246,27 @@ def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) 
                 # For fused_cross_entropy, to avoid grad reduce error, we only support two parallel strategy
                 #   1. dp_shard and dp_replicate only
                 #   2. dp_shard, dp_replicate and tp > 1 with TP_EP_INTERCHANGABLE_WITH_DP_FUSED=1
-                tp_ep_interchangable = int(os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", 0))
+                tp_ep_interchangable = int(
+                    os.environ.get("TP_EP_INTERCHANGABLE_WITH_DP_FUSED", 0)
+                )
                 if config.policy.parallelism.tp_size > 1 and tp_ep_interchangable == 0:
-                    logger.warning("enable_liger_fused_cross_entropy=True doesn't support tp_size > 1 and TP_EP_INTERCHANGABLE_WITH_DP_FUSED==0\
-                                Fall back to enable_liger_cross_entropy=True instead")
+                    logger.warning(
+                        "enable_liger_fused_cross_entropy=True doesn't support tp_size > 1 and TP_EP_INTERCHANGABLE_WITH_DP_FUSED==0\
+                                Fall back to enable_liger_cross_entropy=True instead"
+                    )
                     config.policy.enable_liger_cross_entropy = True
                     config.policy.enable_liger_fused_cross_entropy = False
                 elif config.policy.parallelism.cp_size > 1:
-                    logger.warning("enable_liger_fused_cross_entropy=True doesn't support cp_size > 1\
-                                Fall back to enable_liger_cross_entropy=True instead")
+                    logger.warning(
+                        "enable_liger_fused_cross_entropy=True doesn't support cp_size > 1\
+                                Fall back to enable_liger_cross_entropy=True instead"
+                    )
                     config.policy.enable_liger_cross_entropy = True
                     config.policy.enable_liger_fused_cross_entropy = False
                 else:
-                    logger.info("Replace lm_head with Identity layer for fused_cross_entropy")
+                    logger.info(
+                        "Replace lm_head with Identity layer for fused_cross_entropy"
+                    )
                     # If fused CE enabled, replace lm_head with IndentityLayer and keep its weight
                     new_lm_head = IdentityLayer()
                     new_lm_head.register_parameter("weight", child.weight)

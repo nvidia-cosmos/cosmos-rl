@@ -29,6 +29,7 @@ from .te_permutation import (
     moe_sort_chunks_by_index_with_probs,
 )
 
+
 @contextmanager
 def importlib_metadata_version_context():
     original_version = get_pkg_version
@@ -45,6 +46,7 @@ def importlib_metadata_version_context():
         yield
     finally:
         importlib.metadata.version = original_version
+
 
 def permute(
     tokens,

@@ -3,16 +3,19 @@
 # See LICENSE for license information.
 
 """MoE Permutaion API"""
+
 import warnings
 from typing import Optional, Tuple
 import torch
 
 from . import permutation as triton_permutation
+
 __all__ = [
     "moe_permute",
     "moe_unpermute",
     "moe_sort_chunks_by_index",
 ]
+
 
 class _moe_permute_mask_map(torch.autograd.Function):
     """functional Permute with mask router map"""
@@ -28,7 +31,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not inp.numel():
             ctx.probs = probs
-            return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
+            return (
+                inp,
+                torch.tensor([], device=inp.device),
+                torch.tensor([], device=inp.device),
+            )
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert routing_map.is_cuda, "TransformerEngine needs CUDA."
@@ -38,25 +45,29 @@ class _moe_permute_mask_map(torch.autograd.Function):
         assert inp.size(0) == routing_map.size(0), "Permute not possible"
         num_tokens, hidden_size = inp.size()
         num_experts = routing_map.size(1)
-        assert (
-            num_out_tokens is not None
-        ), "num_out_tokens must be provided to the fused permute function."
+        assert num_out_tokens is not None, (
+            "num_out_tokens must be provided to the fused permute function."
+        )
 
-        row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
+        row_id_map = triton_permutation.make_row_id_map(
+            routing_map, num_tokens, num_experts
+        )
         fp8_scale = None
-        fp8_dtype = None
+        # fp8_dtype = None
         scale_hidden_dim = None
 
-        output, permuted_scale, permuted_probs = triton_permutation.permute_with_mask_map(
-            inp,
-            row_id_map,
-            probs,
-            fp8_scale,
-            num_tokens,
-            num_experts,
-            num_out_tokens,
-            hidden_size,
-            scale_hidden_dim,
+        output, permuted_scale, permuted_probs = (
+            triton_permutation.permute_with_mask_map(
+                inp,
+                row_id_map,
+                probs,
+                fp8_scale,
+                num_tokens,
+                num_experts,
+                num_out_tokens,
+                hidden_size,
+                scale_hidden_dim,
+            )
         )
         ctx.save_for_backward(row_id_map)
         ctx.num_experts = num_experts
@@ -157,7 +168,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 (row_id_map,) = ctx.saved_tensors
 
             scale_hidden_dim = None
-            fp8_dtype = None
+            # fp8_dtype = None
             fp8_scale = None
 
             if ctx.with_probs:
@@ -223,7 +234,9 @@ def moe_permute(
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
     """
-    output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None)
+    output, row_id_map, _ = _moe_permute_mask_map.apply(
+        inp, routing_map, num_out_tokens, None
+    )
     return output, row_id_map
 
 
@@ -419,5 +432,7 @@ def moe_sort_chunks_by_index_with_probs(
     sorted_indices : torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
+    output, permuted_probs = _moe_chunk_sort.apply(
+        inp, split_sizes, sorted_index, probs
+    )
     return output, permuted_probs
