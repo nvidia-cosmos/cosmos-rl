@@ -49,8 +49,12 @@ def floor_by_factor(number: int, factor: int) -> int:
 
 
 class NemotronImagesKwargs(Siglip2ImageProcessorFast.valid_kwargs, total=False):
+    # global setting for all images, can be overridden by per-image kwargs
     max_pixels: Optional[int]
     min_pixels: Optional[int]
+
+    # per-image overrides, e.g. [{"min_pixels": 256*28*28, "max_pixels": 1280*28*28}, None, ...]
+    per_image_kwargs: Optional[list[dict]]
 
 
 class Qwen3VLProcessorKwargs(ProcessingKwargs, total=False):
@@ -120,11 +124,16 @@ class Siglip2ImageProcessorCustom(Siglip2ImageProcessorFast):
         return_tensors: Optional[Union[str, TensorType]],
         **kwargs,
     ) -> BatchFeature:
+        per_image_kwargs = kwargs.pop("per_image_kwargs", None)
         pixel_values = []
         spatial_shapes = []
-        for image in images:
+        for idx, image in enumerate(images):
+            # merge global kwargs with per-image overrides (if provided)
+            image_kwargs = kwargs.copy()
+            if per_image_kwargs is not None and idx < len(per_image_kwargs) and per_image_kwargs[idx]:
+                image_kwargs.update(per_image_kwargs[idx])
             if do_resize:
-                image = self._resize_image(image, max_ratio=200, interpolation=interpolation, **kwargs)
+                image = self._resize_image(image, max_ratio=200, interpolation=interpolation, **image_kwargs)
 
             image = self.rescale_and_normalize(image, do_rescale, rescale_factor, do_normalize, image_mean, image_std)
 
@@ -313,6 +322,44 @@ class NemotronNanoV3BridgeProcessor(ProcessorMixin):
             if getattr(tokenizer, "vision_end_token_id", None)
             else tokenizer.convert_tokens_to_ids(self.vision_end_token)
         )
+
+    def apply_chat_template(self, conversation, **kwargs):
+        """
+        Override to extract per-image pixel constraints (min_pixels, max_pixels) from
+        individual message content items and route them to the image processor.
+
+        Example message format::
+
+            {"type": "image", "image": "path/to/img.jpg", "min_pixels": 256*28*28, "max_pixels": 512*28*28}
+
+        Any image content item without these fields falls back to the global defaults.
+        """
+        # Normalise to a list of conversations for uniform handling
+        if isinstance(conversation, (list, tuple)) and conversation and isinstance(conversation[0], (list, tuple)):
+            conversations = conversation
+        else:
+            conversations = [conversation]
+
+        per_image_kwargs: list = []
+        for conv in conversations:
+            for message in conv:
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if item.get("type") != "image":
+                        continue
+                    img_override = {}
+                    if "min_pixels" in item:
+                        img_override["min_pixels"] = item["min_pixels"]
+                    if "max_pixels" in item:
+                        img_override["max_pixels"] = item["max_pixels"]
+                    per_image_kwargs.append(img_override if img_override else None)
+
+        if any(v is not None for v in per_image_kwargs):
+            kwargs["per_image_kwargs"] = per_image_kwargs
+
+        return super().apply_chat_template(conversation, **kwargs)
 
     def __call__(
         self,
