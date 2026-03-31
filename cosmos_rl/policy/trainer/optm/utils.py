@@ -21,6 +21,7 @@ import inspect
 import math
 from typing import Any, Optional
 
+import torch
 import torch.nn as nn
 
 from cosmos_rl.utils.logging import logger
@@ -35,6 +36,203 @@ def is_orthonormal_optimizer(name: str) -> bool:
     True for name in {"Muon", "Dion", "Dion2", "NorMuon"}.
     """
     return name in _ORTHONORMAL_OPTIMIZER_NAMES
+
+
+def use_builtin_torch_muon() -> bool:
+    """Use :class:`torch.optim.Muon` when PyTorch >= 2.9 and the class exists (no ``dion``)."""
+    return hasattr(torch.optim, "Muon")
+
+
+def _torch_muon_adjust_lr_fn_from_config(train: Any) -> Optional[str]:
+    """Map ``optm_adjust_lr`` to PyTorch Muon ``adjust_lr_fn`` (``original`` / ``match_rms_adamw``)."""
+    raw = getattr(train, "optm_adjust_lr", None)
+    if raw is None:
+        return None
+    s = str(raw).lower()
+    if s in ("match_rms_adamw", "match_rms", "rms_norm", "moonshot", "adamw"):
+        return "match_rms_adamw"
+    if s in ("original", "spectral_norm", "none"):
+        return "original"
+    logger.warning(
+        "Unknown optm_adjust_lr=%r for PyTorch Muon; using default (original).", raw
+    )
+    return None
+
+
+def _split_params_for_builtin_torch_muon(
+    model: nn.Module,
+) -> tuple[
+    list[nn.Parameter],
+    list[nn.Parameter],
+    list[nn.Parameter],
+    list[nn.Parameter],
+]:
+    """Same grouping as ``separate_param_groups_for_orthonormal_optim`` for Muon vs scalar params."""
+    matrix_params: list[nn.Parameter] = []
+    vector_params: list[nn.Parameter] = []
+    embed_params: list[nn.Parameter] = []
+    lm_head_params: list[nn.Parameter] = []
+
+    name_to_module = dict(model.named_modules())
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        module = None
+        try:
+            module_name = name.rsplit(".", 1)[0]
+            module = name_to_module.get(module_name, None)
+        except Exception:
+            module = None
+
+        if isinstance(module, nn.Embedding):
+            embed_params.append(param)
+            continue
+
+        if "lm_head" in name:
+            lm_head_params.append(param)
+            continue
+
+        if param.ndim == 2:
+            matrix_params.append(param)
+        else:
+            vector_params.append(param)
+
+    return matrix_params, vector_params, embed_params, lm_head_params
+
+
+def build_pytorch_muon_optimizers(
+    model: nn.Module,
+    config: Any,
+    distributed_mesh: Any = None,
+) -> list[torch.optim.Optimizer]:
+    """Build ``torch.optim.Muon`` + ``AdamW`` for hidden 2D matrices vs embed/lm_head/bias.
+
+    Works with DDP and FSDP (``fully_shard``): gradients are already synchronized per parameter
+    before ``step``; no ``distributed_mesh`` is passed into PyTorch Muon.
+
+    Args:
+        model: Trainable module.
+        config: Job config with ``train`` attributes.
+        distributed_mesh: Ignored (reserved for parity with dion Muon API).
+    """
+    if distributed_mesh is not None:
+        logger.debug(
+            "torch.optim.Muon ignores distributed_mesh; DDP/FSDP handle gradient sync."
+        )
+
+    train = getattr(config, "train", config)
+    base_lr = getattr(train, "optm_lr", 1e-4)
+    if isinstance(base_lr, (list, tuple)):
+        base_lr = float(base_lr[0]) if base_lr else 1e-4
+    base_lr = float(base_lr)
+    weight_decay = float(getattr(train, "optm_weight_decay", 0.01))
+    _betas = getattr(train, "optm_betas", (0.9, 0.999))
+    try:
+        betas = (
+            (float(_betas[0]), float(_betas[1])) if len(_betas) >= 2 else (0.9, 0.999)
+        )
+    except (TypeError, IndexError):
+        betas = (0.9, 0.999)
+    eps = float(getattr(train, "epsilon", 1e-8))
+    _scalar_betas = getattr(train, "optm_scalar_betas", None)
+    if _scalar_betas is not None:
+        try:
+            scalar_betas = (
+                (float(_scalar_betas[0]), float(_scalar_betas[1]))
+                if len(_scalar_betas) >= 2
+                else betas
+            )
+        except (TypeError, IndexError):
+            scalar_betas = betas
+    else:
+        scalar_betas = betas
+    scalar_eps = getattr(train, "optm_scalar_eps", None) or eps
+    scalar_lr = getattr(train, "optm_scalar_lr", None)
+    embed_lr = getattr(train, "optm_embed_lr", None)
+    lm_head_lr = getattr(train, "optm_lm_head_lr", None)
+
+    effective_scalar_lr = float(scalar_lr) if scalar_lr is not None else base_lr
+    effective_embed_lr = (
+        float(embed_lr) if embed_lr is not None else effective_scalar_lr
+    )
+
+    matrix_params, vector_params, embed_params, lm_head_params = (
+        _split_params_for_builtin_torch_muon(model)
+    )
+    if not matrix_params:
+        raise RuntimeError(
+            "torch.optim.Muon requires at least one 2D hidden weight; check model and freezing."
+        )
+
+    muon_cls = torch.optim.Muon
+    mu_sig = inspect.signature(muon_cls.__init__)
+    mu_kw: dict[str, Any] = {
+        "lr": base_lr,
+        "weight_decay": weight_decay,
+    }
+    if "momentum" in mu_sig.parameters:
+        _mu = getattr(train, "optm_mu", None)
+        mu_kw["momentum"] = float(0.95 if _mu is None else _mu)
+    if "nesterov" in mu_sig.parameters:
+        _nv = getattr(train, "optm_nesterov", None)
+        mu_kw["nesterov"] = True if _nv is None else bool(_nv)
+    if "eps" in mu_sig.parameters:
+        mu_kw["eps"] = eps
+    adj = _torch_muon_adjust_lr_fn_from_config(train)
+    if adj is not None and "adjust_lr_fn" in mu_sig.parameters:
+        mu_kw["adjust_lr_fn"] = adj
+
+    muon_opt = muon_cls(matrix_params, **mu_kw)
+
+    adam_groups: list[dict[str, Any]] = []
+    if vector_params:
+        adam_groups.append(
+            {
+                "params": vector_params,
+                "lr": effective_scalar_lr,
+                "betas": scalar_betas,
+                "eps": scalar_eps,
+                "weight_decay": weight_decay,
+            }
+        )
+    if embed_params:
+        adam_groups.append(
+            {
+                "params": embed_params,
+                "lr": effective_embed_lr,
+                "betas": scalar_betas,
+                "eps": scalar_eps,
+                "weight_decay": 0.0,
+            }
+        )
+    if lm_head_params:
+        if lm_head_lr is not None:
+            effective_lm_head_lr = float(lm_head_lr)
+        else:
+            first = lm_head_params[0]
+            d_in = first.shape[-1] if first.ndim >= 2 else max(1, first.numel())
+            effective_lm_head_lr = base_lr / math.sqrt(float(d_in))
+        adam_groups.append(
+            {
+                "params": lm_head_params,
+                "lr": effective_lm_head_lr,
+                "betas": scalar_betas,
+                "eps": scalar_eps,
+                "weight_decay": 0.0,
+            }
+        )
+    if not adam_groups:
+        raise RuntimeError(
+            "torch.optim.Muon setup requires at least bias/embed/lm_head params in AdamW groups."
+        )
+    adam = torch.optim.AdamW(adam_groups)
+
+    logger.info(
+        "Using torch.optim.Muon + AdamW for hidden 2D matrices vs embed/lm_head/bias."
+    )
+    return [muon_opt, adam]
 
 
 def separate_param_groups_for_orthonormal_optim(
@@ -171,7 +369,16 @@ def build_orthonormal_optimizer(
     config: Any,
     distributed_mesh: Any = None,
 ) -> Any:
-    """Build a single orthonormal optimizer (Muon, NorMuon, Dion, Dion2) with param groups."""
+    """Build a single orthonormal optimizer (Muon, NorMuon, Dion, Dion2) with param groups.
+
+    For ``Muon`` with PyTorch >= 2.9 and :class:`torch.optim.Muon` available, returns a
+    **list** ``[Muon, AdamW]`` (no ``dion``). Works with DDP and FSDP without extra mesh.
+    """
+    if optimizer_name == "Muon" and use_builtin_torch_muon():
+        return build_pytorch_muon_optimizers(
+            model, config, distributed_mesh=distributed_mesh
+        )
+
     from cosmos_rl.policy.trainer.optm import orthonormal_optimizers
 
     if getattr(orthonormal_optimizers, "_import_error", None) is not None:

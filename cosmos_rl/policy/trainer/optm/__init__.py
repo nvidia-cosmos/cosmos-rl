@@ -403,7 +403,10 @@ def build_optimizers(
             opt = build_orthonormal_optimizer(
                 name, mp, config, distributed_mesh=distributed_mesh
             )
-            optimizers_per_part.append([opt])
+            if isinstance(opt, (list, tuple)):
+                optimizers_per_part.append(list(opt))
+            else:
+                optimizers_per_part.append([opt])
         return OrthonormalOptimizersContainer(model_parts, optimizers_per_part)
 
     lr = config.train.optm_lr

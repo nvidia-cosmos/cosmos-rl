@@ -749,7 +749,10 @@ class TrainingConfig(BaseModel):
 
     optm_name: str = Field(
         default="AdamW",
-        description="Optimizer name",
+        description=(
+            "Optimizer name. For Muon: PyTorch >= 2.9 with torch.optim.Muon uses the "
+            "built-in optimizer; otherwise the dion package is used."
+        ),
         choices=["AdamW", "Adam", "Muon", "NorMuon", "Dion", "Dion2"],
     )
     optm_lr: Union[float, List[float], Dict[str, float]] = Field(
@@ -811,7 +814,11 @@ class TrainingConfig(BaseModel):
     )
     optm_adjust_lr: Optional[str] = Field(
         default=None,
-        description="LR adjustment: spectral_norm, rms_norm, or None.",
+        description=(
+            "LR adjustment (dion Muon: spectral_norm, rms_norm, ...). For built-in "
+            "torch.optim.Muon, maps to adjust_lr_fn: rms_norm/match_rms -> match_rms_adamw; "
+            "spectral_norm/original -> original."
+        ),
     )
     optm_flatten: Optional[bool] = Field(
         default=None,

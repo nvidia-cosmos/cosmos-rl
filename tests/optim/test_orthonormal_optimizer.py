@@ -304,6 +304,7 @@ class TestBuildOrthonormalOptimizer(unittest.TestCase):
                 }
 
         with (
+            patch.object(optm_utils, "use_builtin_torch_muon", return_value=False),
             patch.object(orthonormal_optimizers, "Muon", FakeOpt),
             patch.object(orthonormal_optimizers, "NorMuon", FakeOpt),
             patch.object(orthonormal_optimizers, "Dion", FakeOpt),
@@ -372,9 +373,12 @@ class TestOrthonormalOptimizerStep(unittest.TestCase):
         from cosmos_rl.policy.trainer.optm import utils as optm_utils
         from cosmos_rl.policy.trainer.optm import orthonormal_optimizers
 
-        if orthonormal_optimizers.Muon is None:
+        if (
+            orthonormal_optimizers.Muon is None
+            and not optm_utils.use_builtin_torch_muon()
+        ):
             self.skipTest(
-                "dion not installed; cannot build real orthonormal optimizer."
+                "dion not installed and PyTorch built-in Muon unavailable; cannot build Muon optimizer."
             )
 
         model, device = get_qwen3_vl_cosmos_model()
@@ -385,9 +389,10 @@ class TestOrthonormalOptimizerStep(unittest.TestCase):
             optm_betas=(0.9, 0.999),
             optm_scalar_opt="adamw",
         )
-        optimizer = optm_utils.build_orthonormal_optimizer(
+        built = optm_utils.build_orthonormal_optimizer(
             "Muon", model, config, distributed_mesh=None
         )
+        optimizers = list(built) if isinstance(built, (list, tuple)) else [built]
 
         processor = AutoProcessor.from_pretrained(
             QWEN3_VL_MODEL_ID, trust_remote_code=True, use_fast=True
@@ -426,9 +431,11 @@ class TestOrthonormalOptimizerStep(unittest.TestCase):
         param_to_track = model.model.language_model.layers[0].self_attn.q_proj.weight
         weight_before = param_to_track.data.clone()
 
-        optimizer.zero_grad(set_to_none=True)
+        for o in optimizers:
+            o.zero_grad(set_to_none=True)
         loss.backward()
-        optimizer.step()
+        for o in optimizers:
+            o.step()
 
         self.assertTrue(loss.requires_grad)
         self.assertIsInstance(loss.item(), float)
