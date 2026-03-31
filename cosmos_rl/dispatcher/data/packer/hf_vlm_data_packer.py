@@ -280,7 +280,8 @@ class HFVLMDataPacker(DataPacker):
                 "qwen3_5_moe",
             ]
             or os.environ.get("USE_QWEN_VL_PROCESS", "0") in ["1", "true", "True"]
-            or vit_type in ["qwen3_vl", "siglip2"]
+            or "siglip2" in vit_type.lower()
+            or "qwen3_vl" in vit_type.lower()
         )
         if self.use_qwen_vl_process:
             real_temp_patch_size = getattr(
