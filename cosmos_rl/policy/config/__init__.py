@@ -778,6 +778,10 @@ class TrainingConfig(BaseModel):
         default=20,
         description="Warmup steps for optimizer, can be an integer or a float, if it is a float and range in [0.0, 1.0], it will be multiplied by the total steps",
     )
+    optm_warmup_start_factor: float = Field(
+        default=0.0,
+        description="The initial learning rate will be `optm_warmup_start_factor * optm_lr` at the beginning of training, and then linearly increase to `optm_lr` in `optm_warmup_steps` steps.",
+    )
     optm_decay_ratio: Optional[float] = Field(
         default=None,
         description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",

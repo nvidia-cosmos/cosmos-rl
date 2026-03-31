@@ -554,6 +554,7 @@ def build_lr_schedulers(
         decay_steps: int,
         lr_decay_type: str,
         min_lr_factor: float,
+        warmup_start_factor: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -573,13 +574,17 @@ def build_lr_schedulers(
         """
         warmup_stable_steps = warmup_steps + stable_steps
         if current_step < warmup_steps:
-            # linear warmup
-            # 0-indexed step, hence + 1 adjustments
-            current_step += 1
+            # linear warmup from warmup_start_factor to 1.0
             assert warmup_steps != 0, (
                 "warmup_steps must not be zero to reach this branch"
             )
-            curr_adjustment = float(current_step / warmup_steps)
+            if warmup_steps == 1:
+                curr_adjustment = 1.0
+            else:
+                progress = float(current_step) / float(warmup_steps - 1)
+                curr_adjustment = (
+                    warmup_start_factor + (1.0 - warmup_start_factor) * progress
+                )
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
@@ -609,6 +614,7 @@ def build_lr_schedulers(
         decay_steps=decay_steps,
         lr_decay_type=lr_decay_type,
         min_lr_factor=min_lr_factor,
+        warmup_start_factor=config.train.optm_warmup_start_factor,
     )
 
     return LRSchedulersContainer(optimizers, lr_lambda)
