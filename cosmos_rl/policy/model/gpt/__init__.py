@@ -33,13 +33,16 @@ from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
+    get_rope_theta,
+)
 
 
 def build_norm(
@@ -72,7 +75,7 @@ class RotaryEmbedding(nn.Module):
     def __init__(self, args: GPTArgs, device=None):
         super().__init__()
         self.args = args
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[args.rope_type]
+        self.rope_init_fn = get_rope_init_fn(args.rope_type)
         self.device = device
         self.config = args
         self.reset_inv_freq(device=device)
@@ -779,7 +782,7 @@ class GPT(BaseModel):
                 head_dim=head_dim,
                 vocab_size=vocab_size,
                 max_seq_len=max_position_embeddings,
-                rope_theta=hf_config.rope_theta,
+                rope_theta=get_rope_theta(hf_config),
                 q_k_norm_enabled=hf_config.model_type == "qwen3",
                 norm_type="rmsnorm",
                 rope_type=rope_type,

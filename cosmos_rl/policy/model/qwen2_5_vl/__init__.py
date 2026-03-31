@@ -19,7 +19,6 @@ from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     resolve_model_path,
@@ -51,6 +50,10 @@ from cosmos_rl.policy.model.vision_encoder.qwen2_5_vl import (
     Qwen2_5_VL_Encoder_Args,
     Qwen2_5_VisionTransformerPretrainedModel,
     rotate_half,
+)
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
+    get_rope_theta,
 )
 
 
@@ -84,7 +87,7 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2_5_VL_LM_Args, device=None):
         super().__init__()
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
+        self.rope_init_fn = get_rope_init_fn(config.rope_type)
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):
@@ -1054,7 +1057,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             n_kv_heads=hf_config.num_key_value_heads,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=hf_config.rope_theta,
+            rope_theta=get_rope_theta(hf_config),
             norm_type="rmsnorm",
             hidden_act=hf_config.hidden_act,
             norm_eps=hf_config.rms_norm_eps,
