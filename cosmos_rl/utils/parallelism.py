@@ -89,10 +89,10 @@ class ParallelDims:
     tp: int
     pp: int
     world_size: int
-    pp_dynamic_shape: bool
-    pp_micro_batch_size: int
-    pp_schedule: str
-    pp_layers_per_stage: int
+    pp_dynamic_shape: bool = False
+    pp_micro_batch_size: int = 1
+    pp_schedule: str = "Interleaved1F1B"
+    pp_layers_per_stage: int = 2
     enable_loss_parallel: bool = False
     ep: int = 1
     # When ep is enabled, we can have different dp shard for the MoE module.
