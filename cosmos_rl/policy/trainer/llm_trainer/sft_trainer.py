@@ -258,7 +258,9 @@ class SFTTrainer(LLMTrainer):
             labels = batch.pop("label_ids")
 
             # model_parts[0]: see above — model-level methods are shared across PP stages.
-            position_ids, input_ids, pos_seq_dim = self.model_parts[0].get_position_ids(**batch)
+            position_ids, input_ids, pos_seq_dim = self.model_parts[0].get_position_ids(
+                **batch
+            )
 
             batch["position_ids"] = position_ids
             padding_mask = batch.get("padding_mask", None)
@@ -280,7 +282,9 @@ class SFTTrainer(LLMTrainer):
                 batch.update(packed_args)
             # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
             # model_parts[0]: model-level attrs are shared across PP stages.
-            delay_cp_slice_inputs = getattr(self.model_parts[0], "delay_cp_slice_inputs", False)
+            delay_cp_slice_inputs = getattr(
+                self.model_parts[0], "delay_cp_slice_inputs", False
+            )
             if (
                 self.parallel_dims.cp_enabled
                 and not packing_seq
@@ -303,8 +307,7 @@ class SFTTrainer(LLMTrainer):
 
             if self.parallel_dims.pp_enabled:
                 pp_last_stage = (
-                    self.parallel_dims.pp_coord[0]
-                    == self.parallel_dims.pp_coord[1] - 1
+                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
                 )
                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
@@ -313,9 +316,7 @@ class SFTTrainer(LLMTrainer):
                 # - First stage receives input_ids and starts the pipeline
                 # - Last stage computes loss and initiates backward pass
                 # - Intermediate stages only receive activations from previous stage
-                targets, losses = (
-                    (labels, []) if pp_last_stage else (None, None)
-                )
+                targets, losses = (labels, []) if pp_last_stage else (None, None)
 
                 pp_data_batch_args = []
                 if pp_first_stage:
@@ -598,7 +599,9 @@ class SFTTrainer(LLMTrainer):
             val_padding_mask = val_batch.get("padding_mask", None)
 
             # model_parts[0]: model-level attrs are shared across PP stages.
-            delay_cp_slice_inputs = getattr(self.model_parts[0], "delay_cp_slice_inputs", False)
+            delay_cp_slice_inputs = getattr(
+                self.model_parts[0], "delay_cp_slice_inputs", False
+            )
             if self.parallel_dims.cp_enabled and not delay_cp_slice_inputs:
                 [val_inputs, val_position_ids, val_padding_mask] = (
                     slice_inputs_for_ulysses(

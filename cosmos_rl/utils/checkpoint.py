@@ -624,7 +624,9 @@ class CheckpointMananger:
         revision: Optional[str] = None,
         strict: bool = True,
         pp_model_parts: Optional[List] = None,
-        pp_model_module_paths: Optional[List[str]] = None,  # dotted module paths for each PP stage
+        pp_model_module_paths: Optional[
+            List[str]
+        ] = None,  # dotted module paths for each PP stage
     ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
         extra_vars = {}
         base_paths: List[str] = self.get_latest_ckpt_paths()
@@ -682,7 +684,7 @@ class CheckpointMananger:
                             prefix_dot = f"{prefix}." if prefix else ""
                             for k, v in saved_state.items():
                                 if k.startswith(prefix_dot):
-                                    mp_state[k[len(prefix_dot):]] = v
+                                    mp_state[k[len(prefix_dot) :]] = v
                             mp.load_state_dict(mp_state, strict=False)
                     else:
                         model.load_state_dict(saved_state, strict=strict)

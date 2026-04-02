@@ -1284,7 +1284,9 @@ class GRPOTrainer(LLMTrainer):
                                             self.model_parts[0],
                                             "check_sequence_packing_compatible",
                                         )
-                                        and not self.model_parts[0].check_sequence_packing_compatible()
+                                        and not self.model_parts[
+                                            0
+                                        ].check_sequence_packing_compatible()
                                     ):
                                         packing_seq = False
                                         logger.debug(
@@ -1313,9 +1315,9 @@ class GRPOTrainer(LLMTrainer):
 
                                 # input_ids are different across ranks in dp_shard_cp
                                 # model_parts[0]: model-level methods are shared across PP stages.
-                                position_ids, input_ids, pos_seq_dim = (
-                                    self.model_parts[0].get_position_ids(**user_mini_batch)
-                                )
+                                position_ids, input_ids, pos_seq_dim = self.model_parts[
+                                    0
+                                ].get_position_ids(**user_mini_batch)
 
                                 if packing_seq:
                                     # Prepare for the sequence packing information.
@@ -1539,7 +1541,9 @@ class GRPOTrainer(LLMTrainer):
                                 else:
                                     with self.act_offloading_ctx_manager:
                                         # model_parts[0]: non-PP forward uses the first (only) model part.
-                                        model_output = self.model_parts[0](**user_mini_batch)
+                                        model_output = self.model_parts[0](
+                                            **user_mini_batch
+                                        )
                                         raw_logits = model_output.logits
 
                                     if self.parallel_dims.cp_enabled:

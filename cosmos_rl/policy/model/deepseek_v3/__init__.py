@@ -265,7 +265,7 @@ class DeepseekV3MoEModel(BaseModel):
         def _remap_bf16_name(name: str) -> Optional[str]:
             if not name.startswith(mtp_layer_prefix):
                 return name
-            suffix = name[len(mtp_layer_prefix):]
+            suffix = name[len(mtp_layer_prefix) :]
             if suffix == "embed_tokens.weight":
                 return "model.embed_tokens.weight"
             if suffix == "shared_head.head.weight":

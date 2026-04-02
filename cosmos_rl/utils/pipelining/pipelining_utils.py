@@ -81,9 +81,9 @@ def generate_split_points(
             )
             num_layers_per_stage = None
     else:
-        assert (
-            num_layers_per_stage is not None
-        ), f"Set num_layers_per_stage for multi-stage schedule '{schedule_str}'"
+        assert num_layers_per_stage is not None, (
+            f"Set num_layers_per_stage for multi-stage schedule '{schedule_str}'"
+        )
 
     weights = {
         "dense": 0.5,
@@ -114,13 +114,13 @@ def generate_split_points(
 
     num_stages_per_rank = num_stages // pp_size
     if is_single_stage_schedule:
-        assert (
-            num_stages_per_rank == 1
-        ), f"Number of stages per rank ({num_stages_per_rank}) must be 1 for single-stage schedules."
+        assert num_stages_per_rank == 1, (
+            f"Number of stages per rank ({num_stages_per_rank}) must be 1 for single-stage schedules."
+        )
     else:
-        assert (
-            num_stages_per_rank >= 2
-        ), f"Number of stages per rank ({num_stages_per_rank}) must be >= 2 for multi-stage schedules."
+        assert num_stages_per_rank >= 2, (
+            f"Number of stages per rank ({num_stages_per_rank}) must be >= 2 for multi-stage schedules."
+        )
 
     layer_types = ["dense", "moe"]
     num_layers_left = {"dense": num_dense_layers, "moe": num_moe_layers}
@@ -194,9 +194,9 @@ def stage_ids_this_rank(
     if schedule_class == ScheduleZBVZeroBubble:
         raise ValueError(f"Unsupported pipeline schedule {schedule_str}")
 
-    assert (
-        num_stages % pp_size == 0
-    ), f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
+    assert num_stages % pp_size == 0, (
+        f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
+    )
     stages_per_rank = num_stages // pp_size
     return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
 

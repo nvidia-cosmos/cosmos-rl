@@ -573,7 +573,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
-                    drop_last=self.config.train.train_policy.dataloader_drop_last or self.parallel_dims.pp_enabled,
+                    drop_last=self.config.train.train_policy.dataloader_drop_last
+                    or self.parallel_dims.pp_enabled,
                 )
             return data_loader
 

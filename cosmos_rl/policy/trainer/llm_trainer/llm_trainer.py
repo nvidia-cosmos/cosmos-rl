@@ -103,9 +103,11 @@ class LLMTrainer(Trainer):
 
         if config.train.fsdp_offload and not pp_enabled:
             model._apply(
-                lambda t: torch.empty_like(t, device="cpu")
-                if t.device.type == "meta"
-                else t.to("cpu"),
+                lambda t: (
+                    torch.empty_like(t, device="cpu")
+                    if t.device.type == "meta"
+                    else t.to("cpu")
+                ),
                 recurse=True,
             )
 
@@ -125,16 +127,20 @@ class LLMTrainer(Trainer):
                 # holds all layers unsharded and must NOT be materialized.
                 for model_part in model.model_parts:
                     model_part._apply(
-                        lambda t: torch.empty_like(t, device=materialize_device)
-                        if t.device.type == "meta"
-                        else t.to(materialize_device),
+                        lambda t: (
+                            torch.empty_like(t, device=materialize_device)
+                            if t.device.type == "meta"
+                            else t.to(materialize_device)
+                        ),
                         recurse=True,
                     )
             elif not config.train.fsdp_offload:
                 model._apply(
-                    lambda t: torch.empty_like(t, device=self.device)
-                    if t.device.type == "meta"
-                    else t.to("cuda"),
+                    lambda t: (
+                        torch.empty_like(t, device=self.device)
+                        if t.device.type == "meta"
+                        else t.to("cuda")
+                    ),
                     recurse=True,
                 )
             model.post_to_empty_hook(config)
@@ -160,7 +166,9 @@ class LLMTrainer(Trainer):
                     if module in self.model_parts:
                         idx = self.model_parts.index(module)
                         self.model_module_path[idx] = name
-                        if all([modpath is not None for modpath in self.model_module_path]):
+                        if all(
+                            [modpath is not None for modpath in self.model_module_path]
+                        ):
                             break
                 for i in range(len(self.model_module_path)):
                     if self.model_module_path[i] is None:
@@ -524,7 +532,9 @@ class LLMTrainer(Trainer):
                         file_name = create_file_name(
                             save_lora_config, pp_rank, pp_size, file_idx
                         )
-                        save_chunked_tensors(current_chunk, current_chunk_size, file_name)
+                        save_chunked_tensors(
+                            current_chunk, current_chunk_size, file_name
+                        )
 
                         # Reset for the next chunk
                         current_chunk = {_name: _param}
