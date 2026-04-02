@@ -38,4 +38,5 @@ python tests/test_colocated_separated.py
 python tests/test_load_balanced_dataset.py
 python tests/test_resume_data_index.py
 /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
+python tests/optim/test_orthonormal_optimizer.py
 python tests/test_diffusion_rl_e2e.py

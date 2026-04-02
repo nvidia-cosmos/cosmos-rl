@@ -31,6 +31,10 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.trainer.optm.utils import (
+    is_orthonormal_optimizer,
+    build_orthonormal_optimizer,
+)
 import inspect
 import math
 
@@ -251,6 +255,75 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
+class OrthonormalOptimizersContainer(Optimizer):
+    """Container for Muon/NorMuon/Dion/Dion2 optimizers (one per model part).
+
+    Provides the same interface as OptimizersContainer: step(), zero_grad(),
+    state_dict(), load_state_dict(), and register_step_post_hook (from Optimizer).
+    state_dict uses idx-{i}-* keys so the checkpointer works unchanged.
+    """
+
+    def __init__(
+        self,
+        model_parts: List[nn.Module],
+        optimizers: List[List[Optimizer]],
+    ) -> None:
+        all_params = []
+        for opt_list in optimizers:
+            for opt in opt_list:
+                for group in opt.param_groups:
+                    all_params.extend(group["params"])
+        super().__init__(all_params, {})
+        self.model_parts = model_parts
+        self.optimizers = optimizers
+
+    def __len__(self) -> int:
+        return len(self.optimizers)
+
+    def step(self, *args, **kwargs) -> None:
+        for opt_list in self.optimizers:
+            for optimizer in opt_list:
+                optimizer.step(*args, **kwargs)
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        for opt_list in self.optimizers:
+            for optimizer in opt_list:
+                optimizer.zero_grad(*args, **kwargs)
+
+    def state_dict(self) -> Dict[str, Any]:
+        state_dict = {}
+        for i, (mp, opt_list) in enumerate(zip(self.model_parts, self.optimizers)):
+            if mp is None or len(opt_list) == 0:
+                continue
+            sd = get_optimizer_state_dict(
+                mp,
+                opt_list,
+                options=StateDictOptions(flatten_optimizer_state_dict=True),
+            )
+            for k, v in sd.items():
+                state_dict[f"idx-{i}-{k}"] = v
+        return state_dict
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        for i, (mp, opt_list) in enumerate(zip(self.model_parts, self.optimizers)):
+            if mp is None or len(opt_list) == 0:
+                continue
+            current_state_dict = {
+                k.replace(f"idx-{i}-", ""): v
+                for k, v in state_dict.items()
+                if k.startswith(f"idx-{i}-")
+            }
+            set_optimizer_state_dict(mp, opt_list, current_state_dict)
+
+    def synchronize_for_checkpoint(self) -> None:
+        """Call synchronize_for_checkpoint on each optimizer if present (e.g. for async)."""
+        for opt_list in self.optimizers:
+            for opt in opt_list:
+                fn = getattr(opt, "synchronize_for_checkpoint", None)
+                if fn is not None and callable(fn):
+                    fn()
+
+
 def _print_optimizer_desc_table(descs: list["OptimizerDesc"]) -> None:
     if not descs:
         logger.info("No optimizer descs to display.")
@@ -301,13 +374,12 @@ def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
     model_modpath: List[str] = None,
-) -> OptimizersContainer:
-    """Create a OptimizersContainer for the given model parts and job config.
+    distributed_mesh: Any = None,
+):
+    """Create an optimizer container for the given model parts and job config.
 
-    This function creates a ``OptimizersContainer`` for the given model parts.
-    ``job_config`` should define the correct optimizer name and parameters.
-    This function currently supports creating ``OptimizersContainer`` and
-    ``OptimizersInBackwardContainer``.
+    This function creates a ``OptimizersContainer`` (Adam/AdamW) or
+    ``OrthonormalOptimizersContainer`` (Muon/NorMuon/Dion/Dion2) for the given model parts.
 
     **Note**
     Users who want to customize the optimizer behavior can create their own
@@ -317,8 +389,26 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        config (CosmosConfig): Job config.
         model_modpath (List[str], optional): List of model part paths. Defaults to None.
+        distributed_mesh: Optional mesh or parallel_dims for orthonormal optimizers.
     """
+    name = config.train.optm_name
+    if is_orthonormal_optimizer(name):
+        optimizers_per_part = []
+        for mp in model_parts:
+            if mp is None:
+                optimizers_per_part.append([])
+                continue
+            opt = build_orthonormal_optimizer(
+                name, mp, config, distributed_mesh=distributed_mesh
+            )
+            if isinstance(opt, (list, tuple)):
+                optimizers_per_part.append(list(opt))
+            else:
+                optimizers_per_part.append([opt])
+        return OrthonormalOptimizersContainer(model_parts, optimizers_per_part)
+
     lr = config.train.optm_lr
     if isinstance(lr, float):
         lr = [lr] * len(model_parts)
