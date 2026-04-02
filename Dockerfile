@@ -6,9 +6,13 @@
 # To build with specific dependency groups:
 #   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=all .
 #   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=wfm,vla .
+# To select the PyTorch dependency profile:
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_TORCH_VARIANT=2.8 .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_TORCH_VARIANT=2.10 .
 
 ARG COSMOS_RL_BUILD_MODE=efa
 ARG COSMOS_RL_EXTRAS=""
+ARG COSMOS_RL_TORCH_VARIANT=2.8
 
 ARG CUDA_VERSION=12.8.1
 
@@ -21,6 +25,7 @@ ARG AWS_OFI_NCCL_VERSION=v1.16.0
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
+ARG COSMOS_RL_TORCH_VARIANT
 
 ENV TZ=Etc/UTC
 
@@ -87,17 +92,37 @@ RUN pip install -U pip setuptools wheel packaging psutil
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
-RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-
-# Install flash_attn separately
-# RUN pip install flash_attn==2.8.2 --no-build-isolation
-
-RUN pip install \
-    torchao==0.13.0 \
-    flash_attn==${FLASH_ATTN_VERSION} \
-    vllm==0.11.0 \
-    flashinfer-python==0.6.1 \
-    transformer_engine[pytorch] --no-build-isolation
+RUN set -eux; \
+        case "${COSMOS_RL_TORCH_VARIANT}" in \
+            2.8) \
+                TORCH_VERSION=2.8.0; \
+                TORCHVISION_VERSION=0.23.0; \
+                TORCHAUDIO_VERSION=2.8.0; \
+                TORCHAO_VERSION=0.13.0; \
+                VLLM_VERSION=0.11.0; \
+                FLASHINFER_VERSION=0.6.1; \
+                ;; \
+            2.10) \
+                TORCH_VERSION=2.10.0; \
+                TORCHVISION_VERSION=0.25.0; \
+                TORCHAUDIO_VERSION=2.10.0; \
+                TORCHAO_VERSION=0.16.0; \
+                VLLM_VERSION=0.17.0; \
+                FLASHINFER_VERSION=0.6.4; \
+                FLASH_ATTN_WHEEL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"; \
+                ;; \
+            *) \
+                echo "Unsupported COSMOS_RL_TORCH_VARIANT: ${COSMOS_RL_TORCH_VARIANT}. Expected 2.8 or 2.10."; \
+                exit 1; \
+                ;; \
+        esac; \
+        pip install torch=="${TORCH_VERSION}" torchvision=="${TORCHVISION_VERSION}" torchaudio=="${TORCHAUDIO_VERSION}" --index-url https://download.pytorch.org/whl/cu128; \
+        pip install \
+            torchao=="${TORCHAO_VERSION}" \
+            ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
+            vllm=="${VLLM_VERSION}" \
+            flashinfer-python=="${FLASHINFER_VERSION}" \
+            transformer_engine[pytorch] --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
@@ -106,12 +131,18 @@ RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https
 
 # Install nvshmem grouped_gemm and DeepEP for MoE
 RUN pip install nvidia-nvshmem-cu12==3.4.5
-RUN TORCH_CUDA_ARCH_LIST="8.0 9.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation
+RUN TORCH_CUDA_ARCH_LIST="8.0 9.0 10.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation
 RUN apt-get update && apt-get install -y  libibverbs-dev
 RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
     && cd /tmp/deepep \
-    && python setup.py build \
-    && python setup.py install
+    && if [ "${COSMOS_RL_TORCH_VARIANT}" = "2.8" ]; then \
+        python setup.py build && python setup.py install; \
+    elif [ "${COSMOS_RL_TORCH_VARIANT}" = "2.10" ]; then \
+        pip install . --no-build-isolation; \
+    else \
+        echo "Unsupported COSMOS_RL_TORCH_VARIANT for DeepEP: ${COSMOS_RL_TORCH_VARIANT}. Expected 2.8 or 2.10."; \
+        exit 1; \
+    fi
 
 # Phase for building any lib that we want to builf from source
 FROM no-efa-base AS source-build
