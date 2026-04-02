@@ -143,6 +143,15 @@ class RLPolicyWorker(PolicyWorkerBase):
             role=self.role,
         )
 
+        # CUDA Graph for P2R sends (keyed by trainable_only bool)
+        # Non-default stream required for CUDA graph capture.
+        self.p2r_send_stream = torch.cuda.Stream()
+        self.p2r_cuda_graphs: Dict[bool, tuple] = {}
+        # Shared flat storage for all needs_fill send buffers, one per
+        # trainable_only key.  Sized to the largest chunk so all chunks
+        # can reuse it from offset 0 (they replay sequentially).
+        self.p2r_send_buffer_storages: Dict[bool, torch.Tensor] = {}
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -289,6 +298,199 @@ class RLPolicyWorker(PolicyWorkerBase):
                     prepared_tensor_to_rollout[dest_name] = view
         return prepared_tensor_to_rollout
 
+    @torch.no_grad()
+    def _build_p2r_cuda_graph(
+        self,
+        pre_P2R_collected_tensors: Dict[str, torch.Tensor],
+        base_mesh_key: str,
+        trainable_only: bool,
+    ) -> None:
+        """Pre-allocate stable send buffers and capture CUDA graphs for P2R NCCL sends.
+
+        When ``COSMOS_P2R_CUDA_GRAPH_CHUNK_MB > 0`` the full slot list is split
+        into sequential chunks so that the pre-allocated (needs_fill=True) memory
+        per chunk stays within that limit.  Each chunk becomes its own
+        ``CUDAGraph``.  ``needs_fill=False`` slots (live views into parameter
+        storage) are zero-cost and do not count toward the chunk limit.
+
+        Stored in ``self.p2r_cuda_graphs[trainable_only]`` as a list of
+        ``(CUDAGraph, chunk_slots)`` pairs, replayed in order each step.
+
+        Each slot is a 5-tuple:
+        ``(dest_name, slice_strategy, send_buffer, r_rank, needs_fill)``
+        """
+        transfer_dtype = str2torch_dtype(self.config.train.transfer_dtype)
+        # First pass: collect slot metadata; defer shared-storage allocation.
+        # slot: (dest_name, slice_strategy, view, r_rank, needs_fill)
+        # For needs_fill=True, view is a temporary contiguous copy used only for
+        # shape/numel; the real send_buffer is carved from shared_storage below.
+        raw_slots = []
+
+        for insts_group in self.policy_to_rollout_insts:
+            for insts_for_per_param in insts_group.param_instructions:
+                dest_name = insts_for_per_param.param_name
+                if dest_name not in self.trainable_params and trainable_only:
+                    continue
+                for inst in insts_for_per_param.instructions:
+                    if self.global_rank != inst.policy_rank:
+                        continue
+                    r_rank = inst.rollout_rank
+                    slice_strategy = inst.slice_strategy
+
+                    raw_entry = self.trainer.map_w_from_policy_to_rollout.get(dest_name)
+                    is_stable_source = (
+                        dest_name not in pre_P2R_collected_tensors
+                        and not isinstance(raw_entry, Callable)
+                    )
+
+                    if is_stable_source:
+                        local_view = raw_entry
+                    elif dest_name in pre_P2R_collected_tensors:
+                        local_view = pre_P2R_collected_tensors[dest_name]
+                    else:
+                        local_view = raw_entry()  # Callable
+
+                    view = (
+                        local_view.to(transfer_dtype)
+                        .cosmos_slice(slice_strategy)
+                        .contiguous()
+                        .cuda()
+                    )
+
+                    # needs_fill=False: view shares storage with live param tensor;
+                    # graph replay reads latest weights with zero extra memory.
+                    # needs_fill=True: requires a stable copy; use shared storage.
+                    if is_stable_source and (
+                        view.storage().data_ptr() == local_view.storage().data_ptr()
+                    ):
+                        raw_slots.append(
+                            (dest_name, slice_strategy, view, r_rank, False)
+                        )
+                    else:
+                        raw_slots.append(
+                            (dest_name, slice_strategy, view, r_rank, True)
+                        )
+
+        # ── Split into memory-bounded chunks ────────────────────────────────
+        chunk_limit_bytes = constant.COSMOS_P2R_CUDA_GRAPH_CHUNK_MB * 1024 * 1024
+        raw_chunks: List[list] = []
+        cur_chunk: list = []
+        cur_bytes = 0
+        for slot in raw_slots:
+            _, _, view, _, needs_fill = slot
+            slot_bytes = view.numel() * view.element_size() if needs_fill else 0
+            if (
+                cur_chunk
+                and chunk_limit_bytes > 0
+                and cur_bytes + slot_bytes > chunk_limit_bytes
+            ):
+                raw_chunks.append(cur_chunk)
+                cur_chunk = []
+                cur_bytes = 0
+            cur_chunk.append(slot)
+            cur_bytes += slot_bytes
+        if cur_chunk:
+            raw_chunks.append(cur_chunk)
+
+        # Chunks replay sequentially so they share one flat storage sized to the
+        # largest chunk's needs_fill footprint (offset resets to 0 per chunk).
+        max_chunk_numel = max(
+            (sum(v.numel() for _, _, v, _, nf in chunk if nf) for chunk in raw_chunks),
+            default=0,
+        )
+        shared_storage = torch.empty(
+            max_chunk_numel,
+            dtype=transfer_dtype,
+            device=torch.cuda.current_device(),
+        )
+        self.p2r_send_buffer_storages[trainable_only] = shared_storage
+
+        # Build final slot lists, carving needs_fill send_buffers from
+        # shared_storage starting at offset 0 for each chunk.
+        all_slots = []
+        chunks: List[list] = []
+        for raw_chunk in raw_chunks:
+            offset = 0
+            chunk_slots = []
+            for dest_name, ss, view, r_rank, needs_fill in raw_chunk:
+                if needs_fill:
+                    numel = view.numel()
+                    send_buffer = shared_storage.narrow(0, offset, numel).view(
+                        view.shape
+                    )
+                    offset += numel
+                else:
+                    send_buffer = view
+                slot = (dest_name, ss, send_buffer, r_rank, needs_fill)
+                all_slots.append(slot)
+                chunk_slots.append(slot)
+            chunks.append(chunk_slots)
+
+        # ── Per-chunk warm-up + capture ──────────────────────────────────────
+        torch.cuda.synchronize()
+        graph_chunks = []
+        for chunk_slots in chunks:
+            # Warm-up
+            with torch.cuda.stream(self.p2r_send_stream):
+                for _, _, send_buf, r_rank, _ in chunk_slots:
+                    self.p2r_collective_manager.send(base_mesh_key, send_buf, r_rank)
+            self.p2r_send_stream.synchronize()
+
+            # Capture
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.stream(self.p2r_send_stream):
+                graph.capture_begin()
+                for _, _, send_buf, r_rank, _ in chunk_slots:
+                    self.p2r_collective_manager.send(base_mesh_key, send_buf, r_rank)
+                graph.capture_end()
+            graph_chunks.append((graph, chunk_slots))
+
+        self.p2r_cuda_graphs[trainable_only] = graph_chunks
+
+        total_mb = sum(s[2].numel() * s[2].element_size() for s in all_slots) / (
+            1024 * 1024
+        )
+        shared_mb = (
+            shared_storage.numel() * shared_storage.element_size() / (1024 * 1024)
+        )
+        logger.info(
+            f"[Policy] Captured {len(graph_chunks)} P2R CUDA graph(s): "
+            f"{len(all_slots)} sends, {total_mb:.1f} MB total, "
+            f"{shared_mb:.1f} MB shared storage (max-chunk needs_fill), "
+            f"trainable_only={trainable_only}."
+        )
+
+    @torch.no_grad()
+    def _fill_p2r_send_buffers(
+        self,
+        send_slots: list,
+        pre_P2R_collected_tensors: Dict[str, torch.Tensor],
+    ) -> None:
+        """Copy current param data into pre-allocated send buffers before graph replay.
+
+        Slots where ``needs_fill=False`` point directly into stable parameter
+        storage and are skipped — the parameter is already up-to-date in place.
+        """
+        transfer_dtype = str2torch_dtype(self.config.train.transfer_dtype)
+        for dest_name, slice_strategy, send_buf, _, needs_fill in send_slots:
+            if not needs_fill:
+                continue
+            if dest_name in pre_P2R_collected_tensors:
+                local_view = pre_P2R_collected_tensors[dest_name]
+            elif isinstance(
+                self.trainer.map_w_from_policy_to_rollout[dest_name], Callable
+            ):
+                local_view = self.trainer.map_w_from_policy_to_rollout[dest_name]()
+            else:
+                local_view = self.trainer.map_w_from_policy_to_rollout[dest_name]
+            view = (
+                local_view.to(transfer_dtype)
+                .cosmos_slice(slice_strategy)
+                .contiguous()
+                .cuda()
+            )
+            send_buf.copy_(view)
+
     @CommMixin.register_policy_command_handler(PolicyToPolicyBroadcastCommand)
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
@@ -395,86 +597,132 @@ class RLPolicyWorker(PolicyWorkerBase):
                         self.pre_P2R_collect_parameters()
                     )
 
-                    def grouped_send(grouped_send_ops):
-                        if (
-                            self.rl_mode != "colocated_separated"
-                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-                        ):
-                            # Only in non-colocated-separated mode, we could use NCCL group feature.
-                            nccl_group_start(comm_id)
-                        for view, r_rank, dest_name in grouped_send_ops:
-                            logger.debug(
-                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
+                    if (
+                        constant.COSMOS_P2R_CUDA_GRAPH
+                        and self.rl_mode != "colocated_separated"
+                        and self.config.rollout.quantization == "none"
+                    ):
+                        # ── CUDA graph path ──────────────────────────────────────
+                        # First call for this trainable_only mode: build graph.
+                        if command.trainable_only not in self.p2r_cuda_graphs:
+                            self._build_p2r_cuda_graph(
+                                pre_P2R_collected_tensors,
+                                base_mesh_key,
+                                command.trainable_only,
                             )
-                            self.p2r_collective_manager.send(
-                                base_mesh_key, view, r_rank
-                            )
-                        if (
-                            self.rl_mode != "colocated_separated"
-                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-                        ):
-                            nccl_group_end(comm_id)
-                        grouped_send_ops.clear()
+                        graph_chunks = self.p2r_cuda_graphs[command.trainable_only]
 
-                    grouped_send_ops = []
-                    num_groups = 0
+                        # For each chunk: fill its needs_fill buffers then replay
+                        # its graph.  Chunks are replayed sequentially on
+                        # p2r_send_stream, keeping per-chunk extra memory within
+                        # COSMOS_P2R_CUDA_GRAPH_CHUNK_MB.
+                        self.p2r_send_stream.wait_stream(self.train_stream)
+                        with torch.cuda.stream(self.p2r_send_stream):
+                            for chunk_graph, chunk_slots in graph_chunks:
+                                self._fill_p2r_send_buffers(
+                                    chunk_slots, pre_P2R_collected_tensors
+                                )
+                                chunk_graph.replay()
 
-                    transferred_params_cnt = 0
-                    skipped_params_cnt = 0
-                    for insts_group in self.policy_to_rollout_insts:
-                        for insts_for_per_param in insts_group.param_instructions:
-                            dest_name = insts_for_per_param.param_name
+                        total_bytes_sent = sum(
+                            s[2].numel() * s[2].element_size()
+                            for _, chunk_slots in graph_chunks
+                            for s in chunk_slots
+                        )
+                        transferred_params_cnt = sum(
+                            len(chunk_slots) for _, chunk_slots in graph_chunks
+                        )
+                        skipped_params_cnt = 0
+                    else:
+                        # ── Original path ────────────────────────────────────────
+                        def grouped_send(grouped_send_ops):
                             if (
-                                dest_name not in self.trainable_params
-                                and command.trainable_only
+                                self.rl_mode != "colocated_separated"
+                                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
                             ):
+                                # Only in non-colocated-separated mode, we could use NCCL group feature.
+                                nccl_group_start(comm_id)
+                            for view, r_rank, dest_name in grouped_send_ops:
                                 logger.debug(
-                                    f"[Policy] Skip {dest_name} in P2R send due to non trainable."
+                                    f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                                 )
-                                skipped_params_cnt += 1
-                                continue
-                            transferred_params_cnt += 1
+                                self.p2r_collective_manager.send(
+                                    base_mesh_key, view, r_rank
+                                )
+                            if (
+                                self.rl_mode != "colocated_separated"
+                                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                            ):
+                                nccl_group_end(comm_id)
+                            grouped_send_ops.clear()
 
-                            for inst in insts_for_per_param.instructions:
-                                p_rank = inst.policy_rank
-                                r_rank = inst.rollout_rank
-                                tensor_split_strategys = inst.slice_strategy
+                        grouped_send_ops = []
+                        num_groups = 0
+
+                        transferred_params_cnt = 0
+                        skipped_params_cnt = 0
+                        for insts_group in self.policy_to_rollout_insts:
+                            for insts_for_per_param in insts_group.param_instructions:
+                                dest_name = insts_for_per_param.param_name
                                 if (
-                                    dest_name
-                                    not in self.trainer.map_w_from_policy_to_rollout
+                                    dest_name not in self.trainable_params
+                                    and command.trainable_only
                                 ):
-                                    raise RuntimeError(
-                                        f"dest_name {dest_name} not in trainer's map_w_from_policy_to_rollout"
+                                    logger.debug(
+                                        f"[Policy] Skip {dest_name} in P2R send due to non trainable."
                                     )
-                                local_view = self.trainer.map_w_from_policy_to_rollout[
-                                    dest_name
-                                ]
-                                if dest_name in pre_P2R_collected_tensors:
-                                    local_view = pre_P2R_collected_tensors[dest_name]
-                                elif isinstance(local_view, Callable):
-                                    local_view = local_view()
-                                else:
-                                    pass
-                                local_view = local_view.to(
-                                    str2torch_dtype(self.config.train.transfer_dtype)
-                                )
-                                view = (
-                                    local_view.cosmos_slice(tensor_split_strategys)
-                                    .contiguous()
-                                    .cuda()
-                                )
-                                assert self.global_rank == p_rank
-                                logger.debug(
-                                    f"[Policy] Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
-                                )
-                                grouped_send_ops.append((view, r_rank, dest_name))
-                                total_bytes_sent += view.numel() * view.element_size()
-                        num_groups += 1
-                        if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                            grouped_send(grouped_send_ops)
-                            num_groups = 0
+                                    skipped_params_cnt += 1
+                                    continue
+                                transferred_params_cnt += 1
 
-                    grouped_send(grouped_send_ops)
+                                for inst in insts_for_per_param.instructions:
+                                    p_rank = inst.policy_rank
+                                    r_rank = inst.rollout_rank
+                                    tensor_split_strategys = inst.slice_strategy
+                                    if (
+                                        dest_name
+                                        not in self.trainer.map_w_from_policy_to_rollout
+                                    ):
+                                        raise RuntimeError(
+                                            f"dest_name {dest_name} not in trainer's map_w_from_policy_to_rollout"
+                                        )
+                                    local_view = (
+                                        self.trainer.map_w_from_policy_to_rollout[
+                                            dest_name
+                                        ]
+                                    )
+                                    if dest_name in pre_P2R_collected_tensors:
+                                        local_view = pre_P2R_collected_tensors[
+                                            dest_name
+                                        ]
+                                    elif isinstance(local_view, Callable):
+                                        local_view = local_view()
+                                    else:
+                                        pass
+                                    local_view = local_view.to(
+                                        str2torch_dtype(
+                                            self.config.train.transfer_dtype
+                                        )
+                                    )
+                                    view = (
+                                        local_view.cosmos_slice(tensor_split_strategys)
+                                        .contiguous()
+                                        .cuda()
+                                    )
+                                    assert self.global_rank == p_rank
+                                    logger.debug(
+                                        f"[Policy] Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                                    )
+                                    grouped_send_ops.append((view, r_rank, dest_name))
+                                    total_bytes_sent += (
+                                        view.numel() * view.element_size()
+                                    )
+                            num_groups += 1
+                            if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                                grouped_send(grouped_send_ops)
+                                num_groups = 0
+
+                        grouped_send(grouped_send_ops)
                 finally:
                     if self.config.policy.lora is not None:
                         # Always attempt to unmerge to restore training state

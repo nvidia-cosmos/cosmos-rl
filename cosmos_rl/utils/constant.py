@@ -41,6 +41,14 @@ COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = int(
 )
 # FIXME: (lms) Setting this greater than 1 could cause P2R NCCL hang when PP and FSDP are both enabled.
 COSMOS_P2R_NCCL_GROUP_SIZE = int(os.environ.get("COSMOS_P2R_NCCL_GROUP_SIZE", "0"))
+# Enable CUDA graph capture for P2R NCCL sends to eliminate Python/CPU overhead on replay.
+# Requires NCCL >= 2.9 and a non-colocated-separated rl_mode.
+COSMOS_P2R_CUDA_GRAPH = int(os.environ.get("COSMOS_P2R_CUDA_GRAPH", "0"))
+# Split P2R CUDA graphs into chunks so that each chunk's pre-allocated (needs_fill=True)
+# buffer memory stays within this limit (MiB).  0 = no splitting (single graph).
+COSMOS_P2R_CUDA_GRAPH_CHUNK_MB = int(
+    os.environ.get("COSMOS_P2R_CUDA_GRAPH_CHUNK_MB", "0")
+)
 COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT = int(
     os.environ.get("COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT", "600")
 )

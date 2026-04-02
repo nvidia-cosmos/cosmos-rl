@@ -187,6 +187,20 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             role=self.role,
         )
 
+        # CUDA Graph for P2R recvs (keyed by trainable_only bool).
+        # p2r_recv_stream: dedicated non-default stream for graph capture/replay.
+        self.p2r_recv_stream = torch.cuda.Stream()
+        # p2r_recv_cuda_graphs[trainable_only] =
+        #   (graph_chunks, all_post_ops, all_check_info)
+        # graph_chunks: List[(CUDAGraph, [(recv_buf, p_rank)])]
+        # all_post_ops: List[(target_view, recv_buf, param_name)]
+        # all_check_info: List[(target_view, recv_buf, param_name)]
+        self.p2r_recv_cuda_graphs = {}
+        # Shared flat storage for all not-inplace recv buffers, one per
+        # trainable_only key.  All per-slot recv_buffers are views into this
+        # tensor, so the total extra allocation is a single contiguous block.
+        self.p2r_recv_buffer_storages = {}
+
         # initialize variable for async rollout.
         self._is_async_rollout = False
         self.scheduler: Optional[RolloutTaskScheduler] = None
@@ -443,6 +457,205 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
             logger.info(
                 f"[Rollout] Obtained {len(self.trainable_params)} trainable params after weight unsplit."
+            )
+
+    @torch.no_grad()
+    def _build_p2r_recv_cuda_graph(
+        self,
+        base_mesh_key: str,
+        trainable_only: bool,
+    ) -> None:
+        """Pre-allocate stable recv buffers and capture CUDA graphs for P2R NCCL recvs.
+
+        Mirrors ``RLPolicyWorker._build_p2r_cuda_graph`` exactly: for each chunk
+        we do one warm-up recv pass (real data transfer) followed by one capture
+        pass, matching the policy side's warm-up+capture ordering so neither side
+        hangs waiting for its peer.
+
+        Slot format: (param_name, slice_strategy, recv_buffer, p_rank, is_inplace,
+                      target_view)
+          is_inplace=True  → recv_buffer IS target_view (param slice); direct recv,
+                             no post-copy needed.
+          is_inplace=False → recv_buffer is a pre-allocated stable temp; after graph
+                             replay the data must be copied to target_view via
+                             weight_mapper.update_tensor_view on p2r_copy_stream.
+
+        Stored as (graph_chunks, all_post_ops, quantize_names) where:
+          graph_chunks   – List[(CUDAGraph, [(recv_buf, p_rank)])]
+          all_post_ops   – List[(target_view, recv_buf, param_name)]
+          quantize_names – List[str]  full weight names needing re-quantisation
+        """
+        target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
+        # First pass: collect slot metadata, deferring not-inplace buffer alloc.
+        # slot fields: (param_name, slice_strategy, recv_buffer, p_rank, is_inplace, target_view)
+        # recv_buffer is None for not-inplace slots until shared storage is carved.
+        raw_slots = []
+        not_inplace_numel = 0
+
+        for insts_group in self.policy_to_rollout_recv_insts:
+            for insts_for_per_param in insts_group.param_instructions:
+                inst_dest_name = insts_for_per_param.param_name
+                if inst_dest_name not in self.trainable_params and trainable_only:
+                    continue
+
+                target_tensor = self.weight_inplace_view_map[inst_dest_name]
+                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                    target_tensor = target_tensor.to_local()
+
+                for inst in insts_for_per_param.instructions:
+                    assert inst.rollout_rank == self.global_rank
+                    p_rank = inst.policy_rank
+                    slice_strategy = inst.slice_strategy
+
+                    underlying_view = target_tensor.cosmos_slice(slice_strategy)
+
+                    is_inplace = (
+                        underlying_view.is_cuda
+                        and underlying_view.is_contiguous()
+                        and underlying_view.dtype == target_dtype
+                    )
+                    if not is_inplace:
+                        not_inplace_numel += underlying_view.numel()
+
+                    raw_slots.append(
+                        (
+                            inst_dest_name,
+                            slice_strategy,
+                            None,
+                            p_rank,
+                            is_inplace,
+                            underlying_view,
+                        )
+                    )
+
+        # ── Chunk raw_slots by extra (not-inplace) memory ─────────────────
+        chunk_limit_bytes = constant.COSMOS_P2R_CUDA_GRAPH_CHUNK_MB * 1024 * 1024
+        raw_chunks: List[list] = []
+        cur_chunk: list = []
+        cur_bytes = 0
+        for slot in raw_slots:
+            _, _, _, _, is_inplace, target_view = slot
+            slot_bytes = (
+                target_view.numel() * target_view.element_size()
+                if not is_inplace
+                else 0
+            )
+            if (
+                cur_chunk
+                and chunk_limit_bytes > 0
+                and cur_bytes + slot_bytes > chunk_limit_bytes
+            ):
+                raw_chunks.append(cur_chunk)
+                cur_chunk = []
+                cur_bytes = 0
+            cur_chunk.append(slot)
+            cur_bytes += slot_bytes
+        if cur_chunk:
+            raw_chunks.append(cur_chunk)
+
+        # Chunks replay sequentially, so they can all share one flat storage
+        # sized to the largest chunk's not-inplace footprint (offset resets to
+        # 0 for each chunk).  This is max(per-chunk numel) vs sum(all numel).
+        max_chunk_numel = max(
+            (
+                sum(tv.numel() for _, _, _, _, ip, tv in chunk if not ip)
+                for chunk in raw_chunks
+            ),
+            default=0,
+        )
+        shared_storage = torch.empty(
+            max_chunk_numel,
+            dtype=target_dtype,
+            device=torch.cuda.current_device(),
+        )
+        self.p2r_recv_buffer_storages[trainable_only] = shared_storage
+
+        # Build final all_slots (with real recv_buffer views) and per-chunk
+        # slot lists in one pass, resetting the storage offset per chunk.
+        all_slots = []
+        chunks: List[list] = []
+        all_post_ops = []
+        all_check_info = []
+        for raw_chunk in raw_chunks:
+            offset = 0
+            chunk_slots = []
+            for pname, ss, _, p_rank, is_inplace, target_view in raw_chunk:
+                if is_inplace:
+                    recv_buffer = target_view
+                else:
+                    numel = target_view.numel()
+                    recv_buffer = shared_storage.narrow(0, offset, numel).view(
+                        target_view.shape
+                    )
+                    offset += numel
+                    all_post_ops.append((target_view, recv_buffer, pname))
+                all_check_info.append((target_view, recv_buffer, pname))
+                slot = (pname, ss, recv_buffer, p_rank, is_inplace, target_view)
+                all_slots.append(slot)
+                chunk_slots.append(slot)
+            chunks.append(chunk_slots)
+
+        # ── Per-chunk warm-up then capture (matches policy side ordering) ──
+        # NCCL P2P requires both peers to execute the same number of real
+        # transfers.  For each chunk the policy does: warm-up send → capture
+        # send.  We mirror that here: warm-up recv → capture recv.
+        torch.cuda.synchronize()
+        graph_chunks = []
+        for chunk_slots in chunks:
+            # Warm-up: real recv (matches policy's warm-up send for this chunk).
+            with torch.cuda.stream(self.p2r_recv_stream):
+                for _, _, recv_buf, p_rank, _, _ in chunk_slots:
+                    self.p2r_collective_manager.recv(base_mesh_key, recv_buf, p_rank)
+            self.p2r_recv_stream.synchronize()
+
+            # Capture: records recv kernels (matches policy's capture send).
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.stream(self.p2r_recv_stream):
+                graph.capture_begin()
+                for _, _, recv_buf, p_rank, _, _ in chunk_slots:
+                    self.p2r_collective_manager.recv(base_mesh_key, recv_buf, p_rank)
+                graph.capture_end()
+
+            graph_chunks.append(
+                (
+                    graph,
+                    [
+                        (recv_buf, p_rank)
+                        for _, _, recv_buf, p_rank, _, _ in chunk_slots
+                    ],
+                )
+            )
+
+        self.p2r_recv_cuda_graphs[trainable_only] = (
+            graph_chunks,
+            all_post_ops,
+            all_check_info,
+        )
+        total_mb = sum(s[2].numel() * s[2].element_size() for s in all_slots) / (
+            1024 * 1024
+        )
+        shared_mb = (
+            shared_storage.numel() * shared_storage.element_size() / (1024 * 1024)
+        )
+        logger.info(
+            f"[Rollout] Captured {len(graph_chunks)} P2R recv CUDA graph(s): "
+            f"{len(all_slots)} recvs, {total_mb:.1f} MB total, "
+            f"{shared_mb:.1f} MB shared storage (max-chunk not-inplace), "
+            f"trainable_only={trainable_only}."
+        )
+
+    @torch.no_grad()
+    def _apply_p2r_recv_buffers(self, all_post_ops: list) -> None:
+        """Copy not-inplace recv buffers into model params.
+
+        Must be called on ``self.p2r_copy_stream`` after the recv graph has been
+        replayed and ``p2r_copy_stream`` has waited for the recv event.
+        Quantization is not supported in the CUDA graph path and is handled by
+        the original recv path instead.
+        """
+        for target_view, recv_buf, param_name in all_post_ops:
+            self.weight_mapper.update_tensor_view(
+                target_view, recv_buf, param_name, parallel_dims=self.parallel_dims
             )
 
     def recv_weight_shard(
@@ -1025,134 +1238,201 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 total_params += 1
                 total_recvs += len(insts_for_per_param.instructions)
 
-        copy_stream = torch.cuda.Stream()
-
         assert total_params == len(self.recv_param_key_n_rank_list), (
             f"Mismatch in total params and received param keys: {total_params} != {len(self.recv_param_key_n_rank_list)}"
         )
 
-        with torch.cuda.stream(self.inference_stream):
-            logger.info(
-                f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
-            )
-            # recv the weight from policy
-            st = time.time()
-            total_bytes_received = 0
+        st = time.time()
 
-            pending_bytes = [0]
-            pending_completions = []
-            pending_groups = 0
+        if (
+            constant.COSMOS_P2R_CUDA_GRAPH
+            and self.rl_mode != "colocated_separated"
+            and self.quantization_type is None
+        ):
+            # ── CUDA graph path ───────────────────────────────────────────────
+            # Build graph on first call for this trainable_only mode.
+            if command.trainable_only not in self.p2r_recv_cuda_graphs:
+                self._build_p2r_recv_cuda_graph(base_mesh_key, command.trainable_only)
 
-            def flush_completions(pending_bytes, pending_completions):
-                recv_ready = torch.cuda.Event()
-                recv_ready.record()
-                copy_stream.wait_event(recv_ready)
-                with torch.cuda.stream(copy_stream):
-                    logger.debug(
-                        f"[Rollout] Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024} MB"
-                    )
-                    for completion in pending_completions:
-                        completion()
-                    pending_bytes[0] = 0
-                    pending_completions.clear()
+            graph_chunks, all_post_ops, all_check_info = self.p2r_recv_cuda_graphs[
+                command.trainable_only
+            ]
 
-            if (
-                self.rl_mode != "colocated_separated"
-                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-            ):
-                # Only in non-colocated-separated mode, we could use NCCL group feature.
-                nccl_group_start(comm_id)
+            # Reshard FSDP if needed (done once, outside the graph).
+            if self.get_underlying_model() is not None:
+                for m in self.get_underlying_model().modules():
+                    if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                        m.reshard()
 
-            skipped_params_cnt = 0
-            transferred_params_cnt = 0
-            skipped_groups_cnt = 0
-            transferred_groups_cnt = 0
+            # Replay each chunk's graph on p2r_recv_stream; wait for any pending
+            # inference work first, then signal inference_stream when done.
+            with torch.cuda.stream(self.inference_stream):
+                # do_weight_sync_check: zero recv bufs and clone target views
+                # before replay so we can diff after apply.
+                cloned_check_tensors = []
+                if command.do_weight_sync_check:
+                    for target_view, recv_buf, _ in all_check_info:
+                        cloned_check_tensors.append(target_view.clone().cpu())
+                        recv_buf.zero_()
 
-            for insts_group in self.policy_to_rollout_recv_insts:
-                # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
-                # handle inst group
-                (
-                    bytes_received,
-                    completion_fn,
-                    skipped_cnt,
-                ) = self.recv_weight_shard(
-                    self.global_rank,
-                    insts_group,
-                    base_mesh_key,
-                    command.trainable_only,
-                    command.do_weight_sync_check,
-                )
-                skipped_params_cnt += skipped_cnt
-                transferred_params_cnt += (
-                    len(insts_group.param_instructions) - skipped_cnt
-                )
-                if (
-                    self.weight_mapper.get_unsplited_weight_name(
-                        insts_group.param_instructions[0].param_name
-                    )
-                    != insts_group.param_instructions[0].param_name
+            self.p2r_recv_stream.wait_stream(self.inference_stream)
+            with torch.cuda.stream(self.p2r_recv_stream):
+                for chunk_graph, _ in graph_chunks:
+                    chunk_graph.replay()
+                # After all recvs: copy not-inplace buffers to model params.
+                self._apply_p2r_recv_buffers(all_post_ops)
+                self.temp_recv_tensor_queue.queue.clear()
+
+            recv_finished = torch.cuda.Event()
+            recv_finished.record(self.p2r_recv_stream)
+            self.inference_stream.wait_event(recv_finished)
+
+            # do_weight_sync_check: compare after apply (CPU-side, after sync).
+            if command.do_weight_sync_check:
+                target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
+                for (target_view, _, pname), cloned in zip(
+                    all_check_info, cloned_check_tensors
                 ):
-                    # The params in the group of this case originally belong to the same param.
-                    # The following counts related with `groups` measure the original params before split.
-                    # The count related with `groups` match the count in R2R which is without split.
-                    skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
-                    transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
-                else:
-                    skipped_groups_cnt += skipped_cnt
-                    transferred_groups_cnt += (
+                    cloned = cloned.to(target_dtype).to(cloned.dtype)
+                    if not torch.allclose(cloned, target_view.cpu()):
+                        raise ValueError(
+                            f"Weight sync check failed for {pname} in CUDA graph P2R path."
+                        )
+
+            total_bytes_received = sum(
+                rb.numel() * rb.element_size()
+                for _, chunk_recv_ops in graph_chunks
+                for rb, _ in chunk_recv_ops
+            )
+            transferred_params_cnt = sum(
+                len(chunk_recv_ops) for _, chunk_recv_ops in graph_chunks
+            )
+            skipped_params_cnt = 0
+            transferred_groups_cnt = transferred_params_cnt
+        else:
+            # ── Original path ─────────────────────────────────────────────────
+            copy_stream = torch.cuda.Stream()
+
+            with torch.cuda.stream(self.inference_stream):
+                logger.info(
+                    f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
+                )
+                total_bytes_received = 0
+
+                pending_bytes = [0]
+                pending_completions = []
+                pending_groups = 0
+
+                def flush_completions(pending_bytes, pending_completions):
+                    recv_ready = torch.cuda.Event()
+                    recv_ready.record()
+                    copy_stream.wait_event(recv_ready)
+                    with torch.cuda.stream(copy_stream):
+                        logger.debug(
+                            f"[Rollout] Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024} MB"
+                        )
+                        for completion in pending_completions:
+                            completion()
+                        pending_bytes[0] = 0
+                        pending_completions.clear()
+
+                if (
+                    self.rl_mode != "colocated_separated"
+                    and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                ):
+                    # Only in non-colocated-separated mode, we could use NCCL group feature.
+                    nccl_group_start(comm_id)
+
+                skipped_params_cnt = 0
+                transferred_params_cnt = 0
+                skipped_groups_cnt = 0
+                transferred_groups_cnt = 0
+
+                for insts_group in self.policy_to_rollout_recv_insts:
+                    # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
+                    # handle inst group
+                    (
+                        bytes_received,
+                        completion_fn,
+                        skipped_cnt,
+                    ) = self.recv_weight_shard(
+                        self.global_rank,
+                        insts_group,
+                        base_mesh_key,
+                        command.trainable_only,
+                        command.do_weight_sync_check,
+                    )
+                    skipped_params_cnt += skipped_cnt
+                    transferred_params_cnt += (
                         len(insts_group.param_instructions) - skipped_cnt
                     )
-
-                pending_bytes[0] += bytes_received
-                pending_completions.append(completion_fn)
-                total_bytes_received += bytes_received
-
-                pending_groups += 1
-                if pending_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                     if (
-                        self.rl_mode != "colocated_separated"
-                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        self.weight_mapper.get_unsplited_weight_name(
+                            insts_group.param_instructions[0].param_name
+                        )
+                        != insts_group.param_instructions[0].param_name
                     ):
-                        nccl_group_end(comm_id)
-                    flush_completions(pending_bytes, pending_completions)
-                    if (
-                        self.rl_mode != "colocated_separated"
-                        and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-                    ):
-                        nccl_group_start(comm_id)
-                    pending_groups = 0
+                        # The params in the group of this case originally belong to the same param.
+                        # The following counts related with `groups` measure the original params before split.
+                        # The count related with `groups` match the count in R2R which is without split.
+                        skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
+                        transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
+                    else:
+                        skipped_groups_cnt += skipped_cnt
+                        transferred_groups_cnt += (
+                            len(insts_group.param_instructions) - skipped_cnt
+                        )
 
-            if (
-                self.rl_mode != "colocated_separated"
-                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-            ):
-                nccl_group_end(comm_id)
+                    pending_bytes[0] += bytes_received
+                    pending_completions.append(completion_fn)
+                    total_bytes_received += bytes_received
 
-            flush_completions(pending_bytes, pending_completions)
+                    pending_groups += 1
+                    if pending_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
+                            nccl_group_end(comm_id)
+                        flush_completions(pending_bytes, pending_completions)
+                        if (
+                            self.rl_mode != "colocated_separated"
+                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                        ):
+                            nccl_group_start(comm_id)
+                        pending_groups = 0
 
-            with torch.cuda.stream(copy_stream):
-                copy_finished = torch.cuda.Event()
-                copy_finished.record()
+                if (
+                    self.rl_mode != "colocated_separated"
+                    and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                ):
+                    nccl_group_end(comm_id)
 
-            self.inference_stream.wait_event(copy_finished)
-            self.temp_recv_tensor_queue.queue.clear()
+                flush_completions(pending_bytes, pending_completions)
 
-            time_eclapsed = time.time() - st
-            logger.info(
-                f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} trainable splitted params transferred."
+                with torch.cuda.stream(copy_stream):
+                    copy_finished = torch.cuda.Event()
+                    copy_finished.record()
+
+                self.inference_stream.wait_event(copy_finished)
+                self.temp_recv_tensor_queue.queue.clear()
+
+        time_eclapsed = time.time() - st
+        logger.info(
+            f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} trainable splitted params transferred."
+        )
+
+        if command.trainable_only:
+            assert self.non_trainable_params_received, (
+                "[Rollout] Non-trainable params must be received before trainable-only P2R."
+            )
+            if not hasattr(self, "p2r_synced_trainable_params_cnt"):
+                self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
+            assert self.p2r_synced_trainable_params_cnt == transferred_groups_cnt, (
+                f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
             )
 
-            if command.trainable_only:
-                assert self.non_trainable_params_received, (
-                    "[Rollout] Non-trainable params must be received before trainable-only P2R."
-                )
-                if not hasattr(self, "p2r_synced_trainable_params_cnt"):
-                    self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
-                assert self.p2r_synced_trainable_params_cnt == transferred_groups_cnt, (
-                    f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
-                )
-
-            self.state.set_weight_synced()
+        self.state.set_weight_synced()
         if not command.trainable_only:
             self.non_trainable_params_received = True
 
