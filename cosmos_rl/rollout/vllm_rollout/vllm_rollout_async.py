@@ -134,7 +134,7 @@ class vLLMRolloutAsync(vLLMRollout):
             pp_size = rollout_parallelism.pp_size
 
             enable_ep_parallelism = False
-            disable_mm_preprocessor_cache = False
+            extra_kwargs = {}
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
@@ -146,7 +146,7 @@ class vLLMRolloutAsync(vLLMRollout):
                 enable_ep_parallelism = True
             if model_type in multimodal_type:
                 # for vllm nightly, this is only True for multimodal models, check here
-                disable_mm_preprocessor_cache = True
+                extra_kwargs["mm_processor_cache_gb"] = 0
             assert tp_size * pp_size == rollout_parallelism.world_size, (
                 "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
                 % (tp_size, pp_size, rollout_parallelism.world_size)
@@ -168,7 +168,6 @@ class vLLMRolloutAsync(vLLMRollout):
                 enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
                 gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
                 disable_custom_all_reduce=True,
-                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
                 skip_tokenizer_init=False,
                 max_model_len=policy_config.model_max_length,
                 disable_log_stats=True,
@@ -184,6 +183,7 @@ class vLLMRolloutAsync(vLLMRollout):
                 quantization=self.quantization,
                 seed=seed or 42,
                 load_format=load_format,
+                **extra_kwargs,
             )
 
             self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
