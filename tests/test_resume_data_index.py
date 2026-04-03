@@ -132,6 +132,7 @@ class TestSFTResumeDataloaderIndex(unittest.TestCase):
                 train_stream,
                 data_packer,
                 val_data_packer,
+                hook_fns=None,
             ):
                 self.config = config
 
@@ -198,6 +199,7 @@ class TestSFTResumeDataloaderIndex(unittest.TestCase):
                 train_stream,
                 data_packer,
                 val_data_packer,
+                hook_fns=None,
             ):
                 self.config = config
 

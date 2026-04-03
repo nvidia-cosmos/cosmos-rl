@@ -986,6 +986,10 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
 
+        # For transformers v5, tie_word_embeddings in text_config and hf_config might be different,
+        # we will use the one in hf_config for weight loading and set it to text_config for model initialization to avoid mismatch
+        lm_config.tie_word_embeddings = hf_config.tie_word_embeddings
+
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,

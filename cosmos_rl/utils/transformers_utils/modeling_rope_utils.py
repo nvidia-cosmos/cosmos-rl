@@ -4,18 +4,19 @@ from transformers import AutoConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 
-# For transformers v5.0.0 and higher, rope_theta is not in the config,
-# so we need to get it from the rope_parameters dictionary.
+# v4: `rope_theta` often on the flat config; v5+: nested under `text_config` and/or `rope_parameters`.
 def get_rope_theta(hf_config: AutoConfig) -> float:
-    rope_theta = getattr(hf_config, "rope_theta", None) or (
-        getattr(hf_config, "rope_parameters", {}).get("rope_theta", None)
-        if hasattr(hf_config, "rope_parameters")
-        and "rope_theta" in getattr(hf_config, "rope_parameters", {})
-        else None
-    )
-    if rope_theta is None:
-        raise ValueError("rope_theta is not found in config={hf_config}")
-    return rope_theta
+    cfg = getattr(hf_config, "text_config", None) or hf_config
+    rope_theta = getattr(cfg, "rope_theta", None)
+    if rope_theta is not None:
+        return float(rope_theta)
+    rp = getattr(cfg, "rope_parameters", None)
+    if isinstance(rp, dict) and rp.get("rope_theta") is not None:
+        return float(rp["rope_theta"])
+    rs = getattr(cfg, "rope_scaling", None)
+    if isinstance(rs, dict) and rs.get("rope_theta") is not None:
+        return float(rs["rope_theta"])
+    raise ValueError(f"rope_theta is not found in config={hf_config!r}")
 
 
 def get_rope_init_fn(rope_type: str) -> Callable:
@@ -62,7 +63,7 @@ def compute_default_rope_parameters(
         config, "rope_parameters", {}
     ).get("rope_theta", None)
     if base is None:
-        raise ValueError("rope_theta is not found in config={config}")
+        raise ValueError(f"rope_theta is not found in config={config!r}")
     partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
     head_dim = (
         getattr(config, "head_dim", None)

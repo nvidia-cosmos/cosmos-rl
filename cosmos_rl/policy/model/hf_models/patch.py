@@ -26,6 +26,7 @@ from transformers.utils.import_utils import (
     is_causal_conv1d_available,
     is_flash_linear_attention_available,
 )
+from cosmos_rl.utils.transformers_utils import is_transformers_v5
 
 from cosmos_rl.utils.logging import logger
 
@@ -558,6 +559,12 @@ def visual_forward_qwen3_vl_patch(model):
             _EXPECTED_TRANSFORMERS_VERSION,
             transformers.__version__,
         )
+        # TODO: Support visual_forward_qwen3_vl_patch for transformers v5
+        if is_transformers_v5():
+            logger.warning(
+                "If using transformers v5, skip visual_forward_qwen3_vl_patch for now since it was only tested on v4.57.6 and may require adjustments for v5's refactored attention implementation."
+            )
+            return
 
     # Resolve the output dataclass from the actual runtime module
     model_module = importlib.import_module(type(model).__module__)

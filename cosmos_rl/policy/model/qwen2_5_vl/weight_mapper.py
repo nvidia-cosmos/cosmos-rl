@@ -24,15 +24,19 @@ from typing import List, Tuple
 import re
 
 
+def _qwen2_5_vl_lm_config(cfg: AutoConfig) -> AutoConfig:
+    """LM layout fields (`num_attention_heads`, …) on `text_config` in Transformers v5+; v4 flat on root."""
+    return getattr(cfg, "text_config", None) or cfg
+
+
 class QwenVL25WeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)
         assert isinstance(self.config, Qwen2_5_VLConfig)
 
-        self.kv_head_ratio = (
-            self.config.num_attention_heads // self.config.num_key_value_heads
-        )
-        self.head_dim = self.config.hidden_size // self.config.num_attention_heads
+        lm_cfg = _qwen2_5_vl_lm_config(self.config)
+        self.kv_head_ratio = lm_cfg.num_attention_heads // lm_cfg.num_key_value_heads
+        self.head_dim = lm_cfg.hidden_size // lm_cfg.num_attention_heads
 
     def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         if self.backend == "vllm":
