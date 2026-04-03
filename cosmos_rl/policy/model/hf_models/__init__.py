@@ -30,6 +30,7 @@ from cosmos_rl.utils.util import (
     reverse_hf_checkpoint_mapping,
     resolve_model_path,
 )
+from cosmos_rl.utils.transformers_utils import is_transformers_v5
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.utils.logging import logger
@@ -445,17 +446,56 @@ class HFModel(BaseModel):
         assert lm_head_weight_key is not None and embed_tokens_weight_key is not None, (
             "lm_head and embed_tokens weight keys not found in the state dict"
         )
-
         hf_checkpoint_conversion_mapping = getattr(
             self.model, "_checkpoint_conversion_mapping", None
         )
 
+        # In transformers v5, _checkpoint_conversion_mapping is empty {} and
+        # get_model_conversion_mapping() returns WeightRenaming objects whose
+        # direction is inconsistent across models.  Instead of relying on
+        # those patterns we build a suffix-based lookup table from the model
+        # state dict so that checkpoint keys can be matched regardless of any
+        # prefix differences introduced by the v5 modular refactoring.
+        use_v5_suffix_lookup = (
+            is_transformers_v5() and not hf_checkpoint_conversion_mapping
+        )
+        model_key_by_tail: dict[str, str] = {}
+        if use_v5_suffix_lookup:
+            # Order matters: longest prefix first so we get the shortest tail.
+            _prefixes = (
+                "model.language_model.model.",
+                "model.language_model.",
+                "language_model.model.",
+                "language_model.",
+                "model.",
+                "",
+            )
+            for model_key in self_state_dict:
+                for pfx in _prefixes:
+                    if model_key.startswith(pfx):
+                        tail = model_key[len(pfx) :]
+                        if tail and tail not in model_key_by_tail:
+                            model_key_by_tail[tail] = model_key
+                            break
+
         # Name converter function for checkpoint conversion mapping
         def name_converter(name: str) -> str:
-            if hf_checkpoint_conversion_mapping is not None:
+            if hf_checkpoint_conversion_mapping:
                 for pattern, replacement in hf_checkpoint_conversion_mapping.items():
-                    if re.match(pattern, name):
+                    if re.search(pattern, name):
                         return re.sub(pattern, replacement, name)
+            elif use_v5_suffix_lookup:
+                # Direct match – checkpoint key already matches model key
+                if name in self_state_dict:
+                    return name
+                # Suffix-based lookup – strip common prefixes from the
+                # checkpoint key and find the corresponding model key.
+                for pfx in _prefixes:
+                    if name.startswith(pfx):
+                        tail = name[len(pfx) :]
+                        if tail and tail in model_key_by_tail:
+                            return model_key_by_tail[tail]
+                return name
             return name
 
         # Step 1: Load files in parallel
