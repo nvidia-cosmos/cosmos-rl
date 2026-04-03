@@ -682,35 +682,34 @@ class SFTTrainer(LLMTrainer):
                         dtype=util.str2torch_dtype(self.config.train.param_dtype),
                     )
                 # save checkpoint
-                if self.config.train.ckpt.enable_checkpoint:
-                    logger.info(f"Saving cosmos checkpoint at step {train_step}...")
-                    if self.parallel_dims.pp_enabled:
-                        pp_state_dict = {}
-                        for i, mp in enumerate(self.model_parts):
-                            prefix = self.model_module_path[i]
-                            for k, v in mp.state_dict().items():
-                                full_key = f"{prefix}.{k}" if prefix else k
-                                pp_state_dict[full_key] = v
-                        model_to_save = pp_state_dict
-                    else:
-                        model_to_save = self.model
-                    self.ckpt_manager.save_checkpoint(
-                        model=model_to_save,
-                        optimizer=self.optimizers,
-                        scheduler=self.lr_schedulers,
-                        step=train_step,
-                        total_steps=total_steps,
-                        is_final=is_last_step,
-                        **kwargs,
-                    )
-                    self.ckpt_manager.save_check(
-                        step=train_step,
-                        val_score=val_score,
-                        pp_enabled=self.parallel_dims.pp_enabled,
-                        pp_last_stage=pp_last_stage,
-                        pp_master_rank=self.parallel_dims.world_size
-                        - self.parallel_dims.world_size / self.parallel_dims.pp,
-                    )
+                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                if self.parallel_dims.pp_enabled:
+                    pp_state_dict = {}
+                    for i, mp in enumerate(self.model_parts):
+                        prefix = self.model_module_path[i]
+                        for k, v in mp.state_dict().items():
+                            full_key = f"{prefix}.{k}" if prefix else k
+                            pp_state_dict[full_key] = v
+                    model_to_save = pp_state_dict
+                else:
+                    model_to_save = self.model
+                self.ckpt_manager.save_checkpoint(
+                    model=model_to_save,
+                    optimizer=self.optimizers,
+                    scheduler=self.lr_schedulers,
+                    step=train_step,
+                    total_steps=total_steps,
+                    is_final=is_last_step,
+                    **kwargs,
+                )
+                self.ckpt_manager.save_check(
+                    step=train_step,
+                    val_score=val_score,
+                    pp_enabled=self.parallel_dims.pp_enabled,
+                    pp_last_stage=pp_last_stage,
+                    pp_master_rank=self.parallel_dims.world_size
+                    - self.parallel_dims.world_size / self.parallel_dims.pp,
+                )
             torch.distributed.barrier()
 
     def load_model(self):
