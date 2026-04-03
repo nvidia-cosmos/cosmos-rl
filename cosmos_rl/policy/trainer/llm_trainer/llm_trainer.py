@@ -272,6 +272,34 @@ class LLMTrainer(Trainer):
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
         )
 
+    @property
+    def forward_model(self):
+        """Return the model used for forward passes and BaseModel-level method calls.
+
+        When PP is enabled, model_parts[0] is the first pipeline stage (a deep
+        copy with FSDP applied) which has all BaseModel methods.  When PP is
+        disabled, model_parts contains inner sub-modules from
+        separate_model_parts() that lack BaseModel methods, so we fall back to
+        self.model (the BaseModel instance).
+        """
+        if self.parallel_dims.pp_enabled:
+            return self.model_parts[0]
+        return self.model
+
+    def set_model_train(self):
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_part.train()
+        else:
+            self.model.train()
+
+    def set_model_eval(self):
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_part.eval()
+        else:
+            self.model.eval()
+
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(
@@ -302,10 +330,12 @@ class LLMTrainer(Trainer):
             len_params (int): The number of parameters synced.
         """
         len_params = 0
-        # Collect state dict from all model parts (PP splits model into separate parts)
-        state_dict = {}
-        for model_part in self.model_parts:
-            state_dict.update(model_part.state_dict())
+        if self.parallel_dims.pp_enabled:
+            state_dict = {}
+            for model_part in self.model_parts:
+                state_dict.update(model_part.state_dict())
+        else:
+            state_dict = self.model.state_dict()
         model_state_dict = [state_dict]
 
         if has_reference_model:
@@ -318,8 +348,11 @@ class LLMTrainer(Trainer):
                         value, device="cpu"
                     )
             model_state_dict.append(self.reference_state_dict)
-        for model_part in self.model_parts:
-            model_state_dict[0].update(dict(model_part.named_buffers()))
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_state_dict[0].update(dict(model_part.named_buffers()))
+        else:
+            model_state_dict[0].update(dict(self.model.named_buffers()))
 
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
@@ -497,10 +530,14 @@ class LLMTrainer(Trainer):
                     f"Chunk {file_idx} to be saved at {os.path.basename(file_path)}"
                 )
 
-        for model_part in self.model_parts:
-            for name, param in model_part.named_parameters():
-                # First map the key from local to hf naming convention
-                name = model_part.weight_mapper.policy_map_local_key_to_hf_key(name)
+        if self.parallel_dims.pp_enabled:
+            export_sources = self.model_parts
+        else:
+            export_sources = [self.model]
+
+        for source in export_sources:
+            for name, param in source.named_parameters():
+                name = source.weight_mapper.policy_map_local_key_to_hf_key(name)
                 if trainable_only and not param.requires_grad:
                     continue
                 is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
@@ -512,7 +549,7 @@ class LLMTrainer(Trainer):
                 for (
                     _name,
                     _param,
-                ) in model_part.weight_mapper.policy_map_local_key_for_export_tensor(
+                ) in source.weight_mapper.policy_map_local_key_for_export_tensor(
                     name, param
                 ):
                     if _param is None:
@@ -521,14 +558,11 @@ class LLMTrainer(Trainer):
                         )
                         continue
                     elif save_lora_config and not _name.startswith("base_model"):
-                        # LoRA model needs to add a prefix to the weight name to be consistent with the HF naming convention
                         _name = f"base_model.model.{_name}"
 
                     _param = _param.to(dtype=dtype) if dtype is not None else _param
                     tensor_size = get_tensor_size(_param)
-                    # If adding the current tensor exceeds the size limit, save the current chunk
                     if current_chunk_size + tensor_size > max_size_bytes:
-                        # Save the current chunk as a safetensor file
                         file_name = create_file_name(
                             save_lora_config, pp_rank, pp_size, file_idx
                         )
@@ -536,12 +570,10 @@ class LLMTrainer(Trainer):
                             current_chunk, current_chunk_size, file_name
                         )
 
-                        # Reset for the next chunk
                         current_chunk = {_name: _param}
                         current_chunk_size = tensor_size
                         file_idx += 1
                     else:
-                        # Add tensor to the current chunk
                         current_chunk[_name] = _param
                         current_chunk_size += tensor_size
 

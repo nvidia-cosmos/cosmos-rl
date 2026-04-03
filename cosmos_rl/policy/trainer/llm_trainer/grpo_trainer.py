@@ -1084,19 +1084,15 @@ class GRPOTrainer(LLMTrainer):
             is_computing_old_ahead = phase == TrainerPhase.OLD_LOGP_COMPUTE
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
-                for model_part in self.model_parts:
-                    model_part.eval()
+                self.set_model_eval()
             else:
                 if need_compute_ref:
-                    # Swap model state dict back to the original model
                     need_compute_ref = False
                     self._swap_model_state_dict()
                 if is_computing_old_ahead:
-                    for model_part in self.model_parts:
-                        model_part.eval()
+                    self.set_model_eval()
                 else:
-                    for model_part in self.model_parts:
-                        model_part.train()
+                    self.set_model_train()
 
             with torch.set_grad_enabled(phase == TrainerPhase.TRAIN):
                 for i_mu in range(
@@ -1277,16 +1273,12 @@ class GRPOTrainer(LLMTrainer):
                                         logger.debug(
                                             "[Policy] Packing sequence is disabled due to incompatible dimensions."
                                         )
-                                    # model_parts[0]: model-level methods/attrs are identical across all PP stages.
-                                    # In the non-PP case, model_parts = [self.model], so [0] is just the model itself.
                                     elif (
                                         hasattr(
-                                            self.model_parts[0],
+                                            self.forward_model,
                                             "check_sequence_packing_compatible",
                                         )
-                                        and not self.model_parts[
-                                            0
-                                        ].check_sequence_packing_compatible()
+                                        and not self.forward_model.check_sequence_packing_compatible()
                                     ):
                                         packing_seq = False
                                         logger.debug(
@@ -1313,11 +1305,11 @@ class GRPOTrainer(LLMTrainer):
                                     ):
                                         user_mini_batch[k] = v.to(self.device)
 
-                                # input_ids are different across ranks in dp_shard_cp
-                                # model_parts[0]: model-level methods are shared across PP stages.
-                                position_ids, input_ids, pos_seq_dim = self.model_parts[
-                                    0
-                                ].get_position_ids(**user_mini_batch)
+                                position_ids, input_ids, pos_seq_dim = (
+                                    self.forward_model.get_position_ids(
+                                        **user_mini_batch
+                                    )
+                                )
 
                                 if packing_seq:
                                     # Prepare for the sequence packing information.
@@ -1350,9 +1342,8 @@ class GRPOTrainer(LLMTrainer):
                                 position_ids_before_cp = user_mini_batch["position_ids"]
                                 padding_mask_before_cp = padding_mask
                                 # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
-                                # model_parts[0]: model-level attrs are shared across PP stages.
                                 delay_cp_slice_inputs = getattr(
-                                    self.model_parts[0], "delay_cp_slice_inputs", False
+                                    self.forward_model, "delay_cp_slice_inputs", False
                                 )
                                 if (
                                     self.parallel_dims.cp_enabled
@@ -1540,8 +1531,7 @@ class GRPOTrainer(LLMTrainer):
                                         )
                                 else:
                                     with self.act_offloading_ctx_manager:
-                                        # model_parts[0]: non-PP forward uses the first (only) model part.
-                                        model_output = self.model_parts[0](
+                                        model_output = self.forward_model(
                                             **user_mini_batch
                                         )
                                         raw_logits = model_output.logits
@@ -2076,8 +2066,7 @@ class GRPOTrainer(LLMTrainer):
             "No parameters to sync found."
         )
 
-        for model_part in self.model_parts:
-            model_part.train()
+        self.set_model_train()
 
         return ckpt_extra_info
 
