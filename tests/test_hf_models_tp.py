@@ -88,7 +88,7 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
 
     # init parallel_dims
     parallel_dims: ParallelDims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     parallel_dims.build_mesh(device_type=device.type)
 
@@ -106,9 +106,11 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device=device)
-            if t.device.type == "meta"
-            else t.to(device),
+            lambda t: (
+                torch.empty_like(t, device=device)
+                if t.device.type == "meta"
+                else t.to(device)
+            ),
             recurse=True,
         )
     model.post_to_empty_hook(config)

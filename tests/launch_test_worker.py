@@ -1598,7 +1598,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     config.policy.parallelism.cp_size = cp
     logger.info(f"[Test] sequence packing with fsdp {fsdp}, tp {tp}, cp {cp}")
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -1644,7 +1644,7 @@ def run_sft_validation():
         config_dict,
     )
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -1731,7 +1731,7 @@ def run_reward_check():
     logger.info(f"Using model from {config.policy.model_name_or_path}")
     # config.rollout.n_generation = 2
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.rollout.parallelism
+        parallelism_config=config.rollout.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -1838,7 +1838,7 @@ def run_sft_custom_sampler():
     config.validation.enable = True
     config.validation.freq = 1
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -2051,7 +2051,7 @@ def run_sft_data_packer_factory():
     config.validation.enable = True
     config.validation.freq = 1
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -2151,7 +2151,7 @@ def run_gspo_test():
     config.train.train_policy.variant = "gspo"
     config.logging.logger = ["console"]
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -2252,7 +2252,7 @@ def run_reference_reset_test():
     config.train.train_policy.kl_beta = 100
     config.train.train_policy.reference_reset_interval = 2
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -2331,7 +2331,7 @@ def run_dynamic_batchsize_test(
     config.train.train_policy.batch_size_per_optimize = 16
     config.train.train_policy.mini_batch = 4
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
@@ -2479,7 +2479,7 @@ def run_sft_ddp_load_check():
     config.policy.parallelism.tp_size = 1
     config.policy.parallelism.dp_shard_size = 2
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type=cosmos_device_type)
