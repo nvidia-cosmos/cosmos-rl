@@ -57,6 +57,45 @@ from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
 )
 
 
+def _qwen2_5_vl_text_lm_config(
+    hf_config: AutoConfig,
+) -> tuple[AutoConfig, Optional[AutoConfig]]:
+    """Resolve LM / RoPE config for both Transformers layouts.
+
+    - **v5+**: composite [`Qwen2_5_VLConfig`][`text_config`] holds LM fields and RoPE.
+    - **v4**: flat `hf_config` holds those fields on the root object.
+
+    Returns `(text_lm_cfg, rope_subconfig)` where `rope_subconfig` is the object to pass into
+    RoPE init (same as `text_lm_cfg` when nested, or `None` when flat so callers use full `hf_config`).
+    """
+    text_sub = getattr(hf_config, "text_config", None)
+    if text_sub is not None:
+        return text_sub, text_sub
+    return hf_config, None
+
+
+def _qwen2_5_vl_rope_dict(text_cfg: AutoConfig, hf_config: AutoConfig) -> dict:
+    """Merge RoPE metadata: v5 [`rope_parameters`], v4 [`rope_scaling`]."""
+
+    def _as_dict(obj) -> dict:
+        if not obj:
+            return {}
+        return dict(obj) if isinstance(obj, dict) else {}
+
+    rp = getattr(text_cfg, "rope_parameters", None)
+    if rp:
+        d = _as_dict(rp)
+        if d:
+            return d
+    rs = getattr(text_cfg, "rope_scaling", None)
+    if rs:
+        d = _as_dict(rs)
+        if d:
+            return d
+    rs = getattr(hf_config, "rope_scaling", None)
+    return _as_dict(rs)
+
+
 @dataclass
 class Qwen2_5_VL_LM_Args:
     mrope_section: List[int]
@@ -73,7 +112,10 @@ class Qwen2_5_VL_LM_Args:
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
     hidden_act: str = "silu"
+    # Full multimodal HF config (model_type, tie_word_embeddings, vision token ids, …).
     hf_config: AutoConfig = None
+    # v5+ text sub-config for RoPE (`rope_parameters`, `hidden_size`, …); None => v4 flat, use `hf_config`.
+    text_hf_config: Optional[AutoConfig] = None
 
 
 @dataclass
@@ -91,9 +133,8 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):
-        inv_freq, self.attention_scaling = self.rope_init_fn(
-            self.config.hf_config, device
-        )
+        rope_cfg = self.config.text_hf_config or self.config.hf_config
+        inv_freq, self.attention_scaling = self.rope_init_fn(rope_cfg, device)
         if not hasattr(self, "inv_freq"):
             self.register_buffer("inv_freq", inv_freq, persistent=False)
         else:
@@ -1034,36 +1075,37 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         if hf_config.model_type not in cls.supported_model_types():
             raise ValueError(f"Unsupported model type: {hf_config.model_type}")
 
+        text_cfg, text_hf_config = _qwen2_5_vl_text_lm_config(hf_config)
+
         if max_position_embeddings is None:
-            max_position_embeddings = hf_config.max_position_embeddings
+            max_position_embeddings = text_cfg.max_position_embeddings
         else:
-            hf_config.max_position_embeddings = max_position_embeddings
+            text_cfg.max_position_embeddings = max_position_embeddings
 
         vocab_size = sync_model_vocab(model_name_or_path)
 
-        rope_scaling = {}
-        if hasattr(hf_config, "rope_scaling"):
-            rope_scaling = hf_config.rope_scaling or {}
-        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
+        rope_dict = _qwen2_5_vl_rope_dict(text_cfg, hf_config)
+        rope_type = rope_dict.get("rope_type", rope_dict.get("type", "default"))
 
         bias_list = ["q_proj", "k_proj", "v_proj"]
 
         lm_args = Qwen2_5_VL_LM_Args(
-            mrope_section=hf_config.rope_scaling["mrope_section"],
-            dim=hf_config.hidden_size,
-            ffn_dim=hf_config.intermediate_size,
-            n_layers=hf_config.num_hidden_layers,
-            n_heads=hf_config.num_attention_heads,
-            n_kv_heads=hf_config.num_key_value_heads,
+            mrope_section=rope_dict["mrope_section"],
+            dim=text_cfg.hidden_size,
+            ffn_dim=text_cfg.intermediate_size,
+            n_layers=text_cfg.num_hidden_layers,
+            n_heads=text_cfg.num_attention_heads,
+            n_kv_heads=text_cfg.num_key_value_heads,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=get_rope_theta(hf_config),
+            rope_theta=get_rope_theta(text_cfg),
             norm_type="rmsnorm",
-            hidden_act=hf_config.hidden_act,
-            norm_eps=hf_config.rms_norm_eps,
+            hidden_act=text_cfg.hidden_act,
+            norm_eps=text_cfg.rms_norm_eps,
             rope_type=rope_type,
             biases=bias_list,
             hf_config=hf_config,
+            text_hf_config=text_hf_config,
         )
 
         encoder_args = Qwen2_5_VL_Encoder_Args(
@@ -1072,7 +1114,8 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             hidden_act=hf_config.vision_config.hidden_act,
             intermediate_size=hf_config.vision_config.intermediate_size,
             n_heads=hf_config.vision_config.num_heads,
-            in_channels=hf_config.vision_config.in_chans,
+            in_channels=getattr(hf_config.vision_config, "in_channels", None)
+            or getattr(hf_config.vision_config, "in_chans", 3),
             patch_size=hf_config.vision_config.patch_size,
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
             temporal_patch_size=hf_config.vision_config.temporal_patch_size,
@@ -1081,7 +1124,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             fullatt_block_indexes=hf_config.vision_config.fullatt_block_indexes,
             out_hidden_size=hf_config.vision_config.out_hidden_size,
             norm_type="rmsnorm",
-            norm_eps=hf_config.rms_norm_eps,
+            norm_eps=text_cfg.rms_norm_eps,
             hf_config=hf_config.vision_config,
         )
         args = Qwen2_5_VL_Args(

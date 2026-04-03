@@ -102,14 +102,23 @@ class TestCosmosHfPrecision(unittest.TestCase):
 
         cosmos_model.post_to_empty_hook(None)
 
+        # Transformers v5+: vision lives on `model.visual`; v4 flat layout used `visual` on the root module.
+        hf_visual = getattr(hf_model, "visual", None) or hf_model.model.visual
+
         with torch.no_grad():
             cosmos_result = cosmos_model.visual.forward(
                 inputs.pixel_values.unsqueeze(0).to(torch.bfloat16).to(device),
                 grid_thw=image_grid_thw.to(device),
             )
-            hf_result = hf_model.visual(
+            hf_out = hf_visual(
                 inputs.pixel_values.to(torch.bfloat16).to(device),
                 inputs.image_grid_thw.to(device),
+            )
+            # v4: forward returns a tensor; v5+: `BaseModelOutputWithPooling` — compare to merged embeddings.
+            hf_result = (
+                hf_out.pooler_output
+                if hasattr(hf_out, "pooler_output") and hf_out.pooler_output is not None
+                else hf_out
             )
 
             self.assertTrue(torch.sum((cosmos_result - hf_result).abs()) < 1e-6)
