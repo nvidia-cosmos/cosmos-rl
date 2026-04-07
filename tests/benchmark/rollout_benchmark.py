@@ -82,7 +82,7 @@ def main(args: argparse.Namespace):
     random.seed(seed)
 
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.rollout.parallelism
+        parallelism_config=config.rollout.parallelism
     )
     parallel_dims.build_mesh(device_type=cosmos_device_type)
 

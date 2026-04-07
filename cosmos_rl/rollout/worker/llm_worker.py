@@ -79,7 +79,7 @@ class LLMRolloutWorker(WorkerBase):
 
         if rollout_backend != "trtllm":
             parallel_dims = ParallelDims.from_config(
-                parallesim_config=self.config.rollout.parallelism
+                parallelism_config=self.config.rollout.parallelism
             )
             init_distributed()
             logger.info("Rollout build runner normal.")
