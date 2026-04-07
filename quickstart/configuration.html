@@ -2486,7 +2486,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>1.0</p></td>
 </tr>
-<tr class="row-even"><td rowspan="39"><ul class="simple">
+<tr class="row-even"><td rowspan="47"><ul class="simple">
 <li><p>ParallelismConfig</p></li>
 </ul>
 </td>
@@ -2601,7 +2601,7 @@
 </td>
 <td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size, <cite>n_micro_batch = batch_size / pp_micro_batch_size</cite>, which must be divisible by <cite>pp</cite> stages</p></td>
+<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
@@ -2622,6 +2622,34 @@
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_schedule</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Schedule</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>Interleaved1F1B</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_layers_per_stage</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="70"><ul class="simple">
 <li><p>PolicyConfig</p></li>
@@ -3357,7 +3385,7 @@
 </tr>
 <tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/RolloutAsyncConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="39"><ul class="simple">
+<tr class="row-even"><td rowspan="47"><ul class="simple">
 <li><p>RolloutParallelismConfig</p></li>
 </ul>
 </td>
@@ -3472,7 +3500,7 @@
 </td>
 <td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size, <cite>n_micro_batch = batch_size / pp_micro_batch_size</cite>, which must be divisible by <cite>pp</cite> stages</p></td>
+<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
@@ -3493,6 +3521,34 @@
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_schedule</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Schedule</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>Interleaved1F1B</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_layers_per_stage</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="87"><ul class="simple">
 <li><p>SFTDataConfig</p></li>
@@ -4765,7 +4821,7 @@
 </td>
 <td colspan="5"><p><em>Train Batch Per Replica</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step</p></td>
+<tr class="row-odd"><td colspan="5"><p>The batch size for training per iteration in one replica. Must satisfy: (1) train_batch_per_replica &gt;= mini_batch, (2) train_batch_per_replica % mini_batch == 0, (3) when PP is enabled: train_batch_per_replica % pp_micro_batch_size == 0, and (train_batch_per_replica / pp_micro_batch_size) % pp_size == 0.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
