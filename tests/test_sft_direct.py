@@ -223,7 +223,7 @@ def run_sft_direct(
 
     init_distributed()
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     parallel_dims.build_mesh(device_type="cuda")
 

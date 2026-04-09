@@ -99,11 +99,15 @@ class LLMTrainer(Trainer):
                 self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
-        if config.train.fsdp_offload:
+        pp_enabled = parallel_dims.pp_enabled
+
+        if config.train.fsdp_offload and not pp_enabled:
             model._apply(
-                lambda t: torch.empty_like(t, device="cpu")
-                if t.device.type == "meta"
-                else t.to("cpu"),
+                lambda t: (
+                    torch.empty_like(t, device="cpu")
+                    if t.device.type == "meta"
+                    else t.to("cpu")
+                ),
                 recurse=True,
             )
 
@@ -115,11 +119,28 @@ class LLMTrainer(Trainer):
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
-            if not config.train.fsdp_offload:
+
+            materialize_device = "cpu" if config.train.fsdp_offload else self.device
+            if pp_enabled:
+                # When PP is enabled, model_parts are deep copies with FSDP
+                # applied. Only materialize them — the original model still
+                # holds all layers unsharded and must NOT be materialized.
+                for model_part in model.model_parts:
+                    model_part._apply(
+                        lambda t: (
+                            torch.empty_like(t, device=materialize_device)
+                            if t.device.type == "meta"
+                            else t.to(materialize_device)
+                        ),
+                        recurse=True,
+                    )
+            elif not config.train.fsdp_offload:
                 model._apply(
-                    lambda t: torch.empty_like(t, device=self.device)
-                    if t.device.type == "meta"
-                    else t.to("cuda"),
+                    lambda t: (
+                        torch.empty_like(t, device=self.device)
+                        if t.device.type == "meta"
+                        else t.to("cuda")
+                    ),
                     recurse=True,
                 )
             model.post_to_empty_hook(config)
@@ -134,24 +155,24 @@ class LLMTrainer(Trainer):
 
             torch.cuda.empty_cache()
 
-            # If learning rate is list of `Union[float, List[float]]`,
-            #  it means the learning rates are in order of pre-defined `model.separate_model_parts()`.
-            # else, learning rate must be of type `Dict[str, float]`, where the key is the module path of the model part defined in `model.separate_model_parts()`, and the value is the learning rate for that model part.
-
             if isinstance(config.train.optm_lr, (float, list)):
                 self.model_parts = model.separate_model_parts()
-                self.model_modpath = [None for _ in range(len(self.model_parts))]
-                # `named_modules()` recursively iterates over all modules in the model, and returns both the name and the module itself. We can use it to find the module path for each model part, which will be used in optimizer construction to get the parameters of each model part.
-                # `named_children()` only iterates over the immediate children modules, which is not enough for us to find the module path for each model part since the model part can be nested in the model.
+                # Dotted module path for each pipeline stage within the full model
+                # (e.g. ["model.layers_block_0", "model.layers_block_1"]).
+                # Used to map between per-stage state dicts and the full model's
+                # key namespace for checkpointing, optimizer construction, and LR logging.
+                self.model_module_path = [None for _ in range(len(self.model_parts))]
                 for name, module in model.named_modules():
                     if module in self.model_parts:
                         idx = self.model_parts.index(module)
-                        self.model_modpath[idx] = name
-                        if all([modpath is not None for modpath in self.model_modpath]):
+                        self.model_module_path[idx] = name
+                        if all(
+                            [modpath is not None for modpath in self.model_module_path]
+                        ):
                             break
-                for i in range(len(self.model_modpath)):
-                    if self.model_modpath[i] is None:
-                        self.model_modpath[i] = f"model_part_{i}"
+                for i in range(len(self.model_module_path)):
+                    if self.model_module_path[i] is None:
+                        self.model_module_path[i] = f"model_part_{i}"
             else:
                 assert isinstance(config.train.optm_lr, dict), (
                     "Learning rate must be either a float, a list of floats, or a dict of {model_part: lr}."
@@ -162,7 +183,6 @@ class LLMTrainer(Trainer):
                 _num_re = re.compile(r"(\d+)")
 
                 def natural_key(s: str) -> Tuple[Union[int, str], ...]:
-                    # makes 'layers.2' < 'layers.10'
                     parts = _num_re.split(s)
                     out = []
                     for p in parts:
@@ -174,7 +194,6 @@ class LLMTrainer(Trainer):
                 ) -> List[str]:
                     def key(p: str):
                         depth = 0 if not p else p.count(sep) + 1
-                        # primary: deeper first; secondary: natural lexicographic for stable sibling ordering
                         return (-depth, natural_key(p))
 
                     return sorted(paths, key=key)
@@ -183,7 +202,6 @@ class LLMTrainer(Trainer):
                 module_paths = []
                 learning_rates = []
 
-                # check for global learning rate if exists
                 global_lr = config.train.optm_lr.get("global", None)
                 if global_lr is not None:
                     del config.train.optm_lr["global"]
@@ -191,7 +209,6 @@ class LLMTrainer(Trainer):
                         f"Global learning rate must be a positive float if specified, but got {global_lr}."
                     )
 
-                # Check existence of the module paths specified in the learning rate dict
                 module_paths = sort_module_paths_deep_to_root(
                     config.train.optm_lr.keys()
                 )
@@ -212,15 +229,11 @@ class LLMTrainer(Trainer):
 
                 if global_lr is not None:
                     model_parts.append(model)
-                    # empty string is used to represent the global learning rate for the whole model, which does not correspond to any module path.
                     module_paths.append("[ALL_OTHER]")
                     learning_rates.append(global_lr)
 
                 self.model_parts = model_parts
-                self.model_modpath = module_paths
-                # reset the learning rate in config to be the list of learning rates for each model part, which will be used in optimizer construction.
-                # because modules have to be in specific order during optimizer building,
-                # either a list or an ordered dict is needed to ensure the order of the model parts and the learning rates.
+                self.model_module_path = module_paths
                 self.config.train.optm_lr = learning_rates
 
             self.model = model
@@ -259,10 +272,38 @@ class LLMTrainer(Trainer):
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
         )
 
+    @property
+    def forward_model(self):
+        """Return the model used for forward passes and BaseModel-level method calls.
+
+        When PP is enabled, model_parts[0] is the first pipeline stage (a deep
+        copy with FSDP applied) which has all BaseModel methods.  When PP is
+        disabled, model_parts contains inner sub-modules from
+        separate_model_parts() that lack BaseModel methods, so we fall back to
+        self.model (the BaseModel instance).
+        """
+        if self.parallel_dims.pp_enabled:
+            return self.model_parts[0]
+        return self.model
+
+    def set_model_train(self):
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_part.train()
+        else:
+            self.model.train()
+
+    def set_model_eval(self):
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_part.eval()
+        else:
+            self.model.eval()
+
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(
-            self.model_parts, self.config, model_modpath=self.model_modpath
+            self.model_parts, self.config, model_module_path=self.model_module_path
         )
         if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
@@ -289,8 +330,12 @@ class LLMTrainer(Trainer):
             len_params (int): The number of parameters synced.
         """
         len_params = 0
-        # It's a HFModel, we need to sync the named buffers
-        state_dict = self.model.state_dict()
+        if self.parallel_dims.pp_enabled:
+            state_dict = {}
+            for model_part in self.model_parts:
+                state_dict.update(model_part.state_dict())
+        else:
+            state_dict = self.model.state_dict()
         model_state_dict = [state_dict]
 
         if has_reference_model:
@@ -303,7 +348,11 @@ class LLMTrainer(Trainer):
                         value, device="cpu"
                     )
             model_state_dict.append(self.reference_state_dict)
-        model_state_dict[0].update(dict(self.model.named_buffers()))
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_state_dict[0].update(dict(model_part.named_buffers()))
+        else:
+            model_state_dict[0].update(dict(self.model.named_buffers()))
 
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
@@ -481,50 +530,52 @@ class LLMTrainer(Trainer):
                     f"Chunk {file_idx} to be saved at {os.path.basename(file_path)}"
                 )
 
-        for name, param in self.model.named_parameters():
-            # First map the key from local to hf naming convention
-            name = self.model.weight_mapper.policy_map_local_key_to_hf_key(name)
-            if trainable_only and not param.requires_grad:
-                continue
-            is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
-            param = param.full_tensor() if is_dtensor else param
-            param = param.detach().data
+        if self.parallel_dims.pp_enabled:
+            export_sources = self.model_parts
+        else:
+            export_sources = [self.model]
 
-            pp_rank, pp_size = self.parallel_dims.pp_coord
-
-            for (
-                _name,
-                _param,
-            ) in self.model.weight_mapper.policy_map_local_key_for_export_tensor(
-                name, param
-            ):
-                if _param is None:
-                    logger.debug(
-                        f"[Policy] Skipping None parameter for {name} in safetensors export."
-                    )
+        for source in export_sources:
+            for name, param in source.named_parameters():
+                name = source.weight_mapper.policy_map_local_key_to_hf_key(name)
+                if trainable_only and not param.requires_grad:
                     continue
-                elif save_lora_config and not _name.startswith("base_model"):
-                    # LoRA model needs to add a prefix to the weight name to be consistent with the HF naming convention
-                    _name = f"base_model.model.{_name}"
+                is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
+                param = param.full_tensor() if is_dtensor else param
+                param = param.detach().data
 
-                _param = _param.to(dtype=dtype) if dtype is not None else _param
-                tensor_size = get_tensor_size(_param)
-                # If adding the current tensor exceeds the size limit, save the current chunk
-                if current_chunk_size + tensor_size > max_size_bytes:
-                    # Save the current chunk as a safetensor file
-                    file_name = create_file_name(
-                        save_lora_config, pp_rank, pp_size, file_idx
-                    )
-                    save_chunked_tensors(current_chunk, current_chunk_size, file_name)
+                pp_rank, pp_size = self.parallel_dims.pp_coord
 
-                    # Reset for the next chunk
-                    current_chunk = {_name: _param}
-                    current_chunk_size = tensor_size
-                    file_idx += 1
-                else:
-                    # Add tensor to the current chunk
-                    current_chunk[_name] = _param
-                    current_chunk_size += tensor_size
+                for (
+                    _name,
+                    _param,
+                ) in source.weight_mapper.policy_map_local_key_for_export_tensor(
+                    name, param
+                ):
+                    if _param is None:
+                        logger.debug(
+                            f"[Policy] Skipping None parameter for {name} in safetensors export."
+                        )
+                        continue
+                    elif save_lora_config and not _name.startswith("base_model"):
+                        _name = f"base_model.model.{_name}"
+
+                    _param = _param.to(dtype=dtype) if dtype is not None else _param
+                    tensor_size = get_tensor_size(_param)
+                    if current_chunk_size + tensor_size > max_size_bytes:
+                        file_name = create_file_name(
+                            save_lora_config, pp_rank, pp_size, file_idx
+                        )
+                        save_chunked_tensors(
+                            current_chunk, current_chunk_size, file_name
+                        )
+
+                        current_chunk = {_name: _param}
+                        current_chunk_size = tensor_size
+                        file_idx += 1
+                    else:
+                        current_chunk[_name] = _param
+                        current_chunk_size += tensor_size
 
         # Save any remaining tensors in the last chunk
         if current_chunk:
@@ -740,25 +791,41 @@ class LLMTrainer(Trainer):
 
     def model_load_from_hf(self):
         start_time = time.time()
-        self.model.load_hf_weights(
-            self.config.policy.model_safetensor_path
-            or self.config.policy.model_name_or_path,
-            self.parallel_dims,
-            self.device,
-            revision=self.config.policy.model_revision,
-        )
+        if self.parallel_dims.pp_enabled:
+            for model_part in self.model_parts:
+                model_part.load_hf_weights(
+                    self.config.policy.model_safetensor_path
+                    or self.config.policy.model_name_or_path,
+                    self.parallel_dims,
+                    self.device,
+                    revision=self.config.policy.model_revision,
+                )
+        else:
+            self.model.load_hf_weights(
+                self.config.policy.model_safetensor_path
+                or self.config.policy.model_name_or_path,
+                self.parallel_dims,
+                self.device,
+                revision=self.config.policy.model_revision,
+            )
         end_time = time.time()
         logger.info(
             f"Time taken to load model from HF: {end_time - start_time:.2f} seconds"
         )
 
     def model_resume_from_checkpoint(self):
+        pp_kwargs = {}
+        if self.parallel_dims.pp_enabled:
+            pp_kwargs["pp_model_parts"] = self.model_parts
+            pp_kwargs["pp_model_module_paths"] = self.model_module_path
+            pp_kwargs["strict"] = False
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model,
             optimizer=self.optimizers,
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
+            **pp_kwargs,
         )
         return ckpt_extra_vars
 
