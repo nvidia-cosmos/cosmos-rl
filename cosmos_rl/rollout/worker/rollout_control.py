@@ -74,6 +74,15 @@ from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 from cosmos_rl.collective.collective import P2RCollectiveManager
+from cosmos_rl.rollout.worker.weight_sync import (
+    AsyncR2RSyncMode,
+    get_async_r2r_sync_mode,
+    get_broadcast_all_params,
+    ensure_wst,
+    sync_buffer_to_live,
+    do_nccl_broadcast_grouped,
+    install_inference_sync,
+)
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -852,7 +861,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     payloads_list: List[RLPayload] = validation_queue.get()
 
                     rollout_results: List[RolloutResult] = (
-                        self.rollout.rollout_generation(
+                        self._call_rollout_generation(
                             payloads=payloads_list,
                             stream=self.inference_stream,
                             data_packer=self.val_data_packer,
@@ -958,7 +967,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     def lazy_initialize_rollout_engine(self, load_format):
         # lazy initialization of the rollout engine.
-        if not self.rollout.is_engine_initialized():
+        already_initialized = self.rollout.is_engine_initialized()
+        if not already_initialized:
             if self._is_async_rollout:
                 # wait the scheduler thread to initialize the rollout engine.
                 self._start_async_rollout_scheduler(load_format)
@@ -975,13 +985,26 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 )
             self.prepare_shard_infos_for_weight_sync_insts()
 
+            async_mode = get_async_r2r_sync_mode(self)
+            if async_mode != AsyncR2RSyncMode.DISABLED:
+                logger.info(
+                    "[Rollout] Model loaded — creating buffer + WeightSyncThread "
+                    "(async_mode=%s).",
+                    async_mode.value,
+                )
+                ensure_wst(self)
+
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        """
-        Sync the weight from policy to rollout.
+        """Sync the weight from policy to rollout.
+
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
+
+        When async R2R mode is enabled, P2R commands are routed to the
+        WeightSyncThread which calls ``_execute_p2r_recv`` on its own
+        CUDA stream.
         """
         # lazy initialization of the rollout engine.
         is_for_weight_resume = command.dst_replica_name == self.replica_name
@@ -991,6 +1014,29 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if command.dst_replica_name != self.replica_name:
             return
 
+        async_mode = get_async_r2r_sync_mode(self)
+        if async_mode != AsyncR2RSyncMode.DISABLED:
+            wst = self._weight_sync_thread
+            wst.enqueue_p2r(command)
+            logger.info(
+                "[Rollout] Enqueued P2R to WeightSyncThread (step=%s).",
+                command.weight_step,
+            )
+            return
+
+        self._execute_p2r_recv(command, self.inference_stream)
+
+    def _execute_p2r_recv(
+        self,
+        command: PolicyToRolloutUnicastCommand,
+        stream: torch.cuda.Stream,
+    ):
+        """Execute the P2R NCCL receive on the given CUDA stream.
+
+        Separated from ``policy_to_rollout_unicast`` so the
+        WeightSyncThread can call this directly with its own stream,
+        without needing to swap ``inference_stream``.
+        """
         self.p2r_collective_manager.setup_manager(command)
 
         comm_id = None
@@ -1031,11 +1077,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             f"Mismatch in total params and received param keys: {total_params} != {len(self.recv_param_key_n_rank_list)}"
         )
 
-        with torch.cuda.stream(self.inference_stream):
+        with torch.cuda.stream(stream):
             logger.info(
                 f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
             )
-            # recv the weight from policy
             st = time.time()
             total_bytes_received = 0
 
@@ -1060,7 +1105,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.rl_mode != "colocated_separated"
                 and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
             ):
-                # Only in non-colocated-separated mode, we could use NCCL group feature.
                 nccl_group_start(comm_id)
 
             skipped_params_cnt = 0
@@ -1069,8 +1113,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             transferred_groups_cnt = 0
 
             for insts_group in self.policy_to_rollout_recv_insts:
-                # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
-                # handle inst group
                 (
                     bytes_received,
                     completion_fn,
@@ -1092,9 +1134,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     )
                     != insts_group.param_instructions[0].param_name
                 ):
-                    # The params in the group of this case originally belong to the same param.
-                    # The following counts related with `groups` measure the original params before split.
-                    # The count related with `groups` match the count in R2R which is without split.
                     skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
                     transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
                 else:
@@ -1134,7 +1173,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 copy_finished = torch.cuda.Event()
                 copy_finished.record()
 
-            self.inference_stream.wait_event(copy_finished)
+            stream.wait_event(copy_finished)
             self.temp_recv_tensor_queue.queue.clear()
 
             time_eclapsed = time.time() - st
@@ -1162,128 +1201,200 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     def broadcast_to_all_rollout_replica(
         self, broadcast_command: RolloutToRolloutBroadcastCommand
     ) -> None:
-        """
-        Broadcast the weight to all other rollout replicas.
-        Will only happen between Rollout Replica 0 and all other Rollout Replicas.
+        """Broadcast the weight to all other rollout replicas.
+
+        Will only happen between Rollout Replica 0 and all other Rollout
+        Replicas.
+
+        When ``async_r2r_sync`` is enabled the broadcast is enqueued to
+        the WeightSyncThread which executes it on a dedicated CUDA stream
+        with a Redis barrier.  When ``broadcast_all_params`` is enabled
+        (or in async mode), the full state_dict is broadcast rather than
+        only the trainable subset selected by ``model_param_map``.
         """
         src_replica_name: str = broadcast_command.src_replica_name
         dst_replica_names: List[str] = broadcast_command.dst_replica_names
+
+        # Forward-compat: flush any pending async NCCL sends (e.g. from data
+        # packers) so they complete before weight sync reuses the communicator.
+        if hasattr(self, "data_packer") and hasattr(
+            self.data_packer, "flush_pending_sends"
+        ):
+            self.data_packer.flush_pending_sends()
 
         # lazy initialization of the rollout engine.
         if self.replica_name != src_replica_name:
             # for replicas that needs to be broadcasted, use dummy format.
             self.lazy_initialize_rollout_engine(load_format="dummy")
 
-        if len(dst_replica_names) > 1:
-            self.prepare_trainable_params()
-            skipped_params_cnt = 0
-            transferred_params_cnt = 0
+        was_synced = self.state.weight_synced()
+        trainable_only = broadcast_command.trainable_only
+        if not was_synced and trainable_only:
             logger.info(
-                "[Rollout] Starting broadcasting of parameters to all replicas."
+                "[Rollout] First broadcast has trainable_only=True "
+                "(race: rollout leader was faster). Forcing full broadcast."
             )
-            # Only do broadcast if there are more than one rollout replicas.
-            with torch.cuda.stream(self.inference_stream):
-                assert self.rank_in_rollout_repicas >= 0, (
-                    "[Rollout] rank in rollout replicas should be set before broadcast."
-                )
-                assert len(dst_replica_names) == len(self.replica_name_to_rank), (
-                    "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
-                )
+            trainable_only = False
 
-                src_rank = self.replica_name_to_rank[src_replica_name]
-                with torch.inference_mode():
-                    for name, parameter in self.rollout.model_param_map(
-                        self.weight_mapper
-                    ).items():
-                        if (
-                            name not in self.trainable_params
-                            and broadcast_command.trainable_only
-                        ):
-                            logger.debug(
-                                f"[Rollout] Skip {name} in R2R due to non trainable."
+        async_mode = get_async_r2r_sync_mode(self)
+        broadcast_all = get_broadcast_all_params(self)
+
+        if len(dst_replica_names) > 1:
+            if async_mode != AsyncR2RSyncMode.DISABLED:
+                # Enqueue to the WeightSyncThread.
+                wst = self._weight_sync_thread
+                wst.enqueue_r2r(broadcast_command)
+                logger.info(
+                    "[Rollout] Enqueued R2R to WeightSyncThread (mode=%s, step=%s).",
+                    async_mode.value,
+                    broadcast_command.weight_step,
+                )
+            elif broadcast_all:
+                # Synchronous full-model broadcast via grouped NCCL.
+                logger.info(
+                    "[Rollout] Starting full-model broadcast (broadcast_all_params=true)."
+                )
+                t0 = time.time()
+                transferred_params_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
+                    self,
+                    src_replica_name,
+                    self.inference_stream,
+                )
+                self.inference_stream.synchronize()
+                elapsed = time.time() - t0
+                logger.info(
+                    "[Rollout] Finished full-model broadcast: %d params, "
+                    "%.1f MB, %.3f s",
+                    transferred_params_cnt,
+                    bytes_broadcast / (1024 * 1024),
+                    elapsed,
+                )
+                if not self.state.weight_synced():
+                    self.state.set_weight_synced()
+                if not trainable_only:
+                    self.non_trainable_params_received = True
+            else:
+                # Original synchronous per-param broadcast path.
+                self.prepare_trainable_params()
+                skipped_params_cnt = 0
+                transferred_params_cnt = 0
+                logger.info(
+                    "[Rollout] Starting broadcasting of parameters to all replicas."
+                )
+                with torch.cuda.stream(self.inference_stream):
+                    assert self.rank_in_rollout_repicas >= 0, (
+                        "[Rollout] rank in rollout replicas should be set before broadcast."
+                    )
+                    assert len(dst_replica_names) == len(self.replica_name_to_rank), (
+                        "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                    )
+
+                    src_rank = self.replica_name_to_rank[src_replica_name]
+                    with torch.inference_mode():
+                        for name, parameter in self.rollout.model_param_map(
+                            self.weight_mapper
+                        ).items():
+                            if name not in self.trainable_params and trainable_only:
+                                logger.debug(
+                                    f"[Rollout] Skip {name} in R2R due to non trainable."
+                                )
+                                skipped_params_cnt += 1
+                                continue
+                            transferred_params_cnt += 1
+
+                            recv_tensor = parameter
+                            if not parameter.is_contiguous():
+                                recv_tensor = parameter.contiguous()
+
+                            nccl_broadcast(
+                                recv_tensor, src_rank, self.global_commnicator_idex
                             )
-                            skipped_params_cnt += 1
-                            continue
-                        transferred_params_cnt += 1
 
-                        recv_tensor = parameter
-                        if not parameter.is_contiguous():
-                            recv_tensor = parameter.contiguous()
+                            if not parameter.is_contiguous():
+                                parameter.copy_(recv_tensor)
 
-                        nccl_broadcast(
-                            recv_tensor, src_rank, self.global_commnicator_idex
+                    if not self.state.weight_synced():
+                        assert not trainable_only, (
+                            "[Rollout] Trainable only must be set to False for the first broadcast."
+                        )
+                        self.state.set_weight_synced()
+
+                logger.info(
+                    f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
+                )
+                if not trainable_only:
+                    self.non_trainable_params_received = True
+
+                if trainable_only:
+                    assert self.non_trainable_params_received, (
+                        "[Rollout] Non-trainable params must be received before trainable-only R2R."
+                    )
+                    if not hasattr(self, "r2r_synced_trainable_params_cnt"):
+                        self.r2r_synced_trainable_params_cnt = transferred_params_cnt
+                    if hasattr(self, "p2r_synced_trainable_params_cnt"):
+                        assert (
+                            self.r2r_synced_trainable_params_cnt
+                            == self.p2r_synced_trainable_params_cnt
+                            + len(self.misc_params)
+                        ), (
+                            f"Synced params count in R2R {self.r2r_synced_trainable_params_cnt} must match the sum of count of attribute {self.p2r_synced_trainable_params_cnt} and {len(self.misc_params)}."
                         )
 
-                        if not parameter.is_contiguous():
-                            parameter.copy_(recv_tensor)
-
-                if not self.state.weight_synced():
-                    assert not broadcast_command.trainable_only, (
-                        "[Rollout] Trainable only must be set to False for the first broadcast."
-                    )
-                    self.state.set_weight_synced()
-
-            logger.info(
-                f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
-            )
-            if not broadcast_command.trainable_only:
-                self.non_trainable_params_received = True
-
-            if broadcast_command.trainable_only:
-                assert self.non_trainable_params_received, (
-                    "[Rollout] Non-trainable params must be received before trainable-only R2R."
-                )
-                if not hasattr(self, "r2r_synced_trainable_params_cnt"):
-                    self.r2r_synced_trainable_params_cnt = transferred_params_cnt
-                if hasattr(self, "p2r_synced_trainable_params_cnt"):
-                    # check in R2R sender side.
-                    assert (
-                        self.r2r_synced_trainable_params_cnt
-                        == self.p2r_synced_trainable_params_cnt + len(self.misc_params)
-                    ), (
-                        f"Synced params count in R2R {self.r2r_synced_trainable_params_cnt} must match the sum of count of attribute {self.p2r_synced_trainable_params_cnt} and {len(self.misc_params)}."
-                    )
+        # --- Post-broadcast bookkeeping (weight version, validation, shutdown) ---
 
         current_step = broadcast_command.weight_step
-        if current_step is not None:
-            assert current_step >= self.current_weight_version, (
-                f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
-            )
-            self.current_weight_version = current_step
-        else:
-            current_step = self.current_weight_version
 
-        if current_step is not None and current_step >= 0:
-            is_initial_validation = (
-                current_step == 0 and self.config.validation.val_before_train
-            )
-            is_periodic_validation = (
-                current_step > 0 and current_step % self.config.validation.freq == 0
-            )
-            is_final_validation = current_step == broadcast_command.total_steps
+        # When async mode is enabled, the NCCL broadcast hasn't happened yet
+        # (it's queued on the WST).  The WST's _execute_r2r will update
+        # current_weight_version after the broadcast completes.
+        if async_mode == AsyncR2RSyncMode.DISABLED:
+            if current_step is not None:
+                assert current_step >= self.current_weight_version, (
+                    f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+                )
+                self.current_weight_version = current_step
+            else:
+                current_step = self.current_weight_version
 
-            should_do_validation = self.config.validation.enable and (
-                is_initial_validation or is_periodic_validation or is_final_validation
+            if current_step is not None and current_step >= 0:
+                is_initial_validation = (
+                    current_step == 0 and self.config.validation.val_before_train
+                )
+                is_periodic_validation = (
+                    current_step > 0 and current_step % self.config.validation.freq == 0
+                )
+                is_final_validation = current_step == broadcast_command.total_steps
+
+                should_do_validation = self.config.validation.enable and (
+                    is_initial_validation
+                    or is_periodic_validation
+                    or is_final_validation
+                )
+
+                if should_do_validation:
+                    self.current_step = current_step
+                    self.validation_flag.set()
+
+            if broadcast_command.replica_should_stop():
+                data = {
+                    "is_end": True,
+                    "prompt_idx": -1,
+                    "completion_token_ids": [],
+                }
+                self.redis_controller.publish_teacher_request(data, self.replica_name)
+                logger.info("[Rollout] Published end event to reference")
+                if self.validation_flag.is_set():
+                    self.do_validation()
+                self.shutdown_signal.set()
+                self.shutdown_mp_signal.set()
+
+        if not self.state.weight_synced():
+            logger.info(
+                "[Rollout] Setting weight_synced after broadcast (n_dst=%d, step=%s)",
+                len(dst_replica_names),
+                current_step,
             )
-
-            if should_do_validation:
-                self.current_step = current_step
-                # Setting the flag, do validation in the main loop.
-                self.validation_flag.set()
-
-        if broadcast_command.replica_should_stop():
-            data = {
-                "is_end": True,
-                "prompt_idx": -1,
-                "completion_token_ids": [],
-            }
-            self.redis_controller.publish_teacher_request(data, self.replica_name)
-            logger.info("[Rollout] Published end event to reference")
-            # Do validation if the flag is set before stopping.
-            if self.validation_flag.is_set():
-                self.do_validation()
-            self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
+            self.state.set_weight_synced()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""
@@ -1445,6 +1556,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     ):
         # Consume all pending commands for weight sync.
         # To ensure the weight update is using the up-to-date commands.
+        async_mode = get_async_r2r_sync_mode(self)
         last_cmd = None
         none_cnt = 0
         start_time = time.time()
@@ -1459,13 +1571,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
                 (
                     last_cmd is not None
-                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                    and (
+                        not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                        or async_mode != AsyncR2RSyncMode.DISABLED
+                    )
                 )
                 or last_cmd is None
             ):
-                # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
-                # Since P2R must be followed by another R2R broadcast command, we need wait.
-                # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
+                # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES
+                # times, and the last command is not P2R command, we break.
+                # In synchronous mode P2R must be followed by an R2R broadcast
+                # command on the main thread, so we keep waiting.  In async
+                # mode the R2R is handled by the WeightSyncThread, so there
+                # is no need to block the main thread.
                 break
             time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
 
@@ -1553,15 +1671,44 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 break
         return payloads, is_validation, step, empty
 
+    def _call_rollout_generation(self, **kwargs) -> list:
+        """Call ``rollout_generation`` with pre-generation buffer sync.
+
+        All call sites should use this instead of calling
+        ``self.rollout.rollout_generation`` directly so that async weight
+        sync and weight-version injection happen consistently.
+        """
+        async_mode = get_async_r2r_sync_mode(self)
+        if async_mode != AsyncR2RSyncMode.DISABLED:
+            if async_mode == AsyncR2RSyncMode.INFERENCE and not getattr(
+                self, "_inference_sync_installed", False
+            ):
+                install_inference_sync(self)
+                self._inference_sync_installed = True
+            sync_buffer_to_live(self)
+
+        kwargs["current_weight_version"] = self.current_weight_version
+        return self.rollout.rollout_generation(**kwargs)
+
     @torch.no_grad()
     def main_loop(self):
+        async_mode = get_async_r2r_sync_mode(self)
+        logger.info("[Rollout] main_loop async_r2r_sync mode: %s", async_mode.value)
+
+        try:
+            self._main_loop_impl()
+        finally:
+            wst = getattr(self, "_weight_sync_thread", None)
+            if wst is not None:
+                wst.stop()
+
+    def _main_loop_impl(self):
+        """Core main loop extracted for clean WST lifecycle management."""
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
             if self.validation_flag.is_set():
-                # If encounter validation flag during last rollout generation or this command fetch, do validation first.
                 self.do_validation()
 
-            # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue
 
@@ -1571,11 +1718,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
             if self._is_async_rollout:
-                # In this mode, we perform the stream generation step in the main loop.
                 self.stream_generation_step()
                 continue
 
-            # try fetching new prompts if no ending signal is set
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
                     self.batch_size,
@@ -1587,7 +1732,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
                     )
                     self.state.set_prompt_fetch_end()
-                    # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
                     if self._prompt_queue.empty():
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
@@ -1603,7 +1747,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             else:
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
-                # Check if the prompt is valid for the current weight version
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
                 is_valid_prompt_for_current_weight_version = (
                     first_payload.weight_version
@@ -1612,7 +1755,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
-                    # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
 
                 self.one_step_generation()
@@ -1728,7 +1870,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         payloads_list: List[RLPayload] = self._prompt_queue.get()
 
-        rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+        rollout_results: List[RolloutResult] = self._call_rollout_generation(
             payloads=payloads_list,
             stream=self.inference_stream,
             data_packer=self.data_packer,
