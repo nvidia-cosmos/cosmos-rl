@@ -585,6 +585,21 @@ class GrpoConfig(BaseModel):
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 
+    max_inflight_steps: Optional[int] = Field(
+        default=None,
+        description=(
+            "Hard ceiling on in-flight rollout samples, expressed as a multiple "
+            "of one global training batch.  When the number of pending samples "
+            "reaches max_inflight_steps * n_policy_replicas * train_batch_per_replica, "
+            "all new prompt requests are rejected until the policy catches up.  "
+            "Auto-clamped to >= allowed_outdated_steps + 1 so the standard soft "
+            "throttle fires first.  For DAPO, the soft throttle threshold is "
+            "higher (scaled by max_retry_for_on_policy), so set this value "
+            "above that threshold if you want soft-before-hard ordering.  "
+            "None disables the hard throttle."
+        ),
+    )
+
     min_filter_prefix_tokens: Optional[int] = Field(
         default=None,
         description="Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
@@ -682,6 +697,14 @@ class GrpoConfig(BaseModel):
                 logger.warning(
                     "DAPO is enabled, so outdated_rollout_fetch_batch_size is set to 128 as a large value."
                 )
+        if self.max_inflight_steps is not None:
+            min_allowed = self.allowed_outdated_steps + 1
+            if self.max_inflight_steps < min_allowed:
+                logger.warning(
+                    f"max_inflight_steps ({self.max_inflight_steps}) is below "
+                    f"allowed_outdated_steps + 1 ({min_allowed}); raising to {min_allowed}."
+                )
+                self.max_inflight_steps = min_allowed
         if self.uncentralized_training and self.variant != "grpo":
             raise ValueError(
                 "Uncentralized training is only suitable for GRPO, but the current variant is {}. Please make sure this is intended.".format(
@@ -1862,6 +1885,18 @@ class Config(BaseModel):
             logger.warning(
                 f"allowed_outdated_steps is less than sync_weight_interval - 1, setting allowed_outdated_steps to {self.train.sync_weight_interval - 1}."
             )
+            # Re-clamp max_inflight_steps against the (now-raised) allowed_outdated_steps
+            # so the hard throttle never fires before the soft throttle.
+            tp = self.train.train_policy
+            if tp.max_inflight_steps is not None:
+                min_allowed = tp.allowed_outdated_steps + 1
+                if tp.max_inflight_steps < min_allowed:
+                    logger.warning(
+                        f"max_inflight_steps ({tp.max_inflight_steps}) is below "
+                        f"allowed_outdated_steps + 1 ({min_allowed}) after "
+                        f"sync_weight_interval adjustment; raising to {min_allowed}."
+                    )
+                    tp.max_inflight_steps = min_allowed
 
         # Handle for evaludation configuration.
         if isinstance(self.validation.dataset.split, str):
