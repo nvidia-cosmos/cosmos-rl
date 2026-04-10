@@ -371,24 +371,38 @@ class WeightSyncThread:
         )
 
     def _execute_r2r(self, command) -> None:
-        """Redis barrier + grouped NCCL broadcast on buffer_model."""
+        """Redis barrier + grouped NCCL broadcast on buffer_model.
+
+        When commands are routed directly from the background command
+        thread (bypassing the main-thread handler), the WST is
+        responsible for bookkeeping that would normally be done in the
+        handler: ``flush_pending_sends``, ``set_weight_synced``.
+        """
+        worker = self._worker
+
+        # Flush any pending async NCCL sends before reusing the communicator.
+        if hasattr(worker, "data_packer") and hasattr(
+            worker.data_packer, "flush_pending_sends"
+        ):
+            worker.data_packer.flush_pending_sends()
+
         weight_step = command.weight_step
-        r2r_barrier(self._worker, weight_step)
+        r2r_barrier(worker, weight_step)
         t0 = time.monotonic()
         transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
-            self._worker,
+            worker,
             command.src_replica_name,
             self._stream,
         )
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
-        self._worker._buffer_version += 1
+        worker._buffer_version += 1
 
         if weight_step is not None:
-            self._worker.current_weight_version = weight_step
+            worker.current_weight_version = weight_step
 
         if weight_step is not None and weight_step >= 0:
-            cfg = self._worker.config
+            cfg = worker.config
             is_initial = weight_step == 0 and cfg.validation.val_before_train
             is_periodic = weight_step > 0 and weight_step % cfg.validation.freq == 0
             is_final = weight_step == command.total_steps
@@ -396,12 +410,12 @@ class WeightSyncThread:
                 is_initial or is_periodic or is_final
             )
             if should_do_validation:
-                self._worker.current_step = weight_step
-                self._worker.validation_flag.set()
-                self._worker._pending_validation_step = weight_step
+                worker.current_step = weight_step
+                worker.validation_flag.set()
+                worker._pending_validation_step = weight_step
 
         if command.replica_should_stop():
-            self._worker._pending_shutdown = True
+            worker._pending_shutdown = True
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
@@ -410,7 +424,7 @@ class WeightSyncThread:
             bytes_broadcast / (1024 * 1024),
             elapsed_ms,
             weight_step,
-            self._worker.current_weight_version,
+            worker.current_weight_version,
         )
 
 

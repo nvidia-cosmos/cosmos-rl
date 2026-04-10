@@ -1397,7 +1397,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.state.set_weight_synced()
 
     def query_command_from_controller(self):
-        """Background task to check commands from the controller"""
+        """Background task to check commands from the controller.
+
+        When async R2R mode is active and the WeightSyncThread is ready,
+        P2R and R2R commands are routed directly to the WST instead of
+        going through ``_command_queue``.  This avoids the latency of
+        waiting for the main thread (which may be running a long
+        simulation) to drain the queue before weight-sync begins.
+        """
         while not self.shutdown_signal.is_set():
             commands = []
             try:
@@ -1411,6 +1418,28 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             for instruction in commands:
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
+
+                wst = getattr(self, "_weight_sync_thread", None)
+                if wst is not None and isinstance(
+                    command, PolicyToRolloutUnicastCommand
+                ):
+                    if command.dst_replica_name == self.replica_name:
+                        wst.enqueue_p2r(command)
+                    else:
+                        logger.debug(
+                            "[Rollout] Skipping P2R for other replica %s",
+                            command.dst_replica_name,
+                        )
+                    continue
+
+                if wst is not None and isinstance(
+                    command, RolloutToRolloutBroadcastCommand
+                ):
+                    wst.enqueue_r2r(command)
+                    if not self.state.weight_synced():
+                        self.state.set_weight_synced()
+                    continue
+
                 self._command_queue.put(command)
 
     def teacher_interact_loop(self):
@@ -1554,9 +1583,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         cmd_pred: Optional[Callable[[Command], bool]] = None,
         timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
     ):
-        # Consume all pending commands for weight sync.
-        # To ensure the weight update is using the up-to-date commands.
-        async_mode = get_async_r2r_sync_mode(self)
+        """Consume all pending commands from the command queue.
+
+        In async R2R mode, P2R/R2R commands are routed directly to the
+        WeightSyncThread by ``query_command_from_controller`` and never
+        appear in ``_command_queue``.  The "wait for R2R after P2R"
+        logic only applies when both command types flow through the
+        queue (synchronous mode).
+        """
+        async_wst_active = getattr(self, "_weight_sync_thread", None) is not None
         last_cmd = None
         none_cnt = 0
         start_time = time.time()
@@ -1569,21 +1604,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             else:
                 none_cnt += 1
             if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
-                (
+                async_wst_active
+                or (
                     last_cmd is not None
-                    and (
-                        not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
-                        or async_mode != AsyncR2RSyncMode.DISABLED
-                    )
+                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
                 )
                 or last_cmd is None
             ):
-                # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES
-                # times, and the last command is not P2R command, we break.
-                # In synchronous mode P2R must be followed by an R2R broadcast
-                # command on the main thread, so we keep waiting.  In async
-                # mode the R2R is handled by the WeightSyncThread, so there
-                # is no need to block the main thread.
                 break
             time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
 
