@@ -78,9 +78,12 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_seq_len
         self.config = config
         self.rope_init_fn = get_rope_init_fn(config.rope_type)
-        self.mrope_section = config.hf_config.rope_scaling.get(
-            "mrope_section", [24, 20, 20]
+        rope_dict = (
+            getattr(config.hf_config, "rope_parameters", None)
+            or getattr(config.hf_config, "rope_scaling", None)
+            or {}
         )
+        self.mrope_section = rope_dict.get("mrope_section", [24, 20, 20])
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):
@@ -963,23 +966,24 @@ class Qwen3VLMoeModel(BaseModel):
         if hf_config.model_type not in cls.supported_model_types():
             raise ValueError(f"Unsupported model type: {hf_config.model_type}")
 
+        lm_config = getattr(hf_config, "text_config", hf_config)
         if max_position_embeddings is None:
-            max_position_embeddings = hf_config.max_position_embeddings
+            max_position_embeddings = lm_config.max_position_embeddings
         else:
-            hf_config.max_position_embeddings = max_position_embeddings
+            lm_config.max_position_embeddings = max_position_embeddings
 
         torch_dtype = hf_config.torch_dtype
         hf_config.text_config.torch_dtype = torch_dtype
         hf_config.vision_config.torch_dtype = torch_dtype
         vocab_size = sync_model_vocab(model_name_or_path)
-
-        lm_config = hf_config.text_config
         # Qwen3MoE does not have any biases
         bias_list = []
-        rope_scaling = {}
-        if hasattr(lm_config, "rope_scaling"):
-            rope_scaling = lm_config.rope_scaling or {}
-        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
+        rope_dict = (
+            getattr(lm_config, "rope_parameters", None)
+            or getattr(lm_config, "rope_scaling", None)
+            or {}
+        )
+        rope_type = rope_dict.get("rope_type", rope_dict.get("type", "default"))
         try:
             head_dim = lm_config.head_dim
         except Exception:
