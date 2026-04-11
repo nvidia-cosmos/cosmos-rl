@@ -80,6 +80,7 @@ from cosmos_rl.rollout.worker.weight_sync import (
     get_broadcast_all_params,
     ensure_wst,
     sync_buffer_to_live,
+    process_wst_deferred_actions,
     do_nccl_broadcast_grouped,
     install_inference_sync,
 )
@@ -1388,7 +1389,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.shutdown_signal.set()
                 self.shutdown_mp_signal.set()
 
-        if not self.state.weight_synced():
+        # In async mode the WST's _execute_r2r calls set_weight_synced
+        # after the broadcast actually completes.  Calling it here would
+        # be premature (the NCCL transfer is only enqueued, not done).
+        if async_mode == AsyncR2RSyncMode.DISABLED and not self.state.weight_synced():
             logger.info(
                 "[Rollout] Setting weight_synced after broadcast (n_dst=%d, step=%s)",
                 len(dst_replica_names),
@@ -1436,8 +1440,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     command, RolloutToRolloutBroadcastCommand
                 ):
                     wst.enqueue_r2r(command)
-                    if not self.state.weight_synced():
-                        self.state.set_weight_synced()
                     continue
 
                 self._command_queue.put(command)
@@ -1722,6 +1724,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         async_mode = get_async_r2r_sync_mode(self)
         logger.info("[Rollout] main_loop async_r2r_sync mode: %s", async_mode.value)
 
+        assert not (
+            self._is_async_rollout and async_mode != AsyncR2RSyncMode.DISABLED
+        ), (
+            "async_r2r_sync is not supported with rollout.mode='async'. "
+            "async_r2r_sync targets the synchronous rollout path; the async "
+            "rollout scheduler (vllm_async) uses a separate generation path "
+            "that bypasses the buffer model."
+        )
+
         try:
             self._main_loop_impl()
         finally:
@@ -1731,8 +1742,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     def _main_loop_impl(self):
         """Core main loop extracted for clean WST lifecycle management."""
+        async_mode = get_async_r2r_sync_mode(self)
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
+
+            # Process deferred validation/shutdown from the WST on the
+            # main thread — never inside inference callbacks.
+            if async_mode != AsyncR2RSyncMode.DISABLED:
+                process_wst_deferred_actions(self)
+
             if self.validation_flag.is_set():
                 self.do_validation()
 

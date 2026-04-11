@@ -178,6 +178,11 @@ def redirect_view_map_to_buffer(worker) -> None:
 def sync_buffer_to_live(worker) -> None:
     """Copy buffer params to live model if a new version is available.
 
+    This is a pure data-plane operation: it copies tensors from the
+    buffer model into the live model.  It does **not** trigger
+    validation or shutdown — those are handled by
+    ``process_wst_deferred_actions`` on the main thread.
+
     Non-blocking on CPU.  inference_stream.wait_event(last_event) ensures
     the GPU-side copy executes after the most recently completed write on
     the weight-sync stream.
@@ -228,6 +233,15 @@ def sync_buffer_to_live(worker) -> None:
         elapsed_ms,
     )
 
+
+def process_wst_deferred_actions(worker) -> None:
+    """Handle validation and shutdown flags set by the WeightSyncThread.
+
+    Must be called on the main thread only (never from inference
+    callbacks).  The WST sets lightweight flags when it completes a
+    broadcast that requires validation or shutdown; this function
+    reacts to those flags.
+    """
     if getattr(worker, "_pending_validation_step", None) is not None:
         worker._pending_validation_step = None
         if worker.validation_flag.is_set():
@@ -416,6 +430,17 @@ class WeightSyncThread:
 
         if command.replica_should_stop():
             worker._pending_shutdown = True
+
+        # Mark weight_synced only after the broadcast has completed,
+        # so the main loop does not start serving before weights are
+        # actually available in the buffer.
+        if not worker.state.weight_synced():
+            worker.state.set_weight_synced()
+            logger.info(
+                "[WeightSyncThread] set_weight_synced after first R2R broadcast "
+                "(step=%s)",
+                weight_step,
+            )
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
