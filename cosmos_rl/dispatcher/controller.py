@@ -240,7 +240,26 @@ maxmemory-policy allkeys-lfu
         validation_step: Optional[int] = None,
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
+        return await self._get_batched_prompt_impl(n, validation_step, rank_in_mesh)
+
+    async def _get_batched_prompt_impl(
+        self,
+        n: int,
+        validation_step: Optional[int] = None,
+        rank_in_mesh: Optional[int] = None,
+    ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+
+        # Short-circuit when all policy replicas have unregistered during
+        # teardown.  Without this guard, global_batch_size becomes 0 and
+        # downstream asserts / divisions crash the controller.
+        if len(self.policy_status_manager) == 0:
+            logger.warning(
+                "[Controller] No policy replicas registered. "
+                "Assuming training is finished; signaling end of rollouts."
+            )
+            return [], True
+
         # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
         rollouts_per_global_batch = self.config.train.train_batch_per_replica * len(
             self.policy_status_manager
@@ -263,24 +282,22 @@ maxmemory-policy allkeys-lfu
         )
 
         if step_fetched_count_control:
-            # Throttle the generation speed:
+            current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
+
+            # Soft throttle:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
             # 3. If the current pending rollouts is larger than the allowed outdated version count, reduce the number of prompts to generate.
-            current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
             if (
                 current_pending_rollouts
                 >= (self.config.train.train_policy.allowed_outdated_steps + 1)
                 * rollouts_per_global_batch
             ) and self.config.train.train_policy.variant != "dapo":
-                # For non dapo variant, we only need to control the number of outdated weight versions when fetching new prompts.
-                # Since the number of fetched prompts is directly related to the number of rollouts to be trained.
                 n = min(
                     n,
                     self.config.train.train_policy.outdated_rollout_fetch_batch_size,
                 )
                 if n > 0:
-                    # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
                     logger.warning(
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
@@ -319,6 +336,20 @@ maxmemory-policy allkeys-lfu
                         logger.warning(
                             f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                         )
+
+            # Hard throttle: reject all remaining prompts when pending
+            # rollouts hit a hard ceiling.  This prevents unbounded
+            # accumulation when outdated_rollout_fetch_batch_size > 0.
+            # The validator guarantees max_inflight_steps >= allowed_outdated_steps + 1
+            # so that the non-DAPO soft throttle always fires first.  For DAPO
+            # the soft threshold is higher (scaled by max_retry_for_on_policy),
+            # so the hard throttle may fire before DAPO's soft throttle — set
+            # max_inflight_steps accordingly if using DAPO.
+            max_inflight = self.config.train.train_policy.max_inflight_steps
+            if max_inflight is not None:
+                hard_threshold = max_inflight * rollouts_per_global_batch
+                if current_pending_rollouts >= hard_threshold:
+                    return [], is_validation
 
         if (
             step_fetched_count_control
