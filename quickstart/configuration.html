@@ -1188,7 +1188,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>rowwise</p></td>
 </tr>
-<tr class="row-even"><td rowspan="223"><ul class="simple">
+<tr class="row-even"><td rowspan="228"><ul class="simple">
 <li><p>GrpoConfig</p></li>
 </ul>
 </td>
@@ -1831,1931 +1831,86 @@
 <td colspan="4"><p>0</p></td>
 </tr>
 <tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>max_inflight_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Max Inflight Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Hard ceiling on in-flight rollout samples, expressed as a multiple of one global training batch.  When the number of pending samples reaches max_inflight_steps * n_policy_replicas * train_batch_per_replica, all new prompt requests are rejected until the policy catches up.  Auto-clamped to &gt;= allowed_outdated_steps + 1 so the standard soft throttle fires first.  For DAPO, the soft throttle threshold is higher (scaled by max_retry_for_on_policy), so set this value above that threshold if you want soft-before-hard ordering.  None disables the hard throttle.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>min_filter_prefix_tokens</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Min Filter Prefix Tokens</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. If the number of tokens is larger than the <cite>min_filter_prefix_tokens</cite>, the rollouts with the same prefix but different rewards will be filtered out in loss calculation.</p></td>
+<tr class="row-even"><td colspan="5"><p>Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. If the number of tokens is larger than the <cite>min_filter_prefix_tokens</cite>, the rollouts with the same prefix but different rewards will be filtered out in loss calculation.</p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>max_retry_for_on_policy</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Max Retry For On Policy</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.</p></td>
+<tr class="row-odd"><td colspan="5"><p>Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>-1</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>reference_reset_interval</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Reference Reset Interval</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Interval to reset the reference model to the current model. If set to None or 0, the reference model will not be reset during training.</p></td>
+<tr class="row-odd"><td colspan="5"><p>Interval to reset the reference model to the current model. If set to None or 0, the reference model will not be reset during training.</p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>None</p></td>
 </tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>null</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>reset_optimizer_with_reference</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Reset Optimizer With Reference</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to reset the optimizer state when the reference model is reset.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>balance_dp_token</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Balance Dp Token</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to balance the number of tokens in each data parallel replica when calculating the loss.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>use_decoupled_loss</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Use Decoupled Loss</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to use decoupled loss. A decoupled loss separates the optimization of the behavior policy and the target policy, which can help to reduce the variance of the gradient estimate.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>behav_imp_weight_cap</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Behav Imp Weight Cap</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>rollout_as_token_ids</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Rollout As Token Ids</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>collect_rollout_logprobs</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Collect Rollout Logprobs</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>use_rollout_logprobs_for_loss</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Use Rollout Logprobs For Loss</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use collected logprobs from rollouts for loss calculation. This is an alternative to calculating logprobs during training as old logprobs for importance sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="30"><ul class="simple">
-<li><p>LoggingConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>LoggingConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>logger</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Logger</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>List of loggers to use, e.g., [‘console’, ‘wandb’]</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>log_interval</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Log Interval</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Log interval (in steps) for loss averaging.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>100</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>multi_modal_log_interval</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Multi Modal Log Interval</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Log interval (in steps) for multi-modal logging such as images and videos.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>project_name</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Project Name</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Wandb project name for logging. If set, the training will be logged to this project.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>cosmos_rl</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>group_name</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Group Name</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Wandb group name for logging. If set, the training will be logged to this group.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>experiment_name</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Experiment Name</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>A short display name for this run. If not set, will use the <cite>output_dir</cite> as the experiment name.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="64"><ul class="simple">
-<li><p>LoraConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>LoraConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>r</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>R</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>LoRA rank</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>8</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>lora_names</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Lora Names</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>A List of name for the LoRA adapters. If multiple names are provided, then multiple LoRA adapters will be created and trained simultaneously.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>default</p></td>
-</tr>
-<tr class="row-even"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>lora_path</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Lora Path</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Path to pre-trained LoRA weights</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>lora_alpha</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Lora Alpha</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>LoRA alpha</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>8.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>lora_dropout</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Lora Dropout</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>LoRA dropout</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>0.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>target_modules</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Target Modules</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>LoRA target modules, can be a list of strings or ‘all-linear’</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>array</em></p></td>
-</tr>
-<tr class="row-even"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>primary_adapter</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Primary Adapter</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>The primary adapter name to be used for inference and evaluation when multiple adapters are trained simultaneously. If not set, the first adapter in <cite>lora_names</cite> will be used as the primary adapter.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>use_rslora</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Use Rslora</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>When set to True, uses [Rank-Stabilized LoRA](<a class="reference external" href="https://huggingface.co/papers/2312.03732">https://huggingface.co/papers/2312.03732</a>) which sets the adapter scaling factor to <cite>lora_alpha/math.sqrt(r)</cite>, since it was proven to work better. Otherwise, it will use the original default value of <cite>lora_alpha/r</cite>.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>modules_to_save</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Modules To Save</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>alpha_pattern</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Alpha Pattern</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>r_pattern</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>R Pattern</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>init_lora_weights</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Init Lora Weights</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>How to initialize the weights of the adapter layers.Passing True (default) results in the default initialization from the reference implementation from Microsoft, with the LoRA B weight being set to 0. This means that without further training, the LoRA adapter will be a no-op.Setting the initialization to False leads to random initialization of LoRA A and B, meaning that LoRA is not a no-op before training; this setting is intended for debugging purposes.Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass ‘loftq’ to use LoftQ initialization. Passing ‘eva’ results in a data-driven initialization of Explained Variance Adaptation.EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass ‘olora’ to use OLoRA initialization. Passing ‘pissa’ results in the initialization of <a class="reference external" href="https://huggingface.co/papers/2404.02948">https://huggingface.co/papers/2404.02948</a></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>enum</p></td>
-<td colspan="3"><p>gaussian, eva, olora, pissa, pissa_niter_[number of iters]</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="32"><ul class="simple">
-<li><p>MultiTurnRolloutConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>MultiTurnRolloutConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to enable multi-turn rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_tools</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Tools</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to enable tools in multi-turn rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_thinking</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Thinking</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to enable thinking in multi-turn rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>custom_chat_template_path</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Custom Chat Template Path</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>The path to the custom chat template in chat.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>max_assistant_turns</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Max Assistant Turns</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Max assistant turn count for multi-turn rollout.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>5</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>add_generation_prompt</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Add Generation Prompt</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to add generation prompt in multi-turn rollout.</p></td>
+<tr class="row-even"><td colspan="5"><p>Whether to reset the optimizer state when the reference model is reset.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>boolean</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>continue_final_message</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Continue Final Message</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to continue the final message in multi-turn rollout.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="15"><ul class="simple">
-<li><p>OverlongRewardConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>OverlongRewardConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_overlong_penalty</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Overlong Penalty</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>buffer_length</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Buffer Length</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>4096</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>penalty_factor</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Penalty Factor</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Penalty factor for overlong penalty. The penalty increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="47"><ul class="simple">
-<li><p>ParallelismConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>ParallelismConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_init_replicas</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>N Init Replicas</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of initial replicas to be created</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>tp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Tp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Tensor parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>cp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Cp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Context parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>ep_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Ep Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Expert parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_shard_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dp Shard Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Data Parallelism size in sharded mode</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_dynamic_shape</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Dynamic Shape</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism dynamic shape</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_micro_batch_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_replicate_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dp Replicate Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_schedule</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Schedule</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>Interleaved1F1B</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_layers_per_stage</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="70"><ul class="simple">
-<li><p>PolicyConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>PolicyConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td><ul class="simple">
-<li><p>parallelism</p></li>
-</ul>
-</td>
-<td colspan="5"><p><span class="xref std std-ref">#/$defs/ParallelismConfig</span></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
-<li><p>diffusers</p></li>
-</ul>
-</td>
-<td rowspan="2"><p>anyOf</p></td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/DiffusersConfig</span></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>is_diffusers</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Is Diffusers</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether this model is diffusers or not</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>model_name_or_path</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Model Name Or Path</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>The model name or path, compatible with huggingface model name or local path</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>Qwen/Qwen2.5-VL-7B-Instruct</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>model_safetensor_path</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Model Safetensor Path</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>The safetensor path</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>model_revision</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Model Revision</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>The revision of the model to use</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>model_max_length</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Model Max Length</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>The maximum length for training, longer than this will be ignored for training stability</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>4096</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>model_gradient_checkpointing</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Model Gradient Checkpointing</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use gradient checkpointing</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>lora</p></li>
-</ul>
-</td>
-<td colspan="5"><p>LoRA configuration</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/LoraConfig</span></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>trainable_map</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Trainable Map</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Mapping of name -&gt; bool. Keys can either be: - exact parameter names (from model.named_parameters()) - exact module paths (from model.named_modules())</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>freeze_pattern</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Freeze Pattern</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pattern-based configuration to freeze parts of the model. A list of regex patterns that match against parameter names; matched parameters will be frozen (requires_grad=False). Example: freeze_pattern = [‘^visual..*’] freezes all visual components; freeze_pattern = [‘^model.layers.[0-9]+.’] freezes layers 0-9.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>trainable_pattern</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Trainable Pattern</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pattern-based configuration to train parts of the model. A list of regex patterns that match against parameter names; matched parameters will be set to require_grad=True otherwise require_grad=False. Example: trainable_pattern = [‘^visual..*’] trains all visual components; trainable_pattern = [‘^model.layers.[0-9]+.’] trains layers 0-9.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_liger_kernel</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Liger Kernel</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use liger kernel.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_liger_cross_entropy</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Liger Cross Entropy</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use liger cross entropy. Only valid for SFT now.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_liger_fused_cross_entropy</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Liger Fused Cross Entropy</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use liger fused cross entropy. Only valid for SFT now.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>aux_loss_coeff</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Aux Loss Coeff</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>0.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="13"><ul class="simple">
-<li><p>ProfilerConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>ProfilerConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_profiler</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Profiler</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Enable profiler for training</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_nsys</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Nsys</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Enable nsys for training</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><ul class="simple">
-<li><p>sub_profiler_config</p></li>
-</ul>
-</td>
-<td colspan="5"><p>Sub profiler config</p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="23"><ul class="simple">
-<li><p>RemoteRewardConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>RemoteRewardConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>scale</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Scale</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Scale of the total reward result.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>reward_fns</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Reward Fns</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>List of reward functions for remote reward calculation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>array</em></p></td>
-</tr>
-<tr class="row-even"><td><p>items</p></td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/RewardFunctionConfig</span></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>reward_clip_min</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Reward Clip Min</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Clip minimum of the total reward result.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>-5.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>reward_clip_max</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Reward Clip Max</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Clip maximum of the total reward result.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>5.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>batch_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Batch Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Max number of completions per remote reward request. Payloads are accumulated until their total completions reach this limit. For example, with batch_size=48: training (24 completions/payload) sends 2 payloads per request; validation (1 completion/payload) sends 48 payloads per request.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="23"><ul class="simple">
-<li><p>RewardFunctionConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>RewardFunctionConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
-<li><p><strong>name</strong></p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Name</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Name of the reward function.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>weight</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Weight</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Weight of the reward function.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>score_key</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Score Key</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Score key of the reward function. If not specified, the name will be used as the score key. You can use ‘+’ to add multiple score keys together, which will be added together as the final score. For example, ‘vq_reward+mq_reward’.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>clip_min</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Clip Min</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Clip minimum of the reward function.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>-5.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>clip_max</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Clip Max</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Clip maximum of the reward function.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>5.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="7"><ul class="simple">
-<li><p>RolloutAsyncConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>RolloutAsyncConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>max_concurrent_requests</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Max Concurrent Requests</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Maximum number of concurrent requests for rollout engine.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>10</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="67"><ul class="simple">
-<li><p>RolloutConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>RolloutConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td><ul class="simple">
-<li><p>parallelism</p></li>
-</ul>
-</td>
-<td colspan="5"><p><span class="xref std std-ref">#/$defs/RolloutParallelismConfig</span></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enforce_eager</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enforce Eager</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to enable eager execution for vLLM.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>include_stop_str_in_output</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Include Stop Str In Output</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to include stop string in output.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>gpu_memory_utilization</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Gpu Memory Utilization</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>GPU memory utilization factor for rollout backend.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>0.8</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_chunked_prefill</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Chunked Prefill</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to enable chunked prefill for vLLM.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>max_response_length</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Max Response Length</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Max output length of rollout generation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2048</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_generation</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>N Generation</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>n parameter same like what in OpenAI chat API.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>16</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_generation_to_batch</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>N Generation To Batch</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to treat n_generation as batch dimension in rollout generation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>n_generation_mini_batch</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>N Generation Mini Batch</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>The mini-batch size for n_generation, mainly used for diffusion rl to avoid cuda out-of-memory.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>batch_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Batch Size</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Batch size for rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>quantization</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Quantization</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Quantization in vllm rollout generation.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>none</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>seed</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Seed</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>random seed for rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td><ul class="simple">
-<li><p>sampling_config</p></li>
-</ul>
-</td>
-<td colspan="5"><p><span class="xref std std-ref">#/$defs/SamplingConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>vllm_use_flashinfer</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Vllm Use Flashinfer</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Use flashinfer for vllm rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>backend</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Backend</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Backend for rollout. Currently support <cite>vllm</cite>, <cite>vllm_async</cite> and <cite>trtllm</cite>, and other custom backends.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>vllm</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><ul class="simple">
-<li><p>multi_turn_config</p></li>
-</ul>
-</td>
-<td colspan="5"><p>Configuration for multi-turn rollout.</p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>mode</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Mode</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Rollout mode, could be ‘sync’ or ‘async’.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>sync</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><ul class="simple">
-<li><p>async_config</p></li>
-</ul>
-</td>
-<td colspan="5"><p>Configuration for async rollout.</p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/RolloutAsyncConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="47"><ul class="simple">
-<li><p>RolloutParallelismConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>RolloutParallelismConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_init_replicas</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>N Init Replicas</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of initial replicas to be created</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>tp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Tp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Tensor parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>cp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Cp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Context parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>ep_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Ep Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Expert parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_shard_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dp Shard Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Data Parallelism size in sharded mode</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_dynamic_shape</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Dynamic Shape</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism dynamic shape</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_micro_batch_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_replicate_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dp Replicate Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_schedule</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Schedule</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>Interleaved1F1B</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_layers_per_stage</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="87"><ul class="simple">
-<li><p>SFTDataConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>SFTDataConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
-<li><p><strong>type</strong></p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Type</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>const</p></td>
-<td colspan="4"><p>sft</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>trainer_type</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Trainer Type</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Type of the trainer for SFT.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>sft</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
-<li><p>dataset</p></li>
-</ul>
-</td>
-<td colspan="5"><p>Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.</p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>mini_batch</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Mini Batch</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>mini-batch size for training.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dataloader_shuffle</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Shuffle</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dataloader_seed</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Seed</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>random seed for dataloader shuffling</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>dataloader_batch_size</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Batch Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Batch size for each iteration of the dataloader for when fetch data from controller. This is only the setting of the dataloader iterator on the controller side.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_dataset_cache</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Enable Dataset Cache</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>dataloader_num_workers</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Num Workers</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Number of subprocess to use for data loading</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>dataloader_prefetch_factor</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Prefetch Factor</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Number of batches loaded in advance by each worker.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dataloader_drop_last</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Dataloader Drop Last</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to drop the last batch of the dataloader if it is not complete.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>data_dispatch_as_rank_in_mesh</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Data Dispatch As Rank In Mesh</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>conversation_column_name</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Conversation Column Name</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Column name for formated conversation json</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>conversations</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>system_prompt</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>System Prompt</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>System prompt for the model, which will be prepended to the prompt</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>balance_dp_token</p></li>
@@ -3769,15 +1924,15 @@
 <td colspan="4"><p><em>boolean</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
+<td colspan="4"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_dp_load_balancing</p></li>
+<li><p>use_decoupled_loss</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Enable Dp Load Balancing</em></p></td>
+<td colspan="5"><p><em>Use Decoupled Loss</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Enable load-balanced dynamic batching to balance tokens across DP ranks.</p></td>
+<tr class="row-even"><td colspan="5"><p>Whether to use decoupled loss. A decoupled loss separates the optimization of the behavior policy and the target policy, which can help to reduce the variance of the gradient estimate.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>boolean</em></p></td>
@@ -3785,27 +1940,113 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>load_balanced_pool_size</p></li>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>behav_imp_weight_cap</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Load Balanced Pool Size</em></p></td>
+<td colspan="5"><p><em>Behav Imp Weight Cap</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Size of the sample pool maintained by each DP rank for load-balanced batching.</p></td>
+<tr class="row-even"><td colspan="5"><p>Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>rollout_as_token_ids</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Rollout As Token Ids</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>collect_rollout_logprobs</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Collect Rollout Logprobs</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>use_rollout_logprobs_for_loss</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Use Rollout Logprobs For Loss</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use collected logprobs from rollouts for loss calculation. This is an alternative to calculating logprobs during training as old logprobs for importance sampling.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="30"><ul class="simple">
+<li><p>LoggingConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>LoggingConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>logger</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Logger</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>List of loggers to use, e.g., [‘console’, ‘wandb’]</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>array</em></p></td>
+</tr>
+<tr class="row-even"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>log_interval</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Log Interval</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Log interval (in steps) for loss averaging.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>32</p></td>
+<td colspan="4"><p>100</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>load_balanced_max_tokens_for_batch</p></li>
+<li><p>multi_modal_log_interval</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Load Balanced Max Tokens For Batch</em></p></td>
+<td colspan="5"><p><em>Multi Modal Log Interval</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Maximum tokens per batch for load-balanced batching.</p></td>
+<tr class="row-even"><td colspan="5"><p>Log interval (in steps) for multi-modal logging such as images and videos.</p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>None</p></td>
@@ -3818,52 +2059,60 @@
 <td colspan="3"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>load_balanced_batching_strategy</p></li>
+<li><p>project_name</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Load Balanced Batching Strategy</em></p></td>
+<td colspan="5"><p><em>Project Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Batching strategy: ‘prefer_first’ (FIFO) or ‘prefer_closest’ (minimize padding).</p></td>
+<tr class="row-odd"><td colspan="5"><p>Wandb project name for logging. If set, the training will be logged to this project.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>string</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>prefer_closest</p></td>
+<td colspan="4"><p>cosmos_rl</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>load_balanced_batches_per_optimizer_step</p></li>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>group_name</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Load Balanced Batches Per Optimizer Step</em></p></td>
+<td colspan="5"><p><em>Group Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Number of batches to accumulate per optimizer step for gradient accumulation. Each DataLoader iteration will return this many batches, which are processed before calling optimizer.step(). The total number of batches processed = max_num_steps * load_balanced_batches_per_optimizer_step.</p></td>
+<tr class="row-odd"><td colspan="5"><p>Wandb group name for logging. If set, the training will be logged to this group.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>dataloader_broadcast</p></li>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>experiment_name</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Dataloader Broadcast</em></p></td>
+<td colspan="5"><p><em>Experiment Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>Whether to broadcast the dataloader batch from rank 0 to other ranks in pp/cp/tp mesh. If True, the dataloader batch will be generated by rank 0 and broadcasted to other ranks, which can ensure the consistency of the dataloader batch across ranks. This is only used when parallelism is enabled.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
+<tr class="row-even"><td colspan="5"><p>A short display name for this run. If not set, will use the <cite>output_dir</cite> as the experiment name.</p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
+<td colspan="4"><p>None</p></td>
 </tr>
-<tr class="row-even"><td rowspan="31"><ul class="simple">
-<li><p>SampleConfig</p></li>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="64"><ul class="simple">
+<li><p>LoraConfig</p></li>
 </ul>
 </td>
-<td colspan="6"><p><em>SampleConfig</em></p></td>
+<td colspan="6"><p><em>LoraConfig</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="5"><p><em>object</em></p></td>
@@ -3871,350 +2120,130 @@
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>num_steps</p></li>
+<li><p>r</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Num Steps</em></p></td>
+<td colspan="5"><p><em>R</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Number of sampler inference steps for training</p></td>
+<tr class="row-even"><td colspan="5"><p>LoRA rank</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>40</p></td>
+<td colspan="4"><p>8</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>eval_num_steps</p></li>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>lora_names</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Eval Num Steps</em></p></td>
+<td colspan="5"><p><em>Lora Names</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Number of sampler inference steps for evaluation</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>40</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>guidance_scale</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Guidance Scale</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Classifier-free guidance weight</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>4.5</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>global_std</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Global Std</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use all samples in a batch to compute std</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>noise_level</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Noise Level</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Noise level for sampling</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>deterministic_sampling</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Deterministic Sampling</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to use deterministic sampling</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>solver</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Solver</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Sampler solver to be used</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>dpm2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="23"><ul class="simple">
-<li><p>SamplingConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>SamplingConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>temperature</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Temperature</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Temperature for sampling.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>top_p</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Top P</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Top-p for sampling.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>top_k</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Top K</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Top-k for sampling.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>-1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>repetition_penalty</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Repetition Penalty</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Repetition penalty for sampling.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>1.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>use_flashinfer</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Use Flashinfer</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>Use flashinfer for sampling.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="39"><ul class="simple">
-<li><p>SubProfilerConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>SubProfilerConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>do_profile</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Do Profile</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to profile, only used in runtime.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>active_steps</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Active Steps</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of active steps</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>warmup_steps</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Warmup Steps</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of warmup steps</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>wait_steps</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Wait Steps</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Number of wait steps</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>rank_filter</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Rank Filter</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Rank filter</p></td>
+<tr class="row-even"><td colspan="5"><p>A List of name for the LoRA adapters. If multiple names are provided, then multiple LoRA adapters will be created and trained simultaneously.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>array</em></p></td>
 </tr>
-<tr class="row-even"><td><p>items</p></td>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>default</p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
 <td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
+<td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>record_shape</p></li>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>lora_path</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Record Shape</em></p></td>
+<td colspan="5"><p><em>Lora Path</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="5"><p>Whether to record shape</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
+<tr class="row-odd"><td colspan="5"><p>Path to pre-trained LoRA weights</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
+<td colspan="4"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>profile_memory</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>Profile Memory</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to profile memory</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>with_stack</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>With Stack</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to profile stack</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>with_modules</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>With Modules</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>Whether to profile modules</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="15"><ul class="simple">
-<li><p>TokenizerConfig</p></li>
-</ul>
-</td>
-<td colspan="6"><p><em>TokenizerConfig</em></p></td>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
-<td colspan="5"><p><em>object</em></p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="6"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
-<li><p>chunk_duration</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>lora_alpha</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Chunk Duration</em></p></td>
+<td colspan="5"><p><em>Lora Alpha</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>LoRA alpha</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>integer</em></p></td>
+<td colspan="4"><p><em>number</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="4"><p>81</p></td>
+<td colspan="4"><p>8.0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="3"><ul class="simple">
-<li><p>load_mean_std</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>lora_dropout</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Load Mean Std</em></p></td>
+<td colspan="5"><p><em>Lora Dropout</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>LoRA dropout</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>0.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>target_modules</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Target Modules</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>LoRA target modules, can be a list of strings or ‘all-linear’</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>primary_adapter</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Primary Adapter</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>The primary adapter name to be used for inference and evaluation when multiple adapters are trained simultaneously. If not set, the first adapter in <cite>lora_names</cite> will be used as the primary adapter.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>use_rslora</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Use Rslora</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>When set to True, uses [Rank-Stabilized LoRA](<a class="reference external" href="https://huggingface.co/papers/2312.03732">https://huggingface.co/papers/2312.03732</a>) which sets the adapter scaling factor to <cite>lora_alpha/math.sqrt(r)</cite>, since it was proven to work better. Otherwise, it will use the original default value of <cite>lora_alpha/r</cite>.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>boolean</em></p></td>
@@ -4222,11 +2251,111 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
-<li><p>compile_encode</p></li>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>modules_to_save</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Compile Encode</em></p></td>
+<td colspan="5"><p><em>Modules To Save</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>array</em></p></td>
+</tr>
+<tr class="row-even"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>alpha_pattern</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Alpha Pattern</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>r_pattern</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>R Pattern</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>init_lora_weights</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Init Lora Weights</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>How to initialize the weights of the adapter layers.Passing True (default) results in the default initialization from the reference implementation from Microsoft, with the LoRA B weight being set to 0. This means that without further training, the LoRA adapter will be a no-op.Setting the initialization to False leads to random initialization of LoRA A and B, meaning that LoRA is not a no-op before training; this setting is intended for debugging purposes.Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass ‘loftq’ to use LoftQ initialization. Passing ‘eva’ results in a data-driven initialization of Explained Variance Adaptation.EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass ‘olora’ to use OLoRA initialization. Passing ‘pissa’ results in the initialization of <a class="reference external" href="https://huggingface.co/papers/2404.02948">https://huggingface.co/papers/2404.02948</a></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>enum</p></td>
+<td colspan="3"><p>gaussian, eva, olora, pissa, pissa_niter_[number of iters]</p></td>
+</tr>
+<tr class="row-even"><td rowspan="32"><ul class="simple">
+<li><p>MultiTurnRolloutConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>MultiTurnRolloutConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Whether to enable multi-turn rollout.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>boolean</em></p></td>
@@ -4234,11 +2363,897 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="3"><ul class="simple">
-<li><p>temporal_window</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_tools</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>Temporal Window</em></p></td>
+<td colspan="5"><p><em>Enable Tools</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Whether to enable tools in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_thinking</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Thinking</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Whether to enable thinking in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>custom_chat_template_path</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Custom Chat Template Path</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>The path to the custom chat template in chat.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>max_assistant_turns</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Max Assistant Turns</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Max assistant turn count for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>5</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>add_generation_prompt</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Add Generation Prompt</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to add generation prompt in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>continue_final_message</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Continue Final Message</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to continue the final message in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="15"><ul class="simple">
+<li><p>OverlongRewardConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>OverlongRewardConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_overlong_penalty</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Overlong Penalty</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>buffer_length</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Buffer Length</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>4096</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>penalty_factor</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Penalty Factor</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Penalty factor for overlong penalty. The penalty increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="47"><ul class="simple">
+<li><p>ParallelismConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>ParallelismConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>n_init_replicas</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>N Init Replicas</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of initial replicas to be created</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>tp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Tp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Tensor parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>cp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Cp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Context parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>ep_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Ep Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Expert parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dp_shard_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dp Shard Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Data Parallelism size in sharded mode</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_dynamic_shape</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Dynamic Shape</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism dynamic shape</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_micro_batch_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dp_replicate_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dp Replicate Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_schedule</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Schedule</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>Interleaved1F1B</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_layers_per_stage</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="70"><ul class="simple">
+<li><p>PolicyConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>PolicyConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td><ul class="simple">
+<li><p>parallelism</p></li>
+</ul>
+</td>
+<td colspan="5"><p><span class="xref std std-ref">#/$defs/ParallelismConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><ul class="simple">
+<li><p>diffusers</p></li>
+</ul>
+</td>
+<td rowspan="2"><p>anyOf</p></td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/DiffusersConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>is_diffusers</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Is Diffusers</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether this model is diffusers or not</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>model_name_or_path</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Model Name Or Path</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The model name or path, compatible with huggingface model name or local path</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>Qwen/Qwen2.5-VL-7B-Instruct</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>model_safetensor_path</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Model Safetensor Path</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The safetensor path</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>model_revision</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Model Revision</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>The revision of the model to use</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>model_max_length</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Model Max Length</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The maximum length for training, longer than this will be ignored for training stability</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>4096</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>model_gradient_checkpointing</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Model Gradient Checkpointing</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use gradient checkpointing</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>lora</p></li>
+</ul>
+</td>
+<td colspan="5"><p>LoRA configuration</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/LoraConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>trainable_map</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Trainable Map</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Mapping of name -&gt; bool. Keys can either be: - exact parameter names (from model.named_parameters()) - exact module paths (from model.named_modules())</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>freeze_pattern</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Freeze Pattern</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pattern-based configuration to freeze parts of the model. A list of regex patterns that match against parameter names; matched parameters will be frozen (requires_grad=False). Example: freeze_pattern = [‘^visual..*’] freezes all visual components; freeze_pattern = [‘^model.layers.[0-9]+.’] freezes layers 0-9.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>array</em></p></td>
+</tr>
+<tr class="row-even"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>trainable_pattern</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Trainable Pattern</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pattern-based configuration to train parts of the model. A list of regex patterns that match against parameter names; matched parameters will be set to require_grad=True otherwise require_grad=False. Example: trainable_pattern = [‘^visual..*’] trains all visual components; trainable_pattern = [‘^model.layers.[0-9]+.’] trains layers 0-9.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>array</em></p></td>
+</tr>
+<tr class="row-even"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_liger_kernel</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Liger Kernel</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use liger kernel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_liger_cross_entropy</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Liger Cross Entropy</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use liger cross entropy. Only valid for SFT now.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_liger_fused_cross_entropy</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Liger Fused Cross Entropy</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use liger fused cross entropy. Only valid for SFT now.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>aux_loss_coeff</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Aux Loss Coeff</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Coefficient for auxiliary loss. If set to a positive value, the auxiliary loss will be added to the main loss.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>0.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="13"><ul class="simple">
+<li><p>ProfilerConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>ProfilerConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_profiler</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Profiler</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Enable profiler for training</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_nsys</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Nsys</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Enable nsys for training</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<li><p>sub_profiler_config</p></li>
+</ul>
+</td>
+<td colspan="5"><p>Sub profiler config</p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="23"><ul class="simple">
+<li><p>RemoteRewardConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RemoteRewardConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>scale</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Scale</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Scale of the total reward result.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>reward_fns</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Reward Fns</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>List of reward functions for remote reward calculation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/RewardFunctionConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>reward_clip_min</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Reward Clip Min</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Clip minimum of the total reward result.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>-5.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>reward_clip_max</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Reward Clip Max</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Clip maximum of the total reward result.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>5.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>batch_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Batch Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Max number of completions per remote reward request. Payloads are accumulated until their total completions reach this limit. For example, with batch_size=48: training (24 completions/payload) sends 2 payloads per request; validation (1 completion/payload) sends 48 payloads per request.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="23"><ul class="simple">
+<li><p>RewardFunctionConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RewardFunctionConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<li><p><strong>name</strong></p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Name</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Name of the reward function.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>weight</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Weight</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Weight of the reward function.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>score_key</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Score Key</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Score key of the reward function. If not specified, the name will be used as the score key. You can use ‘+’ to add multiple score keys together, which will be added together as the final score. For example, ‘vq_reward+mq_reward’.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>clip_min</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Clip Min</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Clip minimum of the reward function.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>-5.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>clip_max</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Clip Max</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Clip maximum of the reward function.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>5.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="7"><ul class="simple">
+<li><p>RolloutAsyncConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RolloutAsyncConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>max_concurrent_requests</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Max Concurrent Requests</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Maximum number of concurrent requests for rollout engine.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>10</p></td>
+</tr>
+<tr class="row-even"><td rowspan="67"><ul class="simple">
+<li><p>RolloutConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RolloutConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td><ul class="simple">
+<li><p>parallelism</p></li>
+</ul>
+</td>
+<td colspan="5"><p><span class="xref std std-ref">#/$defs/RolloutParallelismConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enforce_eager</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enforce Eager</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to enable eager execution for vLLM.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>include_stop_str_in_output</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Include Stop Str In Output</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to include stop string in output.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>gpu_memory_utilization</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Gpu Memory Utilization</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>GPU memory utilization factor for rollout backend.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>0.8</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_chunked_prefill</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Chunked Prefill</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to enable chunked prefill for vLLM.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>max_response_length</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Max Response Length</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Max output length of rollout generation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2048</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>n_generation</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>N Generation</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>n parameter same like what in OpenAI chat API.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>integer</em></p></td>
@@ -4246,202 +3261,1208 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="259"><ul class="simple">
-<li><p>TrainingConfig</p></li>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>n_generation_to_batch</p></li>
 </ul>
 </td>
-<td colspan="6"><p><em>TrainingConfig</em></p></td>
+<td colspan="5"><p><em>N Generation To Batch</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to treat n_generation as batch dimension in rollout generation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>n_generation_mini_batch</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>N Generation Mini Batch</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>The mini-batch size for n_generation, mainly used for diffusion rl to avoid cuda out-of-memory.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>batch_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Batch Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Batch size for rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>quantization</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Quantization</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Quantization in vllm rollout generation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>none</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>seed</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Seed</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>random seed for rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td><ul class="simple">
+<li><p>sampling_config</p></li>
+</ul>
+</td>
+<td colspan="5"><p><span class="xref std std-ref">#/$defs/SamplingConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>vllm_use_flashinfer</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Vllm Use Flashinfer</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Use flashinfer for vllm rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>backend</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Backend</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Backend for rollout. Currently support <cite>vllm</cite>, <cite>vllm_async</cite> and <cite>trtllm</cite>, and other custom backends.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>vllm</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<li><p>multi_turn_config</p></li>
+</ul>
+</td>
+<td colspan="5"><p>Configuration for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>mode</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Mode</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Rollout mode, could be ‘sync’ or ‘async’.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>sync</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<li><p>async_config</p></li>
+</ul>
+</td>
+<td colspan="5"><p>Configuration for async rollout.</p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p><span class="xref std std-ref">#/$defs/RolloutAsyncConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="47"><ul class="simple">
+<li><p>RolloutParallelismConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>RolloutParallelismConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>n_init_replicas</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>N Init Replicas</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of initial replicas to be created</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>tp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Tp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Tensor parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>cp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Cp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Context parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>ep_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Ep Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Expert parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dp_shard_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dp Shard Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Data Parallelism size in sharded mode</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism size</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_dynamic_shape</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Dynamic Shape</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism dynamic shape</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_micro_batch_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Micro Batch Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism micro batch size. n_microbatches = train_batch_per_replica / pp_micro_batch_size. Constraints: train_batch_per_replica % pp_micro_batch_size == 0, and n_microbatches % pp_size == 0 (for single-stage schedules). Smaller values reduce memory but increase pipeline bubbles.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dp_replicate_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dp Replicate Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_schedule</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Schedule</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pipeline parallelism schedule. Single-stage (1 stage per rank): ‘1F1B’, ‘GPipe’. Multi-stage (&gt;=2 virtual stages per rank): ‘Interleaved1F1B’. 1F1B releases activations earlier than GPipe, reducing peak memory. Multi-stage schedules reduce pipeline bubbles but use more memory.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>Interleaved1F1B</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>pp_layers_per_stage</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Pp Layers Per Stage</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of effective layers per PP stage. Layers are weighted (MoE=1.0, dense=0.5) to balance compute across stages. Only used for multi-stage schedules (Interleaved1F1B, etc.); ignored for single-stage schedules (GPipe, 1F1B) where it is computed automatically. Lower values = more virtual stages per rank = less pipeline bubbles but more memory.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="87"><ul class="simple">
+<li><p>SFTDataConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>SFTDataConfig</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="5"><p><em>object</em></p></td>
 </tr>
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="71"><ul class="simple">
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<li><p><strong>type</strong></p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Type</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>const</p></td>
+<td colspan="4"><p>sft</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>trainer_type</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Trainer Type</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Type of the trainer for SFT.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>sft</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><ul class="simple">
+<li><p>dataset</p></li>
+</ul>
+</td>
+<td colspan="5"><p>Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.</p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>mini_batch</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Mini Batch</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>mini-batch size for training.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dataloader_shuffle</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Shuffle</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dataloader_seed</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Seed</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>random seed for dataloader shuffling</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>dataloader_batch_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Batch Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Batch size for each iteration of the dataloader for when fetch data from controller. This is only the setting of the dataloader iterator on the controller side.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_dataset_cache</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Dataset Cache</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>dataloader_num_workers</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Num Workers</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Number of subprocess to use for data loading</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>dataloader_prefetch_factor</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Prefetch Factor</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Number of batches loaded in advance by each worker.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>dataloader_drop_last</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Drop Last</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to drop the last batch of the dataloader if it is not complete.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>data_dispatch_as_rank_in_mesh</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Data Dispatch As Rank In Mesh</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>conversation_column_name</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Conversation Column Name</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Column name for formated conversation json</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>conversations</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>system_prompt</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>System Prompt</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>System prompt for the model, which will be prepended to the prompt</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>balance_dp_token</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Balance Dp Token</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to balance the number of tokens in each data parallel replica when calculating the loss.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_dp_load_balancing</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Enable Dp Load Balancing</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Enable load-balanced dynamic batching to balance tokens across DP ranks.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>load_balanced_pool_size</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Load Balanced Pool Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Size of the sample pool maintained by each DP rank for load-balanced batching.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>32</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>load_balanced_max_tokens_for_batch</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Load Balanced Max Tokens For Batch</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Maximum tokens per batch for load-balanced batching.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>load_balanced_batching_strategy</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Load Balanced Batching Strategy</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Batching strategy: ‘prefer_first’ (FIFO) or ‘prefer_closest’ (minimize padding).</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>prefer_closest</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>load_balanced_batches_per_optimizer_step</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Load Balanced Batches Per Optimizer Step</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Number of batches to accumulate per optimizer step for gradient accumulation. Each DataLoader iteration will return this many batches, which are processed before calling optimizer.step(). The total number of batches processed = max_num_steps * load_balanced_batches_per_optimizer_step.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>dataloader_broadcast</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Dataloader Broadcast</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Whether to broadcast the dataloader batch from rank 0 to other ranks in pp/cp/tp mesh. If True, the dataloader batch will be generated by rank 0 and broadcasted to other ranks, which can ensure the consistency of the dataloader batch across ranks. This is only used when parallelism is enabled.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="31"><ul class="simple">
+<li><p>SampleConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>SampleConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>num_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Num Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of sampler inference steps for training</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>40</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>eval_num_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Eval Num Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of sampler inference steps for evaluation</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>40</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>guidance_scale</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Guidance Scale</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Classifier-free guidance weight</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>4.5</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>global_std</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Global Std</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use all samples in a batch to compute std</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>noise_level</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Noise Level</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Noise level for sampling</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>deterministic_sampling</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Deterministic Sampling</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to use deterministic sampling</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>solver</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Solver</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Sampler solver to be used</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>dpm2</p></td>
+</tr>
+<tr class="row-even"><td rowspan="23"><ul class="simple">
+<li><p>SamplingConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>SamplingConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>temperature</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Temperature</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Temperature for sampling.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>top_p</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Top P</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Top-p for sampling.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>top_k</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Top K</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Top-k for sampling.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>-1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>repetition_penalty</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Repetition Penalty</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Repetition penalty for sampling.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>1.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>use_flashinfer</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Use Flashinfer</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Use flashinfer for sampling.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="39"><ul class="simple">
+<li><p>SubProfilerConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>SubProfilerConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>do_profile</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Do Profile</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to profile, only used in runtime.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>active_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Active Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of active steps</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>warmup_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Warmup Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of warmup steps</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>wait_steps</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Wait Steps</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Number of wait steps</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>rank_filter</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Rank Filter</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Rank filter</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>record_shape</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Record Shape</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to record shape</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>profile_memory</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Profile Memory</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to profile memory</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>with_stack</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>With Stack</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to profile stack</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>with_modules</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>With Modules</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Whether to profile modules</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="15"><ul class="simple">
+<li><p>TokenizerConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>TokenizerConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<li><p>chunk_duration</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Chunk Duration</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>81</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><ul class="simple">
+<li><p>load_mean_std</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Load Mean Std</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
+<li><p>compile_encode</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Compile Encode</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><ul class="simple">
+<li><p>temporal_window</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Temporal Window</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>16</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="260"><ul class="simple">
+<li><p>TrainingConfig</p></li>
+</ul>
+</td>
+<td colspan="6"><p><em>TrainingConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="5"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="72"><ul class="simple">
 <li><p>train_policy</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>Train Policy</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="68"><p>default</p></td>
+<tr class="row-odd"><td rowspan="69"><p>default</p></td>
 <td><p>type</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
-<tr class="row-odd"><td><p>trainer_type</p></td>
+<tr class="row-even"><td><p>trainer_type</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
-<tr class="row-even"><td><p>variant</p></td>
+<tr class="row-odd"><td><p>variant</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="6"><p>dataset</p></td>
+<tr class="row-even"><td rowspan="6"><p>dataset</p></td>
 <td><p>local_dir</p></td>
 <td colspan="2"></td>
 </tr>
-<tr class="row-even"><td><p>name</p></td>
+<tr class="row-odd"><td><p>name</p></td>
 <td colspan="2"></td>
 </tr>
-<tr class="row-odd"><td><p>revision</p></td>
+<tr class="row-even"><td><p>revision</p></td>
 <td colspan="2"></td>
 </tr>
-<tr class="row-even"><td><p>split</p></td>
+<tr class="row-odd"><td><p>split</p></td>
 <td colspan="2"></td>
 </tr>
-<tr class="row-odd"><td><p>subset</p></td>
+<tr class="row-even"><td><p>subset</p></td>
 <td colspan="2"></td>
 </tr>
-<tr class="row-even"><td><p>test_size</p></td>
+<tr class="row-odd"><td><p>test_size</p></td>
 <td colspan="2"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p>dataloader_shuffle</p></td>
+<tr class="row-even"><td><p>dataloader_shuffle</p></td>
 <td colspan="3"><p>True</p></td>
 </tr>
-<tr class="row-even"><td><p>dataloader_seed</p></td>
+<tr class="row-odd"><td><p>dataloader_seed</p></td>
 <td colspan="3"><p>0</p></td>
 </tr>
-<tr class="row-odd"><td><p>data_dispatch_as_rank_in_mesh</p></td>
+<tr class="row-even"><td><p>data_dispatch_as_rank_in_mesh</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td><p>enable_dataset_cache</p></td>
+<tr class="row-odd"><td><p>enable_dataset_cache</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td><p>dataloader_num_workers</p></td>
+<tr class="row-even"><td><p>dataloader_num_workers</p></td>
 <td colspan="3"><p>0</p></td>
 </tr>
-<tr class="row-even"><td><p>dataloader_prefetch_factor</p></td>
+<tr class="row-odd"><td><p>dataloader_prefetch_factor</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p>dataloader_batch_size</p></td>
+<tr class="row-even"><td><p>dataloader_batch_size</p></td>
 <td colspan="3"><p>1</p></td>
 </tr>
-<tr class="row-even"><td><p>prompt_column_name</p></td>
+<tr class="row-odd"><td><p>prompt_column_name</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-odd"><td><p>response_column_name</p></td>
+<tr class="row-even"><td><p>response_column_name</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-even"><td><p>reward_function</p></td>
+<tr class="row-odd"><td><p>reward_function</p></td>
 <td><p>single_choice</p></td>
 <td colspan="2"><p>1.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>use_remote_reward</p></td>
+<tr class="row-even"><td><p>use_remote_reward</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="9"><p>remote_reward</p></td>
+<tr class="row-odd"><td rowspan="9"><p>remote_reward</p></td>
 <td><p>batch_size</p></td>
 <td colspan="2"><p>1</p></td>
 </tr>
-<tr class="row-odd"><td><p>reward_clip_max</p></td>
+<tr class="row-even"><td><p>reward_clip_max</p></td>
 <td colspan="2"><p>5.0</p></td>
 </tr>
-<tr class="row-even"><td><p>reward_clip_min</p></td>
+<tr class="row-odd"><td><p>reward_clip_min</p></td>
 <td colspan="2"><p>-5.0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><p>reward_fns</p></td>
+<tr class="row-even"><td rowspan="5"><p>reward_fns</p></td>
 <td><p>clip_max</p></td>
 <td><p>5.0</p></td>
 </tr>
-<tr class="row-even"><td><p>clip_min</p></td>
+<tr class="row-odd"><td><p>clip_min</p></td>
 <td><p>-5.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>name</p></td>
+<tr class="row-even"><td><p>name</p></td>
 <td><p>dance_grpo</p></td>
 </tr>
-<tr class="row-even"><td><p>score_key</p></td>
+<tr class="row-odd"><td><p>score_key</p></td>
 <td><p>overall_reward</p></td>
 </tr>
-<tr class="row-odd"><td><p>weight</p></td>
+<tr class="row-even"><td><p>weight</p></td>
 <td><p>1.0</p></td>
 </tr>
-<tr class="row-even"><td><p>scale</p></td>
+<tr class="row-odd"><td><p>scale</p></td>
 <td colspan="2"><p>1.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>filter_reward_metric</p></td>
+<tr class="row-even"><td><p>filter_reward_metric</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-even"><td><p>bypass_reward</p></td>
+<tr class="row-odd"><td><p>bypass_reward</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td><p>group_reward_calculation</p></td>
+<tr class="row-even"><td><p>group_reward_calculation</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td><p>temperature</p></td>
+<tr class="row-odd"><td><p>temperature</p></td>
 <td colspan="3"><p>1.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>epsilon_low</p></td>
+<tr class="row-even"><td><p>epsilon_low</p></td>
 <td colspan="3"><p>0.2</p></td>
 </tr>
-<tr class="row-even"><td><p>epsilon_high</p></td>
+<tr class="row-odd"><td><p>epsilon_high</p></td>
 <td colspan="3"><p>0.2</p></td>
 </tr>
-<tr class="row-odd"><td><p>advantage_low</p></td>
+<tr class="row-even"><td><p>advantage_low</p></td>
 <td colspan="3"><p>-5.0</p></td>
 </tr>
-<tr class="row-even"><td><p>advantage_high</p></td>
+<tr class="row-odd"><td><p>advantage_high</p></td>
 <td colspan="3"><p>5.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>positive_nll_coef</p></td>
+<tr class="row-even"><td><p>positive_nll_coef</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p>lower_bound_ratio</p></td>
+<tr class="row-odd"><td><p>lower_bound_ratio</p></td>
 <td colspan="3"><p>3.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>loss_type</p></td>
+<tr class="row-even"><td><p>loss_type</p></td>
 <td colspan="3"><p>token-mean</p></td>
 </tr>
-<tr class="row-even"><td><p>unbiased_loss_max_tokens</p></td>
+<tr class="row-odd"><td><p>unbiased_loss_max_tokens</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p>unbiased_advantage</p></td>
+<tr class="row-even"><td><p>unbiased_advantage</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="3"><p>overlong_reward</p></td>
+<tr class="row-odd"><td rowspan="3"><p>overlong_reward</p></td>
 <td><p>buffer_length</p></td>
 <td colspan="2"><p>4096</p></td>
 </tr>
-<tr class="row-odd"><td><p>enable_overlong_penalty</p></td>
+<tr class="row-even"><td><p>enable_overlong_penalty</p></td>
 <td colspan="2"><p>False</p></td>
 </tr>
-<tr class="row-even"><td><p>penalty_factor</p></td>
+<tr class="row-odd"><td><p>penalty_factor</p></td>
 <td colspan="2"><p>1.0</p></td>
 </tr>
-<tr class="row-odd"><td><p>kl_beta</p></td>
+<tr class="row-even"><td><p>kl_beta</p></td>
 <td colspan="3"><p>0.0</p></td>
 </tr>
-<tr class="row-even"><td><p>unbiased_kl_estimate</p></td>
+<tr class="row-odd"><td><p>unbiased_kl_estimate</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td><p>off_policy_masking_delta</p></td>
+<tr class="row-even"><td><p>off_policy_masking_delta</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p>aipo_rho</p></td>
+<tr class="row-odd"><td><p>aipo_rho</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p>mu_iterations</p></td>
+<tr class="row-even"><td><p>mu_iterations</p></td>
 <td colspan="3"><p>1</p></td>
 </tr>
-<tr class="row-even"><td><p>mini_batch</p></td>
+<tr class="row-odd"><td><p>mini_batch</p></td>
 <td colspan="3"><p>2</p></td>
 </tr>
-<tr class="row-odd"><td><p>batch_size_per_optimize</p></td>
+<tr class="row-even"><td><p>batch_size_per_optimize</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p>max_token_len_per_mini_batch</p></td>
+<tr class="row-odd"><td><p>max_token_len_per_mini_batch</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p>entropy_coeff</p></td>
+<tr class="row-even"><td><p>entropy_coeff</p></td>
 <td colspan="3"><p>0.0</p></td>
 </tr>
-<tr class="row-even"><td><p>allowed_outdated_steps</p></td>
+<tr class="row-odd"><td><p>allowed_outdated_steps</p></td>
 <td colspan="3"><p>4</p></td>
 </tr>
-<tr class="row-odd"><td><p>on_policy</p></td>
+<tr class="row-even"><td><p>on_policy</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td><p>uncentralized_training</p></td>
+<tr class="row-odd"><td><p>uncentralized_training</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td><p>outdated_rollout_fetch_batch_size</p></td>
+<tr class="row-even"><td><p>outdated_rollout_fetch_batch_size</p></td>
 <td colspan="3"><p>0</p></td>
+</tr>
+<tr class="row-odd"><td><p>max_inflight_steps</p></td>
+<td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-even"><td><p>min_filter_prefix_tokens</p></td>
 <td colspan="3"><p>None</p></td>
