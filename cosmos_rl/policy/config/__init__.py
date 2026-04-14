@@ -1508,6 +1508,26 @@ class RolloutConfig(BaseModel):
         description="Configuration for async rollout.",
     )
 
+    async_r2r_sync: Literal["disabled", "generation", "inference"] = Field(
+        default="disabled",
+        description=(
+            "Async R2R weight sync mode.  'disabled' runs R2R synchronously on the "
+            "inference stream.  'generation' runs R2R on a background thread and syncs "
+            "the buffer to the live model before each rollout_generation() call.  "
+            "'inference' additionally syncs before each policy forward pass."
+        ),
+    )
+
+    broadcast_all_params: bool = Field(
+        default=False,
+        description=(
+            "When true, R2R broadcasts the full model state_dict (trainable + "
+            "non-trainable) instead of only the trainable subset.  Needed for "
+            "models with frozen components (e.g. vision encoders) that must be "
+            "synced across rollout replicas."
+        ),
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.parallelism, dict):
