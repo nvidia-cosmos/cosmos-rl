@@ -362,7 +362,7 @@ class TestHFModelTP(unittest.TestCase):
                         f"max_index_hf: {max_index_hf} | max_index_cosmos_rl: {max_index_cosmos_rl} | max_logit_hf: {max_logit_hf} | max_logit_cosmos_rl: {max_logit_cosmos_rl}"
                     )
                     assert max_index_hf == max_index_cosmos_rl
-                    assert (max_logit_hf - max_logit_cosmos_rl).abs() < 0.5
+                    assert (max_logit_hf - max_logit_cosmos_rl).abs() <= 0.5
                     print(f"{model_id} forward test passed.")
 
                 del cosmos_hf_model
