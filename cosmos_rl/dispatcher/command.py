@@ -302,10 +302,14 @@ class PolicyToRolloutUnicastCommand(Command):
         )
         redis_handler.publish_command(cmd.pack(), src_replica.name)
         redis_handler.publish_command(cmd.pack(), dst_replica.name)
-        dst_replica.weights_loaded_in_view_of_command = True
 
-        if cls._do_weight_sync_check_flag:
-            cls._do_weight_sync_check_flag = False
+        # if (
+        #     cls._do_weight_sync_check_flag
+        #     and dst_replica.weights_loaded_in_view_of_command
+        # ):
+        #     cls._do_weight_sync_check_flag = False
+
+        dst_replica.weights_loaded_in_view_of_command = True
 
     @classmethod
     def from_dict(cls, dict_v: Dict):
