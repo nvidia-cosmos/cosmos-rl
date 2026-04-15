@@ -25,7 +25,7 @@ from torch.utils.data import Dataset
 
 from queue import Queue, Empty as QueueEmpty
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Optional, Callable, Union, Tuple
+from typing import Dict, List, Optional, Callable, Union, Tuple
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -189,13 +189,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
         self.data_fetcher = None
 
-        self.p2r_collective_manager = P2RCollectiveManager(
-            replica_name=self.replica_name,
-            parallel_dims=self.parallel_dims,
-            config=self.config,
-            api_client=self.api_client,
-            role=self.role,
-        )
+        self.p2r_collective_managers: Dict[tuple[int, int], P2RCollectiveManager] = {}
 
         # initialize variable for async rollout.
         self._is_async_rollout = False
@@ -216,6 +210,32 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_reward_fns=kwargs.get("val_reward_fns"),
         )
         self.non_trainable_params_received = False
+
+    def _get_p2r_collective_manager(
+        self,
+        command: PolicyToRolloutUnicastCommand,
+        p_rank: int,
+        r_rank: int,
+    ) -> P2RCollectiveManager:
+        key = (
+            command.src_replica_name,
+            command.dst_replica_name,
+            p_rank,
+            r_rank,
+        )
+        if key not in self.p2r_collective_managers:
+            self.p2r_collective_managers[key] = P2RCollectiveManager(
+                replica_name=self.replica_name,
+                parallel_dims=self.parallel_dims,
+                config=self.config,
+                api_client=self.api_client,
+                role=self.role,
+                command=command,
+                policy_rank=p_rank,
+                rollout_rank=r_rank,
+                stream=self.inference_stream,
+            )
+        return self.p2r_collective_managers[key]
 
     def setup(
         self,
@@ -457,9 +477,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     def recv_weight_shard(
         self,
+        command: PolicyToRolloutUnicastCommand,
         global_rank_of_rollout: int,
         insts_group: WeightSyncInstructionsGroup,
-        mesh_key: str,
         trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
@@ -583,7 +603,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 logger.debug(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {underlying_tensor_view.shape} of {target_tensor.shape} with dtype {recv_tensor.dtype}."
                 )
-                self.p2r_collective_manager.recv(mesh_key, recv_tensor, p_rank)
+                self._get_p2r_collective_manager(command, p_rank, r_rank).recv(recv_tensor)
 
                 # inplace copy
                 if not inplace:
@@ -1038,16 +1058,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         WeightSyncThread can call this directly with its own stream,
         without needing to swap ``inference_stream``.
         """
-        self.p2r_collective_manager.setup_manager(command)
-
-        comm_id = None
-        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        comm_id = (
-            None
-            if self.rl_mode == "colocated_separated"
-            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
-        )
-
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
@@ -1106,7 +1116,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.rl_mode != "colocated_separated"
                 and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
             ):
+                # Only in non-colocated-separated mode, we could use NCCL group feature.
+                first_inst = self.policy_to_rollout_recv_insts[0].param_instructions[
+                    0
+                ].instructions[0]
+                comm_id = self._get_p2r_collective_manager(
+                    command,
+                    first_inst.policy_rank,
+                    first_inst.rollout_rank,
+                ).query_nccl_comm_index()
                 nccl_group_start(comm_id)
+            else:
+                comm_id = None
 
             skipped_params_cnt = 0
             transferred_params_cnt = 0
@@ -1119,9 +1140,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     completion_fn,
                     skipped_cnt,
                 ) = self.recv_weight_shard(
+                    command,
                     self.global_rank,
                     insts_group,
-                    base_mesh_key,
                     command.trainable_only,
                     command.do_weight_sync_check,
                 )

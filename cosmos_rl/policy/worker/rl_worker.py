@@ -134,14 +134,34 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.teacher_prefetch_queue = Queue()
         self.teacher_uuid_to_dp_shard = {}
 
-        # Init P2R collective manager
-        self.p2r_collective_manager = P2RCollectiveManager(
-            replica_name=self.replica_name,
-            parallel_dims=self.parallel_dims,
-            config=self.config,
-            api_client=self.api_client,
-            role=self.role,
+        # Init per-pair P2R collective managers.
+        self.p2r_collective_managers: Dict[tuple[int, int], P2RCollectiveManager] = {}
+
+    def _get_p2r_collective_manager(
+        self,
+        command: PolicyToRolloutUnicastCommand,
+        p_rank: int,
+        r_rank: int,
+    ) -> P2RCollectiveManager:
+        key = (
+            command.src_replica_name,
+            command.dst_replica_name,
+            p_rank,
+            r_rank,
         )
+        if key not in self.p2r_collective_managers:
+            self.p2r_collective_managers[key] = P2RCollectiveManager(
+                replica_name=self.replica_name,
+                parallel_dims=self.parallel_dims,
+                config=self.config,
+                api_client=self.api_client,
+                role=self.role,
+                command=command,
+                policy_rank=p_rank,
+                rollout_rank=r_rank,
+                stream=self.train_stream,
+            )
+        return self.p2r_collective_managers[key]
 
     def setup(
         self,
@@ -355,8 +375,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             )
             return False
 
-        self.p2r_collective_manager.setup_manager(command)
-
         assert self.trainer.map_w_from_policy_to_rollout is not None, (
             "No parameters to sync found."
         )
@@ -372,13 +390,6 @@ class RLPolicyWorker(PolicyWorkerBase):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
-        base_mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        comm_id = (
-            None
-            if self.rl_mode == "colocated_separated"
-            else self.p2r_collective_manager.query_nccl_comm_index(base_mesh_key)
-        )
-
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 try:
@@ -396,24 +407,36 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
 
                     def grouped_send(grouped_send_ops):
+                        group_comm_id = None
+                        if grouped_send_ops and self.rl_mode != "colocated_separated":
+                            _, first_r_rank, _ = grouped_send_ops[0]
+                            group_comm_id = self._get_p2r_collective_manager(
+                                command,
+                                self.global_rank,
+                                first_r_rank,
+                            ).query_nccl_comm_index()
                         if (
                             self.rl_mode != "colocated_separated"
                             and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
                         ):
                             # Only in non-colocated-separated mode, we could use NCCL group feature.
-                            nccl_group_start(comm_id)
+                            nccl_group_start(group_comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
                             logger.debug(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
-                            self.p2r_collective_manager.send(
-                                base_mesh_key, view, r_rank
+                            self._get_p2r_collective_manager(
+                                command,
+                                self.global_rank,
+                                r_rank,
+                            ).send(
+                                view
                             )
                         if (
                             self.rl_mode != "colocated_separated"
                             and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
                         ):
-                            nccl_group_end(comm_id)
+                            nccl_group_end(group_comm_id)
                         grouped_send_ops.clear()
 
                     grouped_send_ops = []

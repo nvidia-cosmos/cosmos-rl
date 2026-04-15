@@ -17,6 +17,7 @@
 import zmq
 import os
 import torch
+from abc import ABC, abstractmethod
 from typing import Optional
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -33,13 +34,244 @@ from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils import network_util as net
 from cosmos_rl.utils.ipc.tensor_util import tensor_ipc_serialize, tensor_ipc_deserialize
 
-import cosmos_rl.utils.distributed as dist_util
+
+class _P2PChannelBase(ABC):
+    """A fixed one-way point-to-point channel.
+
+    The channel always contains exactly two participants:
+    rank 0 is the sender side, and rank 1 is the receiver side.
+    """
+
+    def __init__(
+        self,
+        channel_key: str,
+        *,
+        local_channel_rank: int,
+        replica_name: str,
+        role_name: str,
+    ):
+        self.channel_key = channel_key
+        self.local_channel_rank = local_channel_rank
+        self.replica_name = replica_name
+        self.role_name = role_name
+        self.send_peer = 1
+        self.recv_peer = 0
+        self.is_sender = local_channel_rank == 0
+
+    @abstractmethod
+    def send(self, tensor: torch.Tensor):
+        pass
+
+    @abstractmethod
+    def recv(self, tensor: torch.Tensor):
+        pass
+
+    def close(self):
+        pass
+
+    @property
+    def comm_index(self) -> Optional[int]:
+        return None
+
+
+class _NCCLP2PChannelBase(_P2PChannelBase):
+    """A fixed one-way NCCL point-to-point channel."""
+
+    def __init__(
+        self,
+        channel_key: str,
+        nccl_unique_id,
+        *,
+        stream: torch.cuda.Stream,
+        local_channel_rank: int,
+        replica_name: str,
+        role_name: str,
+    ):
+        super().__init__(
+            channel_key,
+            local_channel_rank=local_channel_rank,
+            replica_name=replica_name,
+            role_name=role_name,
+        )
+        self.stream = stream
+        self._comm_index: Optional[int] = None
+        self._nccl_unique_id = nccl_unique_id
+
+        self._setup_communicator()
+
+    def _setup_communicator(self):
+        if self._comm_index is not None:
+            return
+
+        if self._nccl_unique_id is None:
+            raise RuntimeError(
+                f"[{self.role_name}] Missing nccl_unique_id for channel {self.channel_key}"
+            )
+
+        self._comm_index = create_nccl_comm(
+            self._nccl_unique_id,
+            self.local_channel_rank,
+            2,
+        )
+        logger.info(
+            "[%s] Created NCCL communicator for point-to-point channel %s.",
+            self.role_name,
+            self.channel_key,
+        )
+
+    @property
+    def comm_index(self) -> int:
+        if self._comm_index is None:
+            raise RuntimeError(
+                f"[{self.role_name}] NCCL communicator for channel {self.channel_key} is not initialized."
+            )
+        return self._comm_index
+
+
+class NCCLChannel(_NCCLP2PChannelBase):
+    """A fixed one-way NCCL point-to-point channel."""
+
+    def __init__(
+        self,
+        channel_key: str,
+        nccl_unique_id,
+        replica_name: str,
+        *,
+        is_sender: bool,
+        stream: torch.cuda.Stream,
+    ):
+        super().__init__(
+            channel_key,
+            nccl_unique_id,
+            stream=stream,
+            local_channel_rank=0 if is_sender else 1,
+            replica_name=replica_name,
+            role_name=(
+                f"NCCLSendChannel:{replica_name}"
+                if is_sender
+                else f"NCCLRecvChannel:{replica_name}"
+            ),
+        )
+
+    def send(self, tensor: torch.Tensor):
+        if not self.is_sender:
+            raise RuntimeError(
+                f"[{self.role_name}] Recv-only channel does not support send."
+            )
+        nccl_send(tensor, self.send_peer, self.comm_index, stream=self.stream)
+
+    def recv(self, tensor: torch.Tensor):
+        if self.is_sender:
+            raise RuntimeError(
+                f"[{self.role_name}] Send-only channel does not support recv."
+            )
+        nccl_recv(tensor, self.recv_peer, self.comm_index, stream=self.stream)
+
+
+class _IPCP2PChannelBase(_P2PChannelBase):
+    """A fixed one-way IPC point-to-point channel."""
+
+    def __init__(
+        self,
+        channel_key: str,
+        zmq_context: zmq.Context,
+        ipc_addr: str,
+        *,
+        local_channel_rank: int,
+        replica_name: str,
+        role_name: str,
+    ):
+        super().__init__(
+            channel_key,
+            local_channel_rank=local_channel_rank,
+            replica_name=replica_name,
+            role_name=role_name,
+        )
+        self.zmq_context = zmq_context
+        self.ipc_addr = ipc_addr
+        self._socket: Optional[zmq.Socket] = None
+
+        self._setup_socket()
+
+    def _setup_socket(self):
+        if self._socket is not None:
+            return
+
+        if not self.ipc_addr:
+            raise RuntimeError(
+                f"[{self.role_name}] Missing ipc_addr for channel {self.channel_key}"
+            )
+
+        socket = self.zmq_context.socket(zmq.PAIR)
+        if self.local_channel_rank == 0:
+            socket.bind(self.ipc_addr)
+        else:
+            socket.connect(self.ipc_addr)
+        self._socket = socket
+
+        logger.info(
+            "[%s] Created IPC socket for point-to-point channel %s.",
+            self.role_name,
+            self.channel_key,
+        )
+
+    @property
+    def socket(self) -> zmq.Socket:
+        if self._socket is None:
+            raise RuntimeError(
+                f"[{self.role_name}] IPC socket for channel {self.channel_key} is not initialized."
+            )
+        return self._socket
+
+    def close(self):
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+
+
+class IPCChannel(_IPCP2PChannelBase):
+    """A fixed one-way IPC point-to-point channel."""
+
+    def __init__(
+        self,
+        channel_key: str,
+        zmq_context: zmq.Context,
+        ipc_addr: str,
+        replica_name: str,
+        *,
+        is_sender: bool,
+    ):
+        super().__init__(
+            channel_key,
+            zmq_context,
+            ipc_addr,
+            local_channel_rank=0 if is_sender else 1,
+            replica_name=replica_name,
+            role_name=(
+                f"IPCSendChannel:{replica_name}"
+                if is_sender
+                else f"IPCRecvChannel:{replica_name}"
+            ),
+        )
+
+    def send(self, tensor: torch.Tensor):
+        if not self.is_sender:
+            raise RuntimeError(
+                f"[{self.role_name}] Recv-only channel does not support send."
+            )
+        self.socket.send_pyobj(tensor_ipc_serialize(tensor))
+
+    def recv(self, tensor: torch.Tensor):
+        if self.is_sender:
+            raise RuntimeError(
+                f"[{self.role_name}] Send-only channel does not support recv."
+            )
+        ipc_data = self.socket.recv_pyobj()
+        tensor.copy_(tensor_ipc_deserialize(ipc_data).cuda())
 
 
 class P2RCollectiveManager:
-    """
-    Send and Recv operations for Policy to Rollout communication.
-    """
+    """Point-to-point P2R communication manager for one policy/rollout rank pair."""
 
     def __init__(
         self,
@@ -48,10 +280,11 @@ class P2RCollectiveManager:
         config: CosmosConfig,
         api_client: APIClient,
         role: Role,
+        command: PolicyToRolloutUnicastCommand,
+        policy_rank: int,
+        rollout_rank: int,
+        stream: Optional[torch.cuda.Stream] = None,
     ):
-        """
-        Initialize the CollectiveManager.
-        """
         self.config = config
         self.replica_name = replica_name
         self.parallel_dims = parallel_dims
@@ -59,365 +292,144 @@ class P2RCollectiveManager:
         self.api_client = api_client
         self.role = role
         self.rl_mode = config.mode
+        self.command = command
+        self.policy_rank = policy_rank
+        self.rollout_rank = rollout_rank
 
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.global_rank = int(os.environ.get("RANK", 0))
 
-        # Shared ZMQ context
-        self.zmq_context = zmq.Context()
+        self.zmq_context: Optional[zmq.Context] = None
+        self.channel: Optional[_P2PChannelBase] = None
+        self.stream: Optional[torch.cuda.Stream] = stream
 
-        self.rl_mode = config.mode
-
-        # UniqueIds cache
-        self.unique_ids_cache = {}
-        # nccl comm index cache
-        self.nccl_comm_cache = {}
-
-        # ipc socket cache
-        self.ipc_comm_cache = {}
-
-    def _setup_inter_replica_communicators(
-        self, command: PolicyToRolloutUnicastCommand
-    ):
-        # init replica to replica communicators
-        mesh_key = self.generate_mesh_key(command)
-        nccl_unique_id = None
-        if self.role != Role.ROLLOUT:
-            # policy initialization
-            assert command.src_replica_size == self.world_size, (
-                "The source replica size should be the same as the world size."
-            )
-            if not command.src_replica_name == self.replica_name:
-                raise RuntimeError(
-                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
-                )
-            # create the communication group ID
-            if mesh_key not in self.unique_ids_cache:
-                if self.global_rank == 0:
-                    nccl_unique_id = create_nccl_uid()
-                    logger.debug(
-                        f"[Policy] Created nccl group id for {mesh_key} in {self.role} side."
-                    )
-                    self.api_client.post_nccl_comm_initiator(mesh_key, nccl_unique_id)
-
-                # broadcast the nccl group id to all ranks
-                nccl_unique_id = dist_util.broadcast_object_cpu(nccl_unique_id)
-                self.unique_ids_cache[mesh_key] = nccl_unique_id
-            else:
-                nccl_unique_id = self.unique_ids_cache[mesh_key]
-        else:
-            # rollout initialization
-            if command.dst_replica_name != self.replica_name:
-                raise RuntimeError(
-                    f"[Rollout] Replica {self.replica_name} doesn't match command destionation: {command.dst_replica_name}"
-                )
-            if mesh_key not in self.unique_ids_cache:
-                # query the nccl group id from controller
-                nccl_unique_id = self.api_client.post_nccl_comm_acceptor(mesh_key)
-                if nccl_unique_id is None:
-                    raise RuntimeError(
-                        f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
-                    )
-                self.unique_ids_cache[mesh_key] = nccl_unique_id
-            else:
-                nccl_unique_id = self.unique_ids_cache[mesh_key]
-
-        if self.role == Role.ROLLOUT:
-            group_size = self.world_size + command.src_replica_size
-            rank_in_group = self.global_rank + command.src_replica_size
-        else:
-            group_size = self.world_size + command.dst_replica_size
-            rank_in_group = self.global_rank
-        # create the nccl communicator
-        if mesh_key not in self.nccl_comm_cache:
-            nccl_comm_index = create_nccl_comm(
-                nccl_unique_id,
-                rank_in_group,
-                group_size,
-            )
-            self.nccl_comm_cache[mesh_key] = nccl_comm_index
-            logger.info(
-                f"Creating nccl communicator for {mesh_key} in {self.role} side."
-            )
-
-    def _setup_p2p_communicators(self, command: PolicyToRolloutUnicastCommand):
-        # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
-        if self.role != Role.ROLLOUT:
-            if command.src_replica_name != self.replica_name:
-                raise RuntimeError(
-                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
-                )
-            # policy
-            p_rank = self.global_rank
-            for r_rank in range(command.dst_replica_size):
-                if p_rank != r_rank:
-                    mesh_key = self.generate_mesh_key(
-                        command, p_rank, r_rank, is_p2p=True
-                    )
-                    if mesh_key not in self.unique_ids_cache:
-                        # create p2p unique id for each non-same device pair
-                        p2p_unique_id = create_nccl_uid()
-                        logger.debug(f"[Policy] Creating nccl unique id for {mesh_key}")
-                        self.unique_ids_cache[mesh_key] = p2p_unique_id
-                        self.api_client.post_nccl_comm_initiator(
-                            mesh_key, p2p_unique_id
-                        )
-
-                    # create communicator for each non-same device pair
-                    if mesh_key not in self.nccl_comm_cache:
-                        nccl_comm_index = create_nccl_comm(
-                            p2p_unique_id,
-                            0,  # policy rank is always 0
-                            2,  # group size of two devices is always 2
-                        )
-                        self.nccl_comm_cache[mesh_key] = nccl_comm_index
-                        logger.debug(
-                            f"[Policy] Creating nccl communicator for {mesh_key}"
-                        )
-        else:
-            # rollout
-            if command.dst_replica_name != self.replica_name:
-                raise RuntimeError(
-                    f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
-                )
-            r_rank = self.global_rank
-            for p_rank in range(command.src_replica_size):
-                if r_rank != p_rank:
-                    mesh_key = self.generate_mesh_key(
-                        command, p_rank, r_rank, is_p2p=True
-                    )
-                    if mesh_key not in self.unique_ids_cache:
-                        nccl_unique_id = self.api_client.post_nccl_comm_acceptor(
-                            mesh_key
-                        )
-                        if nccl_unique_id is None:
-                            raise RuntimeError(
-                                f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
-                            )
-                        self.unique_ids_cache[mesh_key] = nccl_unique_id
-                    else:
-                        nccl_unique_id = self.unique_ids_cache[mesh_key]
-
-                    if mesh_key not in self.nccl_comm_cache:
-                        nccl_comm_index = create_nccl_comm(
-                            nccl_unique_id,
-                            1,  # rollout rank is always 1
-                            2,  # group size of two devices is always 2
-                        )
-                        self.nccl_comm_cache[mesh_key] = nccl_comm_index
-                        logger.debug(
-                            f"[Rollout] Creating nccl communicator for {mesh_key}"
-                        )
-
-    def _setup_nccl(self, command: PolicyToRolloutUnicastCommand):
-        """
-        Arguments:
-            command: PolicyToRolloutUnicastCommand
-            The command is used to initialize the nccl communicator. It contains the source(Policy) and destination(Rollout) replica names.
-        """
-
-        if self.rl_mode == "colocated_separated":
-            self._setup_p2p_communicators(command)
-        else:
-            self._setup_inter_replica_communicators(command)
-
-    def query_nccl_comm_index(self, mesh_key: str):
-        """
-        Query the nccl communicator index for a given mesh key.
-        """
-        if mesh_key not in self.nccl_comm_cache:
-            raise ValueError(
-                f"NCCL communicator index not found for mesh key: {mesh_key}"
-            )
-        return self.nccl_comm_cache[mesh_key]
-
-    def _setup_ipc(self, command: PolicyToRolloutUnicastCommand):
-        if self.rl_mode != "colocated_separated":
-            return
-
-        if self.role != Role.ROLLOUT:
-            # Policy initialization
-            if not command.src_replica_name == self.replica_name:
-                raise RuntimeError(
-                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
-                )
-            # Each pair of policy and rollout share the same device will have one IPC socket.
-            p_rank = self.global_rank
-            r_rank = self.global_rank
-            mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
-            if mesh_key not in self.ipc_comm_cache:
-                logger.info(
-                    f"Setting up IPC for {self.role} side with mode {self.rl_mode}"
-                )
-                local_ip = net.get_local_ip()[0]
-                # To avoid conflict with other processes, we use a fixed port range.
-                port_range = 65535 - 23000
-                base_port_offset = port_range // self.world_size
-                start_port = 23000 + base_port_offset * p_rank
-                end_port = start_port + base_port_offset
-                free_port = net.find_available_port(start_port, end_port)
-
-                ipc_addr = f"tcp://{local_ip}:{free_port}"
-                # create zmq socket
-                socket = self.zmq_context.socket(zmq.PAIR)
-                socket.bind(ipc_addr)
-                self.ipc_comm_cache[mesh_key] = socket
-
-                # Post ipc address to controller
-                self.api_client.post_ipc_info(mesh_key, ipc_addr)
-        else:
-            # Rollout initialization
-            if not command.dst_replica_name == self.replica_name:
-                raise RuntimeError(
-                    f"[Rollout] Replica {self.replica_name} doesn't match command destination: {command.dst_replica_name}"
-                )
-            r_rank = self.global_rank
-            p_rank = self.global_rank
-            if p_rank + 1 > command.src_replica_size:
-                # For rollout rank exceeds the policy world size, we don't need to setup IPC.
-                return
-
-            mesh_key = self.generate_mesh_key(command, p_rank, r_rank, is_ipc=True)
-            if mesh_key not in self.ipc_comm_cache:
-                logger.info(
-                    f"Setting up IPC for {self.role} side with mode {self.rl_mode}"
-                )
-                # query ipc addr from controller
-                ipc_addr = self.api_client.query_ipc_info(mesh_key)
-                # create zmq socket
-                socket = self.zmq_context.socket(zmq.PAIR)
-                socket.connect(ipc_addr)
-                self.ipc_comm_cache[mesh_key] = socket
-
-    def setup_manager(self, command: PolicyToRolloutUnicastCommand):
-        # Setup NCCL
-        self._setup_nccl(command)
-        # Setup IPC
-        self._setup_ipc(command)
+        self._validate_pair_membership()
+        self._setup_backend()
 
     def __del__(self):
-        # close the zmq context
-        for socket in self.ipc_comm_cache.values():
-            socket.close()
-        self.ipc_comm_cache.clear()
-
+        if self.channel is not None:
+            self.channel.close()
+            self.channel = None
         if self.zmq_context is not None:
             self.zmq_context.term()
             self.zmq_context = None
 
-    def generate_mesh_key(
-        self,
-        base_mesh_key_or_command: PolicyToRolloutUnicastCommand | str,
-        p_rank: Optional[int] = None,
-        r_rank: Optional[int] = None,
-        is_p2p: bool = False,
-        is_ipc: bool = False,
-    ):
-        """
-        Generate the mesh key for the collective communication.
-        Arguments:
-            base_mesh_key_or_command: PolicyToRolloutUnicastCommand | str If it is a str, it should be in format of "{src_replica_name}_{dst_replica_name}"
-            p_rank: Optional[int] The rank of the policy
-            r_rank: Optional[int] The rank of the rollout
-            is_p2p: bool Whether the communication is a p2p communication in colocated separated mode
-            is_ipc: bool Whether the communication is a ipc communication in colocated separated mode
-        """
-        if isinstance(base_mesh_key_or_command, PolicyToRolloutUnicastCommand):
-            base_mesh_key = (
-                base_mesh_key_or_command.src_replica_name
-                + "_"
-                + base_mesh_key_or_command.dst_replica_name
-            )
+    @property
+    def base_mesh_key(self) -> str:
+        return self.command.src_replica_name + "_" + self.command.dst_replica_name
+
+    @property
+    def pair_mesh_key(self) -> str:
+        return self.base_mesh_key + f"_{self.policy_rank}_{self.rollout_rank}"
+
+    @property
+    def pair_ipc_key(self) -> str:
+        return self.pair_mesh_key + "_ipc"
+
+    @property
+    def uses_ipc(self) -> bool:
+        return (
+            self.rl_mode == "colocated_separated"
+            and self.policy_rank == self.rollout_rank
+        )
+
+    def _validate_pair_membership(self):
+        if self.role == Role.ROLLOUT:
+            if self.command.dst_replica_name != self.replica_name:
+                raise RuntimeError(
+                    f"[Rollout] Replica {self.replica_name} doesn't match command destination: {self.command.dst_replica_name}"
+                )
+            if self.global_rank != self.rollout_rank:
+                raise RuntimeError(
+                    f"[Rollout] Local global rank {self.global_rank} must match rollout_rank {self.rollout_rank} for pair manager."
+                )
         else:
-            base_mesh_key = base_mesh_key_or_command
+            if self.command.src_replica_name != self.replica_name:
+                raise RuntimeError(
+                    f"[Policy] Replica {self.replica_name} doesn't match command source: {self.command.src_replica_name}"
+                )
+            if self.global_rank != self.policy_rank:
+                raise RuntimeError(
+                    f"[Policy] Local global rank {self.global_rank} must match policy_rank {self.policy_rank} for pair manager."
+                )
 
-        if is_p2p:
-            return base_mesh_key + f"_{p_rank}_{r_rank}"
+    def _setup_backend(self):
+        self.channel = (
+            self._build_ipc_channel() if self.uses_ipc else self._build_nccl_channel()
+        )
 
-        if is_ipc:
-            return base_mesh_key + f"_{p_rank}_{r_rank}_ipc"
+    def _build_nccl_channel(self) -> _P2PChannelBase:
+        if self.stream is None:
+            self.stream = torch.cuda.Stream()
 
-        return base_mesh_key
+        if self.role == Role.ROLLOUT:
+            nccl_unique_id = self.api_client.post_nccl_comm_acceptor(self.pair_mesh_key)
+            if nccl_unique_id is None:
+                raise RuntimeError(
+                    f"[Rollout] Failed to query nccl unique id from controller for {self.pair_mesh_key}"
+                )
+            return NCCLChannel(
+                channel_key=self.pair_mesh_key,
+                nccl_unique_id=nccl_unique_id,
+                replica_name=self.replica_name,
+                is_sender=False,
+                stream=self.stream,
+            )
+        nccl_unique_id = create_nccl_uid()
+        self.api_client.post_nccl_comm_initiator(self.pair_mesh_key, nccl_unique_id)
+        return NCCLChannel(
+            channel_key=self.pair_mesh_key,
+            nccl_unique_id=nccl_unique_id,
+            replica_name=self.replica_name,
+            is_sender=True,
+            stream=self.stream,
+        )
 
-    def send(self, mesh_key: str, tensor: torch.Tensor, r_rank: int):
-        """
-        Send data to a peer.
-        Arguments:
-            mesh_key: str The mesh key shoule in format of "{src_replica_name}_{dst_replica_name}"
-            tensor: torch.Tensor
-            r_rank: int
-        """
+    def _build_ipc_channel(self) -> _P2PChannelBase:
+        self.zmq_context = zmq.Context()
+
+        if self.role == Role.ROLLOUT:
+            ipc_addr = self.api_client.query_ipc_info(self.pair_ipc_key)
+            return IPCChannel(
+                channel_key=self.pair_ipc_key,
+                zmq_context=self.zmq_context,
+                ipc_addr=ipc_addr,
+                replica_name=self.replica_name,
+                is_sender=False,
+            )
+        local_ip = net.get_local_ip()[0]
+        port_range = 65535 - 23000
+        base_port_offset = port_range // self.world_size
+        start_port = 23000 + base_port_offset * self.policy_rank
+        end_port = start_port + base_port_offset
+        free_port = net.find_available_port(start_port, end_port)
+        ipc_addr = f"tcp://{local_ip}:{free_port}"
+        self.api_client.post_ipc_info(self.pair_ipc_key, ipc_addr)
+        return IPCChannel(
+            channel_key=self.pair_ipc_key,
+            zmq_context=self.zmq_context,
+            ipc_addr=ipc_addr,
+            replica_name=self.replica_name,
+            is_sender=True,
+        )
+
+    def query_nccl_comm_index(self) -> int:
+        if self.channel is None or self.channel.comm_index is None:
+            raise ValueError(
+                f"NCCL communicator index not found for pair key: {self.pair_mesh_key}"
+            )
+        return self.channel.comm_index
+
+    def send(self, tensor: torch.Tensor):
         assert self.role == Role.POLICY, "Only policy can send data."
+        assert self.channel is not None, (
+            f"Channel is not initialized for pair key: {self.pair_mesh_key}"
+        )
+        self.channel.send(tensor)
 
-        if self.rl_mode == "colocated_separated":
-            # in colocated separated mode, we use two ways to send data:
-            # 1. for the same device, we use IPC
-            # 2. for the different device, we use NCCL
-            p_rank = self.global_rank
-            if p_rank == r_rank:
-                # for the same device, we use IPC
-                ipc_mesh_key = self.generate_mesh_key(
-                    mesh_key, p_rank, r_rank, is_ipc=True
-                )
-                assert ipc_mesh_key in self.ipc_comm_cache, (
-                    "IPC socket not found for mesh key: {ipc_mesh_key}"
-                )
-                socket = self.ipc_comm_cache[ipc_mesh_key]
-                ipc_data = tensor_ipc_serialize(tensor)
-                socket.send_pyobj(ipc_data)
-            else:
-                # for the different device, we use NCCL
-                nccl_mesh_key = self.generate_mesh_key(
-                    mesh_key, p_rank, r_rank, is_p2p=True
-                )
-                assert nccl_mesh_key in self.nccl_comm_cache, (
-                    "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
-                )
-                comm_index = self.nccl_comm_cache[nccl_mesh_key]
-                nccl_send(tensor, 1, comm_index)
-        else:
-            assert mesh_key in self.nccl_comm_cache, (
-                "NCCL communicator index not found for mesh key: {mesh_key_or_comm_index}"
-            )
-            comm_index = self.nccl_comm_cache[mesh_key]
-            nccl_send(tensor, self.world_size + r_rank, comm_index)
-
-    def recv(self, mesh_key: str, tensor: torch.Tensor, p_rank: int):
-        """
-        Receive data from a peer.
-        Arguments:
-            mesh_key: str The mesh key shoule in format of "{src_replica_name}_{dst_replica_name}"
-            tensor: torch.Tensor
-            p_rank: int
-        """
+    def recv(self, tensor: torch.Tensor):
         assert self.role == Role.ROLLOUT, "Only rollout can receive data."
-
-        if self.rl_mode == "colocated_separated":
-            r_rank = self.global_rank
-            if r_rank == p_rank:
-                # for the same device, we use IPC
-                ipc_mesh_key = self.generate_mesh_key(
-                    mesh_key, p_rank, r_rank, is_ipc=True
-                )
-                assert ipc_mesh_key in self.ipc_comm_cache, (
-                    "IPC socket not found for mesh key: {ipc_mesh_key}"
-                )
-                socket = self.ipc_comm_cache[ipc_mesh_key]
-                ipc_data = socket.recv_pyobj()
-                tensor.copy_(tensor_ipc_deserialize(ipc_data).cuda())
-            else:
-                # for the different device, we use NCCL
-                nccl_mesh_key = self.generate_mesh_key(
-                    mesh_key, p_rank, r_rank, is_p2p=True
-                )
-                assert nccl_mesh_key in self.nccl_comm_cache, (
-                    "NCCL communicator index not found for mesh key: {nccl_mesh_key}"
-                )
-                comm_index = self.nccl_comm_cache[nccl_mesh_key]
-                nccl_recv(tensor, 0, comm_index)
-        else:
-            assert mesh_key in self.nccl_comm_cache, (
-                "NCCL communicator index not found for mesh key: {mesh_key}"
-            )
-            comm_index = self.nccl_comm_cache[mesh_key]
-            nccl_recv(tensor, p_rank, comm_index)
+        assert self.channel is not None, (
+            f"Channel is not initialized for pair key: {self.pair_mesh_key}"
+        )
+        self.channel.recv(tensor)
