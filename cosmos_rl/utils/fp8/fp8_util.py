@@ -190,12 +190,12 @@ class FP8MoEQuantizationConverter(QuantizationConverter):
                 "Compile is required for high performance float8 MoE training."
             )
 
-        assert (
-            parallel_dims.pp_coord[1] == 1
-        ), "Float8 MoE training does not support pipeline parallelism."
-        assert (
-            parallel_dims.cp_coord[1] == 1
-        ), "Float8 MoE training does not support context parallelism."
+        assert parallel_dims.pp_coord[1] == 1, (
+            "Float8 MoE training does not support pipeline parallelism."
+        )
+        assert parallel_dims.cp_coord[1] == 1, (
+            "Float8 MoE training does not support context parallelism."
+        )
 
     def convert_model(self, model: nn.Module):
         """

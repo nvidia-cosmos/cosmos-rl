@@ -25,7 +25,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     ParallelStyle,
 )
-from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
     pre_parallelize_sanity_check,

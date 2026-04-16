@@ -608,7 +608,9 @@ def grouped_gemm_wrapper(
             input, tokens_per_expert, permuted_probs, alignment, num_local_experts
         )
     )
-    output = run_grouped_gemm(input, w13, w2, permuted_probs, tokens_per_expert, enable_glu, act_fn)
+    output = run_grouped_gemm(
+        input, w13, w2, permuted_probs, tokens_per_expert, enable_glu, act_fn
+    )
     output = unpadding_wrapper_for_torch(output, input_shape, padded_indices)
     return output
 
@@ -648,12 +650,16 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
         if torch.count_nonzero(tokens_per_expert) > 0:
             output = grouped_gemm_wrapper(
                 permuted_local_hidden_states,
-                ScaleGrad.apply(self.gate_and_up_projs.to_local(), self.moe_weight_scale).transpose(-2, -1),
-                ScaleGrad.apply(self.down_projs.to_local(), self.moe_weight_scale).transpose(-2, -1),
+                ScaleGrad.apply(
+                    self.gate_and_up_projs.to_local(), self.moe_weight_scale
+                ).transpose(-2, -1),
+                ScaleGrad.apply(
+                    self.down_projs.to_local(), self.moe_weight_scale
+                ).transpose(-2, -1),
                 permuted_probs,
                 tokens_per_expert,
                 self.args.n_routed_experts // self.ep_size,
-                self.act_fn if hasattr(self, 'act_fn') else None,
+                self.act_fn if hasattr(self, "act_fn") else None,
             )
         else:
             output1 = torch.matmul(x[:1] * 0, self.gate_and_up_projs.to_local()[0].t())

@@ -35,6 +35,8 @@ def is_tp_ep_interchangeable_with_dp_fused():
         "TP_EP_INTERCHANGABLE_WITH_DP_FUSED", "0"
     ).lower() in ["1", "true"]
     return TP_EP_INTERCHANGABLE_WITH_DP_FUSED
+
+
 from cosmos_rl.policy.config import Config as CosmosConfig
 
 
