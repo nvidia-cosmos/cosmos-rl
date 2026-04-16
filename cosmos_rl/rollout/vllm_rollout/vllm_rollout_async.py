@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 import asyncio
 import torch
 import copy
@@ -32,8 +34,8 @@ from cosmos_rl.utils.ipc import (
     named_tensors_from_serialize,
 )
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
+    monkey_patch_for_fp8,
+    simplify_process_weights_after_loading_for_fp8,
 )
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
@@ -74,16 +76,7 @@ class VLLMColocateWorkerExtension:
         """
         Apply the fp8 linear patch to the model when initialize the rollout engine.
         """
-        from vllm.config import set_current_vllm_config
-
-        with set_current_vllm_config(self.vllm_config):
-            apply_fp8_linear_patch(self._get_model())
-
-    def simplify_process_weights_after_loading(self):
-        """
-        Simplify the process weights after loading to quantize the weight of linear only in `rowwise` mode.
-        """
-        simplify_process_weights_after_loading()
+        monkey_patch_for_fp8(self.vllm_config, self._get_model())
 
     def _test_get_parameters_mean(self, param_name: str) -> float:
         """
@@ -117,7 +110,7 @@ class vLLMRolloutAsync(vLLMRollout):
 
     def init_engine(
         self,
-        quantization: Optional[str] = None,
+        quantization: Optional[str] = None,  # [None, "fp8", "fp4"]
         seed: int = 42,
         load_format: str = "dummy",
         **kwargs,
@@ -152,9 +145,19 @@ class vLLMRolloutAsync(vLLMRollout):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            self.quantization = quantization
+            self.quantization = quantization  # [None, "fp8", "fp4"]
 
             policy_config = self.config.policy
+
+            if self.quantization is not None:
+                # FIXME: (lms/jxz) Find a way to support calling `simplify_process_weights_after_loading_for_fp8`
+                # inside worker processes that vLLM created before weight loading.
+                raise NotImplementedError(
+                    "Quantization is not supported in vLLM async rollout yet."
+                )
+                # patch for weight quantization. [weight loading]
+                # patch must happen before `rollout_engine` is initialized.
+                simplify_process_weights_after_loading_for_fp8()
 
             engine_args = AsyncEngineArgs(
                 model=model_path,
@@ -198,11 +201,6 @@ class vLLMRolloutAsync(vLLMRollout):
             if self.quantization == "fp8":
                 asyncio.run(
                     self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
-                )
-                asyncio.run(
-                    self.rollout_engine.collective_rpc(
-                        "simplify_process_weights_after_loading"
-                    )
                 )
 
     def post_init_engine_hook(

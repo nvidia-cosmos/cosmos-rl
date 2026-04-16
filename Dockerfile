@@ -24,8 +24,16 @@ ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
 ARG FLASH_ATTN_VERSION=2.8.3
+ARG VLLM_VERSION=0.14.0
 ARG PYTHON_VERSION=3.12
 ARG COSMOS_RL_TORCH_VARIANT
+
+ARG TE_VERSION=2.10.0 # 2.10.0 contains the fix: fix crash when triton >= 3.5 of TE.
+
+# Torch related versions
+ARG TORCH_VERSION=2.9.1
+ARG TORCHVISION_VERSION=0.24.1
+ARG TORCHAO_VERSION=0.15.0
 
 ENV TZ=Etc/UTC
 
@@ -121,8 +129,16 @@ RUN set -eux; \
             torchao=="${TORCHAO_VERSION}" \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
-            flashinfer-python=="${FLASHINFER_VERSION}" \
-            transformer_engine[pytorch] --no-build-isolation
+            flashinfer-python \
+            transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
+# RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu128
+
+# RUN pip install \
+#     torchao==${TORCHAO_VERSION} \
+#     flash_attn==${FLASH_ATTN_VERSION} \
+#     vllm==${VLLM_VERSION} \
+#     flashinfer-python \
+#     transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2

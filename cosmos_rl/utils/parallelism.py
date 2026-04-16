@@ -37,6 +37,9 @@ def is_tp_ep_interchangeable_with_dp_fused():
     return TP_EP_INTERCHANGABLE_WITH_DP_FUSED
 
 
+from cosmos_rl.policy.config import Config as CosmosConfig
+
+
 def train_context(enable_compiled_autograd: bool):
     @contextlib.contextmanager
     def context(cp_context: Optional[Generator[None, None, None]] = None):
@@ -567,3 +570,11 @@ def pre_parallelize_sanity_check(func):
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def is_tensorwise_tp_enabled(config: CosmosConfig) -> bool:
+    return (
+        config.train.quantization.quantization_type != "none"
+        and config.train.quantization.linear_quantization_config.fp_linear_config.quant_recipe
+        == "tensorwise"
+    )

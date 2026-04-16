@@ -235,6 +235,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     with init_on_device(device="meta", include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):
             model = GPT.from_pretrained(
+                None,
                 hf_config,
                 loaded_config.policy.model_name_or_path,
                 max_position_embeddings=4096,
@@ -324,6 +325,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     with init_on_device("meta", include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):
             model = GPT.from_pretrained(
+                None,
                 hf_config,
                 loaded_config.policy.model_name_or_path,
                 max_position_embeddings=4096,
