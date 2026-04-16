@@ -659,6 +659,7 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
                 permuted_probs,
                 tokens_per_expert,
                 self.args.n_routed_experts // self.ep_size,
+                self.enable_glu,
                 self.act_fn if hasattr(self, "act_fn") else None,
             )
         else:
