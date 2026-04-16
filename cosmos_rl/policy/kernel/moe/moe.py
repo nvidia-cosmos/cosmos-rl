@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -46,6 +47,14 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
 from transformers.activations import ACT2FN
 
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
+
+
+def _env_flag_is_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_deepep_dispatcher_enabled() -> bool:
+    return not _env_flag_is_true("COSMOS_DISABLE_DEEPEP_DISPATCHER")
 
 
 def is_deepep_supported():
@@ -359,7 +368,9 @@ class GroupedExpertsDeepEP(nn.Module):
         local_expert_indices = [
             local_expert_indices_offset + i for i in range(num_local_experts)
         ]
-        self.using_deepep = self.args.moe_enable_deepep
+        self.using_deepep = (
+            self.args.moe_enable_deepep and is_deepep_dispatcher_enabled()
+        )
         if self.using_deepep:
             self.token_dispatcher = MoEFlexTokenDispatcher(
                 num_local_experts=num_local_experts,
