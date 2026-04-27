@@ -294,31 +294,65 @@ class ParallelDims:
             mp_mesh_dim_names.append("pp")
             pp_cp_tp_mesh_dim_names.append("pp")
 
+        def _safe_flatten(submesh, mesh_dim_name):
+            """Call ``DeviceMesh._flatten`` defensively.
+
+            When a rank is outside the parent ``DeviceMesh`` (e.g. tests that
+            build a ``world_size=1`` mesh from a multi-rank ``torchrun``
+            launch, where only rank 0 participates), PyTorch's
+            ``create_flatten_mesh`` hits an ``UnboundLocalError`` on
+            ``res_flattened_mesh`` because the variable is only assigned on
+            the participating branch. Tolerate that here so downstream code
+            can still skip gracefully on non-participating ranks.
+            """
+            try:
+                if submesh.get_coordinate() is None:
+                    return None
+            except Exception:  # pragma: no cover - defensive
+                pass
+            try:
+                return submesh._flatten(mesh_dim_name=mesh_dim_name)
+            except UnboundLocalError as err:
+                logger.debug(
+                    "DeviceMesh._flatten(%s) raised UnboundLocalError "
+                    "(likely due to this rank being outside the mesh): %s",
+                    mesh_dim_name,
+                    err,
+                )
+                return None
+
         if dp_mesh_dim_names != []:
-            mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+            _safe_flatten(mesh[tuple(dp_mesh_dim_names)], mesh_dim_name="dp")
         if dp_shard_cp_mesh_dim_names != []:
-            mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
-                mesh_dim_name="dp_shard_cp"
+            _safe_flatten(
+                mesh[tuple(dp_shard_cp_mesh_dim_names)],
+                mesh_dim_name="dp_shard_cp",
             )
         if loss_parallel_mesh_dim_names != []:
-            mesh[tuple(loss_parallel_mesh_dim_names)]._flatten(
-                mesh_dim_name="loss_parallel"
+            _safe_flatten(
+                mesh[tuple(loss_parallel_mesh_dim_names)],
+                mesh_dim_name="loss_parallel",
             )
         if dp_cp_tp_mesh_dim_names != []:
-            mesh[tuple(dp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp")
+            _safe_flatten(
+                mesh[tuple(dp_cp_tp_mesh_dim_names)], mesh_dim_name="dp_cp_tp"
+            )
         if dp_cp_mesh_dim_names != []:
-            mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+            _safe_flatten(mesh[tuple(dp_cp_mesh_dim_names)], mesh_dim_name="dp_cp")
 
         if weight_loading_mesh_dim_names != []:
-            mesh[tuple(weight_loading_mesh_dim_names)]._flatten(
-                mesh_dim_name="weight_loading"
+            _safe_flatten(
+                mesh[tuple(weight_loading_mesh_dim_names)],
+                mesh_dim_name="weight_loading",
             )
 
         if mp_mesh_dim_names != []:
-            mesh[tuple(mp_mesh_dim_names)]._flatten(mesh_dim_name="mp")
+            _safe_flatten(mesh[tuple(mp_mesh_dim_names)], mesh_dim_name="mp")
 
         if pp_cp_tp_mesh_dim_names != []:
-            mesh[tuple(pp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="pp_cp_tp")
+            _safe_flatten(
+                mesh[tuple(pp_cp_tp_mesh_dim_names)], mesh_dim_name="pp_cp_tp"
+            )
 
         self.mesh = mesh
         return mesh
