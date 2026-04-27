@@ -15,6 +15,7 @@
 
 import os
 import copy
+import traceback
 from datetime import timedelta
 
 # Set the environment variable to use HF rotary implementation
@@ -182,8 +183,11 @@ class TestHFModelTP(unittest.TestCase):
         max_position_embeddings = 1024
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
-        # Load cosmos config
-        cosmos_config = Config.from_dict(config_dict)
+        # NOTE: do NOT call ``Config.from_dict`` here with ``model_name_or_path``
+        # still at its module-level default (``None``). Pydantic rejects it
+        # because the field is typed as ``str``. Build the cosmos config
+        # per-model below instead so the test runs in isolation (previously it
+        # relied on ``test_tp_forward`` having already mutated ``config_dict``).
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -193,7 +197,8 @@ class TestHFModelTP(unittest.TestCase):
             # Load hf config
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
             config.max_position_embeddings = max_position_embeddings
-            cosmos_config.policy.model_name_or_path = model_id
+            config_dict["policy"]["model_name_or_path"] = model_id
+            cosmos_config = Config.from_dict(config_dict)
             # Remove the model type from the model registry, so that the model will run in the hfmodel path.
             if ModelRegistry.check_model_type_supported(config.model_type):
                 ModelRegistry._MODEL_REGISTRY.pop(config.model_type)
@@ -372,10 +377,14 @@ class TestHFModelTP(unittest.TestCase):
                 torch.cuda.empty_cache()
             except Exception as e:
                 error_occurred = True
-                print(
-                    f"Rank {torch.distributed.get_rank()} - {model_id} forward test failed."
+                local_error_msg = (
+                    f"Rank {torch.distributed.get_rank()} - "
+                    f"{model_id} forward test failed: {e}"
                 )
-                print(f"Rank {torch.distributed.get_rank()} - Error: {e}")
+                print(local_error_msg)
+                # Print the full traceback on the failing rank so the CI log
+                # doesn't just show an opaque SystemExit(-1) further down.
+                traceback.print_exc()
 
             # Synchronize error state across all ranks to avoid hanging
             error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device=device)
@@ -384,9 +393,14 @@ class TestHFModelTP(unittest.TestCase):
             )
 
             if error_tensor.item() > 0:
-                if torch.distributed.get_rank() == 0:
-                    print("Test failed on at least one rank. Exiting...")
-                exit(-1)
+                # Raise instead of exit(-1): unittest records the failure
+                # properly and the non-zero exit still propagates out of
+                # torchrun because the TestCase ends with an error.
+                raise AssertionError(
+                    f"{model_id} forward test failed on at least one rank "
+                    f"(local rank={torch.distributed.get_rank()}, "
+                    f"local_error={error_occurred})."
+                )
 
 
 # torchrun --nproc_per_node=2 tests/test_hf_models_tp.py

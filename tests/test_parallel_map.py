@@ -54,8 +54,18 @@ class TestParallelMap(unittest.TestCase):
             for process in [policy_process]:
                 stdout, stderr = process.communicate()
 
-                # Check if process completed successfully
-                assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+                # stdout/stderr are both piped directly to sys.stderr above, so
+                # communicate() returns (None, None). Only decode when we
+                # actually captured bytes.
+                stderr_msg = (
+                    stderr.decode(errors="replace")
+                    if isinstance(stderr, (bytes, bytearray))
+                    else ""
+                )
+                assert process.returncode == 0, (
+                    f"Process failed with return code {process.returncode}. "
+                    f"See subprocess output above. {stderr_msg}"
+                )
 
         finally:
             # Ensure process is terminated
@@ -111,8 +121,16 @@ class TestParallelMap(unittest.TestCase):
                 for process in [policy_process]:
                     stdout, stderr = process.communicate()
 
-                    # Check if process completed successfully
-                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+                    stderr_msg = (
+                        stderr.decode(errors="replace")
+                        if isinstance(stderr, (bytes, bytearray))
+                        else ""
+                    )
+                    assert process.returncode == 0, (
+                        f"Process failed with return code {process.returncode} "
+                        f"(fsdp={fsdp}, tp={tp}, pp={pp}). "
+                        f"See subprocess output above. {stderr_msg}"
+                    )
 
             finally:
                 # Ensure process is terminated
@@ -163,8 +181,16 @@ class TestParallelMap(unittest.TestCase):
                 for process in [policy_process]:
                     stdout, stderr = process.communicate()
 
-                    # Check if process completed successfully
-                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+                    stderr_msg = (
+                        stderr.decode(errors="replace")
+                        if isinstance(stderr, (bytes, bytearray))
+                        else ""
+                    )
+                    assert process.returncode == 0, (
+                        f"Process failed with return code {process.returncode} "
+                        f"(fsdp={fsdp}, tp={tp}, pp={pp}). "
+                        f"See subprocess output above. {stderr_msg}"
+                    )
 
             finally:
                 # Ensure process is terminated
