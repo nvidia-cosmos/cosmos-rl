@@ -53,7 +53,24 @@ class _WorkerHarness:
 
     def __init__(self, config):
         self.config = config
-        self.parallel_dims = SimpleNamespace()
+        # `build_runner` / `get_batch_from_dataloader` in SFTPolicyWorker
+        # only touch a handful of parallel_dims flags, so expose safe
+        # single-GPU defaults here. If new code paths grow new accesses,
+        # they need to be reflected here as well.
+        self.parallel_dims = SimpleNamespace(
+            pp_enabled=False,
+            cp_enabled=False,
+            tp_enabled=False,
+            dp_enabled=False,
+            dp_replicate_enabled=False,
+            dp_shard_enabled=False,
+            ep_enabled=False,
+            dp_replicate_coord=(0, 1),
+            pp_coord=(0, 1),
+            cp_coord=(0, 1),
+            tp_coord=(0, 1),
+            dp_coord=(0, 1),
+        )
         self.train_stream = None
         self.dp_rank = 0
         self.dp_world_size = 1

@@ -656,6 +656,13 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank, trainable_param
         rollout.policy_to_rollout_unicast = types.MethodType(
             DisaggregatedRolloutControlWorker.policy_to_rollout_unicast, rollout
         )
+        # `policy_to_rollout_unicast` delegates the actual recv work to
+        # `_execute_p2r_recv`. Bind the real implementation too so TestRollout
+        # can drive the P2R handshake end-to-end without requiring
+        # AsyncR2RSyncMode / WeightSyncThread.
+        rollout._execute_p2r_recv = types.MethodType(
+            DisaggregatedRolloutControlWorker._execute_p2r_recv, rollout
+        )
         rollout.prepare_shard_infos_for_weight_sync_insts = lambda: None
         rollout.policy_to_rollout_unicast(command)
         rollout.inference_stream.synchronize()
@@ -1182,10 +1189,17 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
         config_path = os.path.join(
             cur_dir, "data", f"test_policy_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
         )
-        gt = np.load(config_path, allow_pickle=True)
-        np.testing.assert_array_equal(
-            np.array(all_rank_local_shard_infos, dtype=object), gt
-        )
+        arr = np.array(all_rank_local_shard_infos, dtype=object)
+        if os.environ.get("COSMOS_RL_REGEN_GT") == "1":
+            # Regenerate the ground-truth .npy file with the current code's
+            # output. Use this whenever the sharding logic legitimately changes
+            # (e.g. the GQA-aware k_proj/v_proj dim fix): run the tests once
+            # with COSMOS_RL_REGEN_GT=1 and commit the updated .npy baselines.
+            np.save(config_path, arr, allow_pickle=True)
+            print(f"[regen-gt] wrote {config_path}")
+        else:
+            gt = np.load(config_path, allow_pickle=True)
+            np.testing.assert_array_equal(arr, gt)
 
 
 def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
@@ -1233,10 +1247,13 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
         config_path = os.path.join(
             cur_dir, "data", f"test_rollout_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
         )
-        gt = np.load(config_path, allow_pickle=True)
-        np.testing.assert_array_equal(
-            np.array(all_rank_local_shard_infos, dtype=object), gt
-        )
+        arr = np.array(all_rank_local_shard_infos, dtype=object)
+        if os.environ.get("COSMOS_RL_REGEN_GT") == "1":
+            np.save(config_path, arr, allow_pickle=True)
+            print(f"[regen-gt] wrote {config_path}")
+        else:
+            gt = np.load(config_path, allow_pickle=True)
+            np.testing.assert_array_equal(arr, gt)
 
 
 class TestModelType:
@@ -2251,6 +2268,13 @@ def run_reference_reset_test():
     config.logging.logger = ["console"]
     config.train.train_policy.kl_beta = 100
     config.train.train_policy.reference_reset_interval = 2
+    # The test relies on the policy actually changing between steps so the KL vs
+    # the (unchanged) reference becomes > 0. With the default
+    # `optm_warmup_start_factor=0.0` and `optm_warmup_steps=20` from the simple
+    # GRPO config, the first optimizer step uses `lr=0`, which leaves the model
+    # weights identical to the reference and causes step 1's KL to stay at 0.
+    # Use a 1-step warmup so the LR is at full scale from step 0.
+    config.train.optm_warmup_steps = 1
     parallel_dims = ParallelDims.from_config(
         parallelism_config=config.policy.parallelism
     )
@@ -2308,7 +2332,7 @@ def run_reference_reset_test():
         )
         if rl_worker.global_rank == 0:
             logger.info(
-                f"Step {i} report train/kl_loss_avg {report['train/kl_loss_avg']}, train/kl_loss_max {report['train/kl_loss_max']}"
+                f"Step {i} report train/kl_loss_avg {report['train/kl_loss_avg']}, train/kl_loss_max {report['train/kl_loss_max']}, train/learning_rate {report.get('train/learning_rate')}"
             )
             if i % 2 == 0:
                 assert report["train/kl_loss_avg"] == 0.0

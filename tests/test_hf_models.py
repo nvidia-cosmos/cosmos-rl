@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import os
 import copy
 import torch
@@ -27,6 +28,21 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
 from accelerate import init_on_device
+
+
+def _release_cuda_memory() -> None:
+    """Aggressively release CUDA memory between model iterations.
+
+    Large VLMs (Qwen3-VL-*, phi-4, etc.) can each consume >30GB of device
+    memory, so between loops we must force Python GC before calling
+    ``empty_cache`` — otherwise lingering ``torch.Tensor`` references keep the
+    allocator from handing pages back to the driver.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def is_transformers_version_compatible(model_id) -> bool:
@@ -113,9 +129,11 @@ class TestHFModel(unittest.TestCase):
                             max_position_embeddings=max_position_embeddings,
                         )
                 cosmos_hf_model._apply(
-                    lambda t: torch.empty_like(t, device=device)
-                    if t.device.type == "meta"
-                    else t.to(device),
+                    lambda t: (
+                        torch.empty_like(t, device=device)
+                        if t.device.type == "meta"
+                        else t.to(device)
+                    ),
                     recurse=True,
                 )
                 cosmos_hf_model.post_to_empty_hook(CosmosConfig())
@@ -129,7 +147,7 @@ class TestHFModel(unittest.TestCase):
                 }
                 model_class = cosmos_hf_model.model_class
                 del cosmos_hf_model
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
 
                 # Load hf model
                 hf_model = model_class.from_pretrained(
@@ -137,7 +155,7 @@ class TestHFModel(unittest.TestCase):
                 ).to(device, dtype=dtype)
                 hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
                 del hf_model
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
 
                 for name, cosmos_hf_buffer in cosmos_named_buffers.items():
                     assert name in hf_named_buffers, (
@@ -157,7 +175,10 @@ class TestHFModel(unittest.TestCase):
                 print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
                 del hf_named_buffers
                 del cosmos_named_buffers
-                torch.cuda.empty_cache()
+                # Fully drain the allocator before loading the next (dtype,
+                # model_id) combo; bare ``empty_cache()`` isn't sufficient when
+                # later iterations hit 10B+ param VLMs on a single 80GB GPU.
+                _release_cuda_memory()
 
     def test_forward(self):
         for model_id in [
@@ -192,9 +213,11 @@ class TestHFModel(unittest.TestCase):
                     )
 
             cosmos_hf_model._apply(
-                lambda t: torch.empty_like(t, device=device)
-                if t.device.type == "meta"
-                else t.to(device),
+                lambda t: (
+                    torch.empty_like(t, device=device)
+                    if t.device.type == "meta"
+                    else t.to(device)
+                ),
                 recurse=True,
             )
             cosmos_hf_model.post_to_empty_hook(CosmosConfig())
@@ -302,16 +325,24 @@ class TestHFModel(unittest.TestCase):
                 )
 
                 print(f"{model_id} forward test passed.")
-                del cosmos_hf_model
-                del hf_model
-                del cosmos_hf_logits
-                del hf_generate_logits
-                del hf_forward_logits
-                torch.cuda.empty_cache()
             except Exception as e:
                 print(f"{model_id} forward test failed.")
-                print(f"{e}")
-                exit(-1)
+                # Re-raise to let unittest record the true stack trace instead
+                # of swallowing it behind a SystemExit(-1).
+                raise AssertionError(f"{model_id} forward test failed: {e}") from e
+            finally:
+                # Drop GPU refs before the next model_id iteration, regardless
+                # of success/failure, so large VLMs don't stack up in memory
+                # and OOM the next load.
+                cosmos_hf_model = None
+                hf_model = None
+                cosmos_hf_logits = None
+                hf_generate_logits = None
+                hf_forward_logits = None
+                inputs = None
+                processor = None
+                config = None
+                _release_cuda_memory()
 
 
 if __name__ == "__main__":
