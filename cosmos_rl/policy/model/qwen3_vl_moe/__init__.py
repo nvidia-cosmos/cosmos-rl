@@ -21,7 +21,6 @@ from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -59,6 +58,10 @@ from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
     Qwen3VLMoeVisionModel,
 )
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
+    get_rope_theta,
+)
 
 
 @dataclass
@@ -74,10 +77,13 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
         self.max_seq_len_cached = config.max_seq_len
         self.original_max_seq_len = config.max_seq_len
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[config.rope_type]
-        self.mrope_section = config.hf_config.rope_scaling.get(
-            "mrope_section", [24, 20, 20]
+        self.rope_init_fn = get_rope_init_fn(config.rope_type)
+        rope_dict = (
+            getattr(config.hf_config, "rope_parameters", None)
+            or getattr(config.hf_config, "rope_scaling", None)
+            or {}
         )
+        self.mrope_section = rope_dict.get("mrope_section", [24, 20, 20])
         self.reset_inv_freq(device=device)
 
     def reset_inv_freq(self, device: torch.device = None):
@@ -960,28 +966,33 @@ class Qwen3VLMoeModel(BaseModel):
         if hf_config.model_type not in cls.supported_model_types():
             raise ValueError(f"Unsupported model type: {hf_config.model_type}")
 
+        lm_config = getattr(hf_config, "text_config", hf_config)
         if max_position_embeddings is None:
-            max_position_embeddings = hf_config.max_position_embeddings
+            max_position_embeddings = lm_config.max_position_embeddings
         else:
-            hf_config.max_position_embeddings = max_position_embeddings
+            lm_config.max_position_embeddings = max_position_embeddings
 
         torch_dtype = hf_config.torch_dtype
         hf_config.text_config.torch_dtype = torch_dtype
         hf_config.vision_config.torch_dtype = torch_dtype
         vocab_size = sync_model_vocab(model_name_or_path)
-
-        lm_config = hf_config.text_config
         # Qwen3MoE does not have any biases
         bias_list = []
-        rope_scaling = {}
-        if hasattr(lm_config, "rope_scaling"):
-            rope_scaling = lm_config.rope_scaling or {}
-        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
+        rope_dict = (
+            getattr(lm_config, "rope_parameters", None)
+            or getattr(lm_config, "rope_scaling", None)
+            or {}
+        )
+        rope_type = rope_dict.get("rope_type", rope_dict.get("type", "default"))
         try:
             head_dim = lm_config.head_dim
         except Exception:
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
+
+        # For transformers v5, tie_word_embeddings in text_config and hf_config might be different,
+        # we will use the one in hf_config for weight loading and set it to text_config for model initialization to avoid mismatch
+        lm_config.tie_word_embeddings = hf_config.tie_word_embeddings
 
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
@@ -993,7 +1004,7 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim=head_dim,
             vocab_size=vocab_size,
             max_seq_len=max_position_embeddings,
-            rope_theta=lm_config.rope_theta,
+            rope_theta=get_rope_theta(lm_config),
             q_k_norm_enabled=True,
             norm_type="rmsnorm",
             rope_type=rope_type,

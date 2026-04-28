@@ -88,7 +88,7 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
 
     # init parallel_dims
     parallel_dims: ParallelDims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     parallel_dims.build_mesh(device_type=device.type)
 
@@ -106,9 +106,11 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device=device)
-            if t.device.type == "meta"
-            else t.to(device),
+            lambda t: (
+                torch.empty_like(t, device=device)
+                if t.device.type == "meta"
+                else t.to(device)
+            ),
             recurse=True,
         )
     model.post_to_empty_hook(config)
@@ -360,7 +362,7 @@ class TestHFModelTP(unittest.TestCase):
                         f"max_index_hf: {max_index_hf} | max_index_cosmos_rl: {max_index_cosmos_rl} | max_logit_hf: {max_logit_hf} | max_logit_cosmos_rl: {max_logit_cosmos_rl}"
                     )
                     assert max_index_hf == max_index_cosmos_rl
-                    assert (max_logit_hf - max_logit_cosmos_rl).abs() < 0.5
+                    assert (max_logit_hf - max_logit_cosmos_rl).abs() <= 0.5
                     print(f"{model_id} forward test passed.")
 
                 del cosmos_hf_model

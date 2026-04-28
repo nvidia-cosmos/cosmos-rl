@@ -46,7 +46,7 @@ class TestDataLoaderBroadcast(unittest.TestCase):
         )
         config.train.train_policy.dataloader_broadcast = True
         parallel_dims = ParallelDims.from_config(
-            parallesim_config=ParallelismConfig(
+            parallelism_config=ParallelismConfig(
                 tp_size=2,
                 cp_size=2,
                 dp_shard_size=2,
@@ -86,7 +86,9 @@ class TestDataLoaderBroadcast(unittest.TestCase):
             prefetch_factor=2,
             sampler=sampler,
             drop_last=False,
-            collate_fn=lambda x: x,  # Identity collate_fn to keep the batch as a list of samples for easier debugging
+            collate_fn=lambda x: (
+                x
+            ),  # Identity collate_fn to keep the batch as a list of samples for easier debugging
         )
         iterator = iter(data_loader)
         inst = TestDataLoaderBroadcast.TestEntity(parallel_dims, config)

@@ -115,6 +115,8 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
         ]:
             model_prefix = "model.language_model"
 
+        # linear_attn (Qwen3-5 GatedDeltaNet) is not listed here: TP is fused into the
+        # dp_shard mesh via FSDP on mesh "dp_cp_tp" in hf_models.parallelize when tp>1.
         tp_plan: dict[str, ParallelStyle] = {
             f"{model_prefix}.embed_tokens": rowwise_parallel(input_layouts=Replicate()),
             f"{model_prefix}.layers.*.self_attn.q_proj": colwise_parallel(),

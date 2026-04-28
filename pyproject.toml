@@ -15,7 +15,7 @@ dependencies = [
     "pybind11[global]",
     "torch>=2.6.0",
     "torchvision>=0.21.0",
-    "torchao>=0.10.0,<0.16",
+    "torchao>=0.10.0",
     "tensordict==0.7.2",
     "toml",
     "StrEnum",
@@ -46,12 +46,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
 write_to = "cosmos_rl/_version.py"
-
-# add .post1.devN to last tagged version (N is the number of commits
-# since the tagged commit)
-version_scheme="no-guess-dev"
-# add git commit (and date if working dir is dirty) to the version tag
-local_scheme="node-and-date"
+tag_regex = "^(?:cosmos-rl-)?v(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
+fallback_version = "0.0.0"
+version_scheme = "no-guess-dev"
+local_scheme = "node-and-date"
 
 [project.urls]
 Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"

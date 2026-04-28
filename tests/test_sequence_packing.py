@@ -19,6 +19,10 @@ import sys
 import subprocess
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers.utils.import_utils import (
+    is_causal_conv1d_available,
+    is_flash_linear_attention_available,
+)
 
 try:
     from transformers import Qwen3VLForConditionalGeneration
@@ -175,6 +179,19 @@ class SeqPackingTest(unittest.TestCase):
             # "google/gemma-3-1b-pt", # Need access to it.
         ]:
             if model_id in ["Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3.5-4B"]:
+                if model_id == "Qwen/Qwen3.5-4B":
+                    if not is_causal_conv1d_available():
+                        print(
+                            "Qwen3.5 sequence packing requires causal_conv1d. "
+                            "Skip the test because causal_conv1d is not available."
+                        )
+                        continue
+                    if not is_flash_linear_attention_available():
+                        print(
+                            "Qwen3.5 sequence packing requires flash-linear-attention (fla>=0.2.2). "
+                            "Skip the test because flash-linear-attention is not available."
+                        )
+                        continue
                 from cosmos_rl.policy.model.hf_models.patch import (
                     sequence_packing_forward_qwen3_vl_patch,
                     sequence_packing_forward_qwen3_5_patch,

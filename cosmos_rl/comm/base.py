@@ -43,6 +43,11 @@ import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.colocated.api_client import ColocatedAPIClient
 
+try:
+    import redis as _redis_lib
+except ImportError:
+    _redis_lib = None
+
 
 class CommMixin:
     policy_command_handler_registry = PolicyCommandRegistry()
@@ -170,6 +175,76 @@ class CommMixin:
                 )
 
         util.call_setup(self.val_data_packer, self.config)
+
+        self._inject_redis_into_data_packers()
+
+    def _inject_redis_into_data_packers(self):
+        """Inject the worker's Redis connection into data packers that need one.
+
+        Some data packers expose a ``redis_client`` attribute to receive a
+        shared Redis connection from the worker.  Cosmos-RL calls ``setup()``
+        on the packer *before* ``init_data_packer()``, so any packer feature
+        that depends on Redis would be left disabled after the first setup
+        attempt.  This method provides the live connection and invokes the
+        packer's ``post_redis_injection()`` hook (if present) so the packer
+        can complete any deferred setup.
+
+        No-op for packers without a ``redis_client`` attribute.
+        """
+        self._try_inject_redis(self.data_packer, "data_packer")
+        if (
+            hasattr(self, "val_data_packer")
+            and self.val_data_packer is not self.data_packer
+        ):
+            self._try_inject_redis(self.val_data_packer, "val_data_packer")
+
+    def _try_inject_redis(self, packer, packer_name: str):
+        """Inject Redis client into a single data packer."""
+        if not hasattr(packer, "redis_client"):
+            return
+        if _redis_lib is None:
+            logger.warning(
+                f"[{self.role}] redis package not installed; "
+                f"cannot inject Redis into {packer_name}"
+            )
+            return
+        redis_host, redis_port, redis_db = self._read_redis_endpoint()
+        try:
+            packer.redis_client = _redis_lib.Redis(
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
+                decode_responses=True,
+            )
+            packer.redis_client.ping()
+            logger.info(
+                f"[{self.role}] Injected Redis client into {packer_name} "
+                f"(host={redis_host}, port={redis_port}, db={redis_db})"
+            )
+            if hasattr(packer, "post_redis_injection"):
+                packer.post_redis_injection()
+        except Exception as e:
+            logger.warning(
+                f"[{self.role}] Failed to inject Redis client into {packer_name}: {e}"
+            )
+
+    def _read_redis_endpoint(self) -> tuple:
+        """Return ``(host, port, db)`` from the worker's live Redis client."""
+        redis_host = "localhost"
+        redis_port = 6379
+        redis_db = 0
+        redis_controller = getattr(self, "redis_controller", None)
+        if redis_controller is not None and hasattr(redis_controller, "redis_clients"):
+            clients = redis_controller.redis_clients
+            if clients:
+                conn_kwargs = clients[0].connection_pool.connection_kwargs
+                redis_host = conn_kwargs.get("host", redis_host)
+                redis_port = conn_kwargs.get("port", redis_port)
+                redis_db = conn_kwargs.get("db", redis_db)
+        config = getattr(self, "config", None)
+        if config is not None and hasattr(config, "redis") and config.redis:
+            redis_port = int(config.redis)
+        return redis_host, redis_port, redis_db
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):

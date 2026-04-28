@@ -75,7 +75,7 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     #     apply_ac(model, config.policy.model_name_or_path)
     # init parallel_dims
     parallel_dims: ParallelDims = ParallelDims.from_config(
-        parallesim_config=config.policy.parallelism
+        parallelism_config=config.policy.parallelism
     )
     parallel_dims.build_mesh(device_type=device.type)
 
@@ -93,9 +93,11 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device=device)
-            if t.device.type == "meta"
-            else t.to(device),
+            lambda t: (
+                torch.empty_like(t, device=device)
+                if t.device.type == "meta"
+                else t.to(device)
+            ),
             recurse=True,
         )
     model.post_to_empty_hook(config)
@@ -204,13 +206,17 @@ def create_debug_input(model_name_or_path):
     labels = inputs["input_ids"].clone()
     token_mask = create_assistant_tokens_mask(inputs["input_ids"], processor)
     labels[~token_mask] = IGNORE_INDEX
-    return {
+    filtered_input_kwargs = {
         "input_ids": inputs["input_ids"],
         "attention_mask": inputs["attention_mask"],
         "pixel_values": inputs["pixel_values"],
         "image_grid_thw": inputs["image_grid_thw"],
         "labels": labels,
     }
+    # transformers v5+ has mm_token_type_ids
+    if "mm_token_type_ids" in inputs:
+        filtered_input_kwargs["mm_token_type_ids"] = inputs["mm_token_type_ids"]
+    return filtered_input_kwargs
 
 
 class TestCosmosHfPrecision(unittest.TestCase):
@@ -300,15 +306,19 @@ class TestCosmosHfPrecision(unittest.TestCase):
         )
 
         hf_model.eval()
+        hf_forward_kwargs = {
+            "input_ids": data_batch["input_ids"],
+            "pixel_values": data_batch["pixel_values"],
+            "attention_mask": data_batch["attention_mask"],
+            "image_grid_thw": data_batch["image_grid_thw"],
+            "use_cache": False,
+            "return_dict": True,
+        }
+        # Transformers v5+: multimodal forward requires mm_token_type_ids when image/video grids are set.
+        if "mm_token_type_ids" in data_batch:
+            hf_forward_kwargs["mm_token_type_ids"] = data_batch["mm_token_type_ids"]
         with torch.no_grad():
-            logits_hf = hf_model(
-                data_batch["input_ids"],
-                pixel_values=data_batch["pixel_values"],
-                attention_mask=data_batch["attention_mask"],
-                image_grid_thw=data_batch["image_grid_thw"],
-                use_cache=False,
-                return_dict=True,
-            ).logits
+            logits_hf = hf_model(**hf_forward_kwargs).logits
             print(f"before logits_hf: {logits_hf.shape}")
         del hf_model
         torch.cuda.empty_cache()

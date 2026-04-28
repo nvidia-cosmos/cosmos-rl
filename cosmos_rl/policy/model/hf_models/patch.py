@@ -26,6 +26,7 @@ from transformers.utils.import_utils import (
     is_causal_conv1d_available,
     is_flash_linear_attention_available,
 )
+from cosmos_rl.utils.transformers_utils import is_transformers_v5
 
 from cosmos_rl.utils.logging import logger
 
@@ -196,6 +197,14 @@ def make_new_self_attn_forward(original_attn_forward):
 
 def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     patch_success = False
+    attn_implementation = getattr(hfmodel.model.config, "_attn_implementation", "")
+    if not attn_implementation.startswith("flash_attention"):
+        hfmodel.model.set_attn_implementation("flash_attention_2")
+        logger.warning(
+            f"Model {hf_config.model_type} is not using flash attention by default for sequence packing, switched to flash_attention_2. "
+            f"Original attn implementation: {attn_implementation}"
+        )
+
     try:
         if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
             SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](
@@ -550,6 +559,12 @@ def visual_forward_qwen3_vl_patch(model):
             _EXPECTED_TRANSFORMERS_VERSION,
             transformers.__version__,
         )
+        # TODO: Support visual_forward_qwen3_vl_patch for transformers v5
+        if is_transformers_v5():
+            logger.warning(
+                "If using transformers v5, skip visual_forward_qwen3_vl_patch for now since it was only tested on v4.57.6 and may require adjustments for v5's refactored attention implementation."
+            )
+            return
 
     # Resolve the output dataclass from the actual runtime module
     model_module = importlib.import_module(type(model).__module__)

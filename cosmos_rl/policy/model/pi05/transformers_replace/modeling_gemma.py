@@ -30,12 +30,15 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from transformers.modeling_rope_utils import dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import auto_docstring, can_return_tuple, logging
 from cosmos_rl.policy.model.pi05.transformers_replace.configuration_gemma import (
     GemmaConfig,
+)
+from cosmos_rl.utils.transformers_utils.modeling_rope_utils import (
+    get_rope_init_fn,
 )
 
 
@@ -152,7 +155,7 @@ class GemmaRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rope_init_fn = get_rope_init_fn(self.rope_type)
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)

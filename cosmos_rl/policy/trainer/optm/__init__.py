@@ -99,11 +99,11 @@ class OptimizersContainer(Optimizer, Generic[T]):
         optimizer_cls: type[T],
         model_parts: List[nn.Module],
         optimizer_kwargs: List[Dict[str, Any]],
-        model_modpath: List[str] = None,
+        model_module_path: List[str] = None,
     ) -> None:
         all_params = []
         self.model_parts = model_parts
-        self.model_modpath = model_modpath
+        self.model_module_path = model_module_path
         self.optimizers = [[] for _ in self.model_parts]
         # Compute total number of parameters
         total_trainable_params = 0
@@ -115,8 +115,8 @@ class OptimizersContainer(Optimizer, Generic[T]):
             zip(self.model_parts, optimizer_kwargs)
         ):
             model_part_name = (
-                self.model_modpath[model_id]
-                if self.model_modpath and model_id < len(self.model_modpath)
+                self.model_module_path[model_id]
+                if self.model_module_path and model_id < len(self.model_module_path)
                 else f"part_{model_id}"
             )
 
@@ -300,7 +300,7 @@ def _print_optimizer_desc_table(descs: list["OptimizerDesc"]) -> None:
 def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
-    model_modpath: List[str] = None,
+    model_module_path: List[str] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -317,7 +317,7 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        model_modpath (List[str], optional): List of model part paths. Defaults to None.
+        model_module_path (List[str], optional): List of model part paths. Defaults to None.
     """
     lr = config.train.optm_lr
     if isinstance(lr, float):
@@ -332,8 +332,8 @@ def build_optimizers(
                 lr = lr[: len(model_parts)]
             else:
                 # List the model part names for better debugging
-                if model_modpath is not None:
-                    model_part_names = model_modpath
+                if model_module_path is not None:
+                    model_part_names = model_module_path
                 else:
                     model_part_names = []
                     for model_part in model_parts:
@@ -415,7 +415,7 @@ def build_optimizers(
         optimizer_cls,
         model_parts,
         filtered_optimizer_kwargs,
-        model_modpath=model_modpath,
+        model_module_path=model_module_path,
     )
 
 
@@ -584,6 +584,7 @@ def build_lr_schedulers(
         decay_steps: int,
         lr_decay_type: str,
         min_lr_factor: float,
+        warmup_start_factor: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -603,13 +604,17 @@ def build_lr_schedulers(
         """
         warmup_stable_steps = warmup_steps + stable_steps
         if current_step < warmup_steps:
-            # linear warmup
-            # 0-indexed step, hence + 1 adjustments
-            current_step += 1
+            # linear warmup from warmup_start_factor to 1.0
             assert warmup_steps != 0, (
                 "warmup_steps must not be zero to reach this branch"
             )
-            curr_adjustment = float(current_step / warmup_steps)
+            if warmup_steps == 1:
+                curr_adjustment = 1.0
+            else:
+                progress = float(current_step) / float(warmup_steps - 1)
+                curr_adjustment = (
+                    warmup_start_factor + (1.0 - warmup_start_factor) * progress
+                )
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
@@ -639,6 +644,7 @@ def build_lr_schedulers(
         decay_steps=decay_steps,
         lr_decay_type=lr_decay_type,
         min_lr_factor=min_lr_factor,
+        warmup_start_factor=config.train.optm_warmup_start_factor,
     )
 
     return LRSchedulersContainer(optimizers, lr_lambda)
