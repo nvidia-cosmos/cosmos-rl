@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import os
 import copy
 import traceback
@@ -39,6 +40,23 @@ from transformers import (
 
 
 IGNORE_INDEX = -100
+
+
+def _release_cuda_memory() -> None:
+    """Aggressively release CUDA memory between model iterations.
+
+    Mirror of the helper in ``tests/test_hf_models.py``. A bare
+    ``torch.cuda.empty_cache()`` is not enough between large VLM dtype
+    permutations: lingering Python references (notably the per-rank
+    ``[model]`` list returned by ``init_cosmos_rl_model``) keep the allocator
+    from handing pages back to the driver, and the next ``.to('cuda')`` of a
+    fp32 7B HF model OOMs on a single 80GB GPU.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def test_hf_model_forward(model, inputs):
@@ -226,8 +244,15 @@ class TestHFModelTP(unittest.TestCase):
                     k: v.clone() for k, v in cosmos_hf_model.model.named_buffers()
                 }
                 model_class = cosmos_hf_model.model_class
+                # Drop *every* reference to the cosmos model before loading
+                # the (much larger) raw HF model. ``cosmos_model_list[0]`` is
+                # the same object as ``cosmos_hf_model``; without clearing the
+                # list, ``del cosmos_hf_model`` only removes the local name and
+                # the caching allocator can't release ~14GB of TP-sharded
+                # weights -- which OOMs on Qwen2.5-VL-7B + fp32.
                 del cosmos_hf_model
-                torch.cuda.empty_cache()
+                cosmos_model_list.clear()
+                _release_cuda_memory()
 
                 # Load hf model
                 hf_model = model_class.from_pretrained(
@@ -235,7 +260,7 @@ class TestHFModelTP(unittest.TestCase):
                 ).to("cuda", dtype=dtype)
                 hf_named_buffers = {k: v.clone() for k, v in hf_model.named_buffers()}
                 del hf_model
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
                 if torch.distributed.get_rank() == 0:
                     for name, cosmos_hf_buffer in cosmos_named_buffers.items():
                         assert name in hf_named_buffers, (
@@ -255,7 +280,7 @@ class TestHFModelTP(unittest.TestCase):
                     print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
                 del hf_named_buffers
                 del cosmos_named_buffers
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
 
     def test_tp_forward(self):
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
@@ -370,11 +395,15 @@ class TestHFModelTP(unittest.TestCase):
                     assert (max_logit_hf - max_logit_cosmos_rl).abs() <= 0.5
                     print(f"{model_id} forward test passed.")
 
+                # Same caveat as test_tp_post_to_empty_hook: the list returned
+                # by init_cosmos_rl_model still holds the cosmos model, so
+                # ``del cosmos_hf_model`` alone leaves it on the GPU.
                 del cosmos_hf_model
                 del hf_model
                 del cosmos_forward_logits
                 del hf_forward_logits
-                torch.cuda.empty_cache()
+                cosmos_model_list.clear()
+                _release_cuda_memory()
             except Exception as e:
                 error_occurred = True
                 local_error_msg = (

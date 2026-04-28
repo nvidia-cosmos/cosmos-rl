@@ -40,6 +40,44 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from qwen_vl_utils import fetch_image, fetch_video
 import qwen_vl_utils.vision_process as vision_process
 
+
+def _patch_qwen_vl_utils_video_fps() -> None:
+    """Backfill ``video_fps`` on ``torchvision.io.read_video`` results.
+
+    qwen-vl-utils >= 0.0.14 calls ``info["video_fps"]`` inside
+    ``_read_video_torchvision``. Newer torchvision (>= 0.22) sometimes returns
+    an info dict that does not include ``video_fps`` (e.g. when fps cannot be
+    inferred from the container), which raises ``KeyError: 'video_fps'`` and
+    breaks ``test_data_packer`` / ``test_sequence_packing`` whenever the
+    torchvision backend is selected.
+
+    Environments that have ``decord`` installed prefer the decord backend and
+    never hit this path. Our CI image does not ship decord, so we wrap
+    ``torchvision.io.read_video`` and inject a sensible ``video_fps`` when
+    missing. Idempotent and safe no-op if torchvision is unavailable.
+    """
+    try:
+        import torchvision.io as _tv_io
+    except Exception:
+        return
+    if getattr(_tv_io.read_video, "_cosmos_rl_video_fps_patched", False):
+        return
+    _orig_read_video = _tv_io.read_video
+
+    def read_video(*args, **kwargs):
+        video, audio, info = _orig_read_video(*args, **kwargs)
+        if isinstance(info, dict) and "video_fps" not in info:
+            info = dict(info)
+            info["video_fps"] = float(info.get("fps", 30.0))
+        return video, audio, info
+
+    read_video._cosmos_rl_video_fps_patched = True
+    _tv_io.read_video = read_video
+
+
+_patch_qwen_vl_utils_video_fps()
+
+
 IGNORE_LABEL_ID = -100
 
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run the full cosmos-rl unit-test suite.
+[ -z "$BASH_VERSION" ] && exec bash "$0" "$@"
 #
 # Each entry below is invoked through `run` so that:
 #   * a failure in any single test does NOT stop the rest of the suite, and
