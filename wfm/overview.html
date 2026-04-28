@@ -259,7 +259,7 @@
 <p>Launch a reward service first by following <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>. Then point the trainer to that service through environment variables:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">&quot;your_token&quot;</span>
 <span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/enqueue&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/fetch&quot;</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/pull&quot;</span>
 </pre></div>
 </div>
 <p>After that, launch DiffusionNFT training with <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusion_nft</span></code>. For example, SD3 RL:</p>
@@ -475,7 +475,7 @@ For Cosmos-Predict2.5, you can refer this repo: <a class="reference external" hr
 <li><p>Configure the environment variable <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">&quot;your_token&quot;</span>
 <span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/enqueue&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/fetch&quot;</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/pull&quot;</span>
 </pre></div>
 </div>
 </li>
