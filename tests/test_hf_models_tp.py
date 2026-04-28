@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import os
 import copy
+import traceback
 from datetime import timedelta
 
 # Set the environment variable to use HF rotary implementation
@@ -38,6 +40,23 @@ from transformers import (
 
 
 IGNORE_INDEX = -100
+
+
+def _release_cuda_memory() -> None:
+    """Aggressively release CUDA memory between model iterations.
+
+    Mirror of the helper in ``tests/test_hf_models.py``. A bare
+    ``torch.cuda.empty_cache()`` is not enough between large VLM dtype
+    permutations: lingering Python references (notably the per-rank
+    ``[model]`` list returned by ``init_cosmos_rl_model``) keep the allocator
+    from handing pages back to the driver, and the next ``.to('cuda')`` of a
+    fp32 7B HF model OOMs on a single 80GB GPU.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def test_hf_model_forward(model, inputs):
@@ -182,8 +201,11 @@ class TestHFModelTP(unittest.TestCase):
         max_position_embeddings = 1024
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
-        # Load cosmos config
-        cosmos_config = Config.from_dict(config_dict)
+        # NOTE: do NOT call ``Config.from_dict`` here with ``model_name_or_path``
+        # still at its module-level default (``None``). Pydantic rejects it
+        # because the field is typed as ``str``. Build the cosmos config
+        # per-model below instead so the test runs in isolation (previously it
+        # relied on ``test_tp_forward`` having already mutated ``config_dict``).
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -193,7 +215,8 @@ class TestHFModelTP(unittest.TestCase):
             # Load hf config
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
             config.max_position_embeddings = max_position_embeddings
-            cosmos_config.policy.model_name_or_path = model_id
+            config_dict["policy"]["model_name_or_path"] = model_id
+            cosmos_config = Config.from_dict(config_dict)
             # Remove the model type from the model registry, so that the model will run in the hfmodel path.
             if ModelRegistry.check_model_type_supported(config.model_type):
                 ModelRegistry._MODEL_REGISTRY.pop(config.model_type)
@@ -221,8 +244,15 @@ class TestHFModelTP(unittest.TestCase):
                     k: v.clone() for k, v in cosmos_hf_model.model.named_buffers()
                 }
                 model_class = cosmos_hf_model.model_class
+                # Drop *every* reference to the cosmos model before loading
+                # the (much larger) raw HF model. ``cosmos_model_list[0]`` is
+                # the same object as ``cosmos_hf_model``; without clearing the
+                # list, ``del cosmos_hf_model`` only removes the local name and
+                # the caching allocator can't release ~14GB of TP-sharded
+                # weights -- which OOMs on Qwen2.5-VL-7B + fp32.
                 del cosmos_hf_model
-                torch.cuda.empty_cache()
+                cosmos_model_list.clear()
+                _release_cuda_memory()
 
                 # Load hf model
                 hf_model = model_class.from_pretrained(
@@ -230,7 +260,7 @@ class TestHFModelTP(unittest.TestCase):
                 ).to("cuda", dtype=dtype)
                 hf_named_buffers = {k: v.clone() for k, v in hf_model.named_buffers()}
                 del hf_model
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
                 if torch.distributed.get_rank() == 0:
                     for name, cosmos_hf_buffer in cosmos_named_buffers.items():
                         assert name in hf_named_buffers, (
@@ -250,7 +280,7 @@ class TestHFModelTP(unittest.TestCase):
                     print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
                 del hf_named_buffers
                 del cosmos_named_buffers
-                torch.cuda.empty_cache()
+                _release_cuda_memory()
 
     def test_tp_forward(self):
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
@@ -365,17 +395,25 @@ class TestHFModelTP(unittest.TestCase):
                     assert (max_logit_hf - max_logit_cosmos_rl).abs() <= 0.5
                     print(f"{model_id} forward test passed.")
 
+                # Same caveat as test_tp_post_to_empty_hook: the list returned
+                # by init_cosmos_rl_model still holds the cosmos model, so
+                # ``del cosmos_hf_model`` alone leaves it on the GPU.
                 del cosmos_hf_model
                 del hf_model
                 del cosmos_forward_logits
                 del hf_forward_logits
-                torch.cuda.empty_cache()
+                cosmos_model_list.clear()
+                _release_cuda_memory()
             except Exception as e:
                 error_occurred = True
-                print(
-                    f"Rank {torch.distributed.get_rank()} - {model_id} forward test failed."
+                local_error_msg = (
+                    f"Rank {torch.distributed.get_rank()} - "
+                    f"{model_id} forward test failed: {e}"
                 )
-                print(f"Rank {torch.distributed.get_rank()} - Error: {e}")
+                print(local_error_msg)
+                # Print the full traceback on the failing rank so the CI log
+                # doesn't just show an opaque SystemExit(-1) further down.
+                traceback.print_exc()
 
             # Synchronize error state across all ranks to avoid hanging
             error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device=device)
@@ -384,9 +422,14 @@ class TestHFModelTP(unittest.TestCase):
             )
 
             if error_tensor.item() > 0:
-                if torch.distributed.get_rank() == 0:
-                    print("Test failed on at least one rank. Exiting...")
-                exit(-1)
+                # Raise instead of exit(-1): unittest records the failure
+                # properly and the non-zero exit still propagates out of
+                # torchrun because the TestCase ends with an error.
+                raise AssertionError(
+                    f"{model_id} forward test failed on at least one rank "
+                    f"(local rank={torch.distributed.get_rank()}, "
+                    f"local_error={error_occurred})."
+                )
 
 
 # torchrun --nproc_per_node=2 tests/test_hf_models_tp.py
