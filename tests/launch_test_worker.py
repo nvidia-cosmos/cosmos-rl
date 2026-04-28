@@ -1680,6 +1680,9 @@ def run_sft_validation():
                 dataset_list.append(dataset[split_name])
             self.dataset = concatenate_datasets(dataset_list)
 
+        def __getitem__(self, idx):
+            return super().__getitem__(idx)["conversation"]
+
         def __len__(self):
             return 1
 
