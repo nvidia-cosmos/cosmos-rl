@@ -135,6 +135,7 @@ RUN TORCH_CUDA_ARCH_LIST="8.0 9.0 10.0+PTX" pip install git+https://github.com/f
 RUN apt-get update && apt-get install -y  libibverbs-dev
 RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
     && cd /tmp/deepep \
+    && git checkout 567632d \
     && if [ "${COSMOS_RL_TORCH_VARIANT}" = "2.8" ]; then \
         python setup.py build && python setup.py install; \
     elif [ "${COSMOS_RL_TORCH_VARIANT}" = "2.10" ]; then \
