@@ -115,7 +115,7 @@ Launch a reward service first by following `Reward Service <https://github.com/n
 
     export REMOTE_REWARD_TOKEN="your_token"
     export REMOTE_REWARD_ENQUEUE_URL="https://reward-service-host:PORT/api/reward/enqueue"
-    export REMOTE_REWARD_FETCH_URL="https://reward-service-host:PORT/api/reward/fetch"
+    export REMOTE_REWARD_FETCH_URL="https://reward-service-host:PORT/api/reward/pull"
 
 After that, launch DiffusionNFT training with ``cosmos_rl.tools.dataset.diffusion_nft``. For example, SD3 RL::
 
@@ -338,7 +338,7 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
 
     export REMOTE_REWARD_TOKEN="your_token"
     export REMOTE_REWARD_ENQUEUE_URL="https://reward_service_host:PORT/api/reward/enqueue"
-    export REMOTE_REWARD_FETCH_URL="https://reward_service_host:PORT/api/reward/fetch"
+    export REMOTE_REWARD_FETCH_URL="https://reward_service_host:PORT/api/reward/pull"
 
 **Models**:
 
