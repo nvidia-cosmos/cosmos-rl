@@ -28,13 +28,7 @@ from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
 import cosmos_rl.dispatcher.command as command
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
-from cosmos_rl.utils.nccl_transfer_protocol import (
-    NCCL_COMPLETION_PREFIX,
-    build_cleanup_channel,
-    build_nccl_prefix,
-    build_rollout_prefix,
-    build_transfer_rollout_candidates,
-)
+from cosmos_rl.utils.payload_transport import PayloadTransportRegistry
 from cosmos_rl.utils.report.wandb_logger import (
     is_wandb_available,
     log_wandb,
@@ -850,43 +844,49 @@ class PolicyStatusManager:
 
         discarded_count = len(rollouts) - len(filtered_rollouts)
         if discarded_count > 0 and getattr(self, "_nccl_cleanup_enabled", False):
-            self._publish_nccl_cleanup_for_discarded(rollouts, filtered_rollouts)
+            self._publish_payload_transport_cleanup(rollouts, filtered_rollouts)
 
         return filtered_rollouts
 
-    def _publish_nccl_cleanup_for_discarded(
+    def _publish_payload_transport_cleanup(
         self,
         rollouts: List[Rollout],
         filtered: List[Rollout],
     ) -> None:
-        """Publish Redis cleanup for discarded NCCL-bearing rollouts.
+        """Publish per-transport cleanup for discarded rollouts.
 
-        When NCCL payload transfer is enabled, rollout completions are
-        prefixed with ``nccl:``.  If such rollouts are discarded as outdated,
-        the rollout worker still holds GPU buffers for the pending NCCL send.
-        Publishing a cleanup message lets the worker release them immediately.
+        Each registered :class:`PayloadTransport` may stamp its rollout
+        completions with a sentinel prefix.  When the controller
+        discards rollouts as outdated, we group them by transport and
+        delegate cleanup publishing to each backend so it can release
+        any reserved resources (e.g. GPU buffers held by NCCL transfers).
 
-        This is a no-op when no discarded rollouts use NCCL transfer.
+        This is a no-op when no discarded rollouts carry a transport
+        completion prefix.
         """
         kept_ids = {id(r) for r in filtered}
-        nccl_transfer_ids: list[str] = []
+
+        # Group transfer ids by transport so each backend gets a single
+        # batched cleanup invocation.
+        per_transport: dict = {}
         for rollout in rollouts:
             if id(rollout) in kept_ids:
                 continue
             completion = getattr(rollout, "completion", None)
-            if isinstance(completion, str) and completion.startswith(
-                NCCL_COMPLETION_PREFIX
-            ):
-                nccl_transfer_ids.append(completion[len(NCCL_COMPLETION_PREFIX) :])
+            transport = PayloadTransportRegistry.active_for_completion(completion)
+            if transport is None:
+                continue
+            transfer_id = completion[len(transport.completion_prefix):]
+            per_transport.setdefault(transport, []).append(transfer_id)
 
-        if not nccl_transfer_ids:
+        if not per_transport:
             return
 
         if not self._nccl_cleanup_enabled:
             self._nccl_cleanup_enabled = True
             logger.info(
-                "[Controller] Detected nccl:-prefixed rollouts; "
-                "NCCL cleanup publishing is now active."
+                "[Controller] Detected payload-transport-prefixed rollouts; "
+                "transport cleanup publishing is now active."
             )
 
         redis_handler = getattr(self, "redis_handler", None)
@@ -900,52 +900,22 @@ class PolicyStatusManager:
         if redis_client is None:
             return
 
-        experiment_name = "default"
-        try:
-            experiment_name = self.config.logging.experiment_name
-        except AttributeError:
-            pass
-        job_id = os.environ.get("SLURM_JOB_ID", "test")
-        prefix = build_nccl_prefix(experiment_name=experiment_name, job_id=job_id)
-
-        num_rollout_replicas = None
-        try:
-            num_rollout_replicas = self.config.rollout.parallelism.n_init_replicas
-        except AttributeError:
-            pass
-
-        published = 0
-        max_retries = 3
-        for transfer_id in nccl_transfer_ids:
+        for transport, transfer_ids in per_transport.items():
             try:
-                rollout_indices = build_transfer_rollout_candidates(
-                    transfer_id=transfer_id,
-                    num_rollout_replicas=num_rollout_replicas,
+                published = transport.publish_cleanup_for_discarded(
+                    transfer_ids=transfer_ids,
+                    config=self.config,
+                    redis_client=redis_client,
                 )
-                for rollout_idx in rollout_indices:
-                    channel = build_cleanup_channel(
-                        build_rollout_prefix(prefix, rollout_idx)
+                if published > 0:
+                    logger.debug(
+                        f"[Controller] Published {transport.name} cleanup for "
+                        f"{published}/{len(transfer_ids)} discarded transfers"
                     )
-                    payload = json.dumps({"transfer_id": transfer_id})
-                    for attempt in range(max_retries):
-                        try:
-                            redis_client.publish(channel, payload)
-                            break
-                        except Exception:
-                            if attempt == max_retries - 1:
-                                raise
-                            time.sleep(0.1 * (attempt + 1))
-                published += 1
             except Exception as e:
                 logger.debug(
-                    f"[Controller] Failed to publish NCCL cleanup for "
-                    f"transfer {transfer_id[:32]}: {e}"
+                    f"[Controller] Transport {transport.name} cleanup failed: {e}"
                 )
-        if published > 0:
-            logger.debug(
-                f"[Controller] Published NCCL cleanup for {published}/"
-                f"{len(nccl_transfer_ids)} discarded transfers"
-            )
 
     def sft_report_summary(
         self,
