@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pendulum-v1 demo — continuous-action variant of the CartPole demo.
+# Use this as the smoke test for the continuous-action wiring of
+# GymPolicy / GymRolloutEngine.
+
+[model]
+obs_dim     = 3
+action_dim  = 1
+hidden_dim  = 64
+discrete    = false
+
+[env]
+name        = "Pendulum-v1"
+max_steps   = 200
+
+[custom]
+payload_transfer = "redis"
+
+[train]
+train_batch_per_replica = 4
+
+[rollout]
+n_generation = 1
