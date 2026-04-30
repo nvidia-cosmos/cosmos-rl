@@ -116,8 +116,14 @@ rl = [
     "flash-attn>=2.8.3",
 ]
 
+# Lightweight extra for non-LLM RL workloads (e.g. Gymnasium-based
+# Classic Control demos); avoids dragging in vllm / flash-attn.
+gym = [
+    "gymnasium>=0.29",
+]
+
 all = [
-    "cosmos_rl[wfm,vla,rl]",
+    "cosmos_rl[wfm,vla,rl,gym]",
 ]
 
 [tool.uv.sources]

@@ -38,7 +38,7 @@ from collections import OrderedDict
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Tuple, Dict, Any, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -1275,8 +1275,68 @@ def replace_with_liger_equivalents(root: torch.nn.Module, config: CosmosConfig) 
                     replace_child(name, child, new_lm_head, root)
 
 
+# Custom tokenizer-loader registry.  Each entry is a (predicate, loader)
+# pair; predicates are evaluated in registration order, and the first
+# predicate that matches ``model_name_or_path`` wins.  This lets non-text
+# RL workloads (e.g. Gymnasium-based tasks with local .toml model
+# configs) plug in a NoOpTokenizer without monkey-patching.
+_CUSTOM_TOKENIZER_LOADERS: List[Tuple[Callable[[str], bool], Callable[[str], Any]]] = []
+
+
+def register_tokenizer_loader(
+    predicate: Callable[[str], bool],
+    loader: Callable[[str], Any],
+) -> None:
+    """Register a custom tokenizer loader.
+
+    ``setup_tokenizer`` consults the registry first; the first predicate
+    that returns truthy for the incoming ``model_name_or_path`` is
+    selected and its loader is invoked to produce the tokenizer.  If no
+    predicate matches, the default HuggingFace path is taken.
+
+    Typical usage from a non-LLM RL entrypoint::
+
+        from cosmos_rl.utils.util import register_tokenizer_loader
+        from cosmos_rl.utils.no_op_tokenizer import NoOpTokenizer
+
+        register_tokenizer_loader(
+            predicate=lambda p: p.endswith(".toml"),
+            loader=lambda p: NoOpTokenizer(),
+        )
+
+    Args:
+        predicate: Callable that receives ``model_name_or_path`` and
+            returns ``True`` if this loader should handle it.
+        loader: Callable that receives ``model_name_or_path`` and
+            returns a tokenizer-shaped object.
+    """
+    _CUSTOM_TOKENIZER_LOADERS.append((predicate, loader))
+
+
+def clear_tokenizer_loaders() -> None:
+    """Remove all registered custom tokenizer loaders.  Useful for tests."""
+    _CUSTOM_TOKENIZER_LOADERS.clear()
+
+
 @functools.lru_cache(maxsize=None)
 def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
+    # Registry first so non-text RL workloads can short-circuit the
+    # HuggingFace path.  Loaders raising on a non-match should fall back
+    # gracefully to the default path.
+    for predicate, loader in _CUSTOM_TOKENIZER_LOADERS:
+        try:
+            matched = bool(predicate(model_name_or_path))
+        except Exception as e:
+            logger.warning(
+                f"Tokenizer loader predicate raised for {model_name_or_path}: {e}; skipping"
+            )
+            continue
+        if matched:
+            logger.info(
+                f"Tokenizer for {model_name_or_path} resolved via registered custom loader"
+            )
+            return loader(model_name_or_path)
+
     tokenizer = retry(AutoTokenizer.from_pretrained)(
         model_name_or_path,
         trust_remote_code=True,
