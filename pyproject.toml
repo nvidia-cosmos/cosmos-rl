@@ -122,8 +122,14 @@ gym = [
     "gymnasium>=0.29",
 ]
 
+# UCXX-based zero-copy payload transport (RDMA / SHM auto-routing).
+# CUDA 12 wheels; users on CUDA 11 should install ucxx-cu11 manually.
+ucxx = [
+    "ucxx-cu12>=0.40.0",
+]
+
 all = [
-    "cosmos_rl[wfm,vla,rl,gym]",
+    "cosmos_rl[wfm,vla,rl,gym,ucxx]",
 ]
 
 [tool.uv.sources]

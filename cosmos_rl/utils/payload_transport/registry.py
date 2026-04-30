@@ -348,6 +348,9 @@ def get_payload_transfer_mode(config: Any) -> str:
 
     if isinstance(explicit, str) and explicit:
         normalized = explicit.strip().lower()
+        # Lazy-load known optional backends so users don't pay the import
+        # cost (or hit a missing-extra error) until they actually opt in.
+        _maybe_autoload_backend(normalized)
         if PayloadTransportRegistry.get_optional(normalized) is None:
             raise ValueError(
                 f"[custom].{PAYLOAD_TRANSFER_KEY}={explicit!r} is not a "
@@ -396,6 +399,26 @@ def is_payload_transfer_mode_explicit(config: Any) -> bool:
     except AttributeError:
         legacy = None
     return bool(legacy)
+
+
+def _maybe_autoload_backend(name: str) -> None:
+    """Best-effort import of optional backends keyed by transport name.
+
+    The default Redis and NCCL backends are imported eagerly by
+    :mod:`cosmos_rl.utils.payload_transport`; UCXX is intentionally lazy
+    because it depends on the ``ucxx-cu12`` extra.  Workloads that opt
+    in via ``payload_transfer = "ucxx"`` get the side-effect import here.
+    """
+    if PayloadTransportRegistry.get_optional(name) is not None:
+        return
+    if name == "ucxx":
+        try:
+            import cosmos_rl.utils.payload_transport.ucxx  # noqa: F401
+        except Exception as e:
+            logger.warning(
+                f"Failed to autoload UCXX payload transport: {e}. "
+                "Install with: pip install cosmos_rl[ucxx]"
+            )
 
 
 __all__ = [
