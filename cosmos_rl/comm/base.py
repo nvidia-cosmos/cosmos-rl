@@ -38,7 +38,8 @@ import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 import cosmos_rl.utils.util as util
-from transformers import AutoConfig
+from transformers import AutoConfig  # noqa: F401  re-exported for downstream importers
+from cosmos_rl.utils.model_config import load_model_config
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.colocated.api_client import ColocatedAPIClient
@@ -111,8 +112,13 @@ class CommMixin:
         val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
     ):
         if not self.config.policy.is_diffusers:
-            hf_config = util.retry(AutoConfig.from_pretrained)(
-                self.config.policy.model_name_or_path, trust_remote_code=True
+            # Routes through the model_config registry so non-HF model paths
+            # (e.g. Gymnasium MLP described by a local TOML) resolve via
+            # ``register_local_model_config`` before falling back to
+            # ``AutoConfig.from_pretrained``.  Default flow for HF repo ids
+            # / standard local HF dirs is unchanged.
+            hf_config = util.retry(load_model_config)(
+                self.config.policy.model_name_or_path
             )
             is_vlm = getattr(hf_config, "vision_config", None) is not None
             model_type = hf_config.model_type

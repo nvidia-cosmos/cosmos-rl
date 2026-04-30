@@ -24,6 +24,7 @@ from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
 from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
+from cosmos_rl.utils.model_config import load_model_config
 
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
@@ -600,9 +601,12 @@ class ModelRegistry:
         for k, v in hf_config_args.items():
             logger.info(f"Set hf config args {k} to {v}")
 
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            model_name_or_path, trust_remote_code=True, **hf_config_args
-        )
+        # Routes through the model_config registry first so non-HF model
+        # paths (e.g. a Gymnasium MLP described by a local TOML registered
+        # via ``register_local_model_config``) resolve before the default
+        # ``AutoConfig.from_pretrained`` fallback.  HF repo ids / standard
+        # local HF dirs hit the fallback exactly as before.
+        hf_config = util.retry(load_model_config)(model_name_or_path, **hf_config_args)
         aux_loss_coeff = config.policy.aux_loss_coeff
         if aux_loss_coeff > 0.0 and "aux_loss_coeff" not in hf_config:
             hf_config.aux_loss_coeff = aux_loss_coeff
@@ -1063,3 +1067,66 @@ class WeightMapper(ABC):
         """
         tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
         tensor_view.copy_(tmp_recv_tensor)
+
+
+class IdentityWeightMapper(WeightMapper):
+    """A trivial :class:`WeightMapper` for single-rank, non-sharded models.
+
+    The default :class:`WeightMapper` machinery is built around HuggingFace
+    causal-LM conventions: parameter renaming, fused-KV splitting,
+    expert-stacking for MoE, etc.  Small RL policies (an MLP for a
+    Gymnasium task, for instance) need none of that -- every parameter has
+    the same name on the policy and rollout sides, and there is no
+    tensor-parallel splitting because the world size is typically 1.
+
+    Behavior:
+
+    * Policy -> HF and rollout -> HF name maps are identity.
+    * No parameter splitting (returns the input ``(name, tensor)``
+      unchanged in a single-element list).
+    * Inherits every other hook from the base class as-is, which is
+      correct for an MLP-sized model that lives entirely on rank 0.
+
+    The constructor accepts ``hf_config=None`` so callers that haven't
+    set up a HuggingFace config (the typical Gymnasium case) can still
+    instantiate the mapper without contortions.
+
+    Usage::
+
+        from cosmos_rl.policy.model.base import (
+            IdentityWeightMapper,
+            ModelRegistry,
+        )
+
+        class GymMLP(BaseModel):
+            @staticmethod
+            def supported_model_types():
+                return ["gym_mlp"]
+            ...
+
+        ModelRegistry.register_model(GymMLP, IdentityWeightMapper)
+    """
+
+    def __init__(self, hf_config: Optional["AutoConfig"] = None):
+        # Skip the parent constructor: it logs the wrong backend and
+        # assumes ``hf_config`` is non-None.  We replicate the minimum
+        # state ourselves.
+        self.config = hf_config
+        self.backend = "vllm"
+        logger.info(
+            f"[{type(self).__name__}] Initialized identity weight mapper "
+            "(non-sharded RL policy)"
+        )
+
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        return name
+
+    def rollout_map_local_key_to_hf_key(self, name: str) -> str:
+        return name
+
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
+        self,
+        param_name: str,
+        param: torch.Tensor,
+    ) -> List[Tuple[str, torch.Tensor]]:
+        return [(self.rollout_map_local_key_to_hf_key(param_name), param)]
