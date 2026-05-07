@@ -15,6 +15,7 @@
 
 import os
 import copy
+import gc
 from datetime import timedelta
 
 # Set the environment variable to use HF rotary implementation
@@ -50,6 +51,12 @@ def test_cosmos_hf_model(model, inputs):
     with torch.no_grad():
         logits = model(**inputs).logits
         return logits[:, -1, :]
+
+
+def release_cuda_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
 
 
 @contextmanager
@@ -222,7 +229,8 @@ class TestHFModelTP(unittest.TestCase):
                 }
                 model_class = cosmos_hf_model.model_class
                 del cosmos_hf_model
-                torch.cuda.empty_cache()
+                del cosmos_model_list
+                release_cuda_memory()
 
                 # Load hf model
                 hf_model = model_class.from_pretrained(
@@ -230,7 +238,7 @@ class TestHFModelTP(unittest.TestCase):
                 ).to("cuda", dtype=dtype)
                 hf_named_buffers = {k: v.clone() for k, v in hf_model.named_buffers()}
                 del hf_model
-                torch.cuda.empty_cache()
+                release_cuda_memory()
                 if torch.distributed.get_rank() == 0:
                     for name, cosmos_hf_buffer in cosmos_named_buffers.items():
                         assert name in hf_named_buffers, (
@@ -250,7 +258,7 @@ class TestHFModelTP(unittest.TestCase):
                     print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
                 del hf_named_buffers
                 del cosmos_named_buffers
-                torch.cuda.empty_cache()
+                release_cuda_memory()
 
     def test_tp_forward(self):
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:

@@ -1025,7 +1025,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             return
 
-        self._execute_p2r_recv(command, self.inference_stream)
+        DisaggregatedRolloutControlWorker._execute_p2r_recv(
+            self, command, self.inference_stream
+        )
 
     def _execute_p2r_recv(
         self,

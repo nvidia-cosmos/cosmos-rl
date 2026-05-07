@@ -2254,6 +2254,7 @@ def run_reference_reset_test():
     config.logging.logger = ["console"]
     config.train.train_policy.kl_beta = 100
     config.train.train_policy.reference_reset_interval = 2
+    config.train.optm_warmup_steps = 0
     parallel_dims = ParallelDims.from_config(
         parallelism_config=config.policy.parallelism
     )
