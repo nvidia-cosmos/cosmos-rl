@@ -85,6 +85,7 @@ class VLLMColocateWorkerExtension:
         from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
             simplify_process_weights_after_loading as _simplify,
         )
+
         _simplify()
 
     def _test_get_parameters_mean(self, param_name: str) -> float:

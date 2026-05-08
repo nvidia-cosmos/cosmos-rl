@@ -40,7 +40,6 @@ def apply_patch_to_dispatch():
     global _dispatch_patched
     if _dispatch_patched:
         return
-    from vllm.model_executor.layers.quantization.utils import w8a8_utils
 
     def dispatch_fp8_linear_kernel_to_torch_scaled_mm(*args, **kwargs):
         return w8a8_utils.torch_per_token_w8a8_scaled_mm
@@ -56,7 +55,6 @@ def simplify_process_weights_after_loading():
     Refer to the method `process_weights_after_loading`:
     https://github.com/vllm-project/vllm/blob/1a4f35e2eaa3ebdecb8ef9ff8302b01e289305c9/vllm/model_executor/layers/quantization/fp8.py#L319
     """
-    from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -79,7 +77,6 @@ def simplify_process_weights_after_loading():
 # patch the Linear layer.
 def apply_fp8_linear_patch(model: torch.nn.Module):
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
-    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
     # Ensure dispatch is patched before creating Fp8LinearOp instances.
     apply_patch_to_dispatch()
@@ -130,7 +127,6 @@ def cache_weight_of_quantized_module(
     parallel_dims: ParallelDims,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Get the weight from the quantized module."""
-    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
     original_weight_map = {}
     hp_weight_map = {}

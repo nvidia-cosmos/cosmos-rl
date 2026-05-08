@@ -99,9 +99,7 @@ def _has_visible_nvlink_topology() -> bool:
             ]
 
         bus_ids = {
-            _decode_nvml_string(
-                pynvml.nvmlDeviceGetPciInfo(handle).busId
-            ).upper(): idx
+            _decode_nvml_string(pynvml.nvmlDeviceGetPciInfo(handle).busId).upper(): idx
             for idx, handle in enumerate(handles)
         }
         connected_pairs = set()
