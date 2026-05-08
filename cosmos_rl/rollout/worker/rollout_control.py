@@ -1494,9 +1494,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     if len(payloads) > 0:
                         if self.config.train.local_dataset:
                             for payload in payloads:
-                                payload["prompt"] = self.data_fetcher.get_payload_by_index(
-                                    payload["prompt_idx"],
-                                    is_validation=is_validation,
+                                payload["prompt"] = (
+                                    self.data_fetcher.get_payload_by_index(
+                                        payload["prompt_idx"],
+                                        is_validation=is_validation,
+                                    )
                                 )
                                 payload["conversation"] = (
                                     self.data_fetcher.get_payload_by_index(
@@ -2164,7 +2166,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if self.config.train.local_dataset:
                     for payload in payloads:
                         payload["prompt"] = self.data_fetcher.get_payload_by_index(
-                            payload["prompt_idx"], is_validation=False,
+                            payload["prompt_idx"],
+                            is_validation=False,
                         )
                         payload["conversation"] = (
                             self.data_fetcher.get_payload_by_index(
