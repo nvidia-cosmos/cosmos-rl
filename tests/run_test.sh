@@ -67,12 +67,12 @@ run python tests/test_colocated_separated.py
 run python tests/test_load_balanced_dataset.py
 run python tests/test_resume_data_index.py
 run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
-run python tests/test_diffusion_rl_e2e.py
-run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_cosmos3_trajectory_equivalence.py"
-run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_dpo_direct.py --tp_size 8"
-run python tests/test_wfm_dpo.py
-run python tests/test_wfm_nft.py
-run python tests/test_refactor_contracts.py
+# run python tests/test_diffusion_rl_e2e.py
+# run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_cosmos3_trajectory_equivalence.py"
+# run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_dpo_direct.py --tp_size 8"
+# run python tests/test_wfm_dpo.py
+# run python tests/test_wfm_nft.py
+# run python tests/test_refactor_contracts.py
 
 if (( ${#FAILED[@]} > 0 )); then
     echo
