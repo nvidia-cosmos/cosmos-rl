@@ -124,6 +124,7 @@ class TestHFModel(unittest.TestCase):
                 with init_on_device("meta", include_buffers=False):
                     with cosmos_default_dtype(dtype):
                         cosmos_hf_model = HFModel.from_pretrained(
+                            None,
                             config,
                             model_id,
                             max_position_embeddings=max_position_embeddings,
@@ -207,6 +208,7 @@ class TestHFModel(unittest.TestCase):
             with init_on_device("meta", include_buffers=False):
                 with cosmos_default_dtype(dtype):
                     cosmos_hf_model = HFModel.from_pretrained(
+                        None,
                         config,
                         model_id,
                         max_position_embeddings=max_position_embeddings,

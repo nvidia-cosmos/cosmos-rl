@@ -59,6 +59,7 @@ class DeepseekV3MoEModel(BaseModel):
     @classmethod
     def from_pretrained(
         cls,
+        cosmos_config: CosmosConfig,
         hf_config: AutoConfig,
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,
@@ -67,7 +68,10 @@ class DeepseekV3MoEModel(BaseModel):
         Initialize a DeepseekV3MoE model from a pretrained model.
 
         Args:
+            cosmos_config (CosmosConfig): Cosmos configuration.
+            hf_config (AutoConfig): HuggingFace configuration.
             model_name_or_path (str): Model name or path to the pretrained model.
+            max_position_embeddings (Optional[int]): Maximum position embeddings.
 
         Returns:
             DeepseekV3MoE: DeepseekV3MoE model.

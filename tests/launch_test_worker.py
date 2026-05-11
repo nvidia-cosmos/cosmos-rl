@@ -394,7 +394,7 @@ class TestRollout:
             for k, v in compatibale_map.items()
         }
         self.ref_compatibale_map = compatibale_map
-        self.quantization_type = None
+        self.quantization_type = "none"
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"  # keep the same as policy above.
         self.rl_mode = self.config.mode

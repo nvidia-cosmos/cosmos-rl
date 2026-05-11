@@ -78,6 +78,8 @@ class Qwen3MoeArgs:
     gate_bias_update_factor: float = 0.0
     aux_loss_coeff: float = 0.0
     hf_config: AutoConfig = None
+    # moe_backend: "grouped_gemm" as the default backend
+    moe_backend: str = "grouped_gemm"
 
 
 class RotaryEmbedding(nn.Module):
@@ -215,7 +217,7 @@ class Attention(nn.Module):
         Forward pass of the attention module.
 
         Args:
-            x (torch.Tensor): Input tensor.
+            x (torch.Tensor): Input tensor, shape: [bs, seqlen, head_num * head_dim].
             position_embeddings (torch.Tensor): Position embeddings.
             cu_seqlens (torch.Tensor, optional): Cumulative sequence lengths.
             max_seqlen (int, optional): Maximum sequence length.
@@ -425,6 +427,7 @@ class Qwen3MoE(BaseModel):
             enable_router_bias=False,
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
+            moe_backend=model_args.moe_backend,
         )
 
         self.layers = torch.nn.ModuleDict()
@@ -800,6 +803,7 @@ class Qwen3MoE(BaseModel):
     @classmethod
     def from_pretrained(
         cls,
+        cosmos_config: CosmosConfig,
         hf_config: AutoConfig,
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,
@@ -855,6 +859,7 @@ class Qwen3MoE(BaseModel):
                     biases=bias_list,
                     hf_config=hf_config,
                     aux_loss_coeff=getattr(hf_config, "aux_loss_coeff", 0.0),
+                    moe_backend=cosmos_config.train.moe_backend,
                 )
             )
 
