@@ -3160,7 +3160,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>10</p></td>
 </tr>
-<tr class="row-even"><td rowspan="76"><ul class="simple">
+<tr class="row-even"><td rowspan="80"><ul class="simple">
 <li><p>RolloutConfig</p></li>
 </ul>
 </td>
@@ -3419,6 +3419,20 @@
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>disabled</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>prefetch_rollout</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Prefetch Rollout</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Enable background prompt prefetch.  A daemon thread fetches the next prompt batch into _prompt_queue while rollout_generation() is running and (when the rollout backend implements enqueue_prefetch_payloads) speculatively dispatches sessions for those payloads so the backend can stay busy across batch boundaries.  Default off — only useful for long-running simulation backends where straggler scenes leave the backend underutilized at the tail of each rollout_generation() call.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>broadcast_all_params</p></li>
