@@ -1561,6 +1561,19 @@ class RolloutConfig(BaseModel):
         ),
     )
 
+    prefetch_rollout: bool = Field(
+        default=False,
+        description=(
+            "Enable background prompt prefetch.  A daemon thread fetches the next "
+            "prompt batch into _prompt_queue while rollout_generation() is running "
+            "and (when the rollout backend implements enqueue_prefetch_payloads) "
+            "speculatively dispatches sessions for those payloads so the backend "
+            "can stay busy across batch boundaries.  Default off — only useful for "
+            "long-running simulation backends where straggler scenes leave the "
+            "backend underutilized at the tail of each rollout_generation() call."
+        ),
+    )
+
     broadcast_all_params: bool = Field(
         default=False,
         description=(

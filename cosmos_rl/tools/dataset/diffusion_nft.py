@@ -30,6 +30,13 @@ from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.constant import CACHE_DIR
 from cosmos_rl.utils.logging import logger
 
+# Importing the module triggers the @TrainerRegistry.register decorator for
+# NFTTrainer. The trainer package's __init__.py uses lazy __getattr__, so
+# unless we explicitly import the submodule here the registry stays empty
+# and rl_worker.TrainerRegistry.get_trainer_cls("diffusion_nft") raises
+# "ValueError: Trainer diffusion_nft is not supported." at launch time.
+import cosmos_rl.policy.trainer.diffusers_trainer.nft_trainer  # noqa: F401
+
 DIFFUSION_NFT_DATASET_URL = {
     "pickscore": {
         "train": "https://raw.githubusercontent.com/NVlabs/DiffusionNFT/refs/heads/main/dataset/pickscore/train.txt",
