@@ -650,17 +650,35 @@ cosmos-rl --config config.toml"""
     # Create commands for controller
     if args.log_dir is not None:
         output_dir = args.log_dir
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         latest_dir = os.path.join(output_dir, "logs_latest")
         output_dir = os.path.join(output_dir, f"logs_{timestamp}")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        # create a symlink to the output_dir in the latest_dir
-        if os.path.exists(latest_dir):
-            os.remove(latest_dir)
-        os.symlink(os.path.basename(output_dir), latest_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        # Atomically (re)point ``logs_latest`` at the freshly-created
+        # timestamped dir. ``launch_all.py`` runs on every cosmos node, all
+        # sharing the same lustre-mounted ``log_dir``, so the previous
+        # check-then-``os.remove`` + ``os.symlink`` block raced: two nodes
+        # could both see ``logs_latest`` exist, both call ``os.remove``, and
+        # the loser hit ``FileNotFoundError`` and aborted the whole job.
+        # Use a temp symlink + ``os.replace`` so the swap is a single atomic
+        # rename, and tolerate concurrent winners with ``FileNotFoundError``.
+        tmp_link = f"{latest_dir}.tmp.{os.getpid()}"
+        try:
+            try:
+                os.remove(tmp_link)
+            except FileNotFoundError:
+                pass
+            os.symlink(os.path.basename(output_dir), tmp_link)
+            os.replace(tmp_link, latest_dir)
+        except FileNotFoundError:
+            # Lost the race to another node; ``logs_latest`` already points
+            # at a sibling timestamped dir, which is fine — every node is
+            # writing into its own ``logs_<timestamp>`` either way.
+            try:
+                os.remove(tmp_link)
+            except FileNotFoundError:
+                pass
     else:
         output_dir = None
 

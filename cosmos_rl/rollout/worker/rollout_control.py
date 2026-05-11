@@ -116,6 +116,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[RLPayload]] = Queue()
+        # Serializes get_next_prompt() between main_loop and the optional
+        # prefetch thread (see _prefetch_loop, gated by config.rollout.prefetch_rollout).
+        self._prompt_fetch_lock = threading.Lock()
+        self.prefetch_thread: Optional[threading.Thread] = None
         self.current_weight_version = 0
 
         # determine the quantization type
@@ -1460,48 +1464,56 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if self.global_rank == 0:
             # request new prompts for all ranks from controller only on global rank 0
             # this is to avoid getting different number of prompts at different ranks
-            if prompt_queue.empty():
-                # blocking request to get prompts from controller
-                # batch_size is per data parallel rank so we need to multiply it with data parallel size
-                payloads, is_end = self.api_client.get_next_prompt(
-                    batch_size * self.parallel_dims.mesh["dp"].size(), **kwargs
-                )
+            #
+            # Hold _prompt_fetch_lock across the empty-check + fetch so that
+            # main_loop and the optional prefetch thread (_prefetch_loop, gated
+            # by config.rollout.prefetch_rollout) can never observe an empty
+            # queue concurrently and double-fetch from the controller.
+            with self._prompt_fetch_lock:
+                if prompt_queue.empty():
+                    # blocking request to get prompts from controller
+                    # batch_size is per data parallel rank so we need to multiply it with data parallel size
+                    payloads, is_end = self.api_client.get_next_prompt(
+                        batch_size * self.parallel_dims.mesh["dp"].size(), **kwargs
+                    )
 
-                assert all(payload["prompt_idx"] >= 0 for payload in payloads), (
-                    "All payloads should have a valid prompt index"
-                )
+                    assert all(payload["prompt_idx"] >= 0 for payload in payloads), (
+                        "All payloads should have a valid prompt index"
+                    )
 
-                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-                    for payload in payloads:
-                        assert (
-                            payload["prompt_idx"] % len(self.replica_name_to_rank)
-                            == self.rank_in_rollout_repicas
-                        ), (
-                            f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
-                        )
-                is_validation = kwargs.get("validation_step", None) is not None
-
-                if len(payloads) > 0:
-                    if self.config.train.local_dataset:
+                    if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
                         for payload in payloads:
-                            payload["prompt"] = self.data_fetcher.get_payload_by_index(
-                                payload["prompt_idx"],
-                                is_validation=is_validation,
+                            assert (
+                                payload["prompt_idx"] % len(self.replica_name_to_rank)
+                                == self.rank_in_rollout_repicas
+                            ), (
+                                f"Payload prompt_idx {payload['prompt_idx']} mod {len(self.replica_name_to_rank)} must equal to rank in rollout replicas {self.rank_in_rollout_repicas}"
                             )
-                            payload["conversation"] = (
-                                self.data_fetcher.get_payload_by_index(
-                                    payload["prompt_idx"],
-                                    is_validation=is_validation,
-                                    attr="conversation",
+                    is_validation = kwargs.get("validation_step", None) is not None
+
+                    if len(payloads) > 0:
+                        if self.config.train.local_dataset:
+                            for payload in payloads:
+                                payload["prompt"] = (
+                                    self.data_fetcher.get_payload_by_index(
+                                        payload["prompt_idx"],
+                                        is_validation=is_validation,
+                                    )
                                 )
-                            )
-                    payloads = [
-                        RLPayload.model_validate(payload) for payload in payloads
-                    ]
-                prompts_and_is_end = (
-                    payloads if len(payloads) > 0 else None,
-                    is_end,
-                )
+                                payload["conversation"] = (
+                                    self.data_fetcher.get_payload_by_index(
+                                        payload["prompt_idx"],
+                                        is_validation=is_validation,
+                                        attr="conversation",
+                                    )
+                                )
+                        payloads = [
+                            RLPayload.model_validate(payload) for payload in payloads
+                        ]
+                    prompts_and_is_end = (
+                        payloads if len(payloads) > 0 else None,
+                        is_end,
+                    )
 
         # Broadcast the prompts and is_end to all ranks
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
@@ -2103,6 +2115,89 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 payload.prompt_token_ids = [t[0:1] for t in payload.prompt_token_ids]
         return payloads
 
+    def _prefetch_loop(self):
+        """Background loop that prefetches the next prompt batch.
+
+        While ``rollout_generation()`` is running, ``main_loop`` is blocked
+        and ``_prompt_queue`` sits empty.  This loop fills the queue in
+        advance so the next ``main_loop`` iteration skips the HTTP fetch
+        round-trip entirely.  When the rollout backend implements
+        ``enqueue_prefetch_payloads(payloads)``, the prefetched payloads are
+        also handed to it so the backend can start processing the next batch
+        before the current one finishes — useful for long-running simulation
+        backends where straggler scenes leave the backend underutilized at
+        the tail of each ``rollout_generation()`` call.
+
+        Only fires when ``config.rollout.prefetch_rollout`` is set; otherwise
+        the thread is never started.
+
+        Limitation: requires single-process rollout workers (DP/TP/PP all
+        == 1).  ``request_new_prompts`` ends with a distributed broadcast
+        that all ranks must participate in; calling that from a background
+        thread on rank 0 only would deadlock multi-rank workers.
+        """
+        while not self.shutdown_signal.is_set():
+            time.sleep(0.5)
+            if not self.state.weight_synced():
+                continue
+            if self.state.prompt_fetch_end():
+                continue
+            with self._prompt_fetch_lock:
+                if not self._prompt_queue.empty():
+                    continue
+                # ``parallel_dims.mesh["dp"]`` is not reliably resolvable
+                # from a background thread; prefetch_rollout requires DP=1
+                # so the multiplier is always 1.
+                try:
+                    payloads, is_end = self.api_client.get_next_prompt(
+                        self.batch_size,
+                        rank_in_mesh=self.rank_in_rollout_repicas,
+                    )
+                except Exception:
+                    logger.exception("[Rollout] Prefetch fetch failed")
+                    continue
+                if is_end:
+                    self.state.set_prompt_fetch_end()
+                if not payloads:
+                    continue
+                # Mirror request_new_prompts' local_dataset / RLPayload
+                # validation so main_loop sees identical objects when it
+                # pops from the queue.
+                if self.config.train.local_dataset:
+                    for payload in payloads:
+                        payload["prompt"] = self.data_fetcher.get_payload_by_index(
+                            payload["prompt_idx"],
+                            is_validation=False,
+                        )
+                        payload["conversation"] = (
+                            self.data_fetcher.get_payload_by_index(
+                                payload["prompt_idx"],
+                                is_validation=False,
+                                attr="conversation",
+                            )
+                        )
+                payloads = [RLPayload.model_validate(p) for p in payloads]
+                self._prompt_queue.put(payloads)
+                logger.info(
+                    "[Rollout] Prefetched %d payloads (prompt_idxs=%s%s)",
+                    len(payloads),
+                    [p.prompt_idx for p in payloads[:5]],
+                    " ..." if len(payloads) > 5 else "",
+                )
+            # Speculatively notify the backend.  Backends without this hook
+            # (e.g. vllm, trtllm) skip this and only benefit from the
+            # round-trip elision above.
+            enqueue_fn = getattr(self.rollout, "enqueue_prefetch_payloads", None)
+            if enqueue_fn is None:
+                continue
+            try:
+                enqueue_fn(payloads)
+            except Exception:
+                logger.exception(
+                    "[Rollout] enqueue_prefetch_payloads failed for batch of %d",
+                    len(payloads),
+                )
+
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.
         if self.global_rank == 0:
@@ -2111,6 +2206,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
+            if self.config.rollout.prefetch_rollout:
+                logger.info("[Rollout] Prefetch enabled; starting background thread")
+                self.prefetch_thread = threading.Thread(
+                    target=self._prefetch_loop,
+                    daemon=True,
+                    name="rollout-prefetch",
+                )
+                self.prefetch_thread.start()
         if self.config.distillation.enable:
             # create a thread to interact with teacher model
             self.teacher_interact_thread = threading.Thread(
