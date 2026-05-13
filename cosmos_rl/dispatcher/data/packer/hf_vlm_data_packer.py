@@ -334,7 +334,6 @@ class HFVLMDataPacker(DataPacker):
             ), "All samples should be in conversation format, but got: {}".format(
                 sample
             )
-
         if self.image_token is not None:
             for x in sample:
                 if x["role"] == "user":

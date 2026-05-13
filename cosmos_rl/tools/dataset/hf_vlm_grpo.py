@@ -23,8 +23,6 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 import argparse
 import toml
-import base64
-import io
 from PIL import Image as PILImage
 
 
@@ -99,12 +97,9 @@ class HFVLMGRPODataset(Dataset):
                 "image_obj is not PIL.Image.Image"
             )
             pil_img = img_obj
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format="PNG")
-            img_b64 = base64.b64encode(buffer.getvalue()).decode()
             multi_modal_content = {
                 "type": "image",
-                "image": img_b64,
+                "image": pil_img,
             }
             user_conv.insert(0, multi_modal_content)
 

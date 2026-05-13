@@ -622,7 +622,7 @@ class vLLMRollout(RolloutBase):
                     "Prompt should not be None for single turn rollout generation."
                 )
             else:
-                # Quert prompt from local dataset
+                # Query prompt from local dataset
                 pass
             prompts.append(data_packer.get_rollout_input(pl.prompt))
         prompts = data_packer.rollout_collate_fn(prompts)

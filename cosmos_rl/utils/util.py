@@ -1182,6 +1182,8 @@ def decode_vision_info(prompts):
                         multi_modal_data["image"][i] = image
                 elif img_type == torch.Tensor:
                     pass
+                elif issubclass(img_type, Image.Image):
+                    pass  # already a PIL image, vLLM handles it directly
                 else:
                     raise ValueError(f"Unsupported image type: {img_type}")
 
