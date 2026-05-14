@@ -20,7 +20,7 @@ import fcntl
 import struct
 import array
 import os
-from typing import Any, Callable, List, Union
+from typing import Any, Callable, List, Optional, Union
 
 from cosmos_rl.utils.constant import COSMOS_HTTP_RETRY_CONFIG
 from cosmos_rl.utils.logging import logger
@@ -285,17 +285,45 @@ def find_available_port(start_port, max_port=65536):
     raise RuntimeError("No available port found in the specified range.")
 
 
+def _redis_legacy_skip_tls_port() -> bool:
+    """Return True when ``COSMOS_REDIS_NO_TLS`` is set in the environment.
+
+    Set this on hosts running Redis < 6.0 (which does not understand the
+    ``tls-port`` directive at all and refuses to start when the line is
+    present).  Cosmos-RL does not enable TLS by itself, so dropping the
+    directive is functionally a no-op apart from compatibility.
+    """
+    value = os.environ.get("COSMOS_REDIS_NO_TLS", "").strip().lower()
+    return value not in ("", "0", "false", "no")
+
+
 def write_redis_config(
-    port, logfile, file_path="/opt/redis_config.conf", custom_config=None
+    port,
+    logfile,
+    file_path="/opt/redis_config.conf",
+    custom_config=None,
+    *,
+    skip_tls_port: Optional[bool] = None,
 ):
     """
     Write the redis config file.
     redis_config_path: the path to the redis config file.
     port: the port for Redis to listen on.
     logfile: the logfile for Redis.
+    skip_tls_port: when True, omit the ``tls-port`` directive entirely
+        for compatibility with Redis < 6.0.  When None (default), the
+        ``COSMOS_REDIS_NO_TLS`` environment variable controls behavior.
 
     return the actual path of the redis config file.
     """
+    if skip_tls_port is None:
+        skip_tls_port = _redis_legacy_skip_tls_port()
+
+    if skip_tls_port:
+        tls_block = "# tls-port directive omitted (COSMOS_REDIS_NO_TLS set / Redis 5.x)"
+    else:
+        tls_block = "# Disable TLS by setting the tls-port to 0\ntls-port 0"
+
     config_content = f"""# Redis configuration file example for insecure connections
 
 # Bind to all network interfaces (use with caution)
@@ -304,8 +332,7 @@ bind 0.0.0.0
 # Set the port for Redis to listen on (default is {port})
 port {port}
 
-# Disable TLS by setting the tls-port to 0
-tls-port 0
+{tls_block}
 
 # Disable authentication by commenting out the requirepass directive
 # requirepass yourpassword
