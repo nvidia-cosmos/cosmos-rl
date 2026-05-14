@@ -38,6 +38,12 @@ import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 import cosmos_rl.utils.util as util
+from cosmos_rl.utils.payload_transport import (
+    PayloadTransportRegistry,
+    RedisEndpoint,
+    get_payload_transfer_mode,
+    is_payload_transfer_mode_explicit,
+)
 from transformers import AutoConfig
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -176,60 +182,171 @@ class CommMixin:
 
         util.call_setup(self.val_data_packer, self.config)
 
-        self._inject_redis_into_data_packers()
+        self._attach_payload_transport()
 
-    def _inject_redis_into_data_packers(self):
-        """Inject the worker's Redis connection into data packers that need one.
+    # ------------------------------------------------------------------
+    # Worker-side payload-transport attachment.
+    #
+    # Two compatibility surfaces are preserved here -- search for these
+    # comments if downstream code (e.g. Yuxiao's PolicyDataPacker
+    # introduced in PR #670 / commit 55745c) breaks:
+    #
+    #   (1) NCCL fast path:
+    #       NcclPayloadTransport.attach_data_packer assigns
+    #       packer.redis_client and THEN calls
+    #       packer.post_redis_injection().  This is the literal
+    #       contract from 55745c, hardened to survive ping failures
+    #       without crashing init.
+    #
+    #   (2) Opportunistic Redis injection compat fallback:
+    #       Pre-55745c convention (and any downstream packer that
+    #       lazily depends on ``redis_client`` without selecting NCCL
+    #       mode) expected a Redis client to land on the packer
+    #       regardless of the active transport.  We replicate that
+    #       behavior for any packer whose ``redis_client`` attribute is
+    #       ``None`` after attach -- but ONLY when the active mode is
+    #       NOT "nccl", to avoid double-injection (NCCL's attach
+    #       already handled it).
+    #
+    # The deprecation shim ``_inject_redis_into_data_packers`` below
+    # delegates to this method, keeping the old name reachable for
+    # downstream callers that monkey-patched or invoked it directly.
+    # ------------------------------------------------------------------
+    def _attach_payload_transport(self):
+        """Unified worker-side hook to wire payload transport into packers.
 
-        Some data packers expose a ``redis_client`` attribute to receive a
-        shared Redis connection from the worker.  Cosmos-RL calls ``setup()``
-        on the packer *before* ``init_data_packer()``, so any packer feature
-        that depends on Redis would be left disabled after the first setup
-        attempt.  This method provides the live connection and invokes the
-        packer's ``post_redis_injection()`` hook (if present) so the packer
-        can complete any deferred setup.
+        Replaces the inline Redis-injection logic that used to live in
+        ``_inject_redis_into_data_packers``.  Looks up the active
+        :class:`PayloadTransport` from the registry, then for each data
+        packer:
 
-        No-op for packers without a ``redis_client`` attribute.
+        1. Calls ``transport.attach_data_packer(...)`` so the transport
+           can wire its own state in (e.g. NCCL injects a Redis client
+           and runs ``post_redis_injection()``; UCXX starts prefetch
+           threads; Redis default no-ops).
+        2. Falls back to opportunistic Redis injection for non-NCCL
+           modes to preserve pre-55745c behavior for packers that
+           passively expose a ``redis_client`` attribute.
+
+        Failure handling follows the ``explicit_fatal`` policy: when
+        the user explicitly selected the transport in config, ``ImportError``
+        / ``RuntimeError`` from attach is re-raised so misconfiguration
+        (e.g. ``payload_transfer="ucxx"`` with no ``ucxx-cu12`` installed)
+        crashes loudly.  Other failures are logged and swallowed.
         """
-        self._try_inject_redis(self.data_packer, "data_packer")
+        mode = get_payload_transfer_mode(self.config)
+        explicit = is_payload_transfer_mode_explicit(self.config)
+        transport = PayloadTransportRegistry.get_optional(mode)
+        endpoint = self._build_redis_endpoint()
+        device = getattr(self, "device", None)
+
+        packers = [(self.data_packer, "data_packer")]
         if (
             hasattr(self, "val_data_packer")
             and self.val_data_packer is not self.data_packer
         ):
-            self._try_inject_redis(self.val_data_packer, "val_data_packer")
+            packers.append((self.val_data_packer, "val_data_packer"))
 
-    def _try_inject_redis(self, packer, packer_name: str):
-        """Inject Redis client into a single data packer."""
+        for packer, packer_name in packers:
+            if transport is not None:
+                try:
+                    transport.attach_data_packer(
+                        packer,
+                        config=self.config,
+                        device=device,
+                        redis_endpoint=endpoint,
+                    )
+                except (ImportError, RuntimeError) as exc:
+                    if explicit:
+                        # User-chosen transport failed hard (e.g.
+                        # ucxx-cu12 not installed but config sets
+                        # payload_transfer="ucxx").  Re-raise per
+                        # explicit_fatal policy so the misconfig is
+                        # visible immediately.
+                        raise
+                    logger.warning(
+                        f"[{self.role}] {mode} attach_data_packer for "
+                        f"{packer_name} failed: {exc}"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[{self.role}] {mode} attach_data_packer for "
+                        f"{packer_name} raised "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+            # (2) Opportunistic Redis injection compat fallback.  See
+            # the long-form comment above for why this exists.  Skipped
+            # when the active mode is NCCL because NCCL's attach is
+            # already responsible for the assignment-then-hook order
+            # from 55745c -- running it again here would either
+            # double-inject or stomp on the assigned client.
+            if mode != "nccl":
+                self._opportunistic_inject_redis(packer, packer_name, endpoint)
+
+    def _opportunistic_inject_redis(self, packer, packer_name: str, endpoint):
+        """Best-effort Redis injection for non-NCCL modes.
+
+        Compatibility surface (2) from ``_attach_payload_transport``:
+        preserves pre-55745c permissive injection for downstream packers
+        that lazily depend on ``redis_client`` without selecting NCCL
+        mode.  No-op when the packer has no ``redis_client`` attribute,
+        already has one wired up, or the redis library is unavailable.
+        """
         if not hasattr(packer, "redis_client"):
             return
-        if _redis_lib is None:
-            logger.warning(
-                f"[{self.role}] redis package not installed; "
-                f"cannot inject Redis into {packer_name}"
-            )
+        if getattr(packer, "redis_client", None) is not None:
+            # Some other code path (e.g. a transport's attach hook) has
+            # already wired one in -- don't stomp on it.
             return
-        redis_host, redis_port, redis_db = self._read_redis_endpoint()
+        if endpoint is None or _redis_lib is None:
+            return
         try:
-            packer.redis_client = _redis_lib.Redis(
-                host=redis_host,
-                port=redis_port,
-                db=redis_db,
+            client = _redis_lib.Redis(
+                host=endpoint.host,
+                port=endpoint.port,
+                db=endpoint.db,
                 decode_responses=True,
             )
-            packer.redis_client.ping()
-            logger.info(
-                f"[{self.role}] Injected Redis client into {packer_name} "
-                f"(host={redis_host}, port={redis_port}, db={redis_db})"
-            )
-            if hasattr(packer, "post_redis_injection"):
-                packer.post_redis_injection()
-        except Exception as e:
+            client.ping()
+        except Exception as exc:
             logger.warning(
-                f"[{self.role}] Failed to inject Redis client into {packer_name}: {e}"
+                f"[{self.role}] Opportunistic Redis injection for "
+                f"{packer_name} failed: {exc}"
             )
+            return
+        packer.redis_client = client
+        logger.info(
+            f"[{self.role}] Injected Redis client into {packer_name} "
+            f"(host={endpoint.host}, port={endpoint.port}, db={endpoint.db})"
+        )
+        hook = getattr(packer, "post_redis_injection", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception as exc:
+                logger.warning(
+                    f"[{self.role}] post_redis_injection on {packer_name} "
+                    f"raised {type(exc).__name__}: {exc}"
+                )
 
-    def _read_redis_endpoint(self) -> tuple:
-        """Return ``(host, port, db)`` from the worker's live Redis client."""
+    def _inject_redis_into_data_packers(self):
+        """DEPRECATED: use :meth:`_attach_payload_transport`.
+
+        Kept as a one-line shim because some downstream forks (search
+        PR #670 / commit 55745c) call this method by name or
+        monkey-patch it directly.  Remove no earlier than two minor
+        releases after the unification PR lands.
+        """
+        return self._attach_payload_transport()
+
+    def _build_redis_endpoint(self) -> Optional[RedisEndpoint]:
+        """Return a :class:`RedisEndpoint` for the worker's Redis, or None.
+
+        Resolves to the live ``redis_controller`` connection coordinates
+        when available, falling back to ``("localhost", 6379, 0)``
+        overridden by ``config.redis`` (port-only, historical).
+        """
         redis_host = "localhost"
         redis_port = 6379
         redis_db = 0
@@ -244,7 +361,7 @@ class CommMixin:
         config = getattr(self, "config", None)
         if config is not None and hasattr(config, "redis") and config.redis:
             redis_port = int(config.redis)
-        return redis_host, redis_port, redis_db
+        return RedisEndpoint(host=redis_host, port=int(redis_port), db=int(redis_db))
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):
