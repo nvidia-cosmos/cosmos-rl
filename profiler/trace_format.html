@@ -1,0 +1,296 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trace log line format &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Trace log line format</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/profiler/trace_format.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="trace-log-line-format">
+<h1>Trace log line format<a class="headerlink" href="#trace-log-line-format" title="Link to this heading"></a></h1>
+<p>This page documents the structured <code class="docutils literal notranslate"><span class="pre">[Trace]</span> <span class="pre">...</span></code> log line grammar
+emitted by <code class="xref py py-mod docutils literal notranslate"><span class="pre">cosmos_rl.utils.trace</span></code> and consumed by the offline
+profiler (<code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.profiler</span></code>).  Components that wish to
+participate in profiling should emit lines in this exact format so the
+analyzer can parse them.</p>
+<section id="grammar">
+<h2>Grammar<a class="headerlink" href="#grammar" title="Link to this heading"></a></h2>
+<p>Each trace line is a single newline-terminated string with the
+following grammar (EBNF-ish):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">trace_line</span>     <span class="o">:=</span> <span class="s2">&quot;[Trace]&quot;</span> <span class="n">SP</span> <span class="n">fields</span>
+<span class="n">fields</span>         <span class="o">:=</span> <span class="n">field</span> <span class="p">(</span><span class="n">SP</span> <span class="n">field</span><span class="p">)</span><span class="o">*</span>
+<span class="n">field</span>          <span class="o">:=</span> <span class="n">key</span> <span class="s2">&quot;=&quot;</span> <span class="n">value</span>
+<span class="n">key</span>            <span class="o">:=</span> <span class="n">identifier</span>         <span class="p">;</span> <span class="n">ASCII</span> <span class="n">letters</span><span class="p">,</span> <span class="n">digits</span><span class="p">,</span> <span class="n">underscores</span>
+<span class="n">value</span>          <span class="o">:=</span> <span class="n">number</span> <span class="o">|</span> <span class="n">bare_value</span> <span class="o">|</span> <span class="n">quoted_string</span>
+<span class="n">bare_value</span>     <span class="o">:=</span> <span class="o">/</span><span class="p">[</span><span class="o">^</span>\<span class="n">s</span><span class="s2">&quot;=\[\]]+/     ; grammar-safe characters only</span>
+<span class="n">quoted_string</span>  <span class="o">:=</span> <span class="n">JSON</span> <span class="n">string</span> <span class="n">literal</span> <span class="p">(</span><span class="n">double</span><span class="o">-</span><span class="n">quoted</span><span class="p">,</span> <span class="n">backslash</span><span class="o">-</span><span class="n">escaped</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Producers (e.g. <code class="xref py py-func docutils literal notranslate"><span class="pre">cosmos_rl.utils.trace.format_trace()</span></code>) emit
+free-form <code class="docutils literal notranslate"><span class="pre">str</span></code> values raw when they contain only grammar-safe
+characters, and as JSON-quoted strings otherwise (including the empty
+string and any value containing whitespace, <code class="docutils literal notranslate"><span class="pre">=</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">[</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">]</span></code>).  Consumers can safely round-trip a <code class="docutils literal notranslate"><span class="pre">quoted_string</span></code> value
+with <code class="docutils literal notranslate"><span class="pre">json.loads</span></code>.</p>
+<p>Required fields (in this order):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">thread</span></code> — logical thread / role name
+(<code class="docutils literal notranslate"><span class="pre">&quot;trainer&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;rollout&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;controller&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;ucxx_prefetch&quot;</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">op</span></code> — operation name; the analyzer’s opcode registry keys off this
+value.</p></li>
+</ul>
+<p>Optional well-known fields (when present, parsed as floats in
+milliseconds):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">start</span></code> — start time relative to the process trace zero.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">end</span></code> — end time, same reference frame.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">waited_ms</span></code> — time spent blocked (e.g. waiting on a prefetch).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">transfer_ms</span></code> — wire-time spent on a UCXX transfer.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">copy_ms</span></code> — host-to-device or device-to-device copy time.</p></li>
+</ul>
+<p>Optional well-known integer / size fields:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">count</span></code> — number of items (rollouts, slots, episodes).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">bytes</span></code> — total bytes transferred.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">iter</span></code> — current training iteration.</p></li>
+</ul>
+<p>Optional identity field (auto-emitted when
+<code class="xref py py-func docutils literal notranslate"><span class="pre">cosmos_rl.utils.trace.set_worker_id()</span></code> has been called):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">worker</span></code> — short tag identifying the producing process.</p></li>
+</ul>
+<p>All other <code class="docutils literal notranslate"><span class="pre">key=value</span></code> pairs are passed through to the analyzer as
+free-form metadata.</p>
+</section>
+<section id="example">
+<h2>Example<a class="headerlink" href="#example" title="Link to this heading"></a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span><span class="n">Trace</span><span class="p">]</span> <span class="n">worker</span><span class="o">=</span><span class="n">policy_0</span> <span class="n">thread</span><span class="o">=</span><span class="n">trainer</span> <span class="n">op</span><span class="o">=</span><span class="n">step_training</span> <span class="n">start</span><span class="o">=</span><span class="mf">12.3</span> <span class="n">end</span><span class="o">=</span><span class="mf">42.7</span> <span class="nb">iter</span><span class="o">=</span><span class="mi">42</span>
+<span class="p">[</span><span class="n">Trace</span><span class="p">]</span> <span class="n">worker</span><span class="o">=</span><span class="n">policy_0</span> <span class="n">thread</span><span class="o">=</span><span class="n">trainer</span> <span class="n">op</span><span class="o">=</span><span class="n">trainer_forward</span> <span class="n">start</span><span class="o">=</span><span class="mf">14.1</span> <span class="n">end</span><span class="o">=</span><span class="mf">22.0</span>
+<span class="p">[</span><span class="n">Trace</span><span class="p">]</span> <span class="n">worker</span><span class="o">=</span><span class="n">policy_0</span> <span class="n">thread</span><span class="o">=</span><span class="n">trainer</span> <span class="n">op</span><span class="o">=</span><span class="n">trainer_backward</span> <span class="n">start</span><span class="o">=</span><span class="mf">22.0</span> <span class="n">end</span><span class="o">=</span><span class="mf">33.5</span>
+<span class="p">[</span><span class="n">Trace</span><span class="p">]</span> <span class="n">worker</span><span class="o">=</span><span class="n">rollout_0</span> <span class="n">thread</span><span class="o">=</span><span class="n">ucxx_prefetch</span> <span class="n">op</span><span class="o">=</span><span class="n">ucxx_fetch</span> <span class="n">start</span><span class="o">=</span><span class="mf">8.0</span> <span class="n">end</span><span class="o">=</span><span class="mf">11.5</span> <span class="n">transfer_ms</span><span class="o">=</span><span class="mf">2.1</span> <span class="n">copy_ms</span><span class="o">=</span><span class="mf">1.0</span> <span class="n">count</span><span class="o">=</span><span class="mi">4</span> <span class="nb">bytes</span><span class="o">=</span><span class="mi">1048576</span>
+</pre></div>
+</div>
+</section>
+<section id="producing-trace-lines">
+<h2>Producing trace lines<a class="headerlink" href="#producing-trace-lines" title="Link to this heading"></a></h2>
+<p>The recommended entry point is the <code class="xref py py-func docutils literal notranslate"><span class="pre">cosmos_rl.utils.trace.trace_op()</span></code>
+context manager, which combines start/end timing, line formatting, and
+logger dispatch in a single <code class="docutils literal notranslate"><span class="pre">with</span></code> block:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.trace</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_worker_id</span><span class="p">,</span> <span class="n">trace_op</span>
+
+<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">&quot;policy_0&quot;</span><span class="p">)</span>
+
+<span class="c1"># Basic block timing.</span>
+<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="s2">&quot;step_training&quot;</span><span class="p">,</span> <span class="nb">iter</span><span class="o">=</span><span class="n">current_iter</span><span class="p">):</span>
+    <span class="n">run_training_step</span><span class="p">()</span>
+
+<span class="c1"># Attach fields discovered mid-block by mutating the yielded dict.</span>
+<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">&quot;ucxx_prefetch&quot;</span><span class="p">,</span> <span class="s2">&quot;ucxx_fetch&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">extras</span><span class="p">:</span>
+    <span class="n">n_bytes</span> <span class="o">=</span> <span class="n">do_fetch</span><span class="p">()</span>
+    <span class="n">extras</span><span class="p">[</span><span class="s2">&quot;bytes&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">n_bytes</span>
+    <span class="n">extras</span><span class="p">[</span><span class="s2">&quot;count&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">4</span>
+
+<span class="c1"># Custom logger / level.</span>
+<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span>
+    <span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="s2">&quot;trainer_forward&quot;</span><span class="p">,</span>
+    <span class="n">logger</span><span class="o">=</span><span class="n">my_logger</span><span class="p">,</span> <span class="n">log_level</span><span class="o">=</span><span class="s2">&quot;info&quot;</span><span class="p">,</span>
+<span class="p">):</span>
+    <span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>If the body raises, the <code class="docutils literal notranslate"><span class="pre">[Trace]</span></code> line is still emitted (with
+<code class="docutils literal notranslate"><span class="pre">status=error</span></code> and <code class="docutils literal notranslate"><span class="pre">err=&lt;exception</span> <span class="pre">class</span> <span class="pre">name&gt;</span></code> appended) and the
+exception then propagates unchanged.</p>
+<section id="low-level-building-blocks">
+<h3>Low-level building blocks<a class="headerlink" href="#low-level-building-blocks" title="Link to this heading"></a></h3>
+<p>For call sites that cannot use a <code class="docutils literal notranslate"><span class="pre">with</span></code> block (start and end straddle
+async boundaries, deferred-collect patterns, etc.) the underlying
+primitives remain available:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.trace</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">format_trace</span><span class="p">,</span> <span class="n">get_trace_time</span><span class="p">,</span> <span class="n">set_worker_id</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.logging</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">&quot;policy_0&quot;</span><span class="p">)</span>
+
+<span class="n">start</span> <span class="o">=</span> <span class="n">get_trace_time</span><span class="p">()</span>
+<span class="c1"># ... do work, possibly across an async boundary ...</span>
+<span class="n">end</span> <span class="o">=</span> <span class="n">get_trace_time</span><span class="p">()</span>
+<span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="n">format_trace</span><span class="p">(</span>
+    <span class="n">thread</span><span class="o">=</span><span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="s2">&quot;step_training&quot;</span><span class="p">,</span>
+    <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="nb">iter</span><span class="o">=</span><span class="n">current_iter</span><span class="p">,</span>
+<span class="p">))</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="recommended-opcodes">
+<h2>Recommended opcodes<a class="headerlink" href="#recommended-opcodes" title="Link to this heading"></a></h2>
+<p>The analyzer ships with an opcode registry; new transports can register
+their own opcodes via the analyzer API.  The core set used by
+upstream cosmos-rl trainers includes:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">step_training</span></code> — full training iteration boundary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">trainer_forward</span></code> / <code class="docutils literal notranslate"><span class="pre">trainer_backward</span></code> / <code class="docutils literal notranslate"><span class="pre">trainer_optimizer</span></code> —
+per-phase timing within a training step.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rollout_processing</span></code> — rollout decode/prep before training.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">batch_preparation</span></code> — batch concatenation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">prefetch_submit</span></code> / <code class="docutils literal notranslate"><span class="pre">prefetch_collect</span></code> /
+<code class="docutils literal notranslate"><span class="pre">deferred_prefetch_collect</span></code> — UCXX prefetch lifecycle (see
+<code class="xref py py-mod docutils literal notranslate"><span class="pre">cosmos_rl.utils.payload_transport.ucxx</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ucxx_fetch</span></code> — bg-thread UCXX fetch with <code class="docutils literal notranslate"><span class="pre">transfer_ms</span></code> /
+<code class="docutils literal notranslate"><span class="pre">copy_ms</span></code> / <code class="docutils literal notranslate"><span class="pre">count</span></code> / <code class="docutils literal notranslate"><span class="pre">bytes</span></code> fields.</p></li>
+</ul>
+</section>
+<section id="stability">
+<h2>Stability<a class="headerlink" href="#stability" title="Link to this heading"></a></h2>
+<p>The grammar above is stable: new well-known field names may be added,
+but existing field names will not change semantics.  Free-form
+<code class="docutils literal notranslate"><span class="pre">key=value</span></code> fields are always permitted.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
