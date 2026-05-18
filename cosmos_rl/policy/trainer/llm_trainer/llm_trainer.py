@@ -156,6 +156,7 @@ class LLMTrainer(Trainer):
             torch.cuda.empty_cache()
 
             if isinstance(config.train.optm_lr, (float, list)):
+                logger.info(f"===== Start")
                 self.model_parts = model.separate_model_parts()
                 # Dotted module path for each pipeline stage within the full model
                 # (e.g. ["model.layers_block_0", "model.layers_block_1"]).
