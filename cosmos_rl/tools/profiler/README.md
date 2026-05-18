@@ -20,6 +20,13 @@ python -m cosmos_rl.tools.profiler analyze logs/*.log --format json
 
 # List opcodes the registry knows about (defaults + plugin-registered)
 python -m cosmos_rl.tools.profiler list-opcodes
+
+# RDMA / UCX environment diagnostic
+python -m cosmos_rl.tools.profiler.check_ucxx
+python -m cosmos_rl.tools.profiler.check_ucxx -v
+
+# Enable UCXX-specific opcodes (bandwidth, wait-rate, stale-slot)
+python -m cosmos_rl.tools.profiler analyze --ucxx logs/*.log
 ```
 
 ## Trace line grammar

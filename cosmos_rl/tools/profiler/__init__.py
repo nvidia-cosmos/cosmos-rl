@@ -37,6 +37,7 @@ Public surface
 * :func:`analyze` / :func:`summarize_events` — top-level entry points.
 * :mod:`.cli` — argparse-driven CLI; see ``python -m
   cosmos_rl.tools.profiler --help``.
+* :mod:`.check_ucxx` — RDMA / UCX environment diagnostic (UCXX backend).
 """
 
 from cosmos_rl.tools.profiler.opcodes import (

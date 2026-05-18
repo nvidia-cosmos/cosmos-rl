@@ -129,10 +129,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="-",
         help="Output file (default: stdout)",
     )
+    analyze_p.add_argument(
+        "--ucxx",
+        action="store_true",
+        help=(
+            "Enable UCXX-specific opcodes (ucxx_fetch / ucxx_send / "
+            "ucxx_prefetch_collect / ucxx_stale_slot) with bandwidth + "
+            "wait-rate metrics."
+        ),
+    )
 
-    sub.add_parser("list-opcodes", help="List opcodes known to the registry")
+    list_p = sub.add_parser("list-opcodes", help="List opcodes known to the registry")
+    list_p.add_argument(
+        "--ucxx",
+        action="store_true",
+        help="Include UCXX opcodes in the listing",
+    )
 
     args = parser.parse_args(argv)
+    if getattr(args, "ucxx", False):
+        # Importing the module registers handlers as a side effect on
+        # the first import; calling explicitly handles the case where
+        # the module is already imported but the registry has been
+        # reset (e.g. in test setUp).
+        from cosmos_rl.tools.profiler.ucxx import register_ucxx_opcodes
+
+        register_ucxx_opcodes()
 
     if args.cmd == "list-opcodes":
         for op in OpcodeRegistry.known_opcodes():
