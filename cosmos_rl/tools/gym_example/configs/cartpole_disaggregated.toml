@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CartPole-v1 demo — disaggregated mode (rollout workers and trainer
+# run on separate nodes).  Mirrors the colocated config but switches
+# the payload transport to UCXX so the cross-node hop is zero-copy.
+
+[model]
+obs_dim     = 4
+action_dim  = 2
+hidden_dim  = 64
+discrete    = true
+
+[env]
+name        = "CartPole-v1"
+max_steps   = 500
+
+[custom]
+# UCXX auto-routes between SHM (same node) and RDMA (cross-node), so
+# this single setting works for both.  Requires `pip install
+# cosmos_rl[ucxx]`.
+payload_transfer = "ucxx"
+
+[train]
+train_batch_per_replica = 8
+
+[rollout]
+n_generation = 1

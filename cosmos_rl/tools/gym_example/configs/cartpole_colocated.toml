@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CartPole-v1 demo — colocated mode (rollout + trainer share one node).
+# Drop in as the [policy].model_name_or_path's sibling for a TOML-driven
+# launch, or load with `register_gym_policy()` then point cosmos-rl at
+# this file via `policy.model_name_or_path = "configs/cartpole.toml"`.
+
+[model]
+obs_dim     = 4
+action_dim  = 2
+hidden_dim  = 64
+discrete    = true
+
+[env]
+name        = "CartPole-v1"
+max_steps   = 500
+
+[custom]
+# Use the implicit Redis transport: payload sizes are tiny so there's
+# no benefit to NCCL/UCXX for CartPole.  Switch to "ucxx" or "nccl"
+# when scaling up to larger observation tensors.
+payload_transfer = "redis"
+
+[train]
+train_batch_per_replica = 4
+
+[rollout]
+n_generation = 1
