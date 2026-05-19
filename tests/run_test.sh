@@ -51,6 +51,7 @@ run python tests/test_math_verify.py
 run python tests/test_policy_overfit.py
 run python tests/test_data_packer.py
 run python tests/test_dataset_signature.py
+run python tests/test_put_rollouts.py
 run python tests/test_sequence_packing.py
 run python tests/test_integration.py --stream
 run python tests/test_hf_models.py
