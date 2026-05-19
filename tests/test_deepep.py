@@ -641,6 +641,14 @@ class TestDeepEP(unittest.TestCase):
 
     def test_intranode_kernels(self):
         """Main test for intranode EP kernels"""
+        from cosmos_rl.policy.kernel.moe.moe import is_deepep_supported
+
+        if not is_deepep_supported():
+            self.skipTest(
+                "DeepEP intranode kernels require SM90+ GPUs with visible "
+                "NVLink topology."
+            )
+
         # Create a simple namespace object to hold configuration
         args = argparse.Namespace(
             num_processes=self.num_processes,
