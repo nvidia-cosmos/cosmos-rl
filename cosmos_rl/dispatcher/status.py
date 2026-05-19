@@ -760,17 +760,22 @@ class PolicyStatusManager:
     def put_rollouts(self, rollouts: List[Rollout]):
         """
         Put the rollouts to the rollout buffer.
+
+        Note on ``on_policy_rollout_completed``: this flag is a notification
+        primitive set here when the pending queue drains so the trainer knows
+        the current on-policy step is complete. It is reset by the trainer
+        step-completion handler. It must NOT be used as a producer-side
+        admission gate: the controller's prompt dispatch (driven by
+        ``try_trigger_data_fetch_and_training`` inside ``put_rollout``) can
+        issue step ``N+1`` prompts before the trainer wakes up and resets the
+        flag, so step ``N+1`` rollouts can legitimately arrive while the flag
+        is still ``True``. Their on-policy validity was already established
+        at prompt-dispatch time (weight-version check); dropping them here
+        destroys valid training data and, in the on-policy producer-consumer
+        pipeline, deterministically deadlocks the trainer.
         """
         completion_tokens_count = 0
         n_samples = 0
-        if (
-            self.config.train.train_policy.on_policy
-            and self.on_policy_rollout_completed
-        ):
-            # On-policy training has already completed the required samples for this policy step
-            # Filter out all these rollouts directly in remaining samples number
-            self.remain_samples_num -= len(rollouts)
-            return completion_tokens_count, n_samples
 
         for rollout in rollouts:
             if self.config.train.train_policy.rollout_as_token_ids:
@@ -784,7 +789,9 @@ class PolicyStatusManager:
             if self.config.train.train_policy.on_policy:
                 if self.total_pending_rollouts() == 0:
                     self.on_policy_rollout_completed = True
-                    break
+                    # Do not break: keep admitting any remaining rollouts in
+                    # this batch. They are valid data for the next step and
+                    # dropping them starves the consumer.
 
         return completion_tokens_count, n_samples
 
