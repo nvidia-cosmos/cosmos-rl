@@ -63,6 +63,9 @@ shared-memory bits work without UCXX, so :class:`SharedRingBuffer`
 remains usable for single-node profiling / testing.
 """
 
+from cosmos_rl.utils.payload_transport.ucxx.data_packer_mixin import (
+    UCXXDataPackerMixin,
+)
 from cosmos_rl.utils.payload_transport.ucxx.mixins import (
     UCXXRolloutMixin,
     UCXXTrainerMixin,
@@ -97,6 +100,7 @@ __all__ = [
     "UCXXBuffer",
     "UCXXBufferConfig",
     "UCXXClient",
+    "UCXXDataPackerMixin",
     "UCXXPayloadTransport",
     "UCXXRolloutMixin",
     "UCXXTrainerMixin",

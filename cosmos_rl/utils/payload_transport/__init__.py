@@ -66,6 +66,9 @@ Cosmos-RL ships ``redis`` (no-op default) and ``nccl`` registered out of
 the box.  ``ucxx`` registers itself when imported.
 """
 
+from cosmos_rl.utils.payload_transport.prefetch_mixin import (
+    PrefetchDataPackerMixin,
+)
 from cosmos_rl.utils.payload_transport.registry import (
     DEFAULT_TRANSFER_MODE,
     LEGACY_NCCL_KEY,
@@ -91,6 +94,7 @@ __all__ = [
     "PAYLOAD_TRANSFER_KEY",
     "PayloadTransport",
     "PayloadTransportRegistry",
+    "PrefetchDataPackerMixin",
     "RedisEndpoint",
     "get_payload_transfer_mode",
     "is_payload_transfer_mode_explicit",
