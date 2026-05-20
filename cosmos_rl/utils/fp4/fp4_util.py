@@ -26,7 +26,10 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.model_converter import ModelConverter
+from cosmos_rl.utils.model_converter import (
+    QuantizationConverter,
+    register_quantization_converter_class,
+)
 
 MIN_TORCH_VERSION_FOR_FP4 = "2.7.0"
 IS_TORCH_COMPATIBLE_WITH_FP4 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP4)
@@ -84,7 +87,8 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-class FP4ModelConverter(ModelConverter):
+@register_quantization_converter_class("linear", "fp4")
+class FP4LinearQuantizationConverter(QuantizationConverter):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__(config, parallel_dims)
         if not IS_TORCH_COMPATIBLE_WITH_FP4:
@@ -94,35 +98,35 @@ class FP4ModelConverter(ModelConverter):
             raise RuntimeError(
                 "NVFP4 is only supported for device that has compute capability 10.0 or higher"
             )
-        self.fp4_config = config.train.fp4
+        self.fp4_config = config.train.quantization.linear_quantization_config
 
-        assert is_valid_fp4_quant_recipe(self.fp4_config.quant_recipe)
-        assert is_valid_fp4_recipe(self.fp4_config.fp4_recipe)
+        assert is_valid_fp4_quant_recipe(self.fp4_config.fp_linear_config.quant_recipe)
+        assert is_valid_fp4_recipe(self.fp4_config.fp_linear_config.scaling_recipe)
 
-        if self.fp4_config.fp4_recipe == FP4Recipe.DELAYED_SCALING:
+        if self.fp4_config.fp_linear_config.scaling_recipe == FP4Recipe.DELAYED_SCALING:
             raise NotImplementedError("[FP4] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
 
-        if self.fp4_config.quant_recipe == "rowwise":
+        if self.fp4_config.fp_linear_config.quant_recipe == "rowwise":
             # From torchtitan, it reports an issue that RMSNorm will cause NaN when rowwise quantization and torch.compile is enabled,
             # From that issue, it is recommended to set torch._inductor.config.emulate_precision_casts to True to avoid this.
             # Issue: https://github.com/pytorch/pytorch/issues/150859
             torch._inductor.config.emulate_precision_casts = True
             self.nvfp4_config = Float4LinearConfig.from_recipe_name(
-                self.fp4_config.quant_recipe
+                self.fp4_config.fp_linear_config.quant_recipe
             )
             logger.debug(
                 "[FP4] Set torch._inductor.config.emulate_precision_casts to True"
             )
-        elif self.fp4_config.quant_recipe == "tensorwise":
+        elif self.fp4_config.fp_linear_config.quant_recipe == "tensorwise":
             self.precompute_scale = False
 
     def convert_model(self, model: torch.nn.Module) -> torch.nn.Module:
         if not IS_TORCH_COMPATIBLE_WITH_FP4:
             return
 
-        if not self.fp4_config.enable_fp4:
+        if not self.fp4_config.enable:
             return
 
         convert_to_float4_training(
