@@ -43,9 +43,6 @@ epoch = 1
 type = "grpo"           # discriminator value; the actual trainer is gym_pg below
 trainer_type = "gym_pg"
 mini_batch = 4
-# kl_beta = 0.0 nudges Config.preprocess into the GRPO branch — see
-# cartpole_colocated.toml for the rationale.
-kl_beta = 0.0
 
 [train.ckpt]
 enable_checkpoint = false

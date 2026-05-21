@@ -1847,20 +1847,32 @@ class Config(BaseModel):
         if "train_policy" in data["train"]:
             train_policy_data = data["train"]["train_policy"]
 
-            # Determine the type based on characteristic fields
-            if any(
-                key in train_policy_data
-                for key in [
-                    "temperature",
-                    "epsilon_low",
-                    "epsilon_high",
-                    "kl_beta",
-                    "use_remote_reward",
-                ]
-            ):
-                data["train"]["train_policy"]["type"] = "grpo"
-            else:
-                data["train"]["train_policy"]["type"] = "sft"
+            # Honor an explicit ``type`` declaration (the discriminator
+            # for ``Union[SFTDataConfig, GrpoConfig]``); only infer
+            # ``type`` from heuristics when the field is absent.
+            # Pre-2026-05 behavior unconditionally overwrote ``type``
+            # from GRPO-characteristic-field presence, which silently
+            # flipped explicit ``type = "grpo"`` to ``"sft"`` for
+            # non-LLM RL configs that don't naturally use ``temperature
+            # / epsilon_low / epsilon_high / kl_beta / use_remote_reward``
+            # (e.g. the gym example trainer in tools/gym_example/).
+            # That behavior is now restricted to the "no explicit type"
+            # path, where it still infers reasonably for legacy configs
+            # that omit the discriminator.
+            if "type" not in train_policy_data:
+                if any(
+                    key in train_policy_data
+                    for key in [
+                        "temperature",
+                        "epsilon_low",
+                        "epsilon_high",
+                        "kl_beta",
+                        "use_remote_reward",
+                    ]
+                ):
+                    train_policy_data["type"] = "grpo"
+                else:
+                    train_policy_data["type"] = "sft"
         return data
 
     @model_validator(mode="after")

@@ -56,13 +56,6 @@ epoch = 1
 type = "grpo"           # discriminator value; the actual trainer is gym_pg below
 trainer_type = "gym_pg"
 mini_batch = 4
-# kl_beta = 0.0 is a no-op for the toy PG loss (we never reference it),
-# but cosmos-rl's ``Config.preprocess`` validator uses presence of any
-# GRPO-characteristic field (kl_beta / temperature / epsilon_low /
-# epsilon_high / use_remote_reward) to detect the GRPO branch — without
-# it, the validator silently rewrites ``type`` to ``"sft"`` even when
-# explicitly set, and the launcher routes through ``SFTPolicyWorker``.
-kl_beta = 0.0
 
 [train.ckpt]
 enable_checkpoint = false
