@@ -633,14 +633,70 @@ class vLLMRollout(RolloutBase):
 
         response: List[RolloutResult] = []
 
+        # Filter out prompts that exceed max_model_len to avoid vLLM errors
+        max_model_len = self.config.policy.model_max_length
+        valid_indices = []
+        filtered_prompts = []
+        filtered_payloads = []
+        skipped_count = 0
+
+        # Determine how to get prompt token count based on prompt type
+        for idx, (prompt, payload) in enumerate(zip(new_prompts if isinstance(new_prompts, list) else [new_prompts], payloads)):
+            try:
+                # Handle both string prompts and dict/object prompts (VLM)
+                if isinstance(prompt, str):
+                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt))
+                elif isinstance(prompt, dict) and "prompt" in prompt:
+                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt["prompt"]))
+                elif hasattr(prompt, "prompt"):
+                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt.prompt))
+                else:
+                    # For VLM inputs (with images/videos), use prompt token ids if available
+                    if hasattr(prompt, "prompt_token_ids"):
+                        prompt_token_count = len(prompt.prompt_token_ids)
+                    elif isinstance(prompt, dict) and "prompt_token_ids" in prompt:
+                        prompt_token_count = len(prompt["prompt_token_ids"])
+                    else:
+                        # Fallback: assume it's valid if we can't determine length
+                        prompt_token_count = 0
+
+                if prompt_token_count > 0 and prompt_token_count > max_model_len:
+                    logger.warning(
+                        f"[Rollout] Skipping prompt (token count: {prompt_token_count}) "
+                        f"exceeds max_model_len ({max_model_len}). This usually happens when "
+                        f"images/videos are large or the input text is too long."
+                    )
+                    skipped_count += 1
+                    continue
+
+                valid_indices.append(idx)
+                filtered_prompts.append(prompt)
+                filtered_payloads.append(payload)
+            except Exception as e:
+                logger.warning(
+                    f"[Rollout] Error checking prompt length: {str(e)}, assuming prompt is valid"
+                )
+                valid_indices.append(idx)
+                filtered_prompts.append(prompt)
+                filtered_payloads.append(payload)
+
+        if skipped_count > 0:
+            logger.info(f"[Rollout] Skipped {skipped_count} prompts due to exceeding max_model_len")
+
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
             with torch.cuda.stream(stream):
-                results = self.rollout_engine.generate(
-                    new_prompts,
-                    sampling_params=local_sampling_params,
-                    use_tqdm=False,
-                )
+                if len(filtered_prompts) == 0:
+                    logger.warning("[Rollout] All prompts were filtered out, returning empty results")
+                    results = []
+                else:
+                    results = self.rollout_engine.generate(
+                        filtered_prompts,
+                        sampling_params=local_sampling_params,
+                        use_tqdm=False,
+                    )
+                    # Map results back to payloads
+                    payloads = filtered_payloads
                 if (
                     self.config.distillation.top_k > 0
                     and self.config.distillation.rollout_top_k_recompute
