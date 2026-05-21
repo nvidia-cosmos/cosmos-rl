@@ -83,6 +83,12 @@ def rollout_episode(
     action_dim = policy.config.action_dim
     discrete = policy.config.discrete
 
+    # Honor the device the policy lives on (CPU in unit tests, but cuda:0
+    # under the colocated launcher, where the policy worker has already
+    # moved params onto the device).  ``next(...)`` is safe because
+    # GymPolicy always has at least one parameter.
+    policy_device = next(policy.parameters()).device
+
     if discrete:
         actions_buf = np.zeros((max_steps,), dtype=np.int64)
     else:
@@ -98,7 +104,7 @@ def rollout_episode(
     with torch.no_grad():
         for step in range(max_steps):
             obs_buf[step] = np.asarray(obs, dtype=np.float32)
-            obs_t = torch.from_numpy(obs_buf[step]).unsqueeze(0)
+            obs_t = torch.from_numpy(obs_buf[step]).unsqueeze(0).to(policy_device)
             if deterministic:
                 logits = policy(obs_t)
                 if discrete:

@@ -27,8 +27,8 @@ from queue import Queue, Empty as QueueEmpty
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union, Tuple
 from functools import partial
-from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
+from cosmos_rl.utils.model_config import load_model_config
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
@@ -158,7 +158,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.config.policy.model_name_or_path
             ).eos_token
 
-            hf_config = util.retry(AutoConfig.from_pretrained)(
+            # Routes through ``register_local_model_config`` so non-HF
+            # ``model_name_or_path`` values (e.g. a ``.toml`` describing a
+            # Gymnasium MLP) resolve before falling back to
+            # ``AutoConfig.from_pretrained``. Default HF flow is unchanged.
+            hf_config = util.retry(load_model_config)(
                 self.config.policy.model_name_or_path, trust_remote_code=True
             )
 

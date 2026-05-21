@@ -4,15 +4,24 @@ A minimal end-to-end demo of running cosmos-rl with a non-LLM RL
 workload, using the [Gymnasium Classic Control suite](https://gymnasium.farama.org/environments/classic_control/)
 as the reference environment.
 
+This example is also the **first upstream consumer of the
+trajectory-iteration contract** (`TrajectoryExpansionMixin` /
+`TrajectoryPacker`). `GymTrainer` composes the mixin in **rollout
+mode** (`chunk_size = None`, override `_train_one_rollout`) because
+gym tensor trajectories are small enough that per-rollout iteration
+is the right shape.
+
 ## What this demonstrates
 
+* The trajectory-iteration contract on a tiny CPU-runnable workload:
+  `GymDataPacker` satisfies the `TrajectoryPacker` Protocol;
+  `GymTrainer` composes `TrajectoryExpansionMixin` and walks
+  rollouts through `_begin_training_step` -> N x `_train_one_rollout`
+  -> `_finalize_training_step`.
 * The Gym API extension hooks (`register_tokenizer_loader`,
   `register_local_model_config`, `TensorDataPacker`,
   `IdentityWeightMapper`) wiring a tiny MLP policy and a
   `gymnasium.Env` into the standard cosmos-rl pipeline.
-* Two payload-transfer profiles (Redis and UCXX) selected via
-  `[custom].payload_transfer` so colocated and disaggregated launches
-  share the same code.
 * Both **discrete** (CartPole-v1) and **continuous** (Pendulum-v1)
   action spaces.
 
@@ -20,28 +29,30 @@ as the reference environment.
 
 ```
 cosmos_rl/tools/gym_example/
-├── __init__.py            re-exports the example surface
-├── README.md              this file
-├── gym_policy.py          GymPolicy + GymMLPConfig + register_gym_policy()
-├── gym_rollout.py         GymRolloutEngine + rollout_episode()
-├── gym_data_packer.py     GymDataPacker (TensorDataPacker subclass)
-└── configs/
-    ├── cartpole_colocated.toml       primary, Redis transport
-    ├── cartpole_disaggregated.toml   UCXX transport
-    └── pendulum_colocated.toml       continuous-action variant
++-- __init__.py            re-exports the example surface
++-- README.md              this file
++-- gym_policy.py          GymPolicy + GymMLPConfig + register_gym_policy()
++-- gym_rollout.py         GymRolloutEngine + rollout_episode()
++-- gym_data_packer.py     GymDataPacker (TensorDataPacker + TrajectoryPacker)
++-- gym_algo.py            compute_returns + compute_simple_pg_loss (toy PG)
++-- gym_trainer.py         GymTrainer(TrajectoryExpansionMixin, Trainer)
++-- gym_rollout_backend.py GymRolloutBackend(RolloutBase)
++-- gym_entry.py           launch entry: GymSeedDataset + gym_episode_reward
++-- configs/
+    +-- cartpole_colocated.toml       primary, Redis transport
+    +-- pendulum_colocated.toml       continuous-action variant
 ```
 
 ## Install
 
 ```bash
 pip install "cosmos_rl[gym]"        # primary path (CartPole / Pendulum)
-pip install "cosmos_rl[gym,ucxx]"   # add UCXX transport for disaggregated mode
 ```
 
 ## Standalone (no controller) sanity check
 
 The policy and rollout engine can be exercised directly without
-spinning up the full cosmos-rl controller / dispatcher — useful for
+spinning up the full cosmos-rl controller / dispatcher, useful for
 local iteration and debugging:
 
 ```python
@@ -62,43 +73,68 @@ print({k: v.shape for k, v in traj.items()})
 #  'terminated': (200,), 'truncated': (200,), 'episode_length': (1,)}
 ```
 
-## Wiring it into cosmos-rl
+## Trajectory-iteration contract quickstart
+
+The trainer-side path uses the upstream
+`TrajectoryExpansionMixin` exactly as a downstream consumer would:
 
 ```python
-from cosmos_rl.tools.gym_example import (
-    GymDataPacker, GymPolicy, register_gym_policy,
-)
-from cosmos_rl.policy.model.identity_weight_mapper import IdentityWeightMapper
+from cosmos_rl.tools.gym_example import GymDataPacker, GymTrainer
+from cosmos_rl.dispatcher.data.packer.trajectory_packer import TrajectoryPacker
 
-# 1. Register the .toml -> NoOpTokenizer + GymMLPConfig handlers.
-register_gym_policy()
+# GymDataPacker satisfies the TrajectoryPacker Protocol:
+assert isinstance(GymDataPacker(), TrajectoryPacker)
+# num_transitions(rollout) -> int (=== episode_length)
+# iter_transitions(rollout) -> Iterator[{observation, action, reward}]
+# iter_chunks   inherited from the protocol's default body
+# iter_rollouts inherited from the protocol's default body
 
-# 2. Use IdentityWeightMapper for the (single-rank, non-sharded) MLP.
-#    Hand the policy and mapper to ModelRegistry.register_model() in
-#    your custom_class.py, and set:
-#       [policy] model_name_or_path = "configs/cartpole_colocated.toml"
-#       [policy] model_class        = "GymPolicy"
-#       [policy] data_packer_class  = "GymDataPacker"
+# GymTrainer composes TrajectoryExpansionMixin in rollout mode:
+assert GymTrainer.chunk_size is None
+# _begin_training_step          -> per-step setup (zero_grad, scratch buffers)
+# _train_one_rollout            -> per-trajectory forward + backward
+# _finalize_training_step       -> grad clip, optimizer step, return metrics
 ```
 
-The full launcher integration lives in your project's `custom_class.py`
-because cosmos-rl uses dotted-path imports for trainer / data-packer /
-weight-mapper resolution; the example components above are designed to
-be drop-in.
+## Supported launch matrix
+
+|                          | colocated, single replica | colocated, multi replica | disaggregated |
+|--------------------------|:-------------------------:|:------------------------:|:-------------:|
+| Pytest end-to-end        | yes                       | n/a                      | n/a           |
+| `cosmos-rl --config ...` | **yes**                   | no                       | no            |
+
+The trajectory-iteration contract is validated by
+`tests/test_gym_example.py` (CPU, no controller); the launcher
+integration is validated by hand-running the colocated single-replica
+config below.  Disaggregated and multi-replica are out of scope: the
+toy trainer's `sync_all_states` is a no-op (returns `0` parameters
+transferred) and `map_w_from_policy_to_rollout` is empty, so any
+launch that relies on inter-replica or P2R weight transport will
+silently produce stale weights on the rollout side.
+
+## Wiring it into cosmos-rl
+
+```bash
+cosmos-rl --config cosmos_rl/tools/gym_example/configs/cartpole_colocated.toml \
+          cosmos_rl/tools/gym_example/gym_entry.py
+```
+
+`gym_entry.py` registers the trainer (`gym_pg`), the rollout backend
+(`gym`), and the gym MLP policy loader on import, then hands a
+`GymSeedDataset`, `GymDataPacker`, and `gym_episode_reward` to
+cosmos-rl's `launch_worker`.
+
+The dataset is **not** training data: for an RL workload the
+"dataset" is a stream of initial conditions (here, JSON-encoded
+seeds) that the dispatcher hands to the rollout backend. The
+rollout backend then drives `gymnasium.Env` via `GymRolloutEngine`
+to produce per-episode trajectories.
 
 ## Pendulum-v1
 
-Swap the config and pass `discrete=False`:
-
-```toml
-[model]
-obs_dim    = 3
-action_dim = 1
-discrete   = false
-
-[env]
-name      = "Pendulum-v1"
-max_steps = 200
+```bash
+cosmos-rl --config cosmos_rl/tools/gym_example/configs/pendulum_colocated.toml \
+          cosmos_rl/tools/gym_example/gym_entry.py
 ```
 
 `GymPolicy` automatically swaps in a Gaussian (mean / log_std) head
@@ -108,14 +144,32 @@ for continuous-action environments.
 
 Because the rollout engine is just a thin driver around a user-supplied
 `env_factory`, swapping in a more interesting environment (e.g.
-`gym.make("LunarLander-v2")`) is a one-line change.  Match the
+`gym.make("LunarLander-v2")`) is a one-line change. Match the
 config's `obs_dim` / `action_dim` / `discrete` fields to the new
 environment's `observation_space` / `action_space` and you're done.
+
+## Toy semantics
+
+This trainer is deliberately toy. It exists to validate the
+trajectory-iteration contract end-to-end on CPU, not to be a
+competitive RL implementation. Not in scope:
+
+* Real PG algorithms (PPO / A2C / REINFORCE-with-baseline). The toy
+  loss is MSE between predicted and sampled actions, weighted by
+  return.
+* Real persistence (export_safetensors / model_load_from_hf /
+  model_resume_from_checkpoint are no-ops with a warning).
+* Real validation step.
+* Real LR scheduler.
+* Disaggregated weight sync between rollout and policy ranks.
+
+Each of these is a clean follow-up if a real workload wants to
+adopt the gym example as a starting point.
 
 ## Profiling
 
 When the [profiler](../profiler/README.md) tooling lands, this example
-ships with no extra wiring needed — the rollout engine already emits
+ships with no extra wiring needed: the rollout engine already emits
 `[Trace]` lines through `cosmos_rl.utils.trace.format_trace()` (when
 the trace utility MR is also installed) and the analyzer picks them up
 automatically.

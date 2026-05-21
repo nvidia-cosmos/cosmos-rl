@@ -91,6 +91,15 @@ class GymPolicy(nn.Module):
     log-probs alongside the trajectory.
     """
 
+    @staticmethod
+    def supported_model_types():
+        # Required by ``ModelRegistry.register_model`` so that
+        # ``WeightMapper.get_weight_mapper(model_type)`` resolves to
+        # :class:`IdentityWeightMapper` instead of falling back to
+        # ``HFModelWeightMapper`` (which is LLM-specific and rejects
+        # the gym MLP config because it lacks ``kv_head_ratio``).
+        return [_GYM_MODEL_TYPE]
+
     def __init__(self, config: GymMLPConfig):
         super().__init__()
         self.config = config
@@ -158,9 +167,12 @@ def register_gym_policy(
       ``policy.model_name_or_path`` ending in ``.toml``.
     * Local model-config loader so the same ``.toml`` resolves to a
       :class:`GymMLPConfig`.
-    * (Optional, deferred) ``ModelRegistry.register_model`` would tie
-      the policy class to the registry; for the example we keep
-      registration explicit in user code so reviewers can see it.
+    * :class:`GymPolicy` -> :class:`IdentityWeightMapper` in
+      :class:`ModelRegistry`, so the rollout worker's
+      ``WeightMapper.get_weight_mapper(model_type)`` resolves to the
+      identity mapper instead of falling back to the LLM-specific
+      ``HFModelWeightMapper`` (which would reject the gym MLP config
+      because it lacks ``kv_head_ratio`` / ``head_dim``).
 
     Args:
         model_type: Identifier matched against the TOML's ``model_type``
@@ -171,6 +183,7 @@ def register_gym_policy(
     """
     import toml
 
+    from cosmos_rl.policy.model.base import IdentityWeightMapper, ModelRegistry
     from cosmos_rl.utils.model_config import register_local_model_config
     from cosmos_rl.utils.no_op_tokenizer import NoOpTokenizer
     from cosmos_rl.utils.util import register_tokenizer_loader
@@ -191,6 +204,11 @@ def register_gym_policy(
 
     register_tokenizer_loader(predicate=predicate, loader=lambda _p: NoOpTokenizer())
     register_local_model_config(predicate=predicate, factory=_load_gym_config)
+
+    # Idempotent: ``register_gym_policy`` may be called multiple times
+    # in a single process (e.g. controller + worker via gym_entry.py).
+    if model_type not in ModelRegistry._MODEL_REGISTRY:
+        ModelRegistry.register_model(GymPolicy, IdentityWeightMapper)
 
 
 __all__ = [

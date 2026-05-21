@@ -30,6 +30,10 @@ Reference environments (Gymnasium Classic Control suite):
 See ``README.md`` in this directory for a launch walkthrough.
 """
 
+from cosmos_rl.tools.gym_example.gym_algo import (
+    compute_returns,
+    compute_simple_pg_loss,
+)
 from cosmos_rl.tools.gym_example.gym_data_packer import GymDataPacker
 from cosmos_rl.tools.gym_example.gym_policy import (
     GymMLPConfig,
@@ -40,12 +44,18 @@ from cosmos_rl.tools.gym_example.gym_rollout import (
     GymRolloutEngine,
     rollout_episode,
 )
+from cosmos_rl.tools.gym_example.gym_rollout_backend import GymRolloutBackend
+from cosmos_rl.tools.gym_example.gym_trainer import GymTrainer
 
 __all__ = [
     "GymDataPacker",
     "GymMLPConfig",
     "GymPolicy",
+    "GymRolloutBackend",
     "GymRolloutEngine",
+    "GymTrainer",
+    "compute_returns",
+    "compute_simple_pg_loss",
     "register_gym_policy",
     "rollout_episode",
 ]
