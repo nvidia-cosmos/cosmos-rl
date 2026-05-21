@@ -848,7 +848,7 @@ class PolicyStatusManager:
         )
 
         discarded_count = len(rollouts) - len(filtered_rollouts)
-        if discarded_count > 0 and getattr(self, "_nccl_cleanup_enabled", False):
+        if discarded_count > 0:
             self._publish_payload_transport_cleanup(rollouts, filtered_rollouts)
 
         return filtered_rollouts
@@ -862,16 +862,14 @@ class PolicyStatusManager:
 
         The grouping/dispatch logic lives in
         :meth:`PayloadTransportRegistry.handle_discarded`.  This wrapper
-        only resolves the controller's Redis client and preserves the
-        ``_nccl_cleanup_enabled`` "first-detection" flag flip so the
-        existing log behavior is unchanged.
+        only resolves the controller's Redis client and flips the
+        ``_nccl_cleanup_enabled`` "first-detection" flag (used to
+        debounce the "now active" log line so it appears at most once).
 
-        NOTE: ``_nccl_cleanup_enabled`` carries a known cold-start
-        gating bug introduced in commit 55745c: ``filter_outdated_rollouts``
-        only invokes this method when the flag is already True, but the
-        flag is only flipped True from inside this method, so cleanup
-        is unreachable on cold start.  This refactor preserves the
-        existing behavior; the bug fix is tracked as a separate MR.
+        Called by :meth:`filter_outdated_rollouts` whenever any rollout
+        is discarded; ``handle_discarded`` itself is a cheap no-op when
+        no payload-transport-prefixed rollouts are present, so calling
+        it unconditionally is safe.
         """
         redis_client = self._resolve_cleanup_redis_client()
         published = PayloadTransportRegistry.handle_discarded(
