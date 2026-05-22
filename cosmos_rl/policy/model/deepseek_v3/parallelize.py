@@ -320,7 +320,19 @@ def parallelize(
             assert "moe" in meshes
             _apply_ep(model_part, meshes["moe"]["ep"])
 
-        _apply_ac(model_part)
+        # Honor `policy.model_gradient_checkpointing` (default True).  The
+        # HF-models and GPT paths already branch on this flag; DeepSeek-V3 used
+        # to call `_apply_ac` unconditionally and silently override an explicit
+        # opt-out.  Letting users disable AC matters here because activation
+        # checkpointing under MoE + bf16 router + FSDP can produce
+        # non-deterministic token routing on the backward-time recompute (one
+        # token's expert assignment flips between the original forward and the
+        # recompute, shifting per-EP-rank dispatch counts and triggering
+        # `torch.utils.checkpoint.CheckpointError`).  TODO: address the MoE +
+        # AC determinism issue at the source (e.g. fp32 router matmul, or skip
+        # AC on MoE blocks only) and re-enable AC by default for this path.
+        if config.policy.model_gradient_checkpointing:
+            _apply_ac(model_part)
 
         _apply_fsdp(model_part, meshes, parallel_dims)
 
