@@ -641,15 +641,28 @@ class vLLMRollout(RolloutBase):
         skipped_count = 0
 
         # Determine how to get prompt token count based on prompt type
-        for idx, (prompt, payload) in enumerate(zip(new_prompts if isinstance(new_prompts, list) else [new_prompts], payloads)):
+        for idx, (prompt, payload) in enumerate(
+            zip(
+                new_prompts if isinstance(new_prompts, list) else [new_prompts],
+                payloads,
+            )
+        ):
             try:
                 # Handle both string prompts and dict/object prompts (VLM)
                 if isinstance(prompt, str):
-                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt))
+                    prompt_token_count = len(
+                        self.rollout_engine.llm_engine.tokenizer.encode(prompt)
+                    )
                 elif isinstance(prompt, dict) and "prompt" in prompt:
-                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt["prompt"]))
+                    prompt_token_count = len(
+                        self.rollout_engine.llm_engine.tokenizer.encode(
+                            prompt["prompt"]
+                        )
+                    )
                 elif hasattr(prompt, "prompt"):
-                    prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(prompt.prompt))
+                    prompt_token_count = len(
+                        self.rollout_engine.llm_engine.tokenizer.encode(prompt.prompt)
+                    )
                 else:
                     # For VLM inputs (with images/videos), use prompt token ids if available
                     if hasattr(prompt, "prompt_token_ids"):
@@ -681,13 +694,17 @@ class vLLMRollout(RolloutBase):
                 filtered_payloads.append(payload)
 
         if skipped_count > 0:
-            logger.info(f"[Rollout] Skipped {skipped_count} prompts due to exceeding max_model_len")
+            logger.info(
+                f"[Rollout] Skipped {skipped_count} prompts due to exceeding max_model_len"
+            )
 
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
             with torch.cuda.stream(stream):
                 if len(filtered_prompts) == 0:
-                    logger.warning("[Rollout] All prompts were filtered out, returning empty results")
+                    logger.warning(
+                        "[Rollout] All prompts were filtered out, returning empty results"
+                    )
                     results = []
                 else:
                     results = self.rollout_engine.generate(

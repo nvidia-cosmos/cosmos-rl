@@ -291,16 +291,29 @@ class vLLMRolloutAsync(vLLMRollout):
                 max_model_len = self.config.policy.model_max_length
                 try:
                     if isinstance(cur_prompt, str):
-                        prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(cur_prompt))
+                        prompt_token_count = len(
+                            self.rollout_engine.llm_engine.tokenizer.encode(cur_prompt)
+                        )
                     elif isinstance(cur_prompt, dict) and "prompt" in cur_prompt:
-                        prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(cur_prompt["prompt"]))
+                        prompt_token_count = len(
+                            self.rollout_engine.llm_engine.tokenizer.encode(
+                                cur_prompt["prompt"]
+                            )
+                        )
                     elif hasattr(cur_prompt, "prompt"):
-                        prompt_token_count = len(self.rollout_engine.llm_engine.tokenizer.encode(cur_prompt.prompt))
+                        prompt_token_count = len(
+                            self.rollout_engine.llm_engine.tokenizer.encode(
+                                cur_prompt.prompt
+                            )
+                        )
                     else:
                         # For VLM inputs, try to get prompt_token_ids
                         if hasattr(cur_prompt, "prompt_token_ids"):
                             prompt_token_count = len(cur_prompt.prompt_token_ids)
-                        elif isinstance(cur_prompt, dict) and "prompt_token_ids" in cur_prompt:
+                        elif (
+                            isinstance(cur_prompt, dict)
+                            and "prompt_token_ids" in cur_prompt
+                        ):
                             prompt_token_count = len(cur_prompt["prompt_token_ids"])
                         else:
                             prompt_token_count = 0
