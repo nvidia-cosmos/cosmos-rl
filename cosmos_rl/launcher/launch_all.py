@@ -332,6 +332,17 @@ def parse_args():
         default=False,
         help="In World foundational model mode.",
     )
+    parser.add_argument(
+        "--script",
+        dest="script_option",
+        default=None,
+        metavar="SCRIPT",
+        help=(
+            "A user script which can be provided for custom dataset, reward "
+            "functions, and model registration. Equivalent to the positional "
+            "script argument."
+        ),
+    )
 
     # Positional arguments
     parser.add_argument(
@@ -343,7 +354,34 @@ def parse_args():
 
     parser.add_argument("script_args", nargs=REMAINDER)
 
-    args = parser.parse_args()
+    script_option = None
+    script_option_args = None
+    parse_argv = None
+    raw_argv = sys.argv[1:]
+    if not any(arg in ("-h", "--help") for arg in raw_argv):
+        for idx, arg in enumerate(raw_argv):
+            if arg == "--script":
+                if idx + 1 >= len(raw_argv):
+                    parser.error("--script requires a script path")
+                script_option = raw_argv[idx + 1]
+                script_option_args = raw_argv[idx + 2 :]
+                parse_argv = raw_argv[:idx]
+                break
+            if arg.startswith("--script="):
+                script_option = arg.split("=", 1)[1]
+                script_option_args = raw_argv[idx + 1 :]
+                parse_argv = raw_argv[:idx]
+                break
+
+    args = parser.parse_args(parse_argv)
+    if script_option is not None:
+        if not script_option:
+            parser.error("--script requires a script path")
+        if args.script and args.script != script_option:
+            parser.error("Use either --script or positional script, not both.")
+        args.script = script_option
+        args.script_args = script_option_args
+    delattr(args, "script_option")
 
     # Validate Lepton mode arguments
     if args.lepton_mode:
