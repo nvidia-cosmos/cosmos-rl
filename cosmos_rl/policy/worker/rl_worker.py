@@ -57,6 +57,7 @@ import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.collective.collective import P2RCollectiveManager
+from cosmos_rl.utils.p2r_cuda_graph import P2RSendCudaGraphManager
 
 
 class RLPolicyWorker(PolicyWorkerBase):
@@ -142,6 +143,10 @@ class RLPolicyWorker(PolicyWorkerBase):
             api_client=self.api_client,
             role=self.role,
         )
+
+        # CUDA Graph manager for P2R sends — constructed lazily on first sync
+        # once policy_to_rollout_insts and trainable_params are populated.
+        self._p2r_send_mgr: Optional[P2RSendCudaGraphManager] = None
 
     def setup(
         self,
@@ -395,86 +400,131 @@ class RLPolicyWorker(PolicyWorkerBase):
                         self.pre_P2R_collect_parameters()
                     )
 
-                    def grouped_send(grouped_send_ops):
-                        if (
-                            self.rl_mode != "colocated_separated"
-                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-                        ):
-                            # Only in non-colocated-separated mode, we could use NCCL group feature.
-                            nccl_group_start(comm_id)
-                        for view, r_rank, dest_name in grouped_send_ops:
-                            logger.debug(
-                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
+                    if (
+                        constant.COSMOS_P2R_CUDA_GRAPH
+                        and self.rl_mode != "colocated_separated"
+                        and self.config.rollout.quantization == "none"
+                        and command.trainable_only
+                    ):
+                        # ── CUDA graph path ──────────────────────────────────────
+                        # Construct manager once stable refs are available.
+                        if self._p2r_send_mgr is None:
+                            self._p2r_send_mgr = P2RSendCudaGraphManager(
+                                policy_to_rollout_insts=self.policy_to_rollout_insts,
+                                trainable_params=self.trainable_params,
+                                map_w_from_policy_to_rollout=(
+                                    self.trainer.map_w_from_policy_to_rollout
+                                ),
+                                p2r_collective_manager=self.p2r_collective_manager,
+                                transfer_dtype=str2torch_dtype(
+                                    self.config.train.transfer_dtype
+                                ),
+                                global_rank=self.global_rank,
                             )
-                            self.p2r_collective_manager.send(
-                                base_mesh_key, view, r_rank
+                        if not self._p2r_send_mgr.is_built(command.trainable_only):
+                            self._p2r_send_mgr.build(
+                                pre_P2R_collected_tensors=pre_P2R_collected_tensors,
+                                base_mesh_key=base_mesh_key,
+                                trainable_only=command.trainable_only,
                             )
-                        if (
-                            self.rl_mode != "colocated_separated"
-                            and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
-                        ):
-                            nccl_group_end(comm_id)
-                        grouped_send_ops.clear()
-
-                    grouped_send_ops = []
-                    num_groups = 0
-
-                    transferred_params_cnt = 0
-                    skipped_params_cnt = 0
-                    for insts_group in self.policy_to_rollout_insts:
-                        for insts_for_per_param in insts_group.param_instructions:
-                            dest_name = insts_for_per_param.param_name
+                        stats = self._p2r_send_mgr.fill_and_replay(
+                            trainable_only=command.trainable_only,
+                            pre_P2R_collected_tensors=pre_P2R_collected_tensors,
+                            train_stream=self.train_stream,
+                        )
+                        total_bytes_sent = stats.total_bytes
+                        transferred_params_cnt = stats.transferred_params_cnt
+                        skipped_params_cnt = stats.skipped_params_cnt
+                    else:
+                        # ── Original path ────────────────────────────────────────
+                        def grouped_send(grouped_send_ops):
                             if (
-                                dest_name not in self.trainable_params
-                                and command.trainable_only
+                                self.rl_mode != "colocated_separated"
+                                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
                             ):
+                                # Only in non-colocated-separated mode, we could use NCCL group feature.
+                                nccl_group_start(comm_id)
+                            for view, r_rank, dest_name in grouped_send_ops:
                                 logger.debug(
-                                    f"[Policy] Skip {dest_name} in P2R send due to non trainable."
+                                    f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                                 )
-                                skipped_params_cnt += 1
-                                continue
-                            transferred_params_cnt += 1
+                                self.p2r_collective_manager.send(
+                                    base_mesh_key, view, r_rank
+                                )
+                            if (
+                                self.rl_mode != "colocated_separated"
+                                and constant.COSMOS_P2R_NCCL_GROUP_SIZE > 0
+                            ):
+                                nccl_group_end(comm_id)
+                            grouped_send_ops.clear()
 
-                            for inst in insts_for_per_param.instructions:
-                                p_rank = inst.policy_rank
-                                r_rank = inst.rollout_rank
-                                tensor_split_strategys = inst.slice_strategy
+                        grouped_send_ops = []
+                        num_groups = 0
+
+                        transferred_params_cnt = 0
+                        skipped_params_cnt = 0
+                        for insts_group in self.policy_to_rollout_insts:
+                            for insts_for_per_param in insts_group.param_instructions:
+                                dest_name = insts_for_per_param.param_name
                                 if (
-                                    dest_name
-                                    not in self.trainer.map_w_from_policy_to_rollout
+                                    dest_name not in self.trainable_params
+                                    and command.trainable_only
                                 ):
-                                    raise RuntimeError(
-                                        f"dest_name {dest_name} not in trainer's map_w_from_policy_to_rollout"
+                                    logger.debug(
+                                        f"[Policy] Skip {dest_name} in P2R send due to non trainable."
                                     )
-                                local_view = self.trainer.map_w_from_policy_to_rollout[
-                                    dest_name
-                                ]
-                                if dest_name in pre_P2R_collected_tensors:
-                                    local_view = pre_P2R_collected_tensors[dest_name]
-                                elif isinstance(local_view, Callable):
-                                    local_view = local_view()
-                                else:
-                                    pass
-                                local_view = local_view.to(
-                                    str2torch_dtype(self.config.train.transfer_dtype)
-                                )
-                                view = (
-                                    local_view.cosmos_slice(tensor_split_strategys)
-                                    .contiguous()
-                                    .cuda()
-                                )
-                                assert self.global_rank == p_rank
-                                logger.debug(
-                                    f"[Policy] Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
-                                )
-                                grouped_send_ops.append((view, r_rank, dest_name))
-                                total_bytes_sent += view.numel() * view.element_size()
-                        num_groups += 1
-                        if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                            grouped_send(grouped_send_ops)
-                            num_groups = 0
+                                    skipped_params_cnt += 1
+                                    continue
+                                transferred_params_cnt += 1
 
-                    grouped_send(grouped_send_ops)
+                                for inst in insts_for_per_param.instructions:
+                                    p_rank = inst.policy_rank
+                                    r_rank = inst.rollout_rank
+                                    tensor_split_strategys = inst.slice_strategy
+                                    if (
+                                        dest_name
+                                        not in self.trainer.map_w_from_policy_to_rollout
+                                    ):
+                                        raise RuntimeError(
+                                            f"dest_name {dest_name} not in trainer's map_w_from_policy_to_rollout"
+                                        )
+                                    local_view = (
+                                        self.trainer.map_w_from_policy_to_rollout[
+                                            dest_name
+                                        ]
+                                    )
+                                    if dest_name in pre_P2R_collected_tensors:
+                                        local_view = pre_P2R_collected_tensors[
+                                            dest_name
+                                        ]
+                                    elif isinstance(local_view, Callable):
+                                        local_view = local_view()
+                                    else:
+                                        pass
+                                    local_view = local_view.to(
+                                        str2torch_dtype(
+                                            self.config.train.transfer_dtype
+                                        )
+                                    )
+                                    view = (
+                                        local_view.cosmos_slice(tensor_split_strategys)
+                                        .contiguous()
+                                        .cuda()
+                                    )
+                                    assert self.global_rank == p_rank
+                                    logger.debug(
+                                        f"[Policy] Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                                    )
+                                    grouped_send_ops.append((view, r_rank, dest_name))
+                                    total_bytes_sent += (
+                                        view.numel() * view.element_size()
+                                    )
+                            num_groups += 1
+                            if num_groups >= constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                                grouped_send(grouped_send_ops)
+                                num_groups = 0
+
+                        grouped_send(grouped_send_ops)
                 finally:
                     if self.config.policy.lora is not None:
                         # Always attempt to unmerge to restore training state
