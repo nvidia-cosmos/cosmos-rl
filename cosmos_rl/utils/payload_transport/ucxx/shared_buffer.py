@@ -429,9 +429,17 @@ class SharedRingBuffer:
         return state == SlotState.READY
 
     def get_ready_count(self) -> int:
-        """Get number of entries ready to be consumed."""
-        _, _, entry_count = self._read_header()
-        return entry_count
+        """Get number of slots currently in ``READY`` state.
+
+        Counts slot states directly rather than returning the header's
+        ``entry_count``: ``entry_count`` is monotonic up to
+        ``max_entries`` and saturates after the first ring lap, so it
+        does **not** reflect how many slots are actually ready to be
+        consumed at a given instant.  Use this method when you need
+        the live ready-slot count (e.g. for diagnostics); use
+        :meth:`is_full` for the full/not-full predicate.
+        """
+        return len(self.get_ready_indices())
 
     def is_full(self) -> bool:
         """Check if buffer is full."""
@@ -602,11 +610,23 @@ class SharedRingBuffer:
         """Return the raw bytes of a slot as a contiguous uint8 array view.
 
         Transitions slot state: READY -> READING on first call.
-        Allows concurrent reads from READING state for chunked transfers.
-        Caller must call :meth:`mark_consumed` after all readers are done.
 
-        This is the read-side counterpart of :meth:`write_raw` and is used
-        by the UCXX server for coalesced (single-send) transfers.
+        Read-side counterpart of :meth:`write_raw`; used by the UCXX
+        server's :meth:`UCXXBuffer._handle_connection` for the single
+        coalesced ``send(raw_buf)`` per slot.  Each slot read has a
+        single intended owner: the handler that performed the
+        ``READY -> READING`` transition is responsible for finalising
+        with :meth:`mark_consumed` (success) or
+        :meth:`release_reading` (failure).
+
+        Re-entry from ``READING`` is **tolerated, not encouraged** --
+        if a stale orphan handler is still mid-``send`` when the
+        client times out and rotates to a fresh server thread, the
+        new handler can re-acquire a view (the writer cannot recycle
+        a READING slot, so the bytes are stable).  The defensive
+        guards in :meth:`mark_consumed` and :meth:`release_reading`
+        make the duplicate-finalise call from the orphan handler a
+        no-op.
         """
         with self._lock:
             size, state = self._read_entry_meta(index)
@@ -632,15 +652,25 @@ class SharedRingBuffer:
         Mark entry as consumed (slot can be reused).
 
         Transitions slot state: READING -> FREE.
+
+        Defensive against stale callers: if the slot is not currently
+        in READING state the call is a no-op.  Mirrors the early-
+        return guard in :meth:`release_reading`.  Without this guard a
+        stale ``mark_consumed`` (e.g. an orphan reader exiting after
+        the slot has been recycled by the writer) would silently
+        clobber a slot that is mid-WRITE or already filled with a new
+        payload, dropping data.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            _, state = self._read_entry_meta(index)
 
             if state != SlotState.READING:
                 logger.warning(
                     f"[SharedRingBuffer] mark_consumed on slot {index} with unexpected "
-                    f"state {state.name} (expected READING)"
+                    f"state {state.name} (expected READING) -- ignoring (probable stale "
+                    f"reader exit after slot recycle)"
                 )
+                return
 
             # Transition to FREE state
             self._write_entry_meta(index, 0, SlotState.FREE)

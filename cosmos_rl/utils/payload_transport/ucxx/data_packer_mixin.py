@@ -24,7 +24,8 @@ and this subclass plugs in the UCXX-specific bits:
   ``_ucxx: True``)
 * the cache key (``_cache_key``: ``"ip:port:slot"``)
 * the actual zero-copy fetch (``_fetch_batch`` -> async UCXXClient.read
-  with chunk fan-out and multi-round retry)
+  with single-chunk-per-slot transfers, port rotation on transient
+  transport errors, and multi-round retry)
 * a sync-fallback fetch for cache misses
 * a periodic INFO summary of UCXX bytes / latency
 
@@ -60,13 +61,23 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
 )
 
 
+# Errors that are worth retrying at the data-packer layer.  Mirrors
+# the rotation set in :data:`ucxx_buffer._PORT_ROTATABLE_ERRORS` --
+# transport-class failures on a specific server thread can succeed on
+# the next attempt because :class:`UCXXClient` will rotate to a
+# different (worker_ip, port) endpoint internally.
+#
+# Deliberately excluded:
+#   * ``StaleSlotError`` -- the slot has been overwritten on the
+#     producer side; no amount of retrying brings it back.  The
+#     :class:`PrefetchDataPackerMixin` upper layer drops the episode
+#     via ``_on_resolve_failed`` on the very first attempt.
 _TRANSIENT_UCXX_ERRORS = frozenset(
     {
         "UCXXCanceledError",
         "UCXXConnectionResetError",
         "UCXXCloseError",
         "TimeoutError",
-        "StaleSlotError",
     }
 )
 
@@ -80,6 +91,22 @@ TRUNCATED = "truncated"
 EPISODE_LENGTH = "episode_length"
 
 _LOG_INTERVAL = 50
+
+
+# Numpy → torch dtype map for the bulk pinned-buffer copy in
+# ``_to_gpu``.  Defined at module scope so it is built once at import
+# time rather than on every fetch.
+_NP_TO_TORCH = {
+    np.dtype("float32"): torch.float32,
+    np.dtype("float64"): torch.float64,
+    np.dtype("float16"): torch.float16,
+    np.dtype("int64"): torch.int64,
+    np.dtype("int32"): torch.int32,
+    np.dtype("int16"): torch.int16,
+    np.dtype("int8"): torch.int8,
+    np.dtype("uint8"): torch.uint8,
+    np.dtype("bool"): torch.bool,
+}
 
 
 class UCXXDataPackerMixin(PrefetchDataPackerMixin):
@@ -98,9 +125,8 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
     # not be duplicated here.
     _ucxx_dp_client: Optional[UCXXClient] = None
     _ucxx_dp_device: Optional[torch.device] = None
-    _ucxx_dp_n_chunks: int = 4
     _ucxx_dp_max_attempts: int = 2
-    _ucxx_dp_read_timeout: float = 60.0
+    _ucxx_dp_read_timeout: float = 5.0
 
     # Cumulative stats for periodic INFO summaries (UCXX-specific so the
     # base mixin's _on_prefetch_complete hook is the right place).
@@ -152,9 +178,8 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         *,
         device: torch.device,
         prefetch_timeout: float = 300.0,
-        n_chunks: int = 4,
         max_attempts: int = 2,
-        read_timeout: float = 60.0,
+        read_timeout: float = 5.0,
     ) -> None:
         """Initialise UCXX client + start the (inherited) prefetch thread.
 
@@ -172,8 +197,6 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
             device: Target GPU device for fetched tensors.
             prefetch_timeout: Per-batch wait ceiling (seconds) for the
                 prefetch worker thread's result queue.
-            n_chunks: Number of in-flight prefetch slots reserved on
-                the trainer side.
             max_attempts: Total attempts per remote slot read (initial +
                 retries on transient UCX errors).  Defaults to 2.
             read_timeout: Per-await timeout (seconds) inside one
@@ -187,7 +210,6 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
             )
 
         self._ucxx_dp_device = device
-        self._ucxx_dp_n_chunks = n_chunks
         self._ucxx_dp_max_attempts = max(1, max_attempts)
         self._ucxx_dp_read_timeout = read_timeout
         self._ucxx_dp_client = UCXXClient()
@@ -199,10 +221,9 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
 
         logger.info(
             "[UCXXDataPackerMixin] Initialised: device=%s, timeout=%ss, "
-            "n_chunks=%d, max_attempts=%d, read_timeout=%ss",
+            "max_attempts=%d, read_timeout=%ss",
             device,
             prefetch_timeout,
-            n_chunks,
             self._ucxx_dp_max_attempts,
             read_timeout,
         )
@@ -211,9 +232,8 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         self,
         device: torch.device,
         prefetch_timeout: float = 300.0,
-        n_chunks: int = 4,
         max_attempts: int = 2,
-        read_timeout: float = 60.0,
+        read_timeout: float = 5.0,
     ) -> None:
         """DEPRECATED: use :meth:`_setup_ucxx_data_packer` (kwargs-only).
 
@@ -225,7 +245,6 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         self._setup_ucxx_data_packer(
             device=device,
             prefetch_timeout=prefetch_timeout,
-            n_chunks=n_chunks,
             max_attempts=max_attempts,
             read_timeout=read_timeout,
         )
@@ -434,14 +453,10 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                     for s in schema_info
                 ]
 
-            n_chunks = (
-                min(self._ucxx_dp_n_chunks, len(ports))
-                if ports and len(ports) > 1
-                else 1
-            )
             max_attempts = max(1, self._ucxx_dp_max_attempts)
             read_timeout = self._ucxx_dp_read_timeout
             data = None
+            retryable = True
             for attempt in range(1, max_attempts + 1):
                 try:
                     data = await client.read(
@@ -450,12 +465,15 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                         slot,
                         schema,
                         ports=ports,
-                        n_chunks=n_chunks,
                         timeout=read_timeout,
                     )
                     break
                 except Exception as e:
                     if type(e).__name__ not in _TRANSIENT_UCXX_ERRORS:
+                        # Non-transient (e.g. ``StaleSlotError``,
+                        # protocol error from the server): retrying is
+                        # pointless.  Mark non-retryable so Layer C
+                        # skips the slot in subsequent rounds.
                         logger.error(
                             "[UCXXDataPackerMixin] Non-transient error reading "
                             "%s:%s slot=%s: %s: %s",
@@ -465,7 +483,8 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                             type(e).__name__,
                             e,
                         )
-                        return idx, None
+                        retryable = False
+                        return idx, None, retryable
                     if attempt == max_attempts:
                         logger.warning(
                             "[UCXXDataPackerMixin] All %d attempts failed for "
@@ -477,7 +496,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                             type(e).__name__,
                             e,
                         )
-                        return idx, None
+                        return idx, None, retryable
                     logger.warning(
                         "[UCXXDataPackerMixin] Transient error reading "
                         "%s:%s slot=%s (attempt %d/%d): %s, retrying",
@@ -488,19 +507,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                         max_attempts,
                         type(e).__name__,
                     )
-            return idx, data
-
-        _NP_TO_TORCH = {
-            np.dtype("float32"): torch.float32,
-            np.dtype("float64"): torch.float64,
-            np.dtype("float16"): torch.float16,
-            np.dtype("int64"): torch.int64,
-            np.dtype("int32"): torch.int32,
-            np.dtype("int16"): torch.int16,
-            np.dtype("int8"): torch.int8,
-            np.dtype("uint8"): torch.uint8,
-            np.dtype("bool"): torch.bool,
-        }
+            return idx, data, retryable
 
         def _to_gpu(result: dict) -> dict:
             pinned_buf = result.pop("_pinned_buf", None)
@@ -589,12 +596,17 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
 
             for coro in asyncio.as_completed(tasks):
                 t0 = get_trace_time()
-                idx, result = await coro
+                idx, result, retryable = await coro
                 t1 = get_trace_time()
                 total_transfer_ms += t1 - t0
 
                 if result is None:
-                    failed.append(idx)
+                    if retryable:
+                        failed.append(idx)
+                    # Non-retryable failures (e.g. stale slot): drop
+                    # immediately so the round-level retry doesn't
+                    # waste another ~RTT per round on a slot that
+                    # cannot be resurrected.
                     continue
 
                 gpu_data = _to_gpu(result)

@@ -266,7 +266,6 @@ class TestSetupViaTransportAttach(unittest.TestCase):
         config = SimpleNamespace(
             custom={
                 "ucxx_prefetch_timeout": 7.5,
-                "ucxx_n_chunks": 3,
                 "ucxx_read_max_attempts": 4,
                 "ucxx_read_timeout": 45.0,
             }
@@ -290,7 +289,6 @@ class TestSetupViaTransportAttach(unittest.TestCase):
             packer._setup_ucxx_data_packer(
                 device="cuda:2",
                 prefetch_timeout=7.5,
-                n_chunks=3,
                 max_attempts=4,
                 read_timeout=45.0,
             )
@@ -303,7 +301,7 @@ class TestSetupViaTransportAttach(unittest.TestCase):
         # (the original public name) must keep working: the alias
         # forwards positional args to ``_setup_ucxx_data_packer``
         # using kwargs.  Historical signature is ``(device,
-        # prefetch_timeout, n_chunks)``; newer kwargs default through.
+        # prefetch_timeout)``; newer kwargs default through.
         from unittest import mock
 
         captured = {}
@@ -317,15 +315,14 @@ class TestSetupViaTransportAttach(unittest.TestCase):
         packer = _AliasPacker()
         with mock.patch.object(UCXXDataPackerMixin, "_setup_ucxx_data_packer", _fake):
             # Positional call (the historical public surface).
-            packer.setup_ucxx_data_packer("cuda:0", 5.0, 8)
+            packer.setup_ucxx_data_packer("cuda:0", 5.0)
         self.assertEqual(
             captured,
             {
                 "device": "cuda:0",
                 "prefetch_timeout": 5.0,
-                "n_chunks": 8,
                 "max_attempts": 2,
-                "read_timeout": 60.0,
+                "read_timeout": 5.0,
             },
         )
 
