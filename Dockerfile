@@ -100,6 +100,7 @@ RUN set -eux; \
                 TORCHVISION_VERSION=0.23.0; \
                 TORCHAUDIO_VERSION=2.8.0; \
                 TORCHAO_VERSION=0.13.0; \
+                PEFT_VERSION=0.17.1; \
                 VLLM_VERSION=0.11.0; \
                 FLASHINFER_VERSION=0.6.1; \
                 ;; \
@@ -108,6 +109,7 @@ RUN set -eux; \
                 TORCHVISION_VERSION=0.25.0; \
                 TORCHAUDIO_VERSION=2.10.0; \
                 TORCHAO_VERSION=0.16.0; \
+                PEFT_VERSION=0.17.1; \
                 VLLM_VERSION=0.17.0; \
                 FLASHINFER_VERSION=0.6.4; \
                 FLASH_ATTN_WHEEL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"; \
@@ -120,6 +122,7 @@ RUN set -eux; \
         pip install torch=="${TORCH_VERSION}" torchvision=="${TORCHVISION_VERSION}" torchaudio=="${TORCHAUDIO_VERSION}" --index-url https://download.pytorch.org/whl/cu128; \
         pip install \
             torchao=="${TORCHAO_VERSION}" \
+            peft=="${PEFT_VERSION}" \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
             flashinfer-python=="${FLASHINFER_VERSION}" \

@@ -216,6 +216,82 @@ class TestCheckpointManager(unittest.TestCase):
         target = os.readlink(best_safetensors_link)
         self.assertTrue(target.endswith("step_100"))
 
+    def test_epoch_based_best_checkpoint_and_resume(self):
+        """Test that epoch-named checkpoints can become best and be found on resume."""
+        parallel_dims = create_test_parallel_dims()
+
+        output_dir1 = os.path.join(self.test_dir, self.timestamp1)
+        config1 = create_test_config(
+            output_dir=output_dir1,
+            resume=False,
+            max_keep=5,
+            export_safetensors=True,
+        )
+        manager1 = CheckpointMananger(
+            config1, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler(step=0)
+
+        manager1.save_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            step=10,
+            total_steps=20,
+            epoch=1,
+        )
+        manager1.save_check(10, epoch=1, val_score=1.0)
+
+        manager1.save_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            step=20,
+            total_steps=20,
+            epoch=2,
+        )
+        manager1.save_check(20, epoch=2, val_score=0.5)
+
+        epoch_2_path = os.path.join(
+            self.test_dir, self.timestamp1, "checkpoints", "epoch_2"
+        )
+        self.assertTrue(os.path.exists(os.path.join(epoch_2_path, "policy")))
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(self.test_dir, self.timestamp1, "checkpoints", "step_20")
+            )
+        )
+
+        self.assertEqual(manager1.best_score, 0.5)
+        self.assertEqual(os.path.basename(manager1.best_ckpt_abs_dir), "epoch_2")
+
+        best_ckpt_link = os.path.join(self.test_dir, "best", "checkpoints")
+        self.assertTrue(os.path.islink(best_ckpt_link))
+        self.assertTrue(os.readlink(best_ckpt_link).endswith("epoch_2"))
+
+        best_safetensors_link = os.path.join(self.test_dir, "best", "safetensors")
+        self.assertTrue(os.path.islink(best_safetensors_link))
+        self.assertTrue(os.readlink(best_safetensors_link).endswith("safetensors/epoch_2"))
+
+        best_score_path = os.path.join(self.test_dir, "best", "best_score.json")
+        with open(best_score_path, "r") as f:
+            data = json.load(f)
+        self.assertEqual(data["best_score"], 0.5)
+        self.assertEqual(os.path.basename(data["best_ckpt_abs_dir"]), "epoch_2")
+
+        output_dir2 = os.path.join(self.test_dir, self.timestamp2)
+        config2 = create_test_config(output_dir=output_dir2, resume=True, max_keep=5)
+        manager2 = CheckpointMananger(
+            config2, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
+        )
+
+        self.assertEqual(manager2.best_score, 0.5)
+        self.assertEqual(os.path.basename(manager2.best_ckpt_abs_dir), "epoch_2")
+        self.assertTrue(manager2.get_latest_ckpt_paths()[0].endswith("epoch_2/policy"))
+
     def test_save_check_protects_best_checkpoint_from_deletion(self):
         """Test that save_check does not delete the best checkpoint when max_keep is exceeded.
 
