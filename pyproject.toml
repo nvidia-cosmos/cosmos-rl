@@ -35,7 +35,7 @@ dependencies = [
     "accelerate",
     "kernels",
     "diffusers>=0.36.0", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
-    "peft",
+    "peft==0.17.1",
     "zmq>=0.0.0",
     "nvidia-ml-py>=13.590.48",
 ]
@@ -114,6 +114,10 @@ vla = [
 rl = [
     "vllm>=0.8.5",
     "flash-attn>=2.8.3",
+]
+
+tao = [
+    "nvidia-tao-daft>=2.9.1",
 ]
 
 all = [

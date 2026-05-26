@@ -120,5 +120,6 @@ main(
 ## Example Scripts
 
 - `tao_sft_example.py` - TAO-compatible SFT example with custom logger and hooks
+- `tao_vl_reason_daft_sft_example.py` - tao-vl-reason-v1.0 DAFT SFT example with subsampling and TAO status hooks
 
 For detailed implementation examples, see `custom_loggers_and_hooks.py`.

@@ -256,6 +256,8 @@ def construct_dataset(
     user_provided_val_dataset: Optional[Dataset] = None,
 ):
     config = cosmos_config.train.train_policy
+    train_is_user_dataset = user_provided_dataset is not None
+    val_is_user_dataset = False
     if user_provided_dataset is not None:
         dataset = None
         train_dataset = user_provided_dataset
@@ -278,6 +280,7 @@ def construct_dataset(
     if cosmos_config.validation.enable:
         if user_provided_val_dataset is not None:
             test_dataset = user_provided_val_dataset
+            val_is_user_dataset = True
             logger.info(
                 "Using user-provided validation dataset, which will skip split processing."
             )
@@ -299,6 +302,7 @@ def construct_dataset(
             train_dataset, test_dataset = util.split_train_n_val_dataset(
                 train_dataset, cosmos_config
             )
+            val_is_user_dataset = train_is_user_dataset
     else:
 
         class EmptyDataset(Dataset):
@@ -332,7 +336,7 @@ def construct_dataset(
         config,
         dataset=train_dataset,
         data_packer=data_packer,
-        is_user_dataset=user_provided_dataset is not None,
+        is_user_dataset=train_is_user_dataset,
         enable_cache=train_enable_cache,
         cache_prefix="train",
     )
@@ -340,7 +344,7 @@ def construct_dataset(
         config,
         dataset=test_dataset,
         data_packer=val_data_packer,
-        is_user_dataset=user_provided_val_dataset is not None,
+        is_user_dataset=val_is_user_dataset,
         enable_cache=val_enable_cache,
         cache_prefix="val",
     )

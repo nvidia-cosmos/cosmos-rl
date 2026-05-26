@@ -36,6 +36,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 import cosmos_rl.launcher.worker_entry
 import cosmos_rl.policy.config
@@ -87,7 +88,7 @@ class CustomConfig(pydantic.BaseModel):
     train_dataset: CustomDatasetConfig = pydantic.Field()
     """Training dataset config."""
 
-    val_dataset: CustomDatasetConfig = pydantic.Field(default=None)
+    val_dataset: Optional[CustomDatasetConfig] = pydantic.Field(default=None)
     """Validation dataset config (optional)."""
 
     system_prompt: str = pydantic.Field(default="")
@@ -385,7 +386,22 @@ def main():
         )
 
     # Launch worker with factory functions and TAO logging
-    val_dataset_factory = get_val_dataset if custom_config.val_dataset else None
+    if custom_config.val_dataset:
+        val_dataset_factory = get_val_dataset
+        logger.info(
+            "Using custom validation dataset from "
+            f"{custom_config.val_dataset.annotation_path}"
+        )
+    else:
+        val_dataset_factory = None
+        if config.validation.enable:
+            logger.info(
+                "No custom validation dataset specified. Cosmos-RL will use "
+                "validation.dataset if configured, otherwise split the training "
+                "dataset for validation."
+            )
+        else:
+            logger.info("Validation is disabled; no validation dataset is required.")
 
     cosmos_rl.launcher.worker_entry.main(
         dataset=get_train_dataset,
