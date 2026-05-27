@@ -16,7 +16,6 @@
 import os
 import torch
 
-from transformers import AutoConfig
 from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
 
 from cosmos_rl.comm.base import WorkerBase
@@ -25,6 +24,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
+from cosmos_rl.utils.model_config import load_model_config
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
@@ -37,7 +37,11 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
 
         # TODO (yy): hf_config is used for parameter sync
         if not config.policy.is_diffusers:
-            self.hf_config = util.retry(AutoConfig.from_pretrained)(
+            # Routes through ``register_local_model_config`` so non-HF
+            # ``model_name_or_path`` values (e.g. a ``.toml`` describing a
+            # Gymnasium MLP) resolve before falling back to
+            # ``AutoConfig.from_pretrained``. Default HF flow is unchanged.
+            self.hf_config = util.retry(load_model_config)(
                 self.config.policy.model_name_or_path,
                 trust_remote_code=True,
             )

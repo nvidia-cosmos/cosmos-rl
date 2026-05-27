@@ -23,23 +23,86 @@ Subclasses :class:`TensorDataPacker` to:
 * Echo the trajectory dict produced by the rollout engine straight
   through to the trainer (no transport-side translation needed for
   the in-process / Redis demo).
+
+Also implements the :class:`TrajectoryPacker` Protocol so trainers
+that compose :class:`TrajectoryExpansionMixin` can iterate the
+trajectory at the rollout, chunk, or transition scope. ``iter_chunks``
+and ``iter_rollouts`` come for free from the protocol's default bodies
+(via subclassing); only ``num_transitions`` and ``iter_transitions``
+need real implementations because they're packer-payload-specific.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 from cosmos_rl.dispatcher.data.packer.tensor_data_packer import (
+    ACTIONS,
     EPISODE_LENGTH,
     OBSERVATIONS,
+    REWARDS,
     TensorDataPacker,
 )
+from cosmos_rl.dispatcher.data.packer.trajectory_packer import TrajectoryPacker
+from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.logging import logger
 
 
-class GymDataPacker(TensorDataPacker):
-    """Tensor data packer for Gymnasium-driven rollouts."""
+def _trajectory_from_rollout(rollout: Rollout) -> Dict[str, Any]:
+    """Resolve the trajectory dict for ``rollout``.
+
+    The Gym rollout engine writes the trajectory to ``Rollout.completion``
+    (single completion per rollout). ``extra_info`` is checked as a
+    fallback so transport-aware subclasses that stash the trajectory
+    there in :meth:`get_rollout_output` keep working without overriding
+    this helper.
+    """
+    completion = rollout.completion
+    if isinstance(completion, dict) and OBSERVATIONS in completion:
+        return completion
+    extra = rollout.extra_info or {}
+    if isinstance(extra, dict) and OBSERVATIONS in extra:
+        return extra
+    raise ValueError(
+        "[GymDataPacker] Rollout does not carry a trajectory dict in "
+        "completion or extra_info; "
+        f"completion type={type(completion).__name__}."
+    )
+
+
+def _episode_length(traj: Dict[str, Any]) -> int:
+    """Decode ``EPISODE_LENGTH`` to a Python int.
+
+    The rollout engine emits ``np.array([ep_len], dtype=int64)`` but a
+    plain ``int`` or a 0-d tensor is also accepted so manually-built
+    trajectories (e.g. in tests) work without ceremony.
+    """
+    ep_len = traj.get(EPISODE_LENGTH)
+    if ep_len is None:
+        obs = traj.get(OBSERVATIONS)
+        if hasattr(obs, "shape") and len(obs.shape) > 0:
+            return int(obs.shape[0])
+        return 0
+    if hasattr(ep_len, "item"):
+        try:
+            return int(ep_len.item())
+        except Exception:
+            pass
+    if hasattr(ep_len, "__len__") and len(ep_len) == 1:
+        return int(ep_len[0])
+    return int(ep_len)
+
+
+class GymDataPacker(TensorDataPacker, TrajectoryPacker):
+    """Tensor data packer for Gymnasium-driven rollouts.
+
+    Implements :class:`TrajectoryPacker` so the gym example can compose
+    :class:`TrajectoryExpansionMixin` on the trainer side. Default
+    ``iter_chunks`` / ``iter_rollouts`` bodies are inherited from the
+    protocol; ``num_transitions`` and ``iter_transitions`` are
+    payload-specific and implemented here.
+    """
 
     def get_rollout_input(self, item: Any, **kwargs) -> Dict[str, Any]:
         """Decode the dataset ``prompt`` JSON into a dict of init conditions.
@@ -88,6 +151,39 @@ class GymDataPacker(TensorDataPacker):
             if ep_len_int > max_len:
                 max_len = ep_len_int
         return max_len
+
+    # ------------------------------------------------------------------
+    # TrajectoryPacker conformance
+    # ------------------------------------------------------------------
+
+    def num_transitions(self, rollout: Rollout) -> int:
+        """Number of valid transitions in ``rollout``.
+
+        Reads :data:`EPISODE_LENGTH` from the trajectory dict the rollout
+        engine produced. Padded positions ``[ep_len:]`` are not counted.
+        """
+        return _episode_length(_trajectory_from_rollout(rollout))
+
+    def iter_transitions(self, rollout: Rollout) -> Iterator[Dict[str, Any]]:
+        """Yield single-step dicts for the valid prefix of the trajectory.
+
+        Each yielded dict has keys ``{observation, action, reward}``,
+        sliced from the (possibly padded) per-episode buffers. Padded
+        positions are not yielded. The yielded values keep whatever
+        backing type the rollout engine produced (numpy array, torch
+        tensor, scalar) — the consumer is responsible for any
+        device / dtype conversion.
+        """
+        traj = _trajectory_from_rollout(rollout)
+        observations = traj[OBSERVATIONS]
+        actions = traj[ACTIONS]
+        rewards = traj[REWARDS]
+        for t in range(_episode_length(traj)):
+            yield {
+                "observation": observations[t],
+                "action": actions[t],
+                "reward": rewards[t],
+            }
 
 
 __all__ = ["GymDataPacker"]
