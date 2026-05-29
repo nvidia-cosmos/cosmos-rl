@@ -727,14 +727,246 @@ class TestGymRolloutBackend(unittest.TestCase):
         self.assertIs(backend._engine, engine_a)
         backend.shutdown()
 
-    def test_rollout_generation_before_init_engine_asserts(self):
+    def test_rollout_generation_before_init_engine_raises(self):
+        """Calling rollout_generation before init_engine is a programming
+        error and propagates loudly.  RolloutGenerationMixin's
+        ``_assert_engine_initialized`` raises ``RuntimeError`` outside
+        the template's ``try`` block, so it is not swallowed by
+        ``_on_generation_error``."""
         backend = self._make_backend()
 
         class _Payload:
             prompt = "{}"
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             backend.rollout_generation([_Payload()])
+
+
+class TestGymBackendStructured(unittest.TestCase):
+    """Post-migration: ``GymRolloutBackend`` composes
+    :class:`RolloutGenerationMixin`.  Verifies the four hooks fire in
+    the documented order and the returned ``RolloutResult`` shape is
+    unchanged from the pre-mixin code path."""
+
+    def _make_backend(self, terminate_after=3):
+        from cosmos_rl.policy.config import Config as CosmosConfig
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        return GymRolloutBackend(
+            CosmosConfig(),
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig(obs_dim=4, action_dim=2, discrete=True)),
+            env_factory=lambda: _FakeDiscreteEnv(
+                obs_dim=4, terminate_after=terminate_after
+            ),
+        )
+
+    def test_inherits_from_rollout_generation_mixin(self):
+        from cosmos_rl.rollout.generation_mixin import RolloutGenerationMixin
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        self.assertIn(RolloutGenerationMixin, GymRolloutBackend.__mro__)
+
+    def test_hook_dispatch_order_recorded(self):
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        events: list[str] = []
+
+        class _RecordingBackend(GymRolloutBackend):
+            def _prepare_sample(self, *a, **kw):
+                events.append("prepare")
+                return super()._prepare_sample(*a, **kw)
+
+            def _collate_batch(self, *a, **kw):
+                events.append("collate")
+                return super()._collate_batch(*a, **kw)
+
+            def _generate(self, *a, **kw):
+                events.append("generate")
+                return super()._generate(*a, **kw)
+
+            def _postprocess(self, *a, **kw):
+                events.append("postprocess")
+                return super()._postprocess(*a, **kw)
+
+        from cosmos_rl.policy.config import Config as CosmosConfig
+
+        backend = _RecordingBackend(
+            CosmosConfig(),
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig()),
+            env_factory=lambda: _FakeDiscreteEnv(terminate_after=2),
+        )
+        backend.init_engine()
+
+        class _Payload:
+            def __init__(self, prompt, prompt_idx):
+                self.prompt = prompt
+                self.prompt_idx = prompt_idx
+
+        results = backend.rollout_generation(
+            [
+                _Payload('{"seed": 1}', prompt_idx=0),
+                _Payload('{"seed": 2}', prompt_idx=1),
+            ],
+            data_packer=GymDataPacker(),
+        )
+        backend.shutdown()
+
+        # 2 prepare + 1 collate + 1 generate + 1 postprocess.
+        self.assertEqual(
+            events,
+            ["prepare", "prepare", "collate", "generate", "postprocess"],
+        )
+        self.assertEqual(len(results), 2)
+        for r in results:
+            traj = r.completions[0]
+            self.assertIn(OBSERVATIONS, traj)
+            self.assertIn(EPISODE_LENGTH, traj)
+
+    def test_rollout_result_shape_unchanged_after_migration(self):
+        backend = self._make_backend(terminate_after=3)
+        backend.init_engine()
+
+        class _Payload:
+            def __init__(self, prompt, prompt_idx):
+                self.prompt = prompt
+                self.prompt_idx = prompt_idx
+
+        results = backend.rollout_generation(
+            [_Payload('{"seed": 1}', prompt_idx=0)],
+            data_packer=GymDataPacker(),
+        )
+        self.assertEqual(len(results), 1)
+        r = results[0]
+        self.assertEqual(len(r.completions), 1)
+        traj = r.completions[0]
+        self.assertIn(OBSERVATIONS, traj)
+        self.assertIn(ACTIONS, traj)
+        self.assertIn(EPISODE_LENGTH, traj)
+        self.assertEqual(int(traj[EPISODE_LENGTH][0]), 3)
+        # Prompt is the parsed init dict (echoed-back via _postprocess).
+        self.assertEqual(r.prompt, {"seed": 1})
+        backend.shutdown()
+
+
+class TestGymBackendPrefetch(unittest.TestCase):
+    """``prefetch_rollout=True``: ``_prepare_sample`` runs on the bg
+    setup worker.  When ``submit_setup`` is called before
+    ``rollout_generation``, a deliberately slow ``_generate`` for batch
+    B leaves the bg worker enough time to finish prepare for batch
+    B+1 ahead of the next ``rollout_generation`` call."""
+
+    def _make_backend_with_prefetch(self, terminate_after=2):
+        from cosmos_rl.policy.config import Config as CosmosConfig
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        cfg = CosmosConfig()
+        cfg.rollout.prefetch_rollout = True
+        return GymRolloutBackend(
+            cfg,
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig(obs_dim=4, action_dim=2, discrete=True)),
+            env_factory=lambda: _FakeDiscreteEnv(
+                obs_dim=4, terminate_after=terminate_after
+            ),
+        )
+
+    def test_prepare_runs_on_bg_thread_when_prefetch_on(self):
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        captured_threads: list[str] = []
+
+        class _Recording(GymRolloutBackend):
+            def _prepare_sample(self, *a, **kw):
+                import threading as _t
+
+                captured_threads.append(_t.current_thread().name)
+                return super()._prepare_sample(*a, **kw)
+
+        from cosmos_rl.policy.config import Config as CosmosConfig
+
+        cfg = CosmosConfig()
+        cfg.rollout.prefetch_rollout = True
+        backend = _Recording(
+            cfg,
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig()),
+            env_factory=lambda: _FakeDiscreteEnv(terminate_after=2),
+        )
+        # Bind the data_packer the bg worker should use.
+        backend.bind_prefetch_context(data_packer=GymDataPacker())
+        backend.init_engine()
+
+        class _Payload:
+            def __init__(self, prompt, prompt_idx):
+                self.prompt = prompt
+                self.prompt_idx = prompt_idx
+
+        payloads = [
+            _Payload('{"seed": 1}', prompt_idx=0),
+            _Payload('{"seed": 2}', prompt_idx=1),
+        ]
+        backend.submit_setup(payloads)
+        results = backend.rollout_generation(payloads, data_packer=GymDataPacker())
+        backend.shutdown()
+
+        self.assertEqual(len(results), 2)
+        # All prepare invocations must have run on the bg setup worker
+        # (not on the main test thread).
+        import threading as _t
+
+        main_name = _t.current_thread().name
+        for n in captured_threads:
+            self.assertNotEqual(n, main_name)
+            self.assertEqual(n, "GymRolloutPrefetch")
+
+    def test_setup_thread_started_iff_prefetch_enabled(self):
+        # Off: no setup thread.
+        from cosmos_rl.policy.config import Config as CosmosConfig
+        from cosmos_rl.tools.gym_example.gym_rollout_backend import (
+            GymRolloutBackend,
+        )
+
+        cfg_off = CosmosConfig()
+        backend_off = GymRolloutBackend(
+            cfg_off,
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig()),
+            env_factory=lambda: _FakeDiscreteEnv(terminate_after=2),
+        )
+        self.assertIsNone(backend_off._setup_thread)
+        backend_off.shutdown()
+
+        # On: setup thread is alive.
+        cfg_on = CosmosConfig()
+        cfg_on.rollout.prefetch_rollout = True
+        backend_on = GymRolloutBackend(
+            cfg_on,
+            parallel_dims=None,
+            device=torch.device("cpu"),
+            policy=GymPolicy(GymMLPConfig()),
+            env_factory=lambda: _FakeDiscreteEnv(terminate_after=2),
+        )
+        self.assertIsNotNone(backend_on._setup_thread)
+        self.assertTrue(backend_on._setup_thread.is_alive())
+        backend_on.shutdown()
+        self.assertFalse(backend_on._setup_thread.is_alive())
 
 
 class TestGymEntry(unittest.TestCase):

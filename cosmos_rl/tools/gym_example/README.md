@@ -39,6 +39,13 @@ is the right shape.
   `gymnasium.Env` into the standard cosmos-rl pipeline.
 * Both **discrete** (CartPole-v1) and **continuous** (Pendulum-v1)
   action spaces.
+* The **rollout-side `RolloutGenerationMixin`** (`cosmos_rl.rollout.
+  generation_mixin`).  `GymRolloutBackend` is the first upstream
+  consumer: it composes the mixin and overrides four hooks
+  (`_prepare_sample`, `_collate_batch`, `_generate`, `_postprocess`)
+  instead of writing a bespoke `rollout_generation`, and gets
+  background per-prompt setup overlap "for free" when
+  `[rollout].prefetch_rollout = true` is set in the config.
 
 ## Layout
 

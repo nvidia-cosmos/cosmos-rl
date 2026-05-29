@@ -911,10 +911,12 @@ class TrainingConfig(BaseModel):
         description="If True, the controller coalesces (drops) redundant P2R+R2R "
         "weight-sync rounds while a round is still in flight to the rollouts "
         "(depth-1 drop-to-latest): it re-issues at the latest step only once the "
-        "rollouts have adopted the previously staged version. Reduces wasted "
-        "weight transfers when the trainer outruns rollout drain. Only active for "
-        "off-policy runs (allowed_outdated_steps > 0); ignored for on-policy, "
-        "which requires step-exact weight sync.",
+        "rollouts have adopted the previously staged version. No separate "
+        "'steps to drop' knob -- any number of intermediate trainer steps "
+        "collapse to a single pending round (always the latest weights). "
+        "Reduces wasted weight transfers when the trainer outruns rollout drain. "
+        "Only active for off-policy runs (allowed_outdated_steps > 0); ignored "
+        "for on-policy, which requires step-exact weight sync.",
     )
     deterministic: bool = Field(
         default=False,
@@ -1549,12 +1551,18 @@ class RolloutConfig(BaseModel):
         default=False,
         description=(
             "Enable background prompt prefetch.  A daemon thread fetches the next "
-            "prompt batch into _prompt_queue while rollout_generation() is running "
-            "and (when the rollout backend implements enqueue_prefetch_payloads) "
-            "speculatively dispatches sessions for those payloads so the backend "
-            "can stay busy across batch boundaries.  Default off — only useful for "
-            "long-running simulation backends where straggler scenes leave the "
-            "backend underutilized at the tail of each rollout_generation() call."
+            "prompt batch into _prompt_queue while rollout_generation() is running. "
+            "Backends that compose cosmos_rl.rollout.generation_mixin."
+            "RolloutGenerationMixin (e.g. the gym example) additionally have their "
+            "_prepare_sample hook dispatched on a background setup thread for each "
+            "prefetched payload, so per-prompt setup work (env construction, "
+            "tokenization, KV-cache prefill, ...) overlaps with in-flight engine "
+            "calls on the previous batch.  Default off — most useful for "
+            "simulation / multi-turn backends where per-prompt setup is non-trivial "
+            "and straggler prompts would otherwise leave the engine underutilized "
+            "at the tail of each rollout_generation() call.  The legacy "
+            "enqueue_prefetch_payloads hook on RolloutBase is supported as a "
+            "deprecation shim for backends that haven't yet migrated to the mixin."
         ),
     )
 
