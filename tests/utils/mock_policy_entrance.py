@@ -207,7 +207,8 @@ def main(*args, **kwargs):
                 assert worker.trainer.computed_cnt == 3, (
                     "custom_rollout should compute logprobs for the three real "
                     "training steps; the final TrainingCompleteCommand is a "
-                    "zero-work ack and must not call compute_logprobs"
+                    "zero-work ack and must not call compute_logprobs "
+                    f"(got computed_cnt={getattr(worker.trainer, 'computed_cnt', None)})"
                 )
         elif policy_type == "sft":
             custom_sft_dataset = kwargs.get("dataset")

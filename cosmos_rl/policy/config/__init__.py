@@ -906,6 +906,16 @@ class TrainingConfig(BaseModel):
         default=1,
         description="The interval of train step for synchronizing weights between replicas.",
     )
+    coalesce_weight_sync: bool = Field(
+        default=False,
+        description="If True, the controller coalesces (drops) redundant P2R+R2R "
+        "weight-sync rounds while a round is still in flight to the rollouts "
+        "(depth-1 drop-to-latest): it re-issues at the latest step only once the "
+        "rollouts have adopted the previously staged version. Reduces wasted "
+        "weight transfers when the trainer outruns rollout drain. Only active for "
+        "off-policy runs (allowed_outdated_steps > 0); ignored for on-policy, "
+        "which requires step-exact weight sync.",
+    )
     deterministic: bool = Field(
         default=False,
         description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
@@ -990,6 +1000,23 @@ class TrainingConfig(BaseModel):
                 logger.warning(
                     "on_policy is enabled, so allowed_outdated_steps is set to 0."
                 )
+
+        # Weight-sync coalescing is an off-policy-only optimization: it
+        # intentionally lets rollouts run slightly stale, which on-policy (and
+        # allowed_outdated_steps == 0) cannot tolerate.  Disable it rather than
+        # silently mis-sync.
+        if self.coalesce_weight_sync:
+            outdated_ok = getattr(self.train_policy, "allowed_outdated_steps", 0) > 0
+            on_policy = getattr(self.train_policy, "on_policy", False)
+            if on_policy or not outdated_ok:
+                logger.warning(
+                    "coalesce_weight_sync requires off-policy training with "
+                    "allowed_outdated_steps > 0 (on_policy=%s, "
+                    "allowed_outdated_steps=%s); disabling it.",
+                    on_policy,
+                    getattr(self.train_policy, "allowed_outdated_steps", 0),
+                )
+                self.coalesce_weight_sync = False
 
         if self.deterministic and self.seed is None:
             self.seed = 42

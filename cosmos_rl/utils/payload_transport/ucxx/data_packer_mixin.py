@@ -126,7 +126,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
     _ucxx_dp_client: Optional[UCXXClient] = None
     _ucxx_dp_device: Optional[torch.device] = None
     _ucxx_dp_max_attempts: int = 2
-    _ucxx_dp_read_timeout: float = 5.0
+    _ucxx_dp_read_timeout: float = 30.0
 
     # Cumulative stats for periodic INFO summaries (UCXX-specific so the
     # base mixin's _on_prefetch_complete hook is the right place).
@@ -179,7 +179,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         device: torch.device,
         prefetch_timeout: float = 300.0,
         max_attempts: int = 2,
-        read_timeout: float = 5.0,
+        read_timeout: float = 30.0,
     ) -> None:
         """Initialise UCXX client + start the (inherited) prefetch thread.
 
@@ -233,7 +233,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         device: torch.device,
         prefetch_timeout: float = 300.0,
         max_attempts: int = 2,
-        read_timeout: float = 5.0,
+        read_timeout: float = 30.0,
     ) -> None:
         """DEPRECATED: use :meth:`_setup_ucxx_data_packer` (kwargs-only).
 

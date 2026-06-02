@@ -237,12 +237,17 @@ def sync_buffer_to_live(worker) -> None:
                 live_sd[name].copy_(buffer_sd[name])
     worker._buffer_synced_version = buf_ver
     elapsed_ms = (time.monotonic() - t0) * 1000
+    # ``superseded`` = buffer versions transferred since the last adopt but
+    # jumped over here (never adopted into the live model) -> wasted NCCL
+    # transfers.  Coalescing (Phase 2) should drive this to ~0.
+    superseded = max(0, buf_ver - synced_ver - 1)
     logger.info(
         "[WeightSync] Synced buffer -> live (%d params, ver %d->%d, "
-        "wait_event=%s, %.1f ms CPU enqueue)",
+        "superseded=%d, wait_event=%s, %.1f ms CPU enqueue)",
         len(live_sd),
         synced_ver,
         buf_ver,
+        superseded,
         has_event,
         elapsed_ms,
     )
@@ -296,6 +301,12 @@ class WeightSyncThread:
         self._idle = threading.Event()
         self._idle.set()
         self._last_event: torch.cuda.Event | None = None
+        # Backlog observability (see weight-sync coalescing plan): high-water
+        # queue depth and total executed transfers.  A healthy (coalesced) run
+        # keeps ``_max_qdepth`` ~1; a piled-up run shows it climbing while most
+        # transfers are superseded before they are ever adopted.
+        self._max_qdepth = 0
+        self._executed = 0
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -312,11 +323,17 @@ class WeightSyncThread:
         self._seq += 1
         self._idle.clear()
         self._queue.put((0, self._seq, ("p2r", command)))
+        qdepth = self._queue.qsize()
+        if qdepth > self._max_qdepth:
+            self._max_qdepth = qdepth
         logger.info(
-            "[WeightSyncThread] Enqueued P2R (step=%s, seq=%d, buf_ver=%d)",
+            "[WeightSyncThread] Enqueued P2R (step=%s, seq=%d, buf_ver=%d, "
+            "qdepth=%d, max_qdepth=%d)",
             getattr(command, "weight_step", "?"),
             self._seq,
             getattr(self._worker, "_buffer_version", -1),
+            qdepth,
+            self._max_qdepth,
         )
 
     def enqueue_r2r(self, command) -> None:
@@ -324,11 +341,17 @@ class WeightSyncThread:
         self._seq += 1
         self._idle.clear()
         self._queue.put((1, self._seq, ("r2r", command)))
+        qdepth = self._queue.qsize()
+        if qdepth > self._max_qdepth:
+            self._max_qdepth = qdepth
         logger.info(
-            "[WeightSyncThread] Enqueued R2R (step=%s, seq=%d, buf_ver=%d)",
+            "[WeightSyncThread] Enqueued R2R (step=%s, seq=%d, buf_ver=%d, "
+            "qdepth=%d, max_qdepth=%d)",
             getattr(command, "weight_step", "?"),
             self._seq,
             getattr(self._worker, "_buffer_version", -1),
+            qdepth,
+            self._max_qdepth,
         )
 
     def drain(self, timeout: float = 120.0) -> None:
@@ -409,12 +432,16 @@ class WeightSyncThread:
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
         self._worker._buffer_version += 1
+        self._executed += 1
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
-            "[WeightSyncThread] P2R done (step=%s, ver=%s, %.1f ms)",
+            "[WeightSyncThread] P2R done (step=%s, ver=%s, %.1f ms, "
+            "qdepth_after=%d, executed=%d)",
             command.weight_step,
             self._worker.current_weight_version,
             elapsed_ms,
+            self._queue.qsize(),
+            self._executed,
         )
 
     def _execute_r2r(self, command) -> None:
@@ -447,6 +474,7 @@ class WeightSyncThread:
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
         worker._buffer_version += 1
+        self._executed += 1
 
         if weight_step is not None:
             worker.current_weight_version = weight_step
@@ -480,12 +508,15 @@ class WeightSyncThread:
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
-            "[WeightSyncThread] R2R done: %d params, %.1f MB, %.0f ms, step=%s, ver=%s",
+            "[WeightSyncThread] R2R done: %d params, %.1f MB, %.0f ms, step=%s, "
+            "ver=%s, qdepth_after=%d, executed=%d",
             transferred_cnt,
             bytes_broadcast / (1024 * 1024),
             elapsed_ms,
             weight_step,
             worker.current_weight_version,
+            self._queue.qsize(),
+            self._executed,
         )
 
 
