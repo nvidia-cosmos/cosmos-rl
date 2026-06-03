@@ -435,7 +435,11 @@ class CommMixin:
         self._is_registered = False
         # let only rank == 0 send the unregister request
         if self.global_rank == 0:
+            logger.info(
+                f"[{self.role}] Sending unregister for {self.replica_name} to controller"
+            )
             self.api_client.unregister(self.replica_name)
+            logger.info(f"[{self.role}] Unregister for {self.replica_name} completed")
 
     def get_group_unique_key(self, replica_name_to_rank: Dict[str, int]):
         return (
