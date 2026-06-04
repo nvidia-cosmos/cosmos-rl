@@ -17,6 +17,11 @@
 /data/
 outputs/
 results/
+<<<<<<< HEAD
+=======
+test_outputs/
+s_output/
+>>>>>>> 200e94b (Set seed for vllm sampling)
 checkpoints/*
 !checkpoints/README.md
 reward_service/Qwen2-VL-2B-Instruct

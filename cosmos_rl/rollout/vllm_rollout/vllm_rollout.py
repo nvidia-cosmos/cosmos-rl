@@ -214,7 +214,8 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=0,
+            prompt_logprobs=None,
+            seed=42,
         )
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,
@@ -232,6 +233,7 @@ class vLLMRollout(RolloutBase):
             prompt_logprobs=0
             if self.config.distillation.rollout_top_k_recompute
             else self.config.distillation.top_k,
+            seed=42,
         )
 
     def init_engine(
