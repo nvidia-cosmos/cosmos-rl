@@ -18,6 +18,7 @@
 outputs/
 results/
 test_outputs/
+s_output/
 checkpoints/*
 !checkpoints/README.md
 reward_service/Qwen2-VL-2B-Instruct

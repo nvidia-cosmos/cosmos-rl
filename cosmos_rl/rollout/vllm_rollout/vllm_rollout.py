@@ -218,6 +218,7 @@ class vLLMRollout(RolloutBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
             prompt_logprobs=None,
+            seed=42,
         )
 
         # control the prompt logprobs for vllm
@@ -244,6 +245,7 @@ class vLLMRollout(RolloutBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
             prompt_logprobs=prompt_logprobs,
+            seed=42,
         )
 
     def init_engine(
