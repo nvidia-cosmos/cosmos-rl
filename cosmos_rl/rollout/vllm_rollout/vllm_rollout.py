@@ -214,7 +214,7 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=None,
+            prompt_logprobs=0,
             seed=42,
         )
         self.sampling_params = SamplingParams(
