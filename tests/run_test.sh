@@ -51,6 +51,13 @@ run python tests/test_math_verify.py
 run python tests/test_policy_overfit.py
 run python tests/test_data_packer.py
 run python tests/test_dataset_signature.py
+run python tests/test_put_rollouts.py
+run python tests/test_trajectory_iteration.py
+run python tests/test_gym_example.py
+run python -m unittest -v tests.contracts.test_trainer_metrics_contract
+run python -m unittest -v tests.contracts.test_config_routing_contract
+run python -m unittest -v tests.contracts.test_model_registry_contract
+run python -m unittest -v tests.contracts.test_rl_worker_trainer_surface_contract
 run python tests/test_sequence_packing.py
 run python tests/test_integration.py --stream
 run python tests/test_hf_models.py

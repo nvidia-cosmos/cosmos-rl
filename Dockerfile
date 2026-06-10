@@ -228,7 +228,7 @@ FROM pre-package AS package
 ARG COSMOS_RL_EXTRAS
 
 COPY . /workspace/cosmos_rl
-RUN apt install -y cmake && \
+RUN apt-get update && apt-get install -y cmake && \
     pip install /workspace/cosmos_rl${COSMOS_RL_EXTRAS:+[$COSMOS_RL_EXTRAS]} && \
     if [[ ",$COSMOS_RL_EXTRAS," == *,vla,* ]]; then \
         bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \

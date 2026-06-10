@@ -25,7 +25,12 @@ sync_weight_interval = 1
 [policy]
 model_name_or_path = "yufanhuangNV/deepseek-v3-4layer"
 model_max_length = 1024
-model_gradient_checkpointing = true
+# Disabled to work around MoE token-routing nondeterminism under activation
+# checkpointing + bf16 router + FSDP, which causes
+# `torch.utils.checkpoint.CheckpointError` on the backward-time recompute.
+# Re-enable once the root cause (e.g. fp32 router matmul, or AC-skip on MoE
+# blocks only) is addressed.
+model_gradient_checkpointing = false
 
 [logging]
 logger = ['console']
