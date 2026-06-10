@@ -66,6 +66,158 @@ except ImportError:
     )
 
 
+def _drain_inflight_requests(worker, timeout_s: float = 8.0) -> None:
+    """Cancel + drain all in-flight UCXX requests **while the progress thread
+    is still running**, so every request-completion callback fires now, with a
+    healthy interpreter.
+
+    This is the fix for the residual post-"Server stopped" SIGSEGV seen on long
+    runs (~1% of rollout teardowns).  Per the ucxx docs, ``~Worker()`` /
+    ``~Endpoint()`` call ``cancelInflightRequests()`` during destruction, and
+    "we can't release the GIL when the garbage collector runs and destroys the
+    object."  So if any UCP request is still in flight when ``ucxx.reset()`` (or
+    interpreter finalization) garbage-collects the UCXX objects, the C++
+    progress thread dispatches that request's Python completion callback while
+    the collector holds the GIL / is tearing down the request->future dict ->
+    use-after-free (observed backtrace: ``WorkerProgressThread`` -> ucp callback
+    -> ``PyDict_GetItemWithError``).  At end-of-data there *are* in-flight reads
+    (the policy's last output fetches, logged as "Request canceled"), and more
+    of them on long runs -- which is why only the long matrix tripped it.
+
+    The documented teardown contract is: schedule cancellation, then progress
+    the worker until ``getCancelingSize()`` reaches 0.  The progress thread is
+    still alive here, so it does the progressing; we just wait (bounded) for the
+    canceling set to drain before the caller stops the thread and resets.
+
+    All calls are ``getattr``-guarded: on a ucxx build without these methods this
+    degrades to the prior behaviour (no worse than before).
+    """
+    cancel = getattr(worker, "cancel_inflight_requests", None)
+    if cancel is None:
+        return
+    try:
+        n = cancel()
+    except Exception:
+        logger.exception("[UCXXBuffer] cancel_inflight_requests failed")
+        return
+
+    get_canceling_size = getattr(worker, "get_canceling_size", None)
+    if get_canceling_size is not None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                if get_canceling_size() == 0:
+                    break
+            except Exception:
+                break
+            time.sleep(0.01)
+    else:
+        # No introspection available; give the live progress thread a beat to
+        # dispatch the scheduled cancellations before it is stopped.
+        time.sleep(0.2)
+    logger.info("[UCXXBuffer] Drained in-flight UCXX requests (scheduled cancel=%s)", n)
+
+
+def reset_ucxx_context() -> None:
+    """Tear down the process-global UCXX context, stopping its progress thread.
+
+    UCXX runs in its default ``thread`` progress mode, where
+    ``ApplicationContext`` starts a C++ ``WorkerProgressThread`` (inside
+    ``ucxx::Worker``) that calls ``ucp_worker_progress`` in the background.
+    That thread keeps running until the worker is explicitly told to stop it --
+    ``stop_server`` closes the listeners and joins the asyncio loops, but the
+    global context (and therefore the progress thread) lives on.  Left running,
+    the progress thread dispatches into Python objects that the interpreter is
+    finalizing at shutdown (``PyObject_GC_UnTrack`` in the frame) ->
+    use-after-free -> a rare SIGSEGV logged *after* "Server stopped".
+
+    The critical ordering is three steps, all *before* any GC pass:
+    (1) drain in-flight requests (``_drain_inflight_requests``) while the
+    progress thread is still alive, so every request-completion callback fires
+    now; (2) stop the progress thread; (3) ``ucxx.reset()``.  Steps (1) and (2)
+    together are what make (3) safe.
+
+    Stopping the thread first (without (1)) is *not* sufficient: a UCP request
+    left in flight is cancelled by ``~Worker()``/``~Endpoint()`` during the
+    ``gc.collect()`` that ``ucxx.reset()`` (and interpreter finalization)
+    trigger, and the ucxx docs are explicit that the GIL cannot be released
+    while the collector destroys those objects -- so the progress thread
+    dispatches the request's Python callback into a half-torn-down
+    request->future dict (observed backtrace: ``WorkerProgressThread`` -> ucp
+    callback -> ``PyDict_GetItemWithError`` -> SIGSEGV).  ``reset()`` alone is
+    worse still: it stops the thread only *as a side effect* of GC finalizing
+    the ``ApplicationContext`` (``ThreadMode.__del__`` ->
+    ``stop_progress_thread()``), so the thread is racing
+    ``PyObject_GC_UnTrack`` on the very objects being collected.  Draining and
+    then stopping the thread up front needs no cooperation from any still-open
+    endpoint, so it is robust even when an endpoint is stuck.
+
+    ``ucxx.reset()`` then destroys the (now-quiescent) context for full hygiene.
+    It still raises if an Endpoint/Listener lingers (a stuck handler /
+    half-closed client), but that is now harmless -- the crash-causing thread is
+    already stopped -- so we just log it.
+
+    No-op when UCXX is unavailable or was never initialised in this process, and
+    idempotent (a second call sees no context; ``stop_progress_thread`` is itself
+    idempotent).
+    """
+    if not UCXX_AVAILABLE or ucxx is None:
+        return
+
+    # Reach the live context without *creating* one (``ucxx`` exposes the
+    # ``_get_ctx`` helper, but it would instantiate a fresh ApplicationContext
+    # just to tear it down).  ``ucxx.core`` is bound as an attribute of the
+    # package the moment ``import ucxx`` runs (its ``__init__`` does
+    # ``from .core import *``), so attribute access is reliable and avoids a
+    # redundant import.
+    ucxx_core = getattr(ucxx, "core", None)
+    if ucxx_core is None:
+        return
+    ctx = getattr(ucxx_core, "_ctx", None)
+    if ctx is None:
+        return
+
+    # Capture the worker before anything can null ``_ctx`` (``ucxx.reset()``
+    # nulls it before it may raise).  This handle is what lets us stop the
+    # progress thread regardless of endpoint state.
+    worker = getattr(ctx, "worker", None)
+    ctx = None  # drop the extra reference so it cannot itself defeat reset()
+
+    # 1) Drain in-flight requests while the progress thread is STILL running,
+    #    so no request-completion callback is left to fire into a finalizing
+    #    interpreter once we stop the thread / reset (the ~Worker()/~Endpoint()
+    #    GC path -- see _drain_inflight_requests).
+    if worker is not None:
+        _drain_inflight_requests(worker)
+
+    # 2) Stop the C++ progress thread synchronously, BEFORE any gc pass.  With
+    #    the requests already drained, no concurrent ``ucp_worker_progress``
+    #    callback can race object teardown.
+    if worker is not None:
+        try:
+            worker.stop_progress_thread()
+            logger.info("[UCXXBuffer] UCXX worker progress thread stopped")
+        except Exception:
+            logger.exception("[UCXXBuffer] Failed to stop UCXX worker progress thread")
+    else:
+        logger.warning(
+            "[UCXXBuffer] No UCXX worker handle captured; progress thread "
+            "could not be stopped explicitly"
+        )
+
+    # 3) Destroy the now-quiescent global context for full resource hygiene.
+    #    Safe because the progress thread is already joined; a raise here (an
+    #    endpoint/listener still referenced) no longer implies a live thread.
+    try:
+        ucxx.reset()
+        logger.info("[UCXXBuffer] UCXX context reset")
+    except Exception as e:
+        logger.warning(
+            f"[UCXXBuffer] ucxx.reset() did not fully tear down ({e}); "
+            "progress thread already stopped, so this is non-fatal"
+        )
+
+
 class StaleSlotError(RuntimeError):
     """Raised when a client reads a slot that has already been consumed."""
 

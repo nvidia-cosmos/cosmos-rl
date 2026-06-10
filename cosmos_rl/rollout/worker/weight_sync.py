@@ -56,12 +56,26 @@ import queue
 import threading
 import time
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.pynccl import nccl_broadcast, nccl_group_end, nccl_group_start
+from cosmos_rl.utils.pynccl import (
+    bounded_drain_or_abort,
+    nccl_broadcast,
+    nccl_group_end,
+    nccl_group_start,
+)
+
+# Bounded wait for in-flight GPU work on the WeightSyncThread stream during
+# teardown.  A grouped R2R broadcast is enqueued asynchronously and pynccl only
+# bounds the enqueue phase, so a broadcast whose peer departed can hang on the
+# device with no watchdog.  After this deadline we abort all NCCL comms so
+# ``stop()`` (and in turn ``destroy_distributed``) cannot wedge.
+_WST_STREAM_DRAIN_TIMEOUT_S = float(
+    os.getenv("COSMOS_WST_STREAM_DRAIN_TIMEOUT_S", "10.0")
+)
 
 if TYPE_CHECKING:
     pass
@@ -336,10 +350,29 @@ class WeightSyncThread:
             )
 
     def stop(self) -> None:
-        """Signal the thread to stop and wait for it to finish."""
+        """Signal the thread to stop and wait for it to finish.
+
+        The Python thread joining is not sufficient: a grouped R2R broadcast
+        enqueued on ``self._stream`` runs asynchronously on the GPU, and pynccl
+        only bounds the *enqueue* phase (``run_task`` stops polling after
+        ``ncclSuccess``).  If a peer already departed, that broadcast kernel can
+        hang on the device while this thread reports ``thread_alive=False`` --
+        which later wedges any device sync (``inference_stream.synchronize()``)
+        and ``destroy_distributed``.  After joining we therefore bounded-drain
+        the stream and, on timeout, abort all NCCL communicators.
+        """
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=10.0)
+        # Backstop for an orphaned in-flight R2R broadcast on our stream (peer
+        # departed mid-collective).  Should never fire once the controller waits
+        # for all rollouts to check out before shutting down; logs loudly if it
+        # does.  See ``bounded_drain_or_abort``.
+        bounded_drain_or_abort(
+            self._stream,
+            _WST_STREAM_DRAIN_TIMEOUT_S,
+            f"WeightSyncThread[{self._worker.replica_name}]",
+        )
 
     def _run(self) -> None:
         torch.cuda.set_device(self._worker.device)
@@ -401,7 +434,10 @@ class WeightSyncThread:
             worker.data_packer.flush_pending_sends()
 
         weight_step = command.weight_step
-        r2r_barrier(worker, weight_step)
+        # Use the controller's authoritative recipient set for this round as the
+        # barrier participant count so it stays in lockstep as replicas finish.
+        expected_world_size = len(getattr(command, "dst_replica_names", None) or [])
+        r2r_barrier(worker, weight_step, expected_world_size=expected_world_size)
         t0 = time.monotonic()
         transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
             worker,
@@ -518,15 +554,32 @@ def setup_redis_barrier(worker) -> None:
     )
 
 
-def r2r_barrier(worker, weight_step: int) -> None:
+def r2r_barrier(
+    worker, weight_step: int, expected_world_size: Optional[int] = None
+) -> None:
     """Redis-based barrier so all rollout workers start R2R broadcast together.
 
     Uses an atomic INCR counter per weight step.  The last worker to arrive
     publishes a "go" signal; earlier workers block on pub/sub until they
     receive it (or timeout).  Silently skipped if Redis is unavailable.
+
+    ``expected_world_size`` is the authoritative number of participants for
+    *this* broadcast round, derived from the controller's ``dst_replica_names``
+    in the R2R command.  Using it (instead of the cached ``_r2r_world_size``,
+    which is frozen at setup) keeps the barrier in lockstep with the controller:
+    when a replica reaches end-of-data and the controller drops it from the
+    broadcast set, the remaining workers expect the shrunken count and the
+    barrier completes immediately rather than spinning for the full timeout.
     """
     r2r_redis = getattr(worker, "_r2r_redis", None)
-    world_size = getattr(worker, "_r2r_world_size", 0)
+    if expected_world_size is not None and expected_world_size > 0:
+        world_size = expected_world_size
+    else:
+        # Fall back to the live mesh size, then the cached value.  The cached
+        # ``_r2r_world_size`` becomes stale once replicas leave the mesh.
+        world_size = len(getattr(worker, "replica_name_to_rank", {})) or getattr(
+            worker, "_r2r_world_size", 0
+        )
     if r2r_redis is None or world_size <= 1:
         return
 
@@ -572,8 +625,20 @@ def r2r_barrier(worker, weight_step: int) -> None:
                 )
                 return
 
+            # Allow teardown to interrupt the wait: if the WeightSyncThread is
+            # asked to stop, abort the barrier rather than blocking ``wst.stop()``
+            # (and in turn ``destroy_distributed()``) for the full timeout.
+            wst = getattr(worker, "_weight_sync_thread", None)
+            stop_event = getattr(wst, "_stop", None)
             deadline = time.monotonic() + _R2R_BARRIER_TIMEOUT_S
             while time.monotonic() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    logger.info(
+                        "[R2R Barrier] Stop requested while waiting (step=%d); "
+                        "aborting barrier.",
+                        weight_step,
+                    )
+                    return
                 msg = pubsub.get_message(timeout=1.0)
                 if msg is not None and msg.get("type") == "message":
                     break

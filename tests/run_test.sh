@@ -68,6 +68,7 @@ run python tests/test_nccl_timeout.py
 run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
+run python tests/test_multirank_shutdown.py
 run python tests/test_process_flow.py
 run python tests/test_custom_class.py
 run python tests/test_math_verify.py

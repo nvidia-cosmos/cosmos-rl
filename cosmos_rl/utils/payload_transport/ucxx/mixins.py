@@ -43,6 +43,7 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     UCXX_AVAILABLE,
     UCXXBuffer,
     UCXXBufferConfig,
+    reset_ucxx_context,
 )
 
 # Trace utility is provided by a sibling MR; fall back to a wall-clock
@@ -411,9 +412,29 @@ class UCXXRolloutMixin:
             return None
 
     def cleanup_ucxx(self) -> None:
-        """Clean up UCXX resources."""
+        """Clean up UCXX resources.
+
+        Order matters:
+
+        1. ``stop_server`` joins the server threads/loops and closes every
+           listener and endpoint (a bounded drain that lets in-flight reads
+           finish -- which needs the progress thread *running*).
+        2. ``reset_ucxx_context`` then stops the UCXX worker's background C++
+           progress thread (and tears down the global context).  Doing this
+           *before* the shared-memory ``close()`` ensures no ``ucp_worker_progress``
+           runs concurrently with object teardown -- the race behind the rare
+           post-"Server stopped" SIGSEGV.
+        3. ``close()`` releases the shared-memory buffer once the progress
+           thread is quiescent.
+
+        Reset is gated on ``_ucxx_enabled`` so it only fires in a process that
+        actually started a UCXX server.
+        """
+        started_ucxx = self._ucxx_enabled
         if self._ucxx_buffer:
             self._ucxx_buffer.stop_server()
+            if started_ucxx:
+                reset_ucxx_context()
             self._ucxx_buffer.close()
             self._ucxx_buffer = None
         self._ucxx_enabled = False

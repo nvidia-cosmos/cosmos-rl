@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 import atexit
 import time
@@ -41,6 +42,7 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
 from cosmos_rl.utils.pynccl import (
+    bounded_drain_or_abort,
     nccl_group_start,
     nccl_group_end,
 )
@@ -51,12 +53,27 @@ from cosmos_rl.dispatcher.command import (
     PolicyToRolloutUnicastCommand,
     PolicyToPolicyUnicastCommand,
     DataFetchCommand,
+    TrainingCompleteCommand,
     WeightResumeCommand,
 )
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.collective.collective import P2RCollectiveManager
+
+
+# Bounded window the policy lingers after its last training step to deliver the
+# controller's trailing final weight sync (validation-enabled runs only -- that
+# P2R/R2R drives the final validation on the rollouts).  Replaces a hardcoded
+# 30s sleep; the loop breaks as soon as the command arrives, and non-validation
+# runs skip the wait entirely (no trailing sync is issued -- see status.py /
+# controller.get_batched_prompt and rollout_multirank_shutdown.md).
+COSMOS_FINAL_WEIGHT_SYNC_WAIT_S = float(
+    os.getenv("COSMOS_FINAL_WEIGHT_SYNC_WAIT_S", "30.0")
+)
+COSMOS_P2R_STREAM_DRAIN_TIMEOUT_S = float(
+    os.getenv("COSMOS_P2R_STREAM_DRAIN_TIMEOUT_S", "120.0")
+)
 
 
 class RLPolicyWorker(PolicyWorkerBase):
@@ -489,7 +506,11 @@ class RLPolicyWorker(PolicyWorkerBase):
                             "Trainable synced params count must match at each weight sync."
                         )
 
-        # make sure all the send operations of all ranks are finished
+        bounded_drain_or_abort(
+            self.train_stream,
+            COSMOS_P2R_STREAM_DRAIN_TIMEOUT_S,
+            f"policy_P2R[{self.replica_name}@step{command.weight_step}]",
+        )
         time_eclapsed = time.time() - st
         logger.debug(
             f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} splitted params transferred."
@@ -522,34 +543,27 @@ class RLPolicyWorker(PolicyWorkerBase):
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = command.items_count
 
-        is_fake_step = self.replica_batch_for_this_step == 0
-        if not is_fake_step:
-            do_save_checkpoint = command.do_save
-            if (
-                self.signal_handler is not None
-                and any(self.signal_handler.signals_received())
-                and not hasattr(self, "signal_handled")
-            ):
-                logger.info("Signal received, preparing to save checkpoint...")
-                do_save_checkpoint = True
-                self.signal_handler.release()
-                self.signal_handled = True
+        do_save_checkpoint = command.do_save
+        if (
+            self.signal_handler is not None
+            and any(self.signal_handler.signals_received())
+            and not hasattr(self, "signal_handled")
+        ):
+            logger.info("Signal received, preparing to save checkpoint...")
+            do_save_checkpoint = True
+            self.signal_handler.release()
+            self.signal_handled = True
 
-            self.trainer.update_lr_schedulers(command.total_steps)
-            report_data = self.trainer.step_training(
-                rollouts=self.dispatch_rollouts(),
-                current_step=command.global_step,
-                total_steps=command.total_steps,
-                remain_samples_num=command.remain_samples_num,
-                do_save_checkpoint=do_save_checkpoint,
-                inter_policy_nccl=self.inter_policy_nccl,
-                is_master_replica=self.is_master_replica,
-            )
-        else:
-            report_data = {}
-            logger.info(
-                f"[Policy] No data to fetch for global step {command.global_step}, skip this step."
-            )
+        self.trainer.update_lr_schedulers(command.total_steps)
+        report_data = self.trainer.step_training(
+            rollouts=self.dispatch_rollouts(),
+            current_step=command.global_step,
+            total_steps=command.total_steps,
+            remain_samples_num=command.remain_samples_num,
+            do_save_checkpoint=do_save_checkpoint,
+            inter_policy_nccl=self.inter_policy_nccl,
+            is_master_replica=self.is_master_replica,
+        )
 
         # For profiling
         self.profiler.step()
@@ -565,6 +579,41 @@ class RLPolicyWorker(PolicyWorkerBase):
             )
 
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
+        return command.replica_should_stop()
+
+    @CommMixin.register_policy_command_handler(TrainingCompleteCommand)
+    def execute_training_complete(self, command: TrainingCompleteCommand):
+        if command.do_profile:
+            self.profiler.start_dynamic(
+                active_steps=command.active_steps,
+                rank_filter=command.rank_filter,
+                record_shape=command.record_shape,
+                profile_memory=command.profile_memory,
+                with_stack=command.with_stack,
+                with_modules=command.with_modules,
+            )
+
+        assert self.replica_name == command.replica_name
+        self.replica_batch_for_this_step = 0
+        report_data = {}
+        logger.info(
+            f"[Policy] Training complete at global step {command.global_step}, skip training."
+        )
+
+        self.profiler.step()
+
+        if is_master_rank(self.parallel_dims, self.global_rank):
+            self.api_client.post_policy_train_ack(
+                self.replica_name,
+                command.global_step,
+                command.total_steps,
+                self.profiler.check_finished(),
+                report_data,
+            )
+
+        logger.debug(
+            f"[Policy] Train ack sent for training-complete step {command.global_step}."
+        )
         return command.replica_should_stop()
 
     async def fetch_command(self):
@@ -837,9 +886,23 @@ class RLPolicyWorker(PolicyWorkerBase):
         abort = False
         while True:
             abort_at_this_round = abort
-            if abort_at_this_round:
-                # Wait 30s to make sure the final potential P->R is received to finalize the Rollouts
-                time.sleep(30)
+            if abort_at_this_round and self.config.validation.enable:
+                # Validation-enabled runs: the controller issues a final P->R
+                # weight sync after the last train step to drive the rollouts'
+                # final validation.  Linger (bounded) until that command lands,
+                # breaking out as soon as it does instead of sleeping a fixed
+                # 30s.  Non-validation runs issue no trailing sync (status.py),
+                # and rollouts self-terminate via the unified prompt-stream
+                # is_end path, so they skip this wait and exit immediately --
+                # eliminating the old race where the deferred P->R arrived
+                # after the rollout had already aborted (orphaned P2R recv ->
+                # ncclCommAbort hang; see rollout_multirank_shutdown.md).
+                deadline = time.time() + COSMOS_FINAL_WEIGHT_SYNC_WAIT_S
+                while time.time() < deadline:
+                    self.broadcast_command()
+                    if len(self.command_buffer.queue) > 0:
+                        break
+                    time.sleep(0.1)
 
             self.broadcast_command()
             while len(self.command_buffer.queue) > 0:
@@ -849,7 +912,11 @@ class RLPolicyWorker(PolicyWorkerBase):
             if abort_at_this_round:
                 break
         logger.info("[Policy] Main loop finished. Shutdown background task event set.")
-        self.train_stream.synchronize()
+        bounded_drain_or_abort(
+            self.train_stream,
+            float(os.getenv("COSMOS_TEARDOWN_DRAIN_TIMEOUT_S", "15.0")),
+            f"policy_train_stream[{self.replica_name}]",
+        )
         self.handle_shutdown()
 
     def sync_all_states(

@@ -626,6 +626,141 @@ class TestOptionalUcxxExtra(unittest.TestCase):
                 pass
 
 
+class TestResetUCXXContext(unittest.TestCase):
+    """``reset_ucxx_context`` must deterministically tear down the global
+    UCXX context so its background worker progress thread is joined at
+    cleanup time -- otherwise that C++ thread (``WorkerProgressThread``,
+    started by the default ``thread`` progress mode) outlives the Python
+    objects it dispatches into during interpreter shutdown and SIGSEGVs in
+    ``ucp_worker_progress``.
+
+    These mock the ``ucxx`` module so they run without the optional
+    ``ucxx-cu12`` extra or real UCX hardware.
+    """
+
+    def _invoke(self, fake_ucxx):
+        from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer
+
+        with (
+            mock.patch.object(ucxx_buffer, "UCXX_AVAILABLE", True),
+            mock.patch.object(ucxx_buffer, "ucxx", fake_ucxx),
+        ):
+            ucxx_buffer.reset_ucxx_context()
+
+    def test_noop_when_unavailable(self):
+        # No ucxx in the process: must be a silent no-op, never raise.
+        from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer
+
+        with (
+            mock.patch.object(ucxx_buffer, "UCXX_AVAILABLE", False),
+            mock.patch.object(ucxx_buffer, "ucxx", None),
+        ):
+            ucxx_buffer.reset_ucxx_context()  # must not raise
+
+    def test_noop_when_context_not_initialised(self):
+        # UCXX imported but never used (``_ctx is None``): nothing to reset.
+        fake_ucxx = mock.Mock()
+        fake_ucxx.core = SimpleNamespace(_ctx=None)
+        self._invoke(fake_ucxx)
+        fake_ucxx.reset.assert_not_called()
+
+    def test_drains_inflight_then_stops_thread_then_resets(self):
+        # The full teardown contract, in order, all *before* any gc pass:
+        #   (1) cancel + drain in-flight requests while the progress thread is
+        #       still alive (so no request callback fires into a finalizing
+        #       interpreter -- the ~Worker()/~Endpoint() GC path),
+        #   (2) stop the progress thread,
+        #   (3) ucxx.reset().
+        # Record the call order via a shared event list.
+        events = []
+        worker = mock.Mock()
+        worker.cancel_inflight_requests.side_effect = lambda *a, **k: events.append(
+            "cancel"
+        )
+        worker.get_canceling_size.return_value = 0  # drained immediately
+        worker.stop_progress_thread.side_effect = lambda: events.append("stop")
+        fake_ucxx = mock.Mock()
+        fake_ucxx.reset.side_effect = lambda: events.append("reset")
+        fake_ucxx.core = SimpleNamespace(_ctx=SimpleNamespace(worker=worker))
+        self._invoke(fake_ucxx)
+        worker.cancel_inflight_requests.assert_called_once()
+        worker.stop_progress_thread.assert_called_once_with()
+        fake_ucxx.reset.assert_called_once_with()
+        self.assertEqual(
+            events,
+            ["cancel", "stop", "reset"],
+            "must drain in-flight requests, then stop the progress thread, "
+            "then ucxx.reset()",
+        )
+
+    def test_drain_waits_until_canceling_size_zero_before_stop(self):
+        # After cancellation is scheduled, the live progress thread completes it
+        # asynchronously; we must keep waiting until get_canceling_size() hits 0
+        # *before* stopping the thread, or a still-canceling request can fire its
+        # callback into teardown.
+        events = []
+        worker = mock.Mock()
+        # Two requests still canceling, then drained.
+        sizes = [2, 1, 0]
+        worker.get_canceling_size.side_effect = lambda: events.append(
+            ("size", sizes[0])
+        ) or sizes.pop(0)
+        worker.cancel_inflight_requests.side_effect = lambda *a, **k: events.append(
+            "cancel"
+        )
+        worker.stop_progress_thread.side_effect = lambda: events.append("stop")
+        fake_ucxx = mock.Mock()
+        fake_ucxx.reset.side_effect = lambda: events.append("reset")
+        fake_ucxx.core = SimpleNamespace(_ctx=SimpleNamespace(worker=worker))
+        self._invoke(fake_ucxx)
+        # cancel happens first; stop only after the canceling set reached 0.
+        self.assertEqual(events[0], "cancel")
+        self.assertIn(("size", 0), events)
+        self.assertLess(
+            events.index(("size", 0)),
+            events.index("stop"),
+            "must observe canceling_size==0 before stopping the thread",
+        )
+        self.assertEqual(events[-1], "reset")
+
+    def test_drain_is_noop_on_ucxx_build_without_cancel_api(self):
+        # Older/leaner ucxx builds may not expose cancel_inflight_requests; the
+        # drain must degrade silently to the prior stop-then-reset behaviour.
+        events = []
+        worker = mock.Mock(spec=["stop_progress_thread"])  # no cancel_* / size api
+        worker.stop_progress_thread.side_effect = lambda: events.append("stop")
+        fake_ucxx = mock.Mock()
+        fake_ucxx.reset.side_effect = lambda: events.append("reset")
+        fake_ucxx.core = SimpleNamespace(_ctx=SimpleNamespace(worker=worker))
+        self._invoke(fake_ucxx)
+        worker.stop_progress_thread.assert_called_once_with()
+        fake_ucxx.reset.assert_called_once_with()
+        self.assertEqual(events, ["stop", "reset"])
+
+    def test_progress_thread_stopped_even_when_reset_raises(self):
+        # reset() raises while an Endpoint/Listener still references the
+        # context.  That is now non-fatal: the progress thread was already
+        # stopped beforehand, so the crash-causing thread is gone regardless.
+        #
+        # Faithfully mirror the real ``ucxx.reset()``: it sets ``core._ctx`` to
+        # None *before* raising on lingering references -- which is why the
+        # worker must be captured (and stopped) before reset() is called.
+        worker = mock.Mock()
+        worker.get_canceling_size.return_value = 0
+        fake_ucxx = mock.Mock()
+        fake_ucxx.core = SimpleNamespace(_ctx=SimpleNamespace(worker=worker))
+
+        def _reset_then_raise():
+            fake_ucxx.core._ctx = None  # reset() nulls the global before raising
+            raise RuntimeError("Trying to reset UCX but not all Endpoints closed")
+
+        fake_ucxx.reset.side_effect = _reset_then_raise
+        self._invoke(fake_ucxx)
+        worker.cancel_inflight_requests.assert_called_once()
+        worker.stop_progress_thread.assert_called_once_with()
+        fake_ucxx.reset.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # UCXXClient.read port rotation + on-failure fallback
 #

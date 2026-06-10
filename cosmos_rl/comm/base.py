@@ -468,6 +468,60 @@ class CommMixin:
         )
 
     def heartbeat_trigger(self, shutdown_signal: threading.Event):
+        # Ensure this daemon process dies when its parent dies, including
+        # on abnormal parent termination (SIGSEGV, SIGKILL, OOM-kill).
+        # ``mp.Process(daemon=True)`` only kills the child via
+        # ``atexit`` handlers in the parent; any signal that bypasses
+        # ``atexit`` (notably SIGSEGV in C extensions) leaves the daemon
+        # orphaned and reparented to init.  An orphaned heartbeat keeps
+        # posting, so the controller's ``maintain_life_status`` never
+        # marks the replica dead and the whole job waits for the
+        # orchestrator's wall-clock timeout.
+        #
+        # ``PR_SET_PDEATHSIG`` asks the kernel to deliver SIGKILL to this
+        # process when the parent dies (reparenting to init counts as
+        # parent death).  Linux-only; gracefully no-op on other OSes.
+        # See prctl(2) for kernel semantics.
+        try:
+            import os
+            import signal as _signal
+            import ctypes
+
+            PR_SET_PDEATHSIG = 1  # from <linux/prctl.h>
+            _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            # Capture the parent pid BEFORE the prctl call so we can
+            # detect the racy case where the parent died between
+            # mp.Process.start() and our first instruction.
+            _orig_ppid = os.getppid()
+            if _libc.prctl(PR_SET_PDEATHSIG, _signal.SIGKILL, 0, 0, 0) != 0:
+                logger.warning(
+                    "[heartbeat] prctl(PR_SET_PDEATHSIG) failed: errno=%d; "
+                    "daemon will not auto-die if parent crashes",
+                    ctypes.get_errno(),
+                )
+            elif os.getppid() != _orig_ppid:
+                # Parent died between mp.Process.start() and the prctl
+                # call.  ``PR_SET_PDEATHSIG`` only fires on the
+                # subsequent parent death, not for a death that already
+                # happened, so we have to exit explicitly here.
+                logger.warning(
+                    "[heartbeat] parent died during heartbeat startup "
+                    "(orig_ppid=%d current_ppid=%d); exiting",
+                    _orig_ppid,
+                    os.getppid(),
+                )
+                os._exit(0)
+        except Exception as e:
+            # Most likely: non-Linux dev environment (no libc.so.6 / no
+            # prctl).  Log once and continue; on Linux this branch
+            # should be unreachable.
+            logger.warning(
+                "[heartbeat] could not install PR_SET_PDEATHSIG (%s); "
+                "daemon will not auto-die if parent crashes -- expected "
+                "outside Linux, investigate if seen on cluster nodes",
+                e,
+            )
+
         while True:
             self.api_client.post_heartbeat(self.replica_name)
 
