@@ -64,6 +64,15 @@ class TrainerPhase(enum.Enum):
     TRAIN = "train"
 
 
+class ReferenceStateDict(dict):
+    """Store reference weights as detached CPU snapshots."""
+
+    def __setitem__(self, key, value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().clone()
+        super().__setitem__(key, value)
+
+
 def _apply_off_policy_mask(
     per_token_loss: torch.Tensor,
     rollout_per_token_logps: Optional[torch.Tensor],
@@ -564,7 +573,7 @@ class GRPOTrainer(LLMTrainer):
             **kwargs,
         )
 
-        self.reference_state_dict = {}
+        self.reference_state_dict = ReferenceStateDict()
 
         self.lr_schedulers = self.build_lr_schedulers()
         self.lr_schedulers_updated = False
@@ -2030,7 +2039,7 @@ class GRPOTrainer(LLMTrainer):
             self.model_load_from_hf()
             model_loaded = True
             # Clone the state dict of hf model so that it can be used for KL-divergence calculation
-            self.reference_state_dict = {}
+            self.reference_state_dict = ReferenceStateDict()
             state_dict = self.model.state_dict()
             for key, value in state_dict.items():
                 self.reference_state_dict[key] = value.detach().cpu()

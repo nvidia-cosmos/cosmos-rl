@@ -7,7 +7,7 @@ dynamic = ["version"]
 dependencies = [
     "fastapi",
     "uvicorn",
-    "transformers>=4.51.1,!=4.52.*,!=4.53.*,<5.0.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+    "transformers>=4.57.0,<5.0.0",  # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
     "datasets>=4.4.1",
     "pydantic",
     "math_verify",
@@ -21,7 +21,7 @@ dependencies = [
     "StrEnum",
     "redis",
     "msgpack",
-    "qwen_vl_utils",
+    "qwen-vl-utils",
     "pynvml",
     "boto3",
     "modelscope",
@@ -35,7 +35,7 @@ dependencies = [
     "accelerate",
     "kernels",
     "diffusers>=0.36.0", # For cosmos-predict2.5 better use  @ git+https://github.com/huggingface/diffusers.git@ec37629
-    "peft",
+    "peft==0.17.1",
     "zmq>=0.0.0",
     "nvidia-ml-py>=13.590.48",
 ]
@@ -116,6 +116,10 @@ rl = [
     "flash-attn>=2.8.3",
 ]
 
+tao = [
+    "nvidia-tao-daft>=2.9.1",
+]
+
 # Lightweight extra for non-LLM RL workloads (e.g. Gymnasium-based
 # Classic Control demos); avoids dragging in vllm / flash-attn.
 gym = [
@@ -129,7 +133,7 @@ ucxx = [
 ]
 
 all = [
-    "cosmos_rl[wfm,vla,rl,gym,ucxx]",
+    "cosmos_rl[wfm,vla,rl,tao,gym,ucxx]",
 ]
 
 [tool.uv.sources]

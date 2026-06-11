@@ -23,6 +23,7 @@ ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
+ARG DEEPEP_COMMIT=567632d
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
 ARG COSMOS_RL_TORCH_VARIANT
@@ -99,6 +100,7 @@ RUN set -eux; \
                 TORCHVISION_VERSION=0.23.0; \
                 TORCHAUDIO_VERSION=2.8.0; \
                 TORCHAO_VERSION=0.13.0; \
+                PEFT_VERSION=0.17.1; \
                 VLLM_VERSION=0.11.0; \
                 FLASHINFER_VERSION=0.6.1; \
                 ;; \
@@ -107,6 +109,7 @@ RUN set -eux; \
                 TORCHVISION_VERSION=0.25.0; \
                 TORCHAUDIO_VERSION=2.10.0; \
                 TORCHAO_VERSION=0.16.0; \
+                PEFT_VERSION=0.17.1; \
                 VLLM_VERSION=0.17.0; \
                 FLASHINFER_VERSION=0.6.4; \
                 FLASH_ATTN_WHEEL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"; \
@@ -119,6 +122,7 @@ RUN set -eux; \
         pip install torch=="${TORCH_VERSION}" torchvision=="${TORCHVISION_VERSION}" torchaudio=="${TORCHAUDIO_VERSION}" --index-url https://download.pytorch.org/whl/cu128; \
         pip install \
             torchao=="${TORCHAO_VERSION}" \
+            peft=="${PEFT_VERSION}" \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
             flashinfer-python=="${FLASHINFER_VERSION}" \
@@ -135,7 +139,7 @@ RUN TORCH_CUDA_ARCH_LIST="8.0 9.0 10.0+PTX" pip install git+https://github.com/f
 RUN apt-get update && apt-get install -y  libibverbs-dev
 RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
     && cd /tmp/deepep \
-    && git checkout 567632d \
+    && git checkout ${DEEPEP_COMMIT} \
     && if [ "${COSMOS_RL_TORCH_VARIANT}" = "2.8" ]; then \
         python setup.py build && python setup.py install; \
     elif [ "${COSMOS_RL_TORCH_VARIANT}" = "2.10" ]; then \

@@ -636,9 +636,13 @@ class SFTTrainer(LLMTrainer):
                 else:
                     val_loss = torch.tensor([-1.0], device=self.device)
             else:
-                val_logits = self.forward_model(**val_batch).logits
+                val_output = self.forward_model(**val_batch)
+                val_logits = (
+                    val_output.logits if hasattr(val_output, "logits") else val_output
+                )
 
                 val_loss = self.loss_fn(val_logits, val_labels)
+
         if (
             self.parallel_dims.dp_replicate_enabled
             or self.parallel_dims.dp_shard_enabled
@@ -659,30 +663,53 @@ class SFTTrainer(LLMTrainer):
         is_last_step: bool = False,
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
+        steps_per_epoch: Optional[int] = None,
         do_save: bool = False,
         **kwargs,
     ):
         if (
             is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.config.train.ckpt.enable_checkpoint:
+            # When checkpointing is configured by epoch, use the completed epoch
+            # consistently for checkpoint and safetensors directory names.
+            completed_epoch = None
+            if (
+                self.config.train.ckpt.save_freq_in_epoch > 0
+                and steps_per_epoch is not None
+                and steps_per_epoch > 0
+            ):
+                completed_epoch = (train_step - 1) // steps_per_epoch + 1
+                logger.debug(
+                    f"[SFT] Epoch-based checkpoint: train_step={train_step}, steps_per_epoch={steps_per_epoch}, completed_epoch={completed_epoch}"
+                )
+            ckpt_identifier = (
+                f"epoch_{completed_epoch}"
+                if completed_epoch is not None
+                else f"step_{train_step}"
+            )
+
             if self.parallel_dims.dp_replicate_coord[0] == 0:
                 # save safetensors
                 if is_last_step or self.config.train.ckpt.export_safetensors:
                     logger.info(
-                        f"Saving huggingface checkpoint at step {train_step} to {self.config.train.output_dir}..."
+                        f"Saving huggingface checkpoint {ckpt_identifier} at step {train_step} to {self.config.train.output_dir}..."
                     )
+
                     self.export_safetensors(
                         output_dir=self.config.train.output_dir,
                         rel_path=os.path.join(
                             "safetensors",
-                            f"step_{train_step}",
+                            ckpt_identifier,
                         ),
                         trainable_only=False,
                         is_final=is_last_step,
                         dtype=util.str2torch_dtype(self.config.train.param_dtype),
                     )
                 # save checkpoint
-                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                logger.info(
+                    f"Saving cosmos checkpoint {ckpt_identifier} at step {train_step}..."
+                )
+
                 if self.parallel_dims.pp_enabled:
                     pp_state_dict = {}
                     for i, mp in enumerate(self.model_parts):
@@ -699,11 +726,13 @@ class SFTTrainer(LLMTrainer):
                     scheduler=self.lr_schedulers,
                     step=train_step,
                     total_steps=total_steps,
+                    epoch=completed_epoch,
                     is_final=is_last_step,
                     **kwargs,
                 )
                 self.ckpt_manager.save_check(
                     step=train_step,
+                    epoch=completed_epoch,
                     val_score=val_score,
                     pp_enabled=self.parallel_dims.pp_enabled,
                     pp_last_stage=pp_last_stage,

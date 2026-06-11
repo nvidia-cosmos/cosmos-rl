@@ -31,17 +31,18 @@ from typing import List, Callable, Tuple, Union, Optional, Dict
 
 def _step_dir_sort_key(dir_path: str) -> int:
     """
-    Key function for sorting directories by step number.
+    Key function for sorting checkpoint directories by numeric identifier.
 
     Args:
-        dir_path: Directory path (e.g., '/path/to/step_100' or 'step_100')
+        dir_path: Directory path (e.g., '/path/to/step_100', 'step_100',
+            '/path/to/epoch_1', or 'epoch_1')
 
     Returns:
-        step_id if matches 'step_xxx' pattern
+        identifier if matches 'step_xxx' or 'epoch_xxx' pattern
         -9999 if doesn't match - these will sort first
     """
     basename = os.path.basename(dir_path)
-    match = re.match(r"^step_(\d+)$", basename)
+    match = re.match(r"^(?:step|epoch)_(\d+)$", basename)
     if match:
         return int(match.group(1))
     return -9999
@@ -175,10 +176,10 @@ class CheckpointMananger:
 
     def _get_all_saved_ckpt_step_dirs(self) -> List[str]:
         """
-        Get the list of all saved checkpoint step directories.
+        Get the list of all saved checkpoint directories.
 
         Returns:
-            List[str]: A list of paths to the all saved checkpoint step directories.
+            List[str]: A list of paths to all saved checkpoint directories.
         """
         saved_ckpt_step_dirs = []
         if self.config.train.resume == True:  # noqa: E712
@@ -193,16 +194,16 @@ class CheckpointMananger:
                 ckpt_base = os.path.join(root_output_dir, timestamp, "checkpoints")
                 if not os.path.isdir(ckpt_base):
                     continue
-                for step_dir in os.listdir(ckpt_base):
-                    # validate step_dir format: step_<number>
-                    match = re.match(r"^step_(\d+)$", step_dir)
+                for ckpt_dir in os.listdir(ckpt_base):
+                    # validate checkpoint dir format: step_<number> or epoch_<number>
+                    match = re.match(r"^(?:step|epoch)_(\d+)$", ckpt_dir)
                     if match:
-                        saved_ckpt_step_dirs.append(os.path.join(ckpt_base, step_dir))
+                        saved_ckpt_step_dirs.append(os.path.join(ckpt_base, ckpt_dir))
         return saved_ckpt_step_dirs
 
     def get_latest_ckpt_paths(self) -> List[str]:
         """
-        Get the paths to the all saved checkpoint directories ordered by step number in descending order.
+        Get the paths to all saved checkpoint directories ordered by numeric checkpoint id in descending order.
 
         Returns:
             List[str]: A list of paths to the all saved checkpoint directories ordered by step number in descending order.
@@ -281,7 +282,7 @@ class CheckpointMananger:
 
     def _get_best_step_from_link(self) -> Optional[int]:
         """
-        Get the best step number from the existing best checkpoint link.
+        Get the best checkpoint number from the existing best checkpoint link.
         Returns None if no best link exists.
         """
         best_ckpt_link = os.path.join(self._best_dir, "checkpoints")
@@ -289,11 +290,13 @@ class CheckpointMananger:
             try:
                 target = os.readlink(best_ckpt_link)
                 basename = os.path.basename(target)
-                match = re.match(r"^step_(\d+)$", basename)
+                match = re.match(r"^(?:step|epoch)_(\d+)$", basename)
                 if match:
-                    step = int(match.group(1))
-                    logger.info(f"Found existing best checkpoint at step {step}")
-                    return step
+                    checkpoint_id = int(match.group(1))
+                    logger.info(
+                        f"Found existing best checkpoint at {basename}"
+                    )
+                    return checkpoint_id
             except Exception as e:
                 logger.warning(f"Failed to read best checkpoint link: {e}")
         return None
@@ -329,9 +332,9 @@ class CheckpointMananger:
             logger.warning(f"Best checkpoint directory does not exist: {resolved_path}")
             return None
 
-        # Validate the step directory format
+        # Validate the checkpoint directory format
         basename = os.path.basename(resolved_path)
-        match = re.match(r"^step_(\d+)$", basename)
+        match = re.match(r"^(?:step|epoch)_(\d+)$", basename)
         if not match:
             logger.warning(f"Best checkpoint directory has invalid format: {basename}")
             return None
@@ -352,11 +355,12 @@ class CheckpointMananger:
         )
 
     def _delete_checkpoint(self, ckpt_dir: str):
-        """Delete checkpoint and safetensors for a given step.
+        """Delete checkpoint and safetensors for a given step or epoch.
 
         Args:
             ckpt_dir: The directory of the checkpoint to delete, which is expected to be like:
-                /path/to/output_dir/<timestamp>/checkpoints/step_<step_number>
+                /path/to/output_dir/<timestamp>/checkpoints/step_<step_number> or
+                /path/to/output_dir/<timestamp>/checkpoints/epoch_<epoch_number>
         """
         try:
             if os.path.exists(ckpt_dir):
@@ -468,7 +472,14 @@ class CheckpointMananger:
                     )
 
         is_final = kwargs.get("is_final", False)
-        cur_step_ckpt_dir = os.path.join(f"step_{step}", "policy")
+        # Use epoch-based naming if epoch is provided (e.g., save_freq_in_epoch > 0)
+        # Otherwise fall back to step-based naming
+        epoch = kwargs.get("epoch")
+        if epoch is not None:
+            ckpt_identifier = f"epoch_{epoch}"
+        else:
+            ckpt_identifier = f"step_{step}"
+        cur_step_ckpt_dir = os.path.join(ckpt_identifier, "policy")
         os.makedirs(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
         )
@@ -758,8 +769,17 @@ class CheckpointMananger:
 
     def save_check(self, step: int, **kwargs):
         if self._is_master_rank():
-            step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
-            self.saved_ckpt_step_dirs.append(step_ckpt_path)
+            # Use epoch-based naming if epoch is provided, otherwise step-based
+            epoch = kwargs.get("epoch")
+            if epoch is not None:
+                ckpt_identifier = f"epoch_{epoch}"
+                step_ckpt_path = os.path.join(self.ckpt_output_dir, ckpt_identifier)
+            else:
+                ckpt_identifier = f"step_{step}"
+                step_ckpt_path = os.path.join(self.ckpt_output_dir, ckpt_identifier)
+
+            if step_ckpt_path not in self.saved_ckpt_step_dirs:
+                self.saved_ckpt_step_dirs.append(step_ckpt_path)
             # remove the old checkpoints
             # expected behavior:
             # Keep the best checkpoint, and delete the oldest checkpoint if the number of
@@ -808,24 +828,34 @@ class CheckpointMananger:
 
                     # Create symlink for checkpoint at root/best/checkpoints
                     best_ckpt_link = os.path.join(best_dir, "checkpoints")
-                    # assume the best checkpoint is at self.ckpt_output_dir/step_<step>
+                    # assume the best checkpoint is at self.ckpt_output_dir/step_<step> or epoch_<epoch>
                     if os.path.islink(best_ckpt_link):
                         os.unlink(best_ckpt_link)
                     os.symlink(step_ckpt_path, best_ckpt_link)
                     logger.info(
-                        f"Best checkpoint updated to step_{step} with score: {val_score}"
+                        f"Best checkpoint updated to {ckpt_identifier} with score: {val_score}"
                     )
 
                     # Create symlink for safetensors at root/best/safetensors
                     if self.config.train.ckpt.export_safetensors:
                         best_safetensors_link = os.path.join(best_dir, "safetensors")
-                        step_safetensors_path = os.path.join(
-                            self.config.train.output_dir, "safetensors", f"step_{step}"
-                        )
+                        # Support both epoch and step based naming
+                        if epoch is not None:
+                            step_safetensors_path = os.path.join(
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"epoch_{epoch}",
+                            )
+                        else:
+                            step_safetensors_path = os.path.join(
+                                self.config.train.output_dir,
+                                "safetensors",
+                                f"step_{step}",
+                            )
                         if os.path.islink(best_safetensors_link):
                             os.unlink(best_safetensors_link)
                         os.symlink(step_safetensors_path, best_safetensors_link)
-                        logger.info(f"Best safetensors updated to step_{step}")
+                        logger.info(f"Best safetensors updated to {ckpt_identifier}")
 
                     # Save best score to file for persistence across resumes
                     self._save_best_score(val_score, step_ckpt_path)
