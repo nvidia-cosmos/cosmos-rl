@@ -178,6 +178,9 @@ class APIClient(object):
                 partial(
                     requests.post,
                     json={"replica_name": replica_name},
+                    # Bounded so a hung socket during teardown cannot block the
+                    # clean unregister forever (which would strand the controller).
+                    timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
                 ),
                 self.get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX),
                 max_retries=self.max_retries,
@@ -191,6 +194,9 @@ class APIClient(object):
                 partial(
                     requests.post,
                     json={"replica_name": replica_name},
+                    # Bounded so a stuck heartbeat post cannot block the heartbeat
+                    # process indefinitely (which would also wedge its join()).
+                    timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
                 ),
                 self.get_alternative_urls(COSMOS_API_HEARTBEAT_SUFFIX),
                 max_retries=self.max_retries,

@@ -27,6 +27,16 @@ ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
 ARG COSMOS_RL_TORCH_VARIANT
 
+# Bound parallelism of the from-source CUDA extension builds (flash-attn/FA3,
+# apex, transformer_engine, grouped_gemm, DeepEP). Empty = use all cores
+# (previous behavior). Set MAX_JOBS to avoid OOM on hosts where one nvcc job per
+# core exceeds RAM. These ENVs are honored by torch's cpp_extension build and by
+# the flash-attn/TE setup scripts, and propagate to the inheriting build stages.
+ARG MAX_JOBS=""
+ARG NVCC_THREADS=""
+ENV MAX_JOBS=${MAX_JOBS}
+ENV NVCC_THREADS=${NVCC_THREADS}
+
 ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y
@@ -223,9 +233,12 @@ FROM pre-package AS package
 
 ARG COSMOS_RL_EXTRAS
 
+# cmake doesn't depend on the source, so install it above the COPY to keep it
+# cached across source-only changes.
+RUN apt-get update && apt-get install -y cmake
+
 COPY . /workspace/cosmos_rl
-RUN apt-get update && apt-get install -y cmake && \
-    pip install /workspace/cosmos_rl${COSMOS_RL_EXTRAS:+[$COSMOS_RL_EXTRAS]} && \
+RUN pip install /workspace/cosmos_rl${COSMOS_RL_EXTRAS:+[$COSMOS_RL_EXTRAS]} && \
     if [[ ",$COSMOS_RL_EXTRAS," == *,vla,* ]]; then \
         bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \
     fi && \

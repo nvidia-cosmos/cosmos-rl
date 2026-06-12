@@ -21,6 +21,7 @@ from cosmos_rl.utils.constant import (
     RedisStreamConstant,
     COSMOS_HTTP_RETRY_CONFIG,
     COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
+    COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
 )
 from typing import List, Dict
 from cosmos_rl.utils.network_util import make_request_with_retry
@@ -171,7 +172,9 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.CMD_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                # Polling read: the caller loops on shutdown_signal, so fail fast
+                # instead of running the deep retry storm that hangs teardown.
+                max_retries=COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
             )
         except Exception as e:
             logger.error(
@@ -226,6 +229,7 @@ class RedisStreamHandler:
         Returns:
             list: A list of stream entries.
         """
+        messages = None
         try:
             messages = make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -237,7 +241,9 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.ROLLOUT_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                # Polling read: the caller loops on shutdown_signal, so fail fast
+                # instead of running the deep retry storm that hangs teardown.
+                max_retries=COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
             )
         except Exception as e:
             logger.error(

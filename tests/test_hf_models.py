@@ -83,6 +83,13 @@ def test_cosmos_hf_model(model, inputs):
         return logits[:, -1, :]
 
 
+def _logits_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Compare logits; generate() may upcast to float32 while forward stays bf16."""
+    if a.dtype != b.dtype:
+        a, b = a.float(), b.float()
+    return torch.equal(a, b)
+
+
 class TestHFModel(unittest.TestCase):
     def test_post_to_empty_hook(self):
         for model_id in [
@@ -317,10 +324,10 @@ class TestHFModel(unittest.TestCase):
                 cosmos_hf_logits = test_cosmos_hf_model(
                     cosmos_hf_model, copy.deepcopy(inputs)
                 )
-                assert torch.equal(hf_generate_logits, hf_forward_logits), (
+                assert _logits_equal(hf_generate_logits, hf_forward_logits), (
                     f"{hf_generate_logits} != {hf_forward_logits}"
                 )
-                assert torch.equal(hf_generate_logits, cosmos_hf_logits), (
+                assert _logits_equal(hf_generate_logits, cosmos_hf_logits), (
                     f"{hf_generate_logits} != {cosmos_hf_logits}"
                 )
 

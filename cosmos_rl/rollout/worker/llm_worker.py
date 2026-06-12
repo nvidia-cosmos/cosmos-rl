@@ -65,12 +65,14 @@ class LLMRolloutWorker(WorkerBase):
     def execute(self):
         try:
             self.rollout_worker.work()
+            logger.info("[Rollout] execute: work() returned")
         except Exception as e:
             import traceback
 
             traceback.print_exc()
             raise e
         finally:
+            logger.info("[Rollout] execute: entering destroy_worker()")
             self.destroy_worker()
 
     def build_runner(self, **kwargs):
@@ -105,7 +107,12 @@ class LLMRolloutWorker(WorkerBase):
 
     def destroy_worker(self):
         if self.rollout_worker is not None:
+            logger.info(
+                "[Rollout] destroy_worker: deleting rollout_worker (vLLM shutdown)"
+            )
             del self.rollout_worker
             self.rollout_worker = None
+            logger.info("[Rollout] destroy_worker: rollout_worker deleted")
+        logger.info("[Rollout] destroy_worker: calling destroy_distributed")
         destroy_distributed()
         logger.info("[Rollout] Destroy context of torch dist.")

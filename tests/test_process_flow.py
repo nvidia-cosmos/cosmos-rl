@@ -16,13 +16,85 @@
 import os
 
 os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+# Enable faulthandler at interpreter startup in every child process (controller,
+# torchrun workers, launchers) that copies this env. With it set, a SIGABRT makes
+# each Python process dump *all* thread stacks to stderr before dying, so a
+# teardown hang is pinpointed in the logs. Test-only; no production code touched.
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
 import unittest
 import subprocess
 import sys
+import time
+import signal
 import toml
 import tempfile
 
 from cosmos_rl.utils import network_util
+
+
+# Bound for how long a process-flow scenario may take before a non-exiting
+# process is treated as hung. Generous (covers model load + a few steps + the
+# heartbeat-timeout teardown) but finite, so a hang fails fast and LOUD here
+# instead of silently burning the outer CI `timeout 2h`.
+_PROC_EXIT_TIMEOUT = float(os.environ.get("COSMOS_TEST_PROC_EXIT_TIMEOUT", "1200"))
+
+
+def _signal_tree(proc, sig):
+    """Send `sig` to a child's whole process group when it leads its own group.
+
+    Children run with PYTHONFAULTHANDLER=1 (set at module import), so SIGABRT
+    makes every Python process dump *all* thread stacks to stderr before dying
+    -- pinpointing exactly where a hang is. We only use killpg when
+    the child is its own session/group leader (started with start_new_session);
+    otherwise we fall back to a per-process signal so we never hit the test
+    runner's own group.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        if pgid == proc.pid:
+            os.killpg(pgid, sig)
+            return
+    except Exception:
+        pass
+    try:
+        proc.send_signal(sig)
+    except Exception:
+        pass
+
+
+def _diagnose_and_kill(processes):
+    for proc in processes:
+        if proc.poll() is None:
+            _signal_tree(proc, signal.SIGABRT)
+    # Let faulthandler flush all-thread stacks to stderr before the hard kill.
+    time.sleep(5.0)
+    for proc in processes:
+        if proc.poll() is None:
+            _signal_tree(proc, signal.SIGKILL)
+
+
+def _await_processes(processes, timeout=_PROC_EXIT_TIMEOUT):
+    """Wait for all processes to exit within `timeout`; diagnose + fail on hang.
+
+    On timeout we dump every process's thread stacks (via SIGABRT/faulthandler),
+    tear the tree down, and fail with a clear message -- instead of blocking
+    forever in communicate() as the previous loop did.
+    """
+    deadline = time.time() + timeout
+    for process in processes:
+        remaining = max(1.0, deadline - time.time())
+        try:
+            process.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _diagnose_and_kill(processes)
+            raise AssertionError(
+                f"Process pid={process.pid} did not exit within {timeout:.0f}s -- "
+                "likely a teardown/finalize hang. All-thread stack dumps were "
+                "emitted to stderr above (SIGABRT via faulthandler)."
+            )
+        assert process.returncode == 0, (
+            f"Process failed with code: {process.returncode}"
+        )
 
 
 class TestProcessFlow(unittest.TestCase):
@@ -58,6 +130,9 @@ class TestProcessFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
+            # Own session so a hang can be group-signaled (SIGABRT -> faulthandler
+            # all-thread dump) without touching the test runner's own group.
+            start_new_session=True,
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -99,6 +174,7 @@ class TestProcessFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
+            start_new_session=True,
         )
         rollout_env = dict(os.environ)
         rollout_env["CUDA_VISIBLE_DEVICES"] = "2,3"
@@ -107,17 +183,13 @@ class TestProcessFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=rollout_env,
+            start_new_session=True,
         )
 
         processes = [controller_process, policy_process, rollout_process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
     def test_process_exit_sft(self):
         """Test sft all processes exit cleanly."""
@@ -150,6 +222,9 @@ class TestProcessFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
+            # Own session so a hang can be group-signaled (SIGABRT -> faulthandler
+            # all-thread dump) without touching the test runner's own group.
+            start_new_session=True,
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -176,16 +251,12 @@ class TestProcessFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
+            start_new_session=True,
         )
         processes = [controller_process, policy_process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
 
 class TestValidationFlow(unittest.TestCase):
@@ -212,16 +283,12 @@ class TestValidationFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env,
+            start_new_session=True,
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
 
 class TestRewardFlow(unittest.TestCase):
@@ -248,16 +315,12 @@ class TestRewardFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env,
+            start_new_session=True,
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
 
 class TestSFTDDPLoadFlow(unittest.TestCase):
@@ -284,16 +347,12 @@ class TestSFTDDPLoadFlow(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env,
+            start_new_session=True,
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
 
 class TestMultiReplicaSFT(unittest.TestCase):
@@ -339,6 +398,9 @@ class TestMultiReplicaSFT(unittest.TestCase):
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
+            # Own session so a hang can be group-signaled (SIGABRT -> faulthandler
+            # all-thread dump) without touching the test runner's own group.
+            start_new_session=True,
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -363,18 +425,14 @@ class TestMultiReplicaSFT(unittest.TestCase):
                     stdout=sys.stderr,
                     stderr=sys.stderr,
                     env=rollout_env,
+                    start_new_session=True,
                 )
             )
 
         processes = [controller_process] + rollout_processes
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        # Wait for processes to complete (bounded; diagnoses hangs).
+        _await_processes(processes)
 
 
 if __name__ == "__main__":

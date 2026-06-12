@@ -99,6 +99,58 @@ def create_error_response(
 
 controller = Controller()
 server = None
+# Set True on the first successful /register.  Guards heartbeat-reap finalize
+# against the startup window where replica managers are empty but workers have
+# not connected yet (notably SFT controllers where ``not is_rl`` is always true).
+_replicas_were_registered = False
+
+
+def _all_replicas_gone() -> bool:
+    return (
+        len(controller.policy_status_manager) == 0
+        and len(controller.rollout_status_manager) == 0
+        and len(controller.teacher_result_manager) == 0
+    )
+
+
+def _maybe_finalize(reason: str) -> bool:
+    """Shut the controller down once every replica is gone.
+
+    This must trigger regardless of *how* a replica left -- a clean HTTP
+    /unregister OR a heartbeat-timeout reap. Historically the finalize check
+    lived only in the /unregister handler, so a replica that died ungracefully
+    (no clean unregister) left the controller running forever, hanging the
+    process-flow test until the outer job timeout. Centralizing it here and
+    calling it from both paths makes liveness robust to any ungraceful exit.
+
+    The heartbeat-reap path must *not* finalize at startup (empty managers,
+    no replica has registered yet).  The /unregister path is safe without that
+    guard because it only runs after a replica actually departs.
+    """
+    if not _all_replicas_gone():
+        return False
+
+    if reason == "heartbeat-death reap":
+        # All replicas gone after having been live at least once (reaped or
+        # unregistered).  Do not require training_finished / is_rl here --
+        # that would re-introduce the stranded-controller hang when the last
+        # replica dies without a clean HTTP unregister.
+        ready = _replicas_were_registered
+    else:
+        ready = (
+            controller.policy_status_manager.training_finished() or not controller.is_rl
+        )
+
+    if ready:
+        global server
+        if server is not None and not server.should_exit:
+            logger.info(
+                f"[Controller] All replicas are finished ({reason}); finalizing -- "
+                "shutting down controller."
+            )
+            server.should_exit = True
+        return True
+    return False
 
 
 @asynccontextmanager
@@ -114,6 +166,10 @@ async def lifespan(app: FastAPI):
             controller.rollout_status_manager.maintain_life_status(
                 controller.policy_status_manager
             )
+            # A replica reaped via heartbeat timeout is just as "gone" as one
+            # that unregistered cleanly -- finalize the controller here too so a
+            # dead/ungracefully-exiting replica can never strand it.
+            _maybe_finalize("heartbeat-death reap")
             if shutdown_event.wait(timeout=COSMOS_ROLLOUT_SCAN_INTERVAL):
                 break  # Exit early if shutdown signaled during sleep
 
@@ -169,11 +225,13 @@ async def meta():
 
 @app.post(COSMOS_API_REGISTER_SUFFIX)
 async def register(request: RegisterRequest):
+    global _replicas_were_registered
     try:
         await controller.register(
             Atom.from_register_request(request),
             role=request.role,
         )
+        _replicas_were_registered = True
         return {"message": "Registered"}
     except Exception as e:
         import traceback
@@ -189,18 +247,7 @@ async def unregister(request: UnregisterRequest):
     except Exception as e:
         logger.error(f"[Controller] Unregister failed: {e}")
     finally:
-        if (
-            (
-                controller.policy_status_manager.training_finished()
-                or not controller.is_rl
-            )
-            and len(controller.policy_status_manager) == 0
-            and len(controller.rollout_status_manager) == 0
-            and len(controller.teacher_result_manager) == 0
-        ):
-            logger.info("[Controller] All replicas are finished, finalizing...")
-            global server
-            server.should_exit = True
+        _maybe_finalize(f"clean unregister of {request.replica_name}")
         return {"message": "Unregistered"}
 
 

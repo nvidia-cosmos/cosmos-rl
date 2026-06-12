@@ -353,19 +353,29 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if not self.shutdown_mp_signal.is_set():
                 self.shutdown_mp_signal.set()
             if self.background_thread is not None:
+                logger.info("[Rollout] handle_shutdown: joining command-query thread")
                 self.background_thread.join()
                 self.background_thread = None
+                logger.info("[Rollout] handle_shutdown: command-query thread joined")
             if self.teacher_interact_thread is not None:
+                logger.info(
+                    "[Rollout] handle_shutdown: joining teacher-interact thread"
+                )
                 self.teacher_interact_thread.join()
                 self.teacher_interact_thread = None
+                logger.info("[Rollout] handle_shutdown: teacher-interact thread joined")
             if self.scheduler is not None:
                 self.scheduler.stop(wait=False)
                 self.scheduler = None
 
             if self.heartbeat_thread is not None:
+                logger.info("[Rollout] handle_shutdown: joining heartbeat process")
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
+                logger.info("[Rollout] handle_shutdown: heartbeat process joined")
+            logger.info("[Rollout] handle_shutdown: unregistering from controller")
             self.unregister_from_controller()
+            logger.info("[Rollout] handle_shutdown: complete")
 
     def get_underlying_model(self):
         """
@@ -2226,5 +2236,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.teacher_interact_thread.start()
 
         self.main_loop()
+        logger.info(
+            "[Rollout] work: main_loop returned, synchronizing inference stream"
+        )
         self.inference_stream.synchronize()
+        logger.info(
+            "[Rollout] work: inference stream synchronized, calling handle_shutdown"
+        )
         self.handle_shutdown()
+        logger.info("[Rollout] work: handle_shutdown returned")
