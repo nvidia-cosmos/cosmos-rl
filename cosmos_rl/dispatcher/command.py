@@ -402,6 +402,15 @@ class StopCommand(Command):
     non-validation step), STOP triggers no collective, so it cannot orphan
     an in-flight P2R/R2R recv or wedge ``ncclCommAbort``.
 
+    The controller publishes STOP only after every policy replica has
+    unregistered (``should_broadcast_stop``), so the trainer is no longer
+    driving new P2R/R2R rounds when rollouts observe it.  Any weight-sync
+    collective already in flight on a rollout finishes on the ranks that
+    entered it; ranks that never joined (e.g. wedged on the weight-version
+    gate) are unblocked by STOP without touching NCCL.  Cross-replica
+    ordering is therefore safe: STOP is not a mid-collective abort on some
+    nodes while others still block in the same NCCL group.
+
     ``consume_one_command`` broadcasts the dequeued command across ranks via
     ``broadcast_object_cpu``, so all ranks of a multi-rank worker receive
     STOP at the same collective call and leave ``main_loop`` in lockstep --
@@ -529,11 +538,17 @@ class DataFetchCommand(Command):
 
 
 class TrainingCompleteCommand(Command):
-    """Explicit end-of-training signal for the policy at genuine end-of-data.
+    """Explicit end-of-training signal for **policy** replicas only.
 
     Replaces the former ``is_fake_last_cmd`` ``DataFetchCommand`` with
-    ``items_count=0``.  The policy skips ``step_training``, sends ``train_ack``,
-    and exits when ``global_step >= total_steps``.
+    ``items_count=0`` as the dedicated trainer-stop signal.  The policy skips
+    ``step_training``, sends ``train_ack``, and exits its main loop when
+    ``global_step >= total_steps``.
+
+    Rollout shutdown is separate: once every policy replica has unregistered,
+    the controller broadcasts :class:`StopCommand` to the rollout set (see
+    ``should_broadcast_stop``).  ``TrainingCompleteCommand`` ends training;
+    ``StopCommand`` ends rollouts.
     """
 
     def __init__(
