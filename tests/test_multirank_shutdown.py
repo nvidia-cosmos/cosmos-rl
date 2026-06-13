@@ -53,6 +53,7 @@ from cosmos_rl.dispatcher.status import (
     RolloutStatusManager,
     need_weight_sync,
     should_broadcast_stop,
+    should_coalesce_skip,
 )
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, RegisterRequest, Role
 
@@ -257,6 +258,80 @@ class TestShouldBroadcastStop(unittest.TestCase):
         self.assertFalse(
             should_broadcast_stop(**{**self._FIRE, "stop_broadcast_sent": True})
         )
+
+
+class TestShouldCoalesceSkip(unittest.TestCase):
+    """``should_coalesce_skip`` implements depth-1 drop-to-latest.  It skips
+    (coalesces) a weight-sync round only when coalescing is enabled, the round
+    is not forced, and a previously issued round is still in flight
+    (``last_staged_step > max_adopted_version``); otherwise it issues."""
+
+    # Canonical "a round is still in flight" state -> the one case that skips.
+    _SKIP = dict(
+        coalesce_enabled=True,
+        forced=False,
+        last_staged_step=10,
+        max_adopted_version=7,
+    )
+
+    def test_skips_while_round_in_flight(self):
+        # Issued step 10, rollouts only adopted 7 -> in flight -> skip.
+        self.assertTrue(should_coalesce_skip(**self._SKIP))
+
+    def test_issues_when_rollouts_caught_up(self):
+        # Rollouts adopted the last staged version -> issue (drop-to-latest).
+        self.assertFalse(
+            should_coalesce_skip(**{**self._SKIP, "max_adopted_version": 10})
+        )
+        # Adopted even beyond -> still issue.
+        self.assertFalse(
+            should_coalesce_skip(**{**self._SKIP, "max_adopted_version": 12})
+        )
+
+    def test_first_sync_issues_naturally(self):
+        # Nothing staged yet (last_staged = -1) -> never skip, no special-case.
+        self.assertFalse(
+            should_coalesce_skip(
+                coalesce_enabled=True,
+                forced=False,
+                last_staged_step=-1,
+                max_adopted_version=-1,
+            )
+        )
+
+    def test_never_coalesces_when_disabled(self):
+        # Feature off -> behave like the unconditional every-interval sync.
+        self.assertFalse(
+            should_coalesce_skip(**{**self._SKIP, "coalesce_enabled": False})
+        )
+
+    def test_forced_round_always_issues(self):
+        # Validation-trigger steps override the skip even with a round in flight.
+        self.assertFalse(should_coalesce_skip(**{**self._SKIP, "forced": True}))
+
+
+class TestWeightSyncForced(unittest.TestCase):
+    """``_weight_sync_forced`` forces a sync only on validation-trigger steps."""
+
+    def _mgr(self, validation_enable=False, freq=0):
+        mgr = PolicyStatusManager()
+        mgr.config = SimpleNamespace(
+            validation=SimpleNamespace(enable=validation_enable, freq=freq),
+        )
+        return mgr
+
+    def test_not_forced_without_validation(self):
+        mgr = self._mgr(validation_enable=False)
+        self.assertFalse(mgr._weight_sync_forced(step=10, total_steps=100))
+
+    def test_forced_on_validation_freq_step(self):
+        mgr = self._mgr(validation_enable=True, freq=10)
+        self.assertTrue(mgr._weight_sync_forced(step=10, total_steps=100))
+        self.assertFalse(mgr._weight_sync_forced(step=11, total_steps=100))
+
+    def test_forced_on_final_step_with_validation(self):
+        mgr = self._mgr(validation_enable=True, freq=10)
+        self.assertTrue(mgr._weight_sync_forced(step=100, total_steps=100))
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1103,8 @@ class TestJobPhaseFinishDraining(unittest.TestCase):
             recompute_total_steps=_recompute,
             trigger_training_complete=_trigger_training_complete,
             rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
         )
         psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
             psm
@@ -1049,6 +1126,8 @@ class TestJobPhaseFinishDraining(unittest.TestCase):
             recompute_total_steps=lambda **kw: None,
             trigger_training_complete=lambda: training_complete.append(True),
             rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
         )
         psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
             psm
@@ -1071,6 +1150,8 @@ class TestJobPhaseFinishDraining(unittest.TestCase):
             recompute_total_steps=lambda **kw: None,
             trigger_training_complete=lambda: training_complete.append(True),
             rollout_buffer=SimpleNamespace(queue=queue),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
         )
         psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
             psm
@@ -1079,6 +1160,38 @@ class TestJobPhaseFinishDraining(unittest.TestCase):
         self.assertEqual(cleared, [True])
         self.assertEqual(psm.total_steps, 4)
         self.assertEqual(training_complete, [True])
+
+    def test_finish_defers_when_buffer_can_fill_remaining_steps(self):
+        """Do not fire TrainingComplete while a full step of rollouts waits."""
+        training_complete = []
+
+        psm = SimpleNamespace(
+            total_steps=3,
+            current_step=2,
+            policy_replicas={},
+            total_pending_rollouts=lambda: 16,
+            all_ready_or_reduced=lambda: True,
+            trigger_training_complete=lambda: training_complete.append(True),
+            rollout_buffer=SimpleNamespace(
+                queue=SimpleNamespace(
+                    clear=lambda: (_ for _ in ()).throw(
+                        AssertionError("buffer should not be cleared")
+                    )
+                )
+            ),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
+        )
+
+        def _recompute(**_kw):
+            psm.total_steps = 2
+
+        psm.recompute_total_steps = _recompute
+        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
+            psm
+        )
+        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
+        self.assertEqual(training_complete, [])
 
 
 class TestJobPhaseValidationBypass(unittest.TestCase):
@@ -1179,6 +1292,8 @@ class TestTrainingCompleteCommand(unittest.TestCase):
             ),
             trigger_training_complete=_trigger,
             rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
         )
         psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
             psm
@@ -1198,6 +1313,8 @@ class TestTrainingCompleteCommand(unittest.TestCase):
             recompute_total_steps=lambda **kw: None,
             trigger_training_complete=lambda: calls.append(True),
             rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
+            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
+            get_all_atoms_arrived_replicas=lambda: [object()],
         )
         psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
             psm

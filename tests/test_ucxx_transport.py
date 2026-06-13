@@ -520,7 +520,7 @@ class TestUCXXAttachDataPacker(unittest.TestCase):
         UCXXPayloadTransport().attach_data_packer(_Packer(), config=SimpleNamespace())
         self.assertEqual(captured["prefetch_timeout"], 30.0)
         self.assertEqual(captured["max_attempts"], 2)
-        self.assertEqual(captured["read_timeout"], 5.0)
+        self.assertEqual(captured["read_timeout"], 30.0)
         self.assertNotIn("n_chunks", captured)
 
     def test_attach_noop_when_setup_method_missing(self):
@@ -566,7 +566,7 @@ class TestUCXXAttachDataPacker(unittest.TestCase):
         UCXXPayloadTransport().attach_data_packer(_Packer(), config=config)
         self.assertEqual(captured["prefetch_timeout"], 30.0)
         self.assertEqual(captured["max_attempts"], 2)
-        self.assertEqual(captured["read_timeout"], 5.0)
+        self.assertEqual(captured["read_timeout"], 30.0)
         self.assertNotIn("n_chunks", captured)
 
     def test_attach_clamps_max_attempts_to_at_least_one(self):

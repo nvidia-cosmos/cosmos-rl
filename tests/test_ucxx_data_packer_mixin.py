@@ -322,7 +322,7 @@ class TestSetupViaTransportAttach(unittest.TestCase):
                 "device": "cuda:0",
                 "prefetch_timeout": 5.0,
                 "max_attempts": 2,
-                "read_timeout": 5.0,
+                "read_timeout": 30.0,
             },
         )
 

@@ -106,14 +106,8 @@ class LLMRolloutWorker(WorkerBase):
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
 
     def destroy_worker(self):
-        logger.info("[Teardown] destroy_worker: deleting rollout_worker")
         if self.rollout_worker is not None:
-            logger.info(
-                "[Rollout] destroy_worker: deleting rollout_worker (vLLM shutdown)"
-            )
+            logger.info("[Teardown] destroy_worker: shutting down rollout_worker")
             del self.rollout_worker
             self.rollout_worker = None
-            logger.info("[Rollout] destroy_worker: rollout_worker deleted")
-        logger.info("[Teardown] destroy_worker: calling destroy_distributed()")
         destroy_distributed()
-        logger.info("[Rollout] Destroy context of torch dist.")

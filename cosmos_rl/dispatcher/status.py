@@ -153,6 +153,45 @@ def should_broadcast_stop(
     )
 
 
+def should_coalesce_skip(
+    *,
+    coalesce_enabled: bool,
+    forced: bool,
+    last_staged_step: int,
+    max_adopted_version: int,
+) -> bool:
+    """Pure decision: should the controller *skip* (coalesce) this weight-sync
+    round instead of issuing a fresh P2R+R2R?
+
+    Depth-1 drop-to-latest.  A round the controller issued at
+    ``last_staged_step`` is still *in flight* exactly while the rollouts have
+    not yet adopted it -- i.e. ``last_staged_step > max_adopted_version``
+    (``max_adopted_version`` is the freshest weight version any rollout has
+    generated with, tracked from the stamped ``rollout.weight_version``).
+    Issuing another round while one is in flight would only pile redundant
+    ~1.6 GB transfers onto the rollout's ``WeightSyncThread`` queue -- every
+    intermediate version is superseded before it is ever adopted (the rollout's
+    ``sync_buffer_to_live`` always jumps to the latest ``buf_ver``).  So we skip;
+    once the rollouts catch up the next tick issues at ``current_step`` (the
+    latest) -> drop-to-latest.
+
+    Note "in flight" is *derived*, not tracked: there is exactly one source of
+    truth (the adopted-version comparison), so no counter can drift.
+
+    ``forced`` overrides the skip for the one round that must never be coalesced
+    away: a validation-trigger step, where the rollout needs that exact version
+    to validate.  (The first sync issues naturally -- ``last_staged_step`` starts
+    at -1, so the comparison is false -- and the staleness ceiling is enforced
+    independently by ``filter_outdated_rollouts``.)
+
+    When ``coalesce_enabled`` is False this is always False -> behaviour is
+    identical to the unconditional every-interval sync.
+    """
+    if not coalesce_enabled or forced:
+        return False
+    return last_staged_step > max_adopted_version
+
+
 class ReplicaScalingEnum(StrEnum):
     """
     Enum for replica scaling event.
@@ -283,6 +322,22 @@ class PolicyStatusManager:
 
         # For rank specific data dispatch
         self.rollout_buffer_per_rank: List[Queue] = []
+
+        # --- Weight-sync coalescing (depth-1 drop-to-latest) state ---
+        # ``_weight_last_staged_step``: weight_step of the most recent issued
+        #   round (-1 = none issued yet, so the first sync issues naturally).
+        # ``_weight_max_adopted_version``: highest rollout-reported weight
+        #   version seen (updated from put_rollouts).  A round is "in flight"
+        #   iff _weight_last_staged_step > _weight_max_adopted_version -- the
+        #   single derived source of truth the coalescing gate keys on.
+        # ``_weight_coalesced_skips``: count of coalesced (skipped) rounds, for
+        #   the bench report (observability only).
+        self._weight_last_staged_step: int = -1
+        self._weight_max_adopted_version: int = -1
+        self._weight_coalesced_skips: int = 0
+        # Latest accepted-rollout staleness percentiles, merged into the
+        # train_ack report_data (operator-facing tuning signal).
+        self._weight_staleness_recent: Dict[str, int] = {}
 
     def setup(
         self,
@@ -462,6 +517,27 @@ class PolicyStatusManager:
         new_total_steps = self.total_steps
         if new_total_steps > self.current_step:
             logger.info("[Controller] There are still remaining steps, no op required")
+            return
+        rollouts_per_step = self.config.train.train_batch_per_replica * len(
+            self.get_all_atoms_arrived_replicas()
+        )
+        if (
+            rollouts_per_step > 0
+            and total_pending_rollouts >= rollouts_per_step
+            and self.current_step < original_total_steps
+        ):
+            # Buffer still holds at least one full training step and the
+            # policy has not reached the pre-recompute ``total_steps`` yet.
+            # ``train_ack`` will dispatch that step via ``try_trigger``; do
+            # not cut training short (custom_rollout CI: computed_cnt check).
+            logger.info(
+                "[Controller] DRAINING: %d buffered rollouts (>= %d/step) "
+                "but policy at step %d/%d; deferring TrainingComplete",
+                total_pending_rollouts,
+                rollouts_per_step,
+                self.current_step,
+                original_total_steps,
+            )
             return
         if self.current_step == original_total_steps and total_pending_rollouts == 0:
             logger.info(
@@ -1149,11 +1225,19 @@ class PolicyStatusManager:
         cleanup messages so the rollout worker releases them immediately
         instead of waiting for age-based cleanup.
         """
+        allowed_outdated_steps = self.config.train.train_policy.allowed_outdated_steps
         filtered_rollouts = []
+        accepted_staleness: List[int] = []
+        discarded_staleness: List[int] = []
         for idx, rollout in enumerate(rollouts):
             assert rollout.weight_version <= self.current_step, (
                 f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
             )
+            # Adoption signal for weight-sync coalescing: the freshest weight
+            # version any rollout has actually generated with confirms that
+            # round was delivered + adopted (deadlock-free re-arm signal).
+            if rollout.weight_version > self._weight_max_adopted_version:
+                self._weight_max_adopted_version = rollout.weight_version
             # Estimate the step when this rollout will be used for training
             # This is estimated based on the current step, the number of pending rollouts,
             # and the number of rollouts before this rollout in the current batch.
@@ -1163,15 +1247,41 @@ class PolicyStatusManager:
                 self.config.train.train_batch_per_replica
                 * max(len(self.get_all_atoms_arrived_replicas()), 1)
             )
-            if (
-                estimated_step - rollout.weight_version
-                <= self.config.train.train_policy.allowed_outdated_steps
-            ):
+            staleness = estimated_step - rollout.weight_version
+            if staleness <= allowed_outdated_steps:
                 filtered_rollouts.append(rollout)
+                accepted_staleness.append(staleness)
             else:
+                discarded_staleness.append(staleness)
                 logger.debug(
-                    f"[Controller] Filtered out outdated rollout with version {rollout.weight_version}, current step {self.current_step}, estimated step {estimated_step}, pending rollouts {self.total_pending_rollouts()}, preceeding rollouts in this batch {idx}, allowed_outdated_steps {self.config.train.train_policy.allowed_outdated_steps}"
+                    f"[Controller] Filtered out outdated rollout with version {rollout.weight_version}, current step {self.current_step}, estimated step {estimated_step}, pending rollouts {self.total_pending_rollouts()}, preceeding rollouts in this batch {idx}, allowed_outdated_steps {allowed_outdated_steps}"
                 )
+
+        # Operator-facing weight-version staleness (see weight-sync coalescing
+        # plan, Phase 1b): how outdated the *accepted* rollouts are vs the live
+        # weight version, so the sync frequency can be tuned.  Stashed for the
+        # train_ack report (`rollout/weight_staleness_*`) and logged inline with
+        # the config knobs so the headroom vs allowed_outdated_steps is obvious.
+        if accepted_staleness:
+            p50 = int(np.percentile(accepted_staleness, 50))
+            p99 = int(np.percentile(accepted_staleness, 99))
+            smax = int(np.max(accepted_staleness))
+            self._weight_staleness_recent = {
+                "rollout/weight_staleness_p50": p50,
+                "rollout/weight_staleness_p99": p99,
+                "rollout/weight_staleness_max": smax,
+            }
+            logger.info(
+                "[Controller] weight staleness: accepted p50=%d p99=%d max=%d, "
+                "discarded=%d/%d (allowed_outdated_steps=%d, sync_weight_interval=%d)",
+                p50,
+                p99,
+                smax,
+                len(discarded_staleness),
+                len(rollouts),
+                allowed_outdated_steps,
+                self.config.train.sync_weight_interval,
+            )
 
         discarded_count = len(rollouts) - len(filtered_rollouts)
 
@@ -1490,6 +1600,13 @@ class PolicyStatusManager:
                                         / total_samples_for_filtering
                                     }
                                 )
+                    # Operator-facing weight-version staleness + coalescing
+                    # activity (see weight-sync coalescing plan, Phase 1b/2).
+                    if self._weight_staleness_recent:
+                        policy_report_data.update(self._weight_staleness_recent)
+                    policy_report_data["rollout/weight_coalesced_skips"] = (
+                        self._weight_coalesced_skips
+                    )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
@@ -1588,12 +1705,42 @@ class PolicyStatusManager:
 
             # P->R & R->R
             if need_sync_weight:
-                self.trigger_weight_sync(
-                    any_loaded_replica,
-                    rollout_status_manager,
-                    step,
-                    self.total_steps,
+                # Weight-sync coalescing (depth-1 drop-to-latest): while a
+                # previously issued round is still in flight to the rollouts
+                # (last_staged > max_adopted), skip issuing redundant P2R+R2R
+                # rounds -- every intermediate version is superseded on the
+                # rollout before it is adopted.  Once the rollouts catch up, the
+                # next tick issues at the latest step.
+                tp = self.config.train.train_policy
+                coalesce_enabled = (
+                    self.config.train.coalesce_weight_sync
+                    and getattr(tp, "allowed_outdated_steps", 0) > 0
+                    and not getattr(tp, "on_policy", False)
                 )
+                forced = self._weight_sync_forced(step, self.total_steps)
+                if should_coalesce_skip(
+                    coalesce_enabled=coalesce_enabled,
+                    forced=forced,
+                    last_staged_step=self._weight_last_staged_step,
+                    max_adopted_version=self._weight_max_adopted_version,
+                ):
+                    self._weight_coalesced_skips += 1
+                    logger.info(
+                        "[Controller] Coalesced weight-sync skip "
+                        "(last_staged=%d, current=%d, max_adopted=%d, "
+                        "total_skips=%d)",
+                        self._weight_last_staged_step,
+                        step,
+                        self._weight_max_adopted_version,
+                        self._weight_coalesced_skips,
+                    )
+                else:
+                    self.trigger_weight_sync(
+                        any_loaded_replica,
+                        rollout_status_manager,
+                        step,
+                        self.total_steps,
+                    )
             # Trigger next step training if data is available
             self.try_trigger_data_fetch_and_training()
             if self.config.train.train_policy.on_policy:
@@ -1632,6 +1779,28 @@ class PolicyStatusManager:
             total_steps=total_steps,
             redis_handler=self.redis_handler,
         )
+
+        # Weight-sync coalescing: record this as the latest staged round.  It
+        # counts as "in flight" until the rollouts adopt it
+        # (_weight_max_adopted_version catches up), gating the next round.
+        self._weight_last_staged_step = current_step
+
+    def _weight_sync_forced(self, step: int, total_steps: int) -> bool:
+        """The one round that must never be coalesced away: a validation-trigger
+        step, where the rollout needs that exact weight version to validate.
+
+        Nothing else needs forcing -- the first sync issues naturally (the gate
+        comparison is false while ``last_staged_step`` is -1), and the staleness
+        ceiling is enforced independently by ``filter_outdated_rollouts``.
+        """
+        val = self.config.validation
+        if getattr(val, "enable", False):
+            freq = getattr(val, "freq", 0)
+            if freq and step % freq == 0:
+                return True
+            if step == total_steps:
+                return True
+        return False
 
     def rollouts_enough_for_one_step(self) -> bool:
         """
