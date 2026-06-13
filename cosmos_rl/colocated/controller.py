@@ -267,6 +267,17 @@ class ColocatedController(Controller):
             bool: Whether weight synchronization is needed.
         """
         step = self.current_step
+        if step >= self.total_steps and not self.config.validation.enable:
+            logger.info(
+                "[Controller] Colocated training reached final step %s/%s; "
+                "skipping final weight sync and stopping rollout locally.",
+                step,
+                self.total_steps,
+            )
+            self.rollout.shutdown_signal.set()
+            self.rollout.shutdown_mp_signal.set()
+            return False
+
         # All replicas have been reduced, trigger allreduce
         need_sync_weight = step % self.config.train.sync_weight_interval == 0
         # If the current step is the last step, we need to sync weight always to act as ending signal

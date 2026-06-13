@@ -173,6 +173,16 @@ class APIClient(object):
             raise e
 
     def unregister(self, replica_name: str):
+        # ``unregister`` is called on the shutdown path (handle_shutdown).
+        # ``requests.post`` with no ``timeout`` blocks forever when the
+        # controller is wedged (e.g. event loop frozen by another bug),
+        # which then deadlocks worker teardown -- the worker process
+        # never reaches ``destroy_distributed()`` and its UCXX server
+        # threads keep polling until the orchestrator hard-kills the
+        # job.  Cap the per-attempt time and retry only a few times:
+        # best-effort cleanup, not a correctness requirement (the
+        # controller will GC the replica via heartbeat timeout if this
+        # fails).
         try:
             make_request_with_retry(
                 partial(
@@ -183,12 +193,19 @@ class APIClient(object):
                     timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
                 ),
                 self.get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX),
-                max_retries=self.max_retries,
+                max_retries=3,
             )
         except Exception as e:
             logger.error(f"Failed to unregister from controller: {e}")
 
     def post_heartbeat(self, replica_name: str):
+        # Per-attempt timeout matters here too: the heartbeat daemon
+        # blocks shutdown_signal polling while inside ``requests.post``,
+        # so an unresponsive controller would keep the heartbeat
+        # process alive (and ``heartbeat_thread.join()`` hung) for the
+        # full configurable retry chain.  10s is generous relative to a
+        # healthy controller round-trip while still ensuring the daemon
+        # checks shutdown_signal at most every ~10s.
         try:
             make_request_with_retry(
                 partial(

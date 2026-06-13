@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 import threading
 import uuid
@@ -43,12 +44,14 @@ from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
     RolloutToRolloutBroadcastCommand,
+    StopCommand,
     Command,
 )
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
+    bounded_drain_or_abort,
     nccl_broadcast,
     nccl_group_start,
     nccl_group_end,
@@ -88,6 +91,12 @@ from cosmos_rl.rollout.worker.weight_sync import (
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
 """
+
+
+# Bounded teardown drain of ``inference_stream``.  Backstop in case an
+# in-flight NCCL op (e.g. the WeightSyncThread R2R broadcast) wedges the device;
+# on timeout we abort all NCCL communicators so teardown always completes.
+_TEARDOWN_DRAIN_TIMEOUT_S = float(os.getenv("COSMOS_TEARDOWN_DRAIN_TIMEOUT_S", "15.0"))
 
 
 class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
@@ -352,16 +361,45 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.shutdown_signal.set()
             if not self.shutdown_mp_signal.is_set():
                 self.shutdown_mp_signal.set()
+            # All joins below MUST be bounded.  Worker teardown blocking
+            # on an unresponsive controller or a wedged daemon would
+            # otherwise turn into multi-minute scheduler-timeout hangs
+            # (e.g. ``unregister_from_controller`` -> ``requests.post``
+            # to a wedged controller keeping the worker alive long
+            # enough that the orchestrator hard-kills the whole job).
+            # Worst-case delay caused by a missed join is bounded: the
+            # background/heartbeat daemons are ``daemon=True`` /
+            # ``mp.Process(daemon=True)`` with PR_SET_PDEATHSIG, so the
+            # OS will reap them when the worker process exits.
+            _JOIN_TIMEOUT_S = 15.0
+            logger.info(
+                "[Teardown] %s: handle_shutdown joining daemons "
+                "(background/teacher/heartbeat)",
+                self.replica_name,
+            )
             if self.background_thread is not None:
                 logger.info("[Rollout] handle_shutdown: joining command-query thread")
-                self.background_thread.join()
+                self.background_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.background_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] background_thread did not exit within "
+                        "%.1fs of shutdown_signal; continuing teardown "
+                        "(daemon will be reaped on process exit)",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.background_thread = None
                 logger.info("[Rollout] handle_shutdown: command-query thread joined")
             if self.teacher_interact_thread is not None:
                 logger.info(
                     "[Rollout] handle_shutdown: joining teacher-interact thread"
                 )
-                self.teacher_interact_thread.join()
+                self.teacher_interact_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.teacher_interact_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] teacher_interact_thread did not exit "
+                        "within %.1fs of shutdown_signal; continuing teardown",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.teacher_interact_thread = None
                 logger.info("[Rollout] handle_shutdown: teacher-interact thread joined")
             if self.scheduler is not None:
@@ -370,12 +408,26 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
             if self.heartbeat_thread is not None:
                 logger.info("[Rollout] handle_shutdown: joining heartbeat process")
-                self.heartbeat_thread.join()
+                self.heartbeat_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.heartbeat_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] heartbeat process did not exit within "
+                        "%.1fs of shutdown_signal; continuing teardown "
+                        "(PR_SET_PDEATHSIG will reap it on process exit)",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.heartbeat_thread = None
                 logger.info("[Rollout] handle_shutdown: heartbeat process joined")
-            logger.info("[Rollout] handle_shutdown: unregistering from controller")
+            logger.info(
+                "[Teardown] %s: handle_shutdown daemons joined; "
+                "calling unregister_from_controller",
+                self.replica_name,
+            )
             self.unregister_from_controller()
-            logger.info("[Rollout] handle_shutdown: complete")
+            logger.info(
+                "[Teardown] %s: unregister_from_controller returned",
+                self.replica_name,
+            )
 
     def get_underlying_model(self):
         """
@@ -383,8 +435,41 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         return self.rollout.get_underlying_model()
 
+    @RolloutWorkerBase.register_rollout_command_handler(StopCommand)
+    def handle_stop(self, command: StopCommand):
+        """Controller-authoritative end-of-job stop (non-validation runs).
+
+        The controller publishes STOP once every policy replica has
+        unregistered (its main loop finished, so no policy will read this
+        rollout's output again).  Setting the shutdown signals here breaks
+        ``main_loop`` out of *any* branch -- normal drain, an empty queue,
+        or the weight-version-gate spin that no longer clears once weight
+        syncs have stopped (the residual hang the prompt-stream ``is_end``
+        could not reach).  No NCCL collective is involved, and teardown's
+        bounded ``cleanup_ucxx`` still lets any in-flight output read drain.
+        """
+        logger.info(
+            "[Rollout] Received STOP from controller for %s; setting shutdown signal.",
+            self.replica_name,
+        )
+        self.shutdown_signal.set()
+        self.shutdown_mp_signal.set()
+
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
+        # If this replica is already draining (prompt source exhausted),
+        # skip the NCCL mesh rebuild -- entering the collective would
+        # deadlock the peers that join while we exit shortly without
+        # them.  The controller-side filter on ``status.ended`` is the
+        # primary defence; this guard handles the race where a
+        # BuildMeshCommand was queued before that filter took effect.
+        if self.state.prompt_consume_end():
+            logger.info(
+                "[Rollout] Skipping BuildMeshCommand for %s: prompt "
+                "source exhausted, this replica is draining.",
+                self.replica_name,
+            )
+            return
         logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
 
         replica_name_to_rank = build_mesh_command.replica_name_to_rank
@@ -1437,6 +1522,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"[Rollout] Failed in query commands from controller for replica {self.replica_name}\n: {str(e)}"
                 )
 
+            stop_received = False
             for instruction in commands:
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
@@ -1461,6 +1547,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     continue
 
                 self._command_queue.put(command)
+                if isinstance(command, StopCommand):
+                    stop_received = True
+                    break
+
+            if stop_received:
+                break
 
     def teacher_interact_loop(self):
         """Background task to interact with teacher model for distillation"""
@@ -1762,13 +1854,121 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         try:
             self._main_loop_impl()
         finally:
+            # Stop the UCXX output server *before* any NCCL teardown/abort.
+            # The rollout backend (e.g. rl-gym's ModularRolloutWorker via
+            # UCXXRolloutMixin) serves this replica's generated output to the
+            # trainer over a UCXX server.  cleanup_ucxx() is otherwise never
+            # invoked, so at end-of-data a trainer can still be pulling the
+            # final output when teardown begins -- and that concurrent UCXX
+            # activity wedges ncclCommAbort on the straggler.  stop_server()
+            # sets the shutdown flag and bounded-joins its threads (in-flight
+            # reads finish first), so this is a graceful close, not a kill.
+            self._cleanup_payload_server()
             wst = getattr(self, "_weight_sync_thread", None)
             if wst is not None:
+                logger.info(
+                    "[Teardown] %s: stopping WeightSyncThread", self.replica_name
+                )
+                _t_wst = time.monotonic()
                 wst.stop()
+                logger.info(
+                    "[Teardown] %s: WeightSyncThread.stop() returned in %.2fs "
+                    "(thread_alive=%s)",
+                    self.replica_name,
+                    time.monotonic() - _t_wst,
+                    wst._thread.is_alive(),
+                )
+
+    def _cleanup_payload_server(self) -> None:
+        """Best-effort, bounded shutdown of the rollout's UCXX output server.
+
+        Invoked at the very start of teardown (before NCCL abort).  The server
+        lives on the rollout backend (``self.rollout``) when it composes
+        ``UCXXRolloutMixin``; guarded with ``getattr`` so backends without a
+        UCXX server are unaffected.
+        """
+        rollout_engine = getattr(self, "rollout", None)
+        cleanup = getattr(rollout_engine, "cleanup_ucxx", None)
+        if not callable(cleanup):
+            return
+        logger.info(
+            "[Teardown] %s: stopping UCXX output server (cleanup_ucxx)",
+            self.replica_name,
+        )
+        _t0 = time.monotonic()
+        try:
+            cleanup()
+        except Exception:
+            logger.exception(
+                "[Teardown] %s: cleanup_ucxx raised (continuing teardown)",
+                self.replica_name,
+            )
+        logger.info(
+            "[Teardown] %s: UCXX output server stopped in %.2fs",
+            self.replica_name,
+            time.monotonic() - _t0,
+        )
+
+    # Main-loop branch counters and prompt-version rejection logging.
+    _MAINLOOP_LOG_INTERVAL_S = 1.0
+    _VERSION_FAIL_LOG_INTERVAL_S = 5.0
+
+    def _maybe_emit_mainloop_summary(self, now):
+        """Emit a bounded summary of which branch the loop took.
+
+        This is the *only* aggregated counter we keep in the rollout main
+        loop.  We do not log per-iteration -- a hot-spinning loop can
+        easily produce thousands of ``generate start`` lines per second per
+        worker. Instead we tally
+        branch hits in ``_mainloop_branch_counts`` and flush once per
+        ``_MAINLOOP_LOG_INTERVAL_S`` (default 1s) so a stuck rollout
+        produces a handful of lines/sec, not millions.
+        """
+        if now - self._mainloop_log_last_ts < self._MAINLOOP_LOG_INTERVAL_S:
+            return
+        c = self._mainloop_branch_counts
+        # Skip emission when the previous window was completely idle
+        # (loop-pump was blocked elsewhere).
+        total = sum(c.values())
+        if total == 0:
+            self._mainloop_log_last_ts = now
+            return
+        logger.debug(
+            "[Rollout main_loop %.1fs] rank=%d empty_q=%d consume_end=%d "
+            "version_fail=%d gen_attempted=%d gen_succeeded=%d "
+            "fetched_nonempty=%d weight_unsynced=%d",
+            self._MAINLOOP_LOG_INTERVAL_S,
+            self.global_rank,
+            c["empty_q"],
+            c["consume_end"],
+            c["version_fail"],
+            c["gen_attempted"],
+            c["gen_succeeded"],
+            c["fetched_nonempty"],
+            c["weight_unsynced"],
+        )
+        for k in c:
+            c[k] = 0
+        self._mainloop_log_last_ts = now
 
     def _main_loop_impl(self):
         """Core main loop extracted for clean WST lifecycle management."""
         async_mode = get_async_r2r_sync_mode(self)
+
+        # Per-worker branch counters for the legacy sync rollout path. The
+        # async rollout path uses ``stream_generation_step`` instead.
+        self._mainloop_branch_counts = {
+            "empty_q": 0,
+            "consume_end": 0,
+            "version_fail": 0,
+            "gen_attempted": 0,
+            "gen_succeeded": 0,
+            "fetched_nonempty": 0,
+            "weight_unsynced": 0,
+        }
+        self._mainloop_log_last_ts = time.time()
+        self._version_fail_last_log_ts = 0.0
+
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
 
@@ -1780,7 +1980,22 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.validation_flag.is_set():
                 self.do_validation()
 
+            now = time.time()
+            self._maybe_emit_mainloop_summary(now)
+
+            # Multi-rank coordinated shutdown is driven by the controller's
+            # explicit ``StopCommand`` (consumed above via ``consume_command``
+            # -> ``handle_stop``).  Because ``consume_one_command`` broadcasts
+            # the dequeued command across ranks, every rank sets the shutdown
+            # signal at the same collective call and leaves ``main_loop`` in
+            # lockstep -- so no rank strands a peer in a later collective.
+            # This replaces the former Option-C per-iteration drain vote (a
+            # CPU all-reduce gated on ``prompt_fetch_end``), which existed
+            # only because the previous stop signal rode on the racy R2R
+            # weight-sync broadcast.
+
             if not self.state.weight_synced():
+                self._mainloop_branch_counts["weight_unsynced"] += 1
                 continue
 
             _, is_validation, _, _ = self.report_rollouts()
@@ -1793,11 +2008,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 continue
 
             if not self.state.prompt_fetch_end():
+                pre_qsize = self._prompt_queue.qsize()
                 no_more_prompts = self.request_new_prompts(
                     self.batch_size,
                     self._prompt_queue,
                     rank_in_mesh=self.rank_in_rollout_repicas,
                 )
+                if self._prompt_queue.qsize() > pre_qsize:
+                    self._mainloop_branch_counts["fetched_nonempty"] += 1
                 if no_more_prompts:
                     logger.info(
                         f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
@@ -1812,23 +2030,79 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 assert self._prompt_queue.empty() and self.state.prompt_fetch_end(), (
                     "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 )
+                self._mainloop_branch_counts["consume_end"] += 1
+                # Mirror the async-rollout generation path
+                # (``stream_generation_step``, used when
+                # ``config.rollout.mode == "async"`` and the backend is
+                # in ``SUPPORT_ASYNC_BACKEND``): that method already
+                # calls ``self.shutdown_signal.set()`` at the analogous
+                # ``prompt_consume_end()`` site.  Without setting it
+                # here too, the default sync path leaves worker threads
+                # spinning on this branch waiting for an external
+                # ``shutdown`` broadcast that may never arrive (e.g.
+                # when the controller has already crashed).
+                #
+                # Scope the self-terminate to single-process workers
+                # (``world_size == 1``).  In a multi-rank worker the
+                # final prompt batch is scattered round-robin and
+                # *unevenly* across DP ranks, so ranks reach
+                # ``consume_end`` on different iterations.  If the first
+                # rank to drain set ``shutdown_signal`` and left
+                # ``main_loop`` here, it would strand its peers in the
+                # next cross-rank collective -> deadlock.  Multi-rank
+                # workers therefore keep the proven controller-broadcast
+                # lockstep shutdown; only single-process workers (the
+                # prefetch / bench regime that motivated this) take the
+                # self-terminate fast path.
+                if self.parallel_dims.world_size == 1:
+                    self.shutdown_signal.set()
                 continue
             elif self._prompt_queue.empty():
+                self._mainloop_branch_counts["empty_q"] += 1
                 continue
             else:
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
+                allowed = self.config.train.train_policy.allowed_outdated_steps
+                ceiling = self.current_weight_version + allowed
                 is_valid_prompt_for_current_weight_version = (
-                    first_payload.weight_version
-                    <= self.current_weight_version
-                    + self.config.train.train_policy.allowed_outdated_steps
+                    first_payload.weight_version <= ceiling
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
+                    self._mainloop_branch_counts["version_fail"] += 1
+                    # Explain prompt-version rejections at most once per 5s
+                    # per worker.
+                    if (
+                        now - self._version_fail_last_log_ts
+                        >= self._VERSION_FAIL_LOG_INTERVAL_S
+                    ):
+                        self._version_fail_last_log_ts = now
+                        logger.info(
+                            "[Rollout rank=%d] prompt rejected: "
+                            "prompt.weight_version=%s current_weight_version=%s "
+                            "allowed_outdated=%d ceiling=%s; head-of-queue "
+                            "will be re-checked until current_weight_version advances",
+                            self.global_rank,
+                            first_payload.weight_version,
+                            self.current_weight_version,
+                            allowed,
+                            ceiling,
+                        )
+                    # Back off before re-checking the head-of-queue
+                    # prompt.  The rejection clears as soon as the next
+                    # P->R broadcast advances ``current_weight_version``
+                    # (typically every few seconds), so without a sleep
+                    # this branch hot-spins.  50ms wakes well within
+                    # the broadcast interval and is invisible to
+                    # throughput.
+                    time.sleep(0.05)
                     continue
 
+                self._mainloop_branch_counts["gen_attempted"] += 1
                 self.one_step_generation()
+                self._mainloop_branch_counts["gen_succeeded"] += 1
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
@@ -1939,6 +2213,24 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Perform one step of rollout generation.
         Returns the number of valid payloads generated.
         """
+        generation_start_ts = time.time()
+        try:
+            _peek_wv = (
+                self._prompt_queue.queue[0][0].weight_version
+                if not self._prompt_queue.empty()
+                else None
+            )
+        except Exception:
+            _peek_wv = None
+        # Paired with the matching exit log below for per-call latency
+        # measurements when DEBUG logging is enabled.
+        logger.debug(
+            "[one_step_generation entry] rank=%d cur_wv=%s peek_prompt_wv=%s",
+            self.global_rank,
+            self.current_weight_version,
+            _peek_wv,
+        )
+
         payloads_list: List[RLPayload] = self._prompt_queue.get()
 
         rollout_results: List[RolloutResult] = self._call_rollout_generation(
@@ -1950,6 +2242,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
 
         if len(rollout_results) == 0:
+            logger.debug(
+                "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
+                "batch=%d produced=0 returned_false=True",
+                self.global_rank,
+                (time.time() - generation_start_ts) * 1000.0,
+                len(payloads_list),
+            )
             return False
 
         assert len(rollout_results) == len(payloads_list), (
@@ -1958,9 +2257,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-        return self._filter_valid_rollout_results_and_report(
+        result = self._filter_valid_rollout_results_and_report(
             rollout_results, payloads_list
         )
+        logger.debug(
+            "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
+            "batch=%d produced=%d returned_false=False",
+            self.global_rank,
+            (time.time() - generation_start_ts) * 1000.0,
+            len(payloads_list),
+            len(rollout_results),
+        )
+        return result
 
     def _stream_generation_feed_prompts(
         self,
@@ -2088,7 +2396,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if self.state.prompt_consume_end():
             # Send end signal to the controller
             # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
-            self.shutdown_signal.set()
+            #
+            # Scope the self-terminate to single-process workers
+            # (``world_size == 1``); see the matching guard in the
+            # synchronous ``_main_loop_impl`` consume-end branch.  A
+            # multi-rank async worker would otherwise strand its peers
+            # in the next cross-rank collective when the first rank to
+            # exhaust its (unevenly scattered) prompt share leaves
+            # ahead of the others.  Multi-rank workers shut down via
+            # the controller stop-broadcast instead.
+            if self.parallel_dims.world_size == 1:
+                self.shutdown_signal.set()
             if self.global_rank == 0:
                 self.send_end_signal()
 
@@ -2236,12 +2554,23 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.teacher_interact_thread.start()
 
         self.main_loop()
+        # [Teardown trace] These calls are otherwise silent; emitting a
+        # breadcrumb before/after each one means the last line in a wedged
+        # worker's log names the exact blocking call (e.g. a hung
+        # inference_stream.synchronize() from a cross-replica NCCL teardown
+        # race) instead of an un-attributable silent gap before unregister.
         logger.info(
-            "[Rollout] work: main_loop returned, synchronizing inference stream"
+            "[Teardown] %s: main_loop returned; draining inference_stream",
+            self.replica_name,
         )
-        self.inference_stream.synchronize()
-        logger.info(
-            "[Rollout] work: inference stream synchronized, calling handle_shutdown"
+        # Synchronous-path backstop: in async_r2r_sync=disabled there is no
+        # WeightSyncThread, so R2R/P2R run on inference_stream; an orphaned
+        # collective here is drained-or-aborted the same way.  Quiet on healthy
+        # runs now that the controller waits for rollout checkout.
+        bounded_drain_or_abort(
+            self.inference_stream,
+            _TEARDOWN_DRAIN_TIMEOUT_S,
+            f"inference_stream[{self.replica_name}]",
         )
         self.handle_shutdown()
-        logger.info("[Rollout] work: handle_shutdown returned")
+        logger.info("[Teardown] %s: work() returning", self.replica_name)

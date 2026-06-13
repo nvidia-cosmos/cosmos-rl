@@ -27,17 +27,15 @@ from __future__ import annotations
 
 import glob
 import os
+import queue
 import threading
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Callable
-import queue
 from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
 
 import torch
-from torch.cuda import Stream
-from torch.distributed import ReduceOp
-
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.pynccl_wrapper import (
     NCCLLibrary,
     buffer_type,
@@ -48,8 +46,8 @@ from cosmos_rl.utils.pynccl_wrapper import (
     ncclResultEnum,
     ncclUniqueId,
 )
-
-from cosmos_rl.utils.logging import logger
+from torch.cuda import Stream
+from torch.distributed import ReduceOp
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +122,11 @@ class _CommunicatorRegistry:
         """Remove and return metadata for *idx* (or sentinel tuple if absent)."""
         with self._lock:
             return self._store.pop(idx, None)
+
+    def all_indices(self) -> list[int]:
+        """Return a snapshot of all currently registered communicator handles."""
+        with self._lock:
+            return list(self._store.keys())
 
 
 _COMM_REGISTRY = _CommunicatorRegistry()
@@ -507,6 +510,73 @@ def nccl_abort(comm_idx: int):
         logger.warning(f"[NCCL] Aborted communicator idx={comm_idx}")
 
 
+def nccl_abort_all() -> int:
+    """Abort every registered communicator (best-effort).
+
+    Intended for teardown: ``ncclCommAbort`` forces any in-flight collective
+    (e.g. a grouped R2R broadcast whose peer already departed) to stop spinning
+    on the device, so that subsequent stream syncs and ``destroy_distributed``
+    cannot wedge.  Returns the number of communicators aborted.
+    """
+    indices = _COMM_REGISTRY.all_indices()
+    for cid in indices:
+        try:
+            nccl_abort(cid)
+        except Exception:
+            # Best-effort: already in a teardown/error path.
+            pass
+    if indices:
+        logger.warning("[NCCL] nccl_abort_all aborted %d communicator(s)", len(indices))
+    return len(indices)
+
+
+def bounded_drain_or_abort(stream, timeout_s: float, context: str) -> bool:
+    """Bounded-wait for in-flight GPU work on ``stream`` during teardown.
+
+    Records an event on ``stream`` and polls it until it completes or
+    ``timeout_s`` elapses.  ``pynccl`` only bounds the *enqueue* phase of a
+    collective (``run_task`` stops polling after ``ncclSuccess``), so a grouped
+    R2R broadcast whose peer has departed keeps spinning on the device with no
+    watchdog -- which would otherwise wedge the subsequent stream sync and
+    ``destroy_distributed``.
+
+    With coordinated controller shutdown in place this timeout should never fire
+    on a healthy run; reaching it means a peer genuinely vanished mid-collective
+    (crash / OOM / network), so we abort all NCCL communicators (best-effort) to
+    force teardown to completion.  Returns ``True`` if the stream drained
+    cleanly, ``False`` if it timed out and aborted.  ``context`` is a short
+    label included in logs to identify the call site.
+    """
+    try:
+        done = torch.cuda.Event()
+        done.record(stream)
+    except Exception:
+        # No CUDA context / stream available (e.g. CPU-only tests).
+        return True
+    t0 = time.monotonic()
+    deadline = t0 + timeout_s
+    while not done.query():
+        if time.monotonic() > deadline:
+            logger.warning(
+                "[ABNORMAL teardown] %s: in-flight GPU work exceeded %.1fs; a peer "
+                "likely departed unexpectedly mid-collective (crash/OOM/network) -- "
+                "this is NOT the normal coordinated-exit path.  Aborting NCCL "
+                "communicators to unblock teardown.",
+                context,
+                timeout_s,
+            )
+            try:
+                nccl_abort_all()
+            except Exception:
+                pass
+            return False
+        time.sleep(0.01)
+    logger.debug(
+        "[Teardown] %s: stream drained in %.2fs", context, time.monotonic() - t0
+    )
+    return True
+
+
 # Collective wrapper functions
 
 
@@ -721,6 +791,8 @@ __all__ = [
     "create_nccl_uid",
     "create_nccl_comm",
     "nccl_abort",
+    "nccl_abort_all",
+    "bounded_drain_or_abort",
     "get_nccl_comm_nranks",
     # collectives
     "nccl_broadcast",

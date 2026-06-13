@@ -32,6 +32,7 @@ class CommandType(StrEnum):
     POLICY_TO_ROLLOUT_UNICAST = "POLICY_TO_ROLLOUT_UNICAST"
     ROLLOUT_TO_ROLLOUT_BROADCAST = "ROLLOUT_TO_ROLLOUT_BROADCAST"
     DATA_FETCH = "DATA_FETCH"
+    TRAINING_COMPLETE = "TRAINING_COMPLETE"
     ALL_REDUCE = "ALL_REDUCE"
     STOP = "STOP"
     VALIDATE = "VALIDATE"
@@ -80,6 +81,10 @@ class Command(ABC):
             sub_cls = RolloutToRolloutBroadcastCommand
         elif dict_v["command_type"] == CommandType.DATA_FETCH:
             sub_cls = DataFetchCommand
+        elif dict_v["command_type"] == CommandType.TRAINING_COMPLETE:
+            sub_cls = TrainingCompleteCommand
+        elif dict_v["command_type"] == CommandType.STOP:
+            sub_cls = StopCommand
 
         if sub_cls is None:
             raise ValueError(f"Unknown command type: {dict_v['command_type']}")
@@ -379,6 +384,50 @@ class RolloutToRolloutBroadcastCommand(Command):
         return cls(**dict_v)
 
 
+class StopCommand(Command):
+    """Explicit, NCCL-free end-of-job signal for a rollout replica.
+
+    Published over the redis command channel (``publish_command``) -- the
+    same path as every other dispatcher command -- so it is delivered to a
+    rollout via ``query_command_from_controller`` -> ``_command_queue`` ->
+    ``consume_command`` at the top of ``main_loop``.  Crucially this reaches
+    a rollout *regardless of whether it is fetching prompts*: a rank wedged
+    on the weight-version gate (head-of-queue prompt tagged at a weight
+    version that will never arrive once training is finished) never
+    re-fetches and therefore never observes the prompt-stream ``is_end`` --
+    STOP is the only signal that unblocks it.
+
+    Unlike the ``RolloutToRolloutBroadcastCommand`` stop (which rides on a
+    P2R->R2R weight-sync NCCL collective and is suppressed on the final
+    non-validation step), STOP triggers no collective, so it cannot orphan
+    an in-flight P2R/R2R recv or wedge ``ncclCommAbort``.
+
+    ``consume_one_command`` broadcasts the dequeued command across ranks via
+    ``broadcast_object_cpu``, so all ranks of a multi-rank worker receive
+    STOP at the same collective call and leave ``main_loop`` in lockstep --
+    so a multi-rank worker needs no separate drain-vote collective to exit
+    together.
+    """
+
+    def __init__(self, replica_name: str, **kwargs):
+        kwargs["scope"] = CommandScope.GLOBAL
+        kwargs["command_type"] = CommandType.STOP
+        super().__init__(**kwargs)
+        self.replica_name = replica_name
+
+    replica_name: str
+
+    @classmethod
+    def trigger(cls, replicas: List[Replica], redis_handler: RedisStreamHandler):
+        for replica in replicas:
+            cmd = cls(replica.name)
+            redis_handler.publish_command(cmd.pack(), replica.name)
+
+    @classmethod
+    def from_dict(cls, dict_v: Dict):
+        return cls(**dict_v)
+
+
 class DataFetchCommand(Command):
     """
     Used to fetch data from the controller.
@@ -455,6 +504,82 @@ class DataFetchCommand(Command):
         cmd = cls(
             replica.name,
             items_count,
+            global_step,
+            total_steps,
+            remain_samples_num,
+            do_save,
+            replica.sub_profiler_config.do_profile,
+            replica.sub_profiler_config.active_steps,
+            replica.sub_profiler_config.rank_filter,
+            replica.sub_profiler_config.record_shape,
+            replica.sub_profiler_config.profile_memory,
+            replica.sub_profiler_config.with_stack,
+            replica.sub_profiler_config.with_modules,
+        )
+        redis_handler.publish_command(cmd.pack(), replica.name)
+
+    def replica_should_stop(self):
+        if self.global_step is not None and self.total_steps is not None:
+            return self.global_step >= self.total_steps
+        return False
+
+    @classmethod
+    def from_dict(cls, dict_v: Dict):
+        return cls(**dict_v)
+
+
+class TrainingCompleteCommand(Command):
+    """Explicit end-of-training signal for the policy at genuine end-of-data.
+
+    Replaces the former ``is_fake_last_cmd`` ``DataFetchCommand`` with
+    ``items_count=0``.  The policy skips ``step_training``, sends ``train_ack``,
+    and exits when ``global_step >= total_steps``.
+    """
+
+    def __init__(
+        self,
+        replica_name: str,
+        global_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        do_save: bool = False,
+        do_profile: Optional[bool] = None,
+        active_steps: Optional[int] = None,
+        rank_filter: Optional[List[int]] = None,
+        record_shape: Optional[bool] = None,
+        profile_memory: Optional[bool] = None,
+        with_stack: Optional[bool] = None,
+        with_modules: Optional[bool] = None,
+        **kwargs,
+    ):
+        kwargs["scope"] = CommandScope.LOCAL
+        kwargs["command_type"] = CommandType.TRAINING_COMPLETE
+        super().__init__(**kwargs)
+        self.replica_name = replica_name
+        self.global_step = global_step
+        self.total_steps = total_steps
+        self.remain_samples_num = remain_samples_num
+        self.do_save = do_save
+        self.do_profile = do_profile
+        self.active_steps = active_steps
+        self.rank_filter = rank_filter
+        self.record_shape = record_shape
+        self.profile_memory = profile_memory
+        self.with_stack = with_stack
+        self.with_modules = with_modules
+
+    @classmethod
+    def trigger(
+        cls,
+        replica: Replica,
+        global_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        do_save: bool,
+        redis_handler: RedisStreamHandler,
+    ):
+        cmd = cls(
+            replica.name,
             global_step,
             total_steps,
             remain_samples_num,

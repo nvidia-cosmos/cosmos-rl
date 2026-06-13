@@ -83,11 +83,33 @@ def test_cosmos_hf_model(model, inputs):
         return logits[:, -1, :]
 
 
+_LOGITS_RTOL = 2e-2
+_LOGITS_ATOL = 2e-2
+
+
 def _logits_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Compare logits; generate() may upcast to float32 while forward stays bf16."""
-    if a.dtype != b.dtype:
-        a, b = a.float(), b.float()
-    return torch.equal(a, b)
+    a, b = a.float(), b.float()
+    # generate() returns float32; forward/cosmos paths stay bf16.  Compare with
+    # bf16-scale tolerance after promotion instead of requiring bitwise equality.
+    return torch.allclose(a, b, rtol=_LOGITS_RTOL, atol=_LOGITS_ATOL)
+
+
+def _logits_mismatch_summary(a: torch.Tensor, b: torch.Tensor) -> str:
+    a_float, b_float = a.detach().float(), b.detach().float()
+    diff = (a_float - b_float).abs()
+    if diff.numel() == 0:
+        return (
+            f"empty logits: a_dtype={a.dtype}, b_dtype={b.dtype}, "
+            f"rtol={_LOGITS_RTOL}, atol={_LOGITS_ATOL}"
+        )
+    max_abs_diff = diff.max().item()
+    mean_abs_diff = diff.mean().item()
+    return (
+        f"max_abs_diff={max_abs_diff:.6g}, mean_abs_diff={mean_abs_diff:.6g}, "
+        f"a_dtype={a.dtype}, b_dtype={b.dtype}, "
+        f"rtol={_LOGITS_RTOL}, atol={_LOGITS_ATOL}"
+    )
 
 
 class TestHFModel(unittest.TestCase):
@@ -325,9 +347,13 @@ class TestHFModel(unittest.TestCase):
                     cosmos_hf_model, copy.deepcopy(inputs)
                 )
                 assert _logits_equal(hf_generate_logits, hf_forward_logits), (
+                    "hf generate != hf forward: "
+                    f"{_logits_mismatch_summary(hf_generate_logits, hf_forward_logits)}\n"
                     f"{hf_generate_logits} != {hf_forward_logits}"
                 )
                 assert _logits_equal(hf_generate_logits, cosmos_hf_logits), (
+                    "hf generate != cosmos hf: "
+                    f"{_logits_mismatch_summary(hf_generate_logits, cosmos_hf_logits)}\n"
                     f"{hf_generate_logits} != {cosmos_hf_logits}"
                 )
 

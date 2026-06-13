@@ -38,6 +38,20 @@ COSMOS_HEARTBEAT_SEND_INTERVAL = int(
 COSMOS_CONTROL_HTTP_TIMEOUT = float(os.environ.get("COSMOS_CONTROL_HTTP_TIMEOUT", "30"))
 
 COSMOS_ROLLOUT_SCAN_INTERVAL = int(os.environ.get("COSMOS_ROLLOUT_SCAN_INTERVAL", "10"))
+# Opt-in escalation: when truthy, the controller's replica-status monitor
+# initiates a controller-wide shutdown (SIGTERM to self -> FastAPI lifespan
+# shutdown) once every policy replica has been marked dead by the heartbeat
+# timeout.  Default is off because cosmos-rl supports dynamic replica
+# scaling (scale-to-zero, rolling restart) where ``len(policy_replicas)
+# == 0`` is a legitimate transient state and a fatal shutdown would be
+# wrong.  Deployments without auto-respawn -- where one trainer death
+# means the whole job is lost -- can set this to ``1`` to free the
+# allocation immediately instead of waiting for the wall-clock timeout.
+# See ``cosmos_rl/dispatcher/run_web_panel.py::monitor_replica_status``
+# for the escalation logic.
+COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS = os.environ.get(
+    "COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS", "0"
+).lower() in ("1", "true", "yes")
 COSMOS_ROLLOUT_STEP_INTERVAL = int(
     os.environ.get("COSMOS_ROLLOUT_STEP_INTERVAL", "100")
 )
