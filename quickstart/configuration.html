@@ -4309,7 +4309,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="260"><ul class="simple">
+<tr class="row-even"><td rowspan="264"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -5028,6 +5028,20 @@
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="4"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>coalesce_weight_sync</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Coalesce Weight Sync</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>If True, the controller coalesces (drops) redundant P2R+R2R weight-sync rounds while a round is still in flight to the rollouts (depth-1 drop-to-latest): it re-issues at the latest step only once the rollouts have adopted the previously staged version. Reduces wasted weight transfers when the trainer outruns rollout drain. Only active for off-policy runs (allowed_outdated_steps &gt; 0); ignored for on-policy, which requires step-exact weight sync.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>deterministic</p></li>
