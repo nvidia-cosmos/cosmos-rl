@@ -61,6 +61,7 @@ from cosmos_rl.utils.constant import (
 )
 from cosmos_rl.patch.vllm_patch import (
     apply_vllm_gather_logprobs_patch,
+    apply_flashinfer_isolated_rng_patch,
 )
 
 
@@ -244,6 +245,10 @@ class vLLMRollout(RolloutBase):
         if self.config.distillation.top_k > 0:
             # Pacth vllm to simplify the prompt_logprobs handling and avoid detokenization
             apply_vllm_gather_logprobs_patch()
+            # Revert flashinfer PR #2295 so rollout sampling RNG is isolated from
+            # the training-loop global CUDA RNG (required for stable OPD; see
+            # apply_flashinfer_isolated_rng_patch docstring).
+            apply_flashinfer_isolated_rng_patch()
         if not self._engine_initialized:
             trust_remote_code = True  # set trust remote code default to True.
 
