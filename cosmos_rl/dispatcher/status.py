@@ -322,6 +322,9 @@ class PolicyStatusManager:
 
         # For rank specific data dispatch
         self.rollout_buffer_per_rank: List[Queue] = []
+        self.rollout_status_manager = None
+        self._nsys_global_started = False
+        self._nsys_global_stopped = False
 
         # --- Weight-sync coalescing (depth-1 drop-to-latest) state ---
         # ``_weight_last_staged_step``: weight_step of the most recent issued
@@ -1693,6 +1696,16 @@ class PolicyStatusManager:
                         f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
                     )
 
+            _, stop_step = self._nsys_global_window_steps()
+            if (
+                self.config.profiler.enable_nsys
+                and self.config.profiler.nsys_capture_scope == "global_step"
+                and step == stop_step
+                and not self._nsys_global_stopped
+            ):
+                self._trigger_rollout_profile_control("stop", step)
+                self._nsys_global_stopped = True
+
             # All replicas have been reduced, trigger weight sync
             any_loaded_replica = None
             sorted_replicas = sorted(
@@ -1858,6 +1871,45 @@ class PolicyStatusManager:
         # Only `do_save` when checkpointing is enabled
         return do_save and self.config.train.ckpt.enable_checkpoint
 
+    def _nsys_global_window_steps(self) -> tuple[int, int]:
+        sub_config = self.config.profiler.sub_profiler_config
+        start_step = sub_config.wait_steps + sub_config.warmup_steps + 1
+        stop_step = sub_config.wait_steps + sub_config.warmup_steps + sub_config.active_steps
+        return start_step, stop_step
+
+    def _trigger_rollout_profile_control(self, action: str, global_step: int):
+        if (
+            not self.config.profiler.enable_nsys
+            or self.config.profiler.nsys_capture_scope != "global_step"
+            or self.rollout_status_manager is None
+        ):
+            return
+
+        rollout_replicas = self.rollout_status_manager.get_all_atoms_arrived_replicas()
+        if not rollout_replicas:
+            return
+
+        start_step, stop_step = self._nsys_global_window_steps()
+        label = (
+            "cosmos.nsys.global_step_window "
+            f"start_step={start_step} stop_step={stop_step}"
+        )
+        command.ProfileControlCommand.trigger(
+            replicas=rollout_replicas,
+            action=action,
+            global_step=global_step,
+            total_steps=self.total_steps,
+            label=label,
+            redis_handler=self.redis_handler,
+        )
+        logger.info(
+            "[Controller][Nsight] sent rollout profile %s at global step %s for window [%s, %s]",
+            action,
+            global_step,
+            start_step,
+            stop_step,
+        )
+
     def try_trigger_data_fetch_and_training(self):
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.data_fetcher.activated_val_iter is not None:
@@ -1884,6 +1936,15 @@ class PolicyStatusManager:
 
             # From controller's perspective, the training step is already increased
             self.current_step += 1
+            start_step, _ = self._nsys_global_window_steps()
+            if (
+                self.config.profiler.enable_nsys
+                and self.config.profiler.nsys_capture_scope == "global_step"
+                and self.current_step == start_step
+                and not self._nsys_global_started
+            ):
+                self._trigger_rollout_profile_control("start", self.current_step)
+                self._nsys_global_started = True
 
             # Record the actual rollout count dispatched for this step so
             # ``train_ack`` can later decrement ``samples_on_the_fly`` by the

@@ -33,16 +33,19 @@ from cosmos_rl.utils.model_config import load_model_config
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.constant import (
     COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
     COSMOS_REWARD_DISPATCHER_CONCURRENCY,
 )
+from cosmos_rl.utils.nvtx import nvtx_range
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.rollout_base import RolloutRegistry, RolloutBase
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
+    ProfileControlCommand,
     RolloutToRolloutBroadcastCommand,
     StopCommand,
     Command,
@@ -141,6 +144,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         self.state = State()
         self.is_diffusers = self.config.policy.is_diffusers
+        self.profiler = CosmosProfiler(
+            self.config,
+            parallel_dims,
+            replica_name=self.replica_name,
+            api_client=self.api_client,
+        )
 
         if self.config.rollout.parallelism.dp_shard_size == -1:
             self.config.rollout.parallelism.dp_shard_size = parallel_dims.dp_shard
@@ -532,6 +541,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
         self.shutdown_signal.set()
         self.shutdown_mp_signal.set()
+
+    @RolloutWorkerBase.register_rollout_command_handler(ProfileControlCommand)
+    def execute_profile_control(self, command: ProfileControlCommand):
+        label = (
+            f"{command.label} role=rollout action={command.action} "
+            f"global_step={command.global_step} total_steps={command.total_steps}"
+        )
+        if command.action == "start":
+            self.profiler.start_nsys_capture(label)
+        elif command.action == "stop":
+            self.profiler.stop_nsys(mark_finished=True)
+        else:
+            raise ValueError(f"Unsupported profile control action: {command.action}")
 
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
@@ -1605,6 +1627,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
 
+                if isinstance(command, ProfileControlCommand):
+                    self.execute_profile_control(command)
+                    continue
+
                 wst = getattr(self, "_weight_sync_thread", None)
                 if wst is not None and isinstance(
                     command, PolicyToRolloutUnicastCommand
@@ -1927,12 +1953,28 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             sync_buffer_to_live(self)
 
         kwargs["current_weight_version"] = self.current_weight_version
-        return self.rollout.rollout_generation(**kwargs)
+        payloads = kwargs.get("payloads") or []
+        is_validation = kwargs.get("is_validation", False)
+        use_global_nsys = (
+            self.config.profiler.enable_nsys
+            and self.config.profiler.nsys_capture_scope == "global_step"
+        )
+        if not is_validation and not use_global_nsys:
+            self.profiler.maybe_start_nsys()
+        with nvtx_range(
+            f"cosmos.rollout.rollout_generation replica={self.replica_name} weight_version={self.current_weight_version} batch={len(payloads)}"
+        ):
+            rollout_results = self.rollout.rollout_generation(**kwargs)
+        if not is_validation and not use_global_nsys:
+            self.profiler.step()
+        return rollout_results
 
     @torch.no_grad()
     def main_loop(self):
         async_mode = get_async_r2r_sync_mode(self)
         logger.info("[Rollout] main_loop async_r2r_sync mode: %s", async_mode.value)
+        if self.config.profiler.nsys_capture_scope != "global_step":
+            self.profiler.start()
 
         assert not (
             self._is_async_rollout and async_mode != AsyncR2RSyncMode.DISABLED

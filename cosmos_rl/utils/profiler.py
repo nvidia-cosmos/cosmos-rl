@@ -47,6 +47,11 @@ class CosmosProfiler:
         self.profiler = None
         self.thread_pool = None
         self.api_client = api_client
+        self.enable_nsys = config.profiler.enable_nsys
+        self.nsys_armed = False
+        self.nsys_started = False
+        self.nsys_nvtx_range_pushed = False
+        self.nsys_step_num = 0
         # We do not want the timestamp part of output dir for profiling data.
         output_dir = os.path.dirname(config.train.output_dir)
         self.output_dir = os.path.join(
@@ -86,8 +91,88 @@ class CosmosProfiler:
             self.is_finished = False
         return finished
 
+    def _nsys_rank_enabled(self):
+        return (
+            self.enable_nsys
+            and self.global_rank in self.rank_filter
+            and torch.cuda.is_available()
+        )
+
+    def start_nsys(self):
+        if not self._nsys_rank_enabled():
+            return
+        self._validate_config()
+        if not self.nsys_armed:
+            logger.info(
+                f"[Profiler][Nsight] arm cudaProfilerApi capture for rank: {self.global_rank}"
+            )
+            self.nsys_armed = True
+            self.nsys_started = False
+            self.nsys_nvtx_range_pushed = False
+            self.nsys_step_num = 0
+            self.is_finished = False
+
+    def maybe_start_nsys(self):
+        if not self.nsys_armed or self.nsys_started:
+            return
+        if self.nsys_step_num == self.wait_steps + self.warmup_steps:
+            self.start_nsys_capture()
+
+    def start_nsys_capture(self, label: str | None = None):
+        if not self._nsys_rank_enabled():
+            return
+        self._validate_config()
+        if self.nsys_started:
+            return
+        if not self.nsys_armed:
+            self.nsys_armed = True
+        capture_label = label or "cosmos.nsys.capture"
+        logger.info(
+            f"[Profiler][Nsight] start cudaProfilerApi capture for rank: {self.global_rank}, label: {capture_label}"
+        )
+        torch.cuda.cudart().cudaProfilerStart()
+        try:
+            torch.cuda.nvtx.range_push(
+                f"{capture_label} rank={self.global_rank} replica={self.replica_name}"
+            )
+            self.nsys_nvtx_range_pushed = True
+        except Exception:
+            self.nsys_nvtx_range_pushed = False
+        self.nsys_started = True
+
+    def _step_nsys(self):
+        if not self.nsys_armed:
+            return
+        self.nsys_step_num += 1
+        if (
+            self.nsys_started
+            and self.nsys_step_num
+            >= self.wait_steps + self.warmup_steps + self.active_steps
+        ):
+            self.stop_nsys(mark_finished=True)
+
+    def stop_nsys(self, mark_finished: bool = False):
+        if not self.nsys_armed:
+            return
+        if self.nsys_started:
+            logger.info(
+                f"[Profiler][Nsight] stop cudaProfilerApi capture for rank: {self.global_rank}"
+            )
+            if self.nsys_nvtx_range_pushed:
+                try:
+                    torch.cuda.nvtx.range_pop()
+                except Exception:
+                    pass
+                self.nsys_nvtx_range_pushed = False
+            torch.cuda.cudart().cudaProfilerStop()
+        self.nsys_armed = False
+        self.nsys_started = False
+        if mark_finished:
+            self.is_finished = True
+
     def start(self):
         # start the profiler with static config
+        self.start_nsys()
         if self.enable_profile:
             if self.global_rank not in self.rank_filter:
                 return
@@ -160,6 +245,11 @@ class CosmosProfiler:
                 )
                 self.thread_pool = futures.ThreadPoolExecutor(max_workers=4)
 
+        if self.enable_nsys:
+            self.active_steps = active_steps
+            self.rank_filter = rank_filter
+            self.start_nsys()
+
         if self.check():
             if not self.is_started:
                 logger.info(f"[Profiler] start to trace for rank: {self.global_rank}")
@@ -174,6 +264,7 @@ class CosmosProfiler:
             self.is_started = False
 
     def step(self):
+        self._step_nsys()
         if self.check() and self.is_started:
             logger.debug(
                 f"[Profiler] Step ahead for rank: {self.global_rank}, step_num: {self.profiler.step_num}"

@@ -33,6 +33,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
+from cosmos_rl.utils.nvtx import nvtx_range
 
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.worker import RLPolicyWorker, SFTPolicyWorker
@@ -460,31 +461,19 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                         self.config.train.train_batch_per_replica // self.dp_world_size
                     )
                 ]
-                if (
-                    self.config.profiler.enable_nsys
-                    and self.profiler.global_rank in self.profiler.rank_filter
-                ):
-                    if (
-                        self.train_step
-                        == self.profiler.wait_steps + self.profiler.warmup_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStart()
-                    elif (
-                        self.train_step
-                        == self.profiler.wait_steps
-                        + self.profiler.warmup_steps
-                        + self.profiler.active_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStop()
+                self.profiler.maybe_start_nsys()
 
-                report_data = self.trainer.step_training(
-                    global_batch=global_batch,
-                    total_steps=self.total_steps,
-                    train_step=self.train_step,
-                    save_freq=self._save_freq,
-                    inter_policy_nccl=self.inter_policy_nccl,
-                    data_arrival_event=data_arrival_event,
-                )
+                with nvtx_range(
+                    f"cosmos.policy.multi_sft_step replica={self.replica_name} step={self.train_step}"
+                ):
+                    report_data = self.trainer.step_training(
+                        global_batch=global_batch,
+                        total_steps=self.total_steps,
+                        train_step=self.train_step,
+                        save_freq=self._save_freq,
+                        inter_policy_nccl=self.inter_policy_nccl,
+                        data_arrival_event=data_arrival_event,
+                    )
 
                 self.train_step += 1
 

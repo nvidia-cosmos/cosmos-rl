@@ -34,6 +34,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
+from cosmos_rl.utils.nvtx import nvtx_range
 import cosmos_rl.utils.distributed as dist_utils
 import torch.distributed as dist
 from cosmos_rl.utils.report.wandb_logger import (
@@ -979,32 +980,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_arrival_event.record()
             # global_batch is a list of items from `datapacker.sft_process_sample()`
             for global_batch in self.get_batch_from_dataloader(self.train_data_loader):
-                # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
-                # settings from [profiler.sub_profiler_config] are reused
-                if (
-                    self.config.profiler.enable_nsys
-                    and self.profiler.global_rank in self.profiler.rank_filter
-                ):
-                    if (
-                        self.train_step
-                        == self.profiler.wait_steps + self.profiler.warmup_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStart()
-                    elif (
-                        self.train_step
-                        == self.profiler.wait_steps
-                        + self.profiler.warmup_steps
-                        + self.profiler.active_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStop()
+                self.profiler.maybe_start_nsys()
 
-                report_data = self.trainer.step_training(
-                    global_batch=global_batch,
-                    total_steps=self.total_steps,
-                    train_step=self.train_step,
-                    save_freq=self._save_freq,
-                    data_arrival_event=data_arrival_event,
-                )
+                with nvtx_range(
+                    f"cosmos.policy.sft_step replica={self.replica_name} step={self.train_step}"
+                ):
+                    report_data = self.trainer.step_training(
+                        global_batch=global_batch,
+                        total_steps=self.total_steps,
+                        train_step=self.train_step,
+                        save_freq=self._save_freq,
+                        data_arrival_event=data_arrival_event,
+                    )
                 report_data["train/epoch"] = cur_epoch
 
                 self.train_step += 1

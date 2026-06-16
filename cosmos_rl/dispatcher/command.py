@@ -33,6 +33,7 @@ class CommandType(StrEnum):
     ROLLOUT_TO_ROLLOUT_BROADCAST = "ROLLOUT_TO_ROLLOUT_BROADCAST"
     DATA_FETCH = "DATA_FETCH"
     TRAINING_COMPLETE = "TRAINING_COMPLETE"
+    PROFILE_CONTROL = "PROFILE_CONTROL"
     ALL_REDUCE = "ALL_REDUCE"
     STOP = "STOP"
     VALIDATE = "VALIDATE"
@@ -85,6 +86,8 @@ class Command(ABC):
             sub_cls = TrainingCompleteCommand
         elif dict_v["command_type"] == CommandType.STOP:
             sub_cls = StopCommand
+        elif dict_v["command_type"] == CommandType.PROFILE_CONTROL:
+            sub_cls = ProfileControlCommand
 
         if sub_cls is None:
             raise ValueError(f"Unknown command type: {dict_v['command_type']}")
@@ -613,6 +616,55 @@ class TrainingCompleteCommand(Command):
         if self.global_step is not None and self.total_steps is not None:
             return self.global_step >= self.total_steps
         return False
+
+    @classmethod
+    def from_dict(cls, dict_v: Dict):
+        return cls(**dict_v)
+
+
+class ProfileControlCommand(Command):
+    """
+    Start or stop an external profiler capture window on a replica.
+
+    This is intentionally separate from DataFetchCommand so the controller can
+    synchronize policy and rollout capture windows by global training step.
+    """
+
+    def __init__(
+        self,
+        action: str,
+        global_step: int,
+        total_steps: int,
+        label: str,
+        **kwargs,
+    ):
+        kwargs["scope"] = CommandScope.GLOBAL
+        kwargs["command_type"] = CommandType.PROFILE_CONTROL
+        super().__init__(**kwargs)
+        self.action = action
+        self.global_step = global_step
+        self.total_steps = total_steps
+        self.label = label
+
+    action: str
+    global_step: int
+    total_steps: int
+    label: str
+
+    @classmethod
+    def trigger(
+        cls,
+        replicas: List[Replica],
+        action: str,
+        global_step: int,
+        total_steps: int,
+        label: str,
+        redis_handler: RedisStreamHandler,
+    ):
+        cmd = cls(action, global_step, total_steps, label)
+        for replica in replicas:
+            if replica.in_mesh:
+                redis_handler.publish_command(cmd.pack(), replica.name)
 
     @classmethod
     def from_dict(cls, dict_v: Dict):

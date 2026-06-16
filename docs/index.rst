@@ -101,6 +101,7 @@ Main Features
    :caption: Profiler
 
    profiler/overview
+   profiler/nsight_systems
 
 .. toctree::
    :caption: World Foundational Models
