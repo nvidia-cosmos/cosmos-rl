@@ -1874,7 +1874,9 @@ class PolicyStatusManager:
     def _nsys_global_window_steps(self) -> tuple[int, int]:
         sub_config = self.config.profiler.sub_profiler_config
         start_step = sub_config.wait_steps + sub_config.warmup_steps + 1
-        stop_step = sub_config.wait_steps + sub_config.warmup_steps + sub_config.active_steps
+        stop_step = (
+            sub_config.wait_steps + sub_config.warmup_steps + sub_config.active_steps
+        )
         return start_step, stop_step
 
     def _trigger_rollout_profile_control(self, action: str, global_step: int):
