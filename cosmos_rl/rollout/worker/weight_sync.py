@@ -59,6 +59,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.pynccl import (
@@ -157,23 +158,55 @@ def redirect_view_map_to_buffer(worker) -> None:
     old_map = worker.weight_inplace_view_map
     model = worker.rollout.get_underlying_model()
 
+    # View entries (e.g. the q/k/v slices of a fused qkv parameter) do not
+    # appear in the state dict under their own key, and their data_ptr sits
+    # somewhere inside the base parameter's storage. Resolve them by storage
+    # identity and rebuild the same view over the buffer's clone of the base
+    # tensor; matching by data_ptr alone would map an offset-zero view to the
+    # full base tensor and leave nonzero-offset views unredirected.
     sd = model.state_dict()
-    ptr_to_sd_key: dict[int, str] = {}
+    storage_to_sd_key: dict[int, str] = {}
     for name, tensor in sd.items():
-        ptr_to_sd_key[tensor.data_ptr()] = name
+        storage_to_sd_key[tensor.untyped_storage().data_ptr()] = name
 
     new_map: dict[str, torch.Tensor] = {}
     redirected = 0
+    view_redirected = 0
     for hf_key, view_tensor in old_map.items():
         if hf_key in buffer_sd and buffer_sd[hf_key].shape == view_tensor.shape:
             new_map[hf_key] = buffer_sd[hf_key]
             redirected += 1
             continue
-        sd_key = ptr_to_sd_key.get(view_tensor.data_ptr())
+        sd_key = None
+        if isinstance(view_tensor, torch.Tensor) and not isinstance(
+            view_tensor, DTensor
+        ):
+            sd_key = storage_to_sd_key.get(view_tensor.untyped_storage().data_ptr())
         if sd_key is not None and sd_key in buffer_sd:
-            new_map[hf_key] = buffer_sd[sd_key]
-            redirected += 1
-            continue
+            live_base = sd[sd_key]
+            buffer_base = buffer_sd[sd_key]
+            # The buffer base is a contiguous clone, so the view's strides and
+            # offset only transfer when the live base has the same layout, and
+            # the rebuilt view must stay inside the buffer's storage.
+            required_extent = view_tensor.storage_offset() + 1 + sum(
+                (size - 1) * stride
+                for size, stride in zip(view_tensor.size(), view_tensor.stride())
+            )
+            if (
+                buffer_base.dtype == view_tensor.dtype
+                and live_base.storage_offset() == 0
+                and buffer_base.storage_offset() == 0
+                and live_base.stride() == buffer_base.stride()
+                and required_extent <= buffer_base.numel()
+            ):
+                new_map[hf_key] = torch.as_strided(
+                    buffer_base,
+                    view_tensor.size(),
+                    view_tensor.stride(),
+                    view_tensor.storage_offset(),
+                )
+                view_redirected += 1
+                continue
         logger.warning(
             "[WeightSync] Could not redirect view map key %r to buffer; "
             "keeping original tensor.",
@@ -183,9 +216,11 @@ def redirect_view_map_to_buffer(worker) -> None:
 
     worker.weight_inplace_view_map = new_map
     logger.info(
-        "[WeightSync] Redirected %d/%d view map entries to buffer tensors",
-        redirected,
+        "[WeightSync] Redirected %d/%d view map entries to buffer tensors "
+        "(%d rebuilt as views over buffer base tensors)",
+        redirected + view_redirected,
         len(old_map),
+        view_redirected,
     )
 
 

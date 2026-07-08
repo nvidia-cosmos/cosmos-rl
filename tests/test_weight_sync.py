@@ -186,6 +186,50 @@ class TestRedirectViewMapToBuffer:
         redirect_view_map_to_buffer(worker)
         assert worker.weight_inplace_view_map["unknown_key"] is p1
 
+    def test_rebuilds_fused_qkv_views_over_buffer(self):
+        """q/k/v views of a fused parameter must land in the buffer.
+
+        Regression test: matching views by ``data_ptr`` mapped the
+        offset-zero q view to the full fused buffer tensor (wrong shape)
+        and left the k/v views pointing at the live model, so the first
+        P2R receive zeroed and checked the wrong tensors.
+        """
+        heads, dim = 4, 6
+        qkv = torch.arange(3 * heads * dim, dtype=torch.float32).reshape(
+            3 * heads, dim
+        )
+        buf_qkv = qkv.detach().clone()
+        model = MagicMock()
+        model.state_dict.return_value = {"visual.attn.qkv.weight": qkv}
+
+        worker = SimpleNamespace(
+            rollout=SimpleNamespace(get_underlying_model=lambda: model),
+            weight_inplace_view_map={
+                "visual.attn.q.weight": qkv[0:heads],
+                "visual.attn.k.weight": qkv[heads : 2 * heads],
+                "visual.attn.v.weight": qkv[2 * heads : 3 * heads],
+            },
+            _buffer_state_dict={"visual.attn.qkv.weight": buf_qkv},
+        )
+
+        redirect_view_map_to_buffer(worker)
+        new_map = worker.weight_inplace_view_map
+
+        for name in ("q", "k", "v"):
+            view = new_map[f"visual.attn.{name}.weight"]
+            assert view.shape == (heads, dim)
+            assert (
+                view.untyped_storage().data_ptr()
+                == buf_qkv.untyped_storage().data_ptr()
+            )
+        assert new_map["visual.attn.v.weight"].storage_offset() == 2 * heads * dim
+
+        # Writing through the redirected view mutates the buffer, not the
+        # live model.
+        new_map["visual.attn.k.weight"].zero_()
+        assert buf_qkv[heads : 2 * heads].abs().sum() == 0
+        assert qkv[heads : 2 * heads].abs().sum() > 0
+
 
 # ---------------------------------------------------------------------------
 # sync_buffer_to_live — version gating (CPU-only)
