@@ -238,13 +238,11 @@ def redirect_view_map_to_buffer(worker) -> None:
         ).append(name)
 
     new_map: dict[str, torch.Tensor] = {}
-    redirected = 0
     view_redirected = 0
     failed: list[str] = []
     for hf_key, view_tensor in old_map.items():
         if hf_key in buffer_sd and buffer_sd[hf_key].shape == view_tensor.shape:
             new_map[hf_key] = buffer_sd[hf_key]
-            redirected += 1
             continue
         buffered = _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys)
         if buffered is not None:
@@ -266,9 +264,8 @@ def redirect_view_map_to_buffer(worker) -> None:
 
     worker.weight_inplace_view_map = new_map
     logger.info(
-        "[WeightSync] Redirected %d/%d view map entries to buffer tensors "
+        "[WeightSync] Redirected all %d view map entries to buffer tensors "
         "(%d rebuilt as views over buffer base tensors)",
-        redirected + view_redirected,
         len(old_map),
         view_redirected,
     )

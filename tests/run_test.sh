@@ -78,7 +78,7 @@ run python tests/test_dataset_signature.py
 run python tests/test_put_rollouts.py
 run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
-# pytest-style suite (CPU-only); pytest is not baked into the test image.
+# pytest-style suite (CPU-only); install pytest in case the image lacks it.
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
