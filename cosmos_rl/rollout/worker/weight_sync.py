@@ -148,11 +148,73 @@ def create_buffer_model(worker, device=None) -> None:
     )
 
 
+def _storage_extent(tensor: torch.Tensor) -> int:
+    """Number of storage elements ``tensor`` spans past its storage offset."""
+    if tensor.numel() == 0:
+        return 0
+    return 1 + sum(
+        (size - 1) * stride for size, stride in zip(tensor.size(), tensor.stride())
+    )
+
+
+def _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys):
+    """Return a buffer-backed equivalent of ``view_tensor``, or ``None``.
+
+    Resolves the base parameter by untyped-storage identity, then either
+    maps the base's buffer clone directly (when ``view_tensor`` is the
+    base itself under another name) or rebuilds the same view over the
+    clone.
+    """
+    if not isinstance(view_tensor, torch.Tensor) or isinstance(view_tensor, DTensor):
+        return None
+    storage_key = (view_tensor.device, view_tensor.untyped_storage().data_ptr())
+    view_offset = view_tensor.storage_offset()
+    for sd_key in storage_to_sd_keys.get(storage_key, ()):
+        live_base = sd[sd_key]
+        buffer_base = buffer_sd.get(sd_key)
+        if buffer_base is None or buffer_base.dtype != view_tensor.dtype:
+            continue
+        # The entry is the base parameter under another name: its buffer
+        # clone is a standalone same-shape tensor, so map it directly (the
+        # clone of a non-dense base has different strides, which is fine
+        # for a whole-tensor receive target).
+        if (
+            view_tensor.size() == live_base.size()
+            and view_tensor.stride() == live_base.stride()
+            and view_offset == live_base.storage_offset()
+        ):
+            return buffer_base
+        # Otherwise rebuild the view over the clone.  The clone's storage
+        # starts at offset zero, so rebase the view's offset against the
+        # base; strides only transfer when the clone preserved the base's
+        # layout, and the rebuilt view must stay inside the base's extent.
+        relative_offset = view_offset - live_base.storage_offset()
+        if (
+            relative_offset >= 0
+            and live_base.stride() == buffer_base.stride()
+            and buffer_base.storage_offset() == 0
+            and relative_offset + _storage_extent(view_tensor)
+            <= _storage_extent(live_base)
+        ):
+            return torch.as_strided(
+                buffer_base,
+                view_tensor.size(),
+                view_tensor.stride(),
+                relative_offset,
+            )
+    return None
+
+
 def redirect_view_map_to_buffer(worker) -> None:
     """Replace weight_inplace_view_map entries with buffer_model tensors.
 
     After this call, P2R nccl_recv writes directly into the buffer
     tensors instead of the live model parameters.
+
+    Raises ``RuntimeError`` if any entry cannot be redirected: a receive
+    target left on the live model would race inference, and its received
+    updates would be overwritten with stale buffer data by the next
+    ``sync_buffer_to_live``.
     """
     buffer_sd = worker._buffer_state_dict
     old_map = worker.weight_inplace_view_map
@@ -165,54 +227,42 @@ def redirect_view_map_to_buffer(worker) -> None:
     # tensor; matching by data_ptr alone would map an offset-zero view to the
     # full base tensor and leave nonzero-offset views unredirected.
     sd = model.state_dict()
-    storage_to_sd_key: dict[int, str] = {}
+    storage_to_sd_keys: dict[tuple[torch.device, int], list[str]] = {}
     for name, tensor in sd.items():
-        storage_to_sd_key[tensor.untyped_storage().data_ptr()] = name
+        if not isinstance(tensor, torch.Tensor) or isinstance(tensor, DTensor):
+            # DTensor storages have no accessible data pointer; DTensor
+            # entries are redirected by the exact-name match below.
+            continue
+        storage_to_sd_keys.setdefault(
+            (tensor.device, tensor.untyped_storage().data_ptr()), []
+        ).append(name)
 
     new_map: dict[str, torch.Tensor] = {}
     redirected = 0
     view_redirected = 0
+    failed: list[str] = []
     for hf_key, view_tensor in old_map.items():
         if hf_key in buffer_sd and buffer_sd[hf_key].shape == view_tensor.shape:
             new_map[hf_key] = buffer_sd[hf_key]
             redirected += 1
             continue
-        sd_key = None
-        if isinstance(view_tensor, torch.Tensor) and not isinstance(
-            view_tensor, DTensor
-        ):
-            sd_key = storage_to_sd_key.get(view_tensor.untyped_storage().data_ptr())
-        if sd_key is not None and sd_key in buffer_sd:
-            live_base = sd[sd_key]
-            buffer_base = buffer_sd[sd_key]
-            # The buffer base is a contiguous clone, so the view's strides and
-            # offset only transfer when the live base has the same layout, and
-            # the rebuilt view must stay inside the buffer's storage.
-            required_extent = view_tensor.storage_offset() + 1 + sum(
-                (size - 1) * stride
-                for size, stride in zip(view_tensor.size(), view_tensor.stride())
-            )
-            if (
-                buffer_base.dtype == view_tensor.dtype
-                and live_base.storage_offset() == 0
-                and buffer_base.storage_offset() == 0
-                and live_base.stride() == buffer_base.stride()
-                and required_extent <= buffer_base.numel()
-            ):
-                new_map[hf_key] = torch.as_strided(
-                    buffer_base,
-                    view_tensor.size(),
-                    view_tensor.stride(),
-                    view_tensor.storage_offset(),
-                )
-                view_redirected += 1
-                continue
-        logger.warning(
-            "[WeightSync] Could not redirect view map key %r to buffer; "
-            "keeping original tensor.",
-            hf_key,
+        buffered = _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys)
+        if buffered is not None:
+            new_map[hf_key] = buffered
+            view_redirected += 1
+            continue
+        failed.append(hf_key)
+
+    if failed:
+        raise RuntimeError(
+            f"[WeightSync] Could not redirect {len(failed)}/{len(old_map)} view "
+            f"map entries to buffer tensors (first entries: {failed[:5]}). "
+            "Async weight sync requires every receive target to be "
+            "buffer-backed: a live-model target would race inference and its "
+            "received updates would be overwritten with stale data by the "
+            'next buffer->live sync. Set rollout.async_r2r_sync="disabled" '
+            "for this model."
         )
-        new_map[hf_key] = view_tensor
 
     worker.weight_inplace_view_map = new_map
     logger.info(
