@@ -41,6 +41,7 @@ from cosmos_rl.utils.distributed import HighAvailabilitylNccl, destroy_distribut
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+from cosmos_rl.utils.nvtx import nvtx_range
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
     nccl_group_start,
@@ -530,6 +531,20 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):
+        use_global_nsys = (
+            self.config.profiler.enable_nsys
+            and self.config.profiler.nsys_capture_scope == "global_step"
+        )
+        nsys_start_step = (
+            self.config.profiler.sub_profiler_config.wait_steps
+            + self.config.profiler.sub_profiler_config.warmup_steps
+            + 1
+        )
+        nsys_stop_step = (
+            self.config.profiler.sub_profiler_config.wait_steps
+            + self.config.profiler.sub_profiler_config.warmup_steps
+            + self.config.profiler.sub_profiler_config.active_steps
+        )
         if command.do_profile:
             self.profiler.start_dynamic(
                 active_steps=command.active_steps,
@@ -539,10 +554,18 @@ class RLPolicyWorker(PolicyWorkerBase):
                 with_stack=command.with_stack,
                 with_modules=command.with_modules,
             )
+        elif self.config.profiler.enable_nsys and not use_global_nsys:
+            self.profiler.start_nsys()
 
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = command.items_count
 
+        if use_global_nsys and command.global_step == nsys_start_step:
+            self.profiler.start_nsys_capture(
+                f"cosmos.nsys.global_step_window role=policy start_step={nsys_start_step} stop_step={nsys_stop_step}"
+            )
+        elif not use_global_nsys:
+            self.profiler.maybe_start_nsys()
         do_save_checkpoint = command.do_save
         if (
             self.signal_handler is not None
@@ -555,18 +578,23 @@ class RLPolicyWorker(PolicyWorkerBase):
             self.signal_handled = True
 
         self.trainer.update_lr_schedulers(command.total_steps)
-        report_data = self.trainer.step_training(
-            rollouts=self.dispatch_rollouts(),
-            current_step=command.global_step,
-            total_steps=command.total_steps,
-            remain_samples_num=command.remain_samples_num,
-            do_save_checkpoint=do_save_checkpoint,
-            inter_policy_nccl=self.inter_policy_nccl,
-            is_master_replica=self.is_master_replica,
-        )
+        with nvtx_range(
+            f"cosmos.policy.step_training replica={self.replica_name} step={command.global_step}"
+        ):
+            report_data = self.trainer.step_training(
+                rollouts=self.dispatch_rollouts(),
+                current_step=command.global_step,
+                total_steps=command.total_steps,
+                remain_samples_num=command.remain_samples_num,
+                do_save_checkpoint=do_save_checkpoint,
+                inter_policy_nccl=self.inter_policy_nccl,
+                is_master_replica=self.is_master_replica,
+            )
 
         # For profiling
         self.profiler.step()
+        if use_global_nsys and command.global_step == nsys_stop_step:
+            self.profiler.stop_nsys(mark_finished=True)
 
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):

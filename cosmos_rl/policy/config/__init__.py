@@ -735,11 +735,77 @@ class ProfilerConfig(BaseModel):
     )
     enable_nsys: bool = Field(
         default=False,
-        description="Enable nsys for training",
+        description=(
+            "Enable Nsight Systems profiling. The replica launcher wraps target "
+            "roles with `nsys profile`, and workers use cudaProfilerStart/Stop "
+            "to capture the configured profiler step window."
+        ),
+    )
+    nsys_target_roles: List[str] = Field(
+        default_factory=lambda: ["policy"],
+        description=(
+            "Replica roles to wrap with Nsight Systems when enable_nsys is true. "
+            "Valid values are policy, rollout, and reference."
+        ),
+    )
+    nsys_output_dir: str = Field(
+        default="",
+        description=(
+            "Directory for Nsight Systems reports. If empty, the launcher uses "
+            "<train.output_dir>/nsys_profile."
+        ),
+    )
+    nsys_output_prefix: str = Field(
+        default="nsys",
+        description="Prefix for Nsight Systems report names.",
+    )
+    nsys_trace: str = Field(
+        default="cuda,nvtx,osrt,cudnn,cublas",
+        description="Comma-separated domains passed to `nsys profile --trace`.",
+    )
+    nsys_capture_range: str = Field(
+        default="cudaProfilerApi",
+        description=(
+            "Nsight Systems capture range. The default pairs with "
+            "cudaProfilerStart/Stop so only the selected training steps are captured."
+        ),
+    )
+    nsys_capture_range_end: str = Field(
+        default="stop",
+        description="Value passed to `nsys profile --capture-range-end`.",
+    )
+    nsys_capture_scope: str = Field(
+        default="local_step",
+        description=(
+            "Semantic scope for cudaProfilerApi start/stop. `local_step` uses each "
+            "worker's local profiler step counter. `global_step` lets the controller "
+            "open/close a shared wall-clock window for policy and rollout replicas."
+        ),
+    )
+    nsys_extra_args: List[str] = Field(
+        default_factory=list,
+        description="Additional raw arguments appended to `nsys profile`.",
     )
     sub_profiler_config: SubProfilerConfig = Field(
         default_factory=SubProfilerConfig, description="Sub profiler config"
     )
+
+    @model_validator(mode="after")
+    def check_nsys_roles(self):
+        valid_roles = {"policy", "rollout", "reference"}
+        invalid_roles = sorted(set(self.nsys_target_roles) - valid_roles)
+        if invalid_roles:
+            raise ValueError(
+                f"nsys_target_roles contains invalid roles {invalid_roles}; "
+                f"valid roles are {sorted(valid_roles)}"
+            )
+        valid_scopes = {"local_step", "global_step"}
+        if self.nsys_capture_scope not in valid_scopes:
+            raise ValueError(
+                f"nsys_capture_scope must be one of {sorted(valid_scopes)}, "
+                f"got {self.nsys_capture_scope}"
+            )
+        return self
 
 
 class FP8Config(BaseModel):

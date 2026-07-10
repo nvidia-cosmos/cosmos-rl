@@ -55,6 +55,7 @@ from cosmos_rl.utils.distributed import (
     destroy_distributed,
     cosmos_device_type,
 )
+from cosmos_rl.utils.nvtx import nvtx_range
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
@@ -2616,7 +2617,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shm_name", type=str)  # 1st arg
     parser.add_argument("--shm_size", type=int)  # 2nd arg
-    parser.add_argument("--mode", type=str, required=True)  # 3rd arg
+    parser.add_argument("--mode", type=str, default=None)  # 3rd arg
     parser.add_argument(
         "--parallel_config",
         type=str,
@@ -2631,8 +2632,19 @@ async def main():
         default=False,
         help="If only trainable params are synced. If set, part of the params will be frozen.",
     )  # 4th arg
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--redis-logfile-path", type=str, default=None)
     args = parser.parse_args()
     mode = args.mode
+    if mode is None:
+        role = os.environ.get("COSMOS_ROLE")
+        if role == "Policy":
+            mode = "dummy_policy"
+            args.mode = mode
+        elif role == "Rollout":
+            mode = "dummy_rollout"
+            args.mode = mode
     shm_name = args.shm_name
     shm_size = args.shm_size
     mode = args.mode
@@ -2640,15 +2652,23 @@ async def main():
         args.trainable_param_sync
     )  # If only trainable params are synced
 
+    if mode is None and os.environ.get("COSMOS_ROLE") == "Controller":
+        from cosmos_rl.dispatcher.run_web_panel import main as controller_main
+
+        controller_main(args=args)
+        exit(0)
+
     if mode == "dummy_policy":
         os.environ["COSMOS_ROLE"] = "Policy"
         # Dummy policy process for testing
-        run_dummy_policy(args=args)
+        with nvtx_range("cosmos.test.dummy_policy"):
+            run_dummy_policy(args=args)
         exit(0)
     elif mode == "dummy_rollout":
         os.environ["COSMOS_ROLE"] = "Rollout"
         # Dummy rollout process for testing
-        run_dummy_rollout(args=args)
+        with nvtx_range("cosmos.test.dummy_rollout"):
+            run_dummy_rollout(args=args)
         exit(0)
     elif mode == "test_overfit":
         run_overfitting_policy(args=args)
@@ -2741,5 +2761,20 @@ async def main():
     destroy_distributed()
 
 
+def _run_controller_entry():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--redis-logfile-path", type=str, default=None)
+    args = parser.parse_args()
+
+    from cosmos_rl.dispatcher.run_web_panel import main as controller_main
+
+    controller_main(args=args)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    if os.environ.get("COSMOS_ROLE") == "Controller":
+        _run_controller_entry()
+    else:
+        asyncio.run(main())

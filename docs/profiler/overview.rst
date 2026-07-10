@@ -97,6 +97,13 @@ You can open it with:
 
 Perfetto is recommended.
 
+Nsight Systems
+--------------
+
+Cosmos-RL also supports launch-time Nsight Systems wrapping plus runtime
+``cudaProfilerApi`` capture windows for asynchronous, disaggregated jobs. See
+:doc:`nsight_systems` for configuration and usage details.
+
 Quick Troubleshooting
 ---------------------
 

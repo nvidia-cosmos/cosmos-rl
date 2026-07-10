@@ -11,6 +11,14 @@ SCRIPT_ARGS=()
 CONFIG=""
 BACKEND="vllm"
 WFM_MODE="False"
+NSYS="0"
+NSYS_EXPLICIT="0"
+NSYS_OUTPUT_DIR=""
+NSYS_OUTPUT_PREFIX="nsys"
+NSYS_TRACE="cuda,nvtx,osrt,cudnn,cublas"
+NSYS_CAPTURE_RANGE="cudaProfilerApi"
+NSYS_CAPTURE_RANGE_END="stop"
+NSYS_EXTRA_ARGS=()
 
 print_help() {
   echo ""
@@ -26,6 +34,11 @@ print_help() {
   echo "  --config <path>                       The path to the config file."
   echo "  --backend <vllm|vllm_async|trtllm>    The backend to use for the job. Default: vllm"
   echo "  --wfm-mode <True|False>               Whether to launch in wfm mode. Default: False"
+  echo "  --nsys                                Wrap this replica with Nsight Systems regardless of TOML role filters."
+  echo "  --nsys-output-dir <path>              Directory to save Nsight Systems reports."
+  echo "  --nsys-output-prefix <prefix>         Report file prefix. Default: nsys"
+  echo "  --nsys-trace <domains>                Domains for nsys --trace. Default: cuda,nvtx,osrt,cudnn,cublas"
+  echo "  --nsys-extra-arg <arg>                Additional argument appended to nsys profile. Can be repeated."
   echo "  --help                                Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
@@ -39,6 +52,113 @@ set_env() {
   local upper_type="${TYPE^^}"
   echo "[Cosmos-RL] $upper_type Pre-setting environment variable $env_name=$env_value"
   export "$env_name=$env_value"
+}
+
+load_nsys_config() {
+  if [ -z "$CONFIG" ]; then
+    return
+  fi
+
+  while IFS= read -r line; do
+    eval "$line"
+  done < <(python - "$CONFIG" "$TYPE" <<'PY'
+import os
+import shlex
+import sys
+
+import toml
+
+config_path = sys.argv[1]
+role = sys.argv[2]
+
+try:
+    config = toml.load(config_path)
+except Exception:
+    sys.exit(0)
+
+profiler = config.get("profiler", {})
+train = config.get("train", {})
+
+target_roles = profiler.get("nsys_target_roles", ["policy"])
+if isinstance(target_roles, str):
+    target_roles = [target_roles]
+
+enable = bool(profiler.get("enable_nsys", False)) and role in target_roles
+
+train_output_dir = train.get("output_dir", "./outputs")
+default_output_dir = os.path.join(os.path.dirname(train_output_dir), "nsys_profile")
+output_dir = profiler.get("nsys_output_dir") or default_output_dir
+
+extra_args = profiler.get("nsys_extra_args", [])
+if isinstance(extra_args, str):
+    extra_args = [extra_args]
+
+values = {
+    "NSYS_CONFIG_ENABLE": "1" if enable else "0",
+    "NSYS_CONFIG_OUTPUT_DIR": output_dir,
+    "NSYS_CONFIG_OUTPUT_PREFIX": profiler.get("nsys_output_prefix", "nsys"),
+    "NSYS_CONFIG_TRACE": profiler.get("nsys_trace", "cuda,nvtx,osrt,cudnn,cublas"),
+    "NSYS_CONFIG_CAPTURE_RANGE": profiler.get("nsys_capture_range", "cudaProfilerApi"),
+    "NSYS_CONFIG_CAPTURE_RANGE_END": profiler.get("nsys_capture_range_end", "stop"),
+    "NSYS_CONFIG_EXTRA_ARGS": shlex.join([str(arg) for arg in extra_args]),
+}
+
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+  )
+
+  if [ "$NSYS_EXPLICIT" != "1" ]; then
+    NSYS="${NSYS_CONFIG_ENABLE:-0}"
+  fi
+  if [ -z "$NSYS_OUTPUT_DIR" ]; then
+    NSYS_OUTPUT_DIR="${NSYS_CONFIG_OUTPUT_DIR:-}"
+  fi
+  if [ "$NSYS_OUTPUT_PREFIX" == "nsys" ]; then
+    NSYS_OUTPUT_PREFIX="${NSYS_CONFIG_OUTPUT_PREFIX:-$NSYS_OUTPUT_PREFIX}"
+  fi
+  if [ "$NSYS_TRACE" == "cuda,nvtx,osrt,cudnn,cublas" ]; then
+    NSYS_TRACE="${NSYS_CONFIG_TRACE:-$NSYS_TRACE}"
+  fi
+  if [ "$NSYS_CAPTURE_RANGE" == "cudaProfilerApi" ]; then
+    NSYS_CAPTURE_RANGE="${NSYS_CONFIG_CAPTURE_RANGE:-$NSYS_CAPTURE_RANGE}"
+  fi
+  if [ "$NSYS_CAPTURE_RANGE_END" == "stop" ]; then
+    NSYS_CAPTURE_RANGE_END="${NSYS_CONFIG_CAPTURE_RANGE_END:-$NSYS_CAPTURE_RANGE_END}"
+  fi
+  if [ -n "${NSYS_CONFIG_EXTRA_ARGS:-}" ]; then
+    eval "NSYS_EXTRA_ARGS+=( ${NSYS_CONFIG_EXTRA_ARGS} )"
+  fi
+}
+
+apply_nsys_wrapper() {
+  if [ "$NSYS" != "1" ]; then
+    return
+  fi
+  if ! command -v nsys >/dev/null 2>&1; then
+    echo "Error: [profiler].enable_nsys is true or --nsys was passed, but 'nsys' is not available in PATH."
+    exit 1
+  fi
+
+  if [ -z "$NSYS_OUTPUT_DIR" ]; then
+    NSYS_OUTPUT_DIR="./outputs/nsys_profile"
+  fi
+  mkdir -p "$NSYS_OUTPUT_DIR"
+
+  local output_pattern="${NSYS_OUTPUT_DIR}/${NSYS_OUTPUT_PREFIX}_${TYPE}_%h_%p"
+  local nsys_cmd=(
+    nsys profile
+    --force-overwrite=true
+    --capture-range="$NSYS_CAPTURE_RANGE"
+    --trace="$NSYS_TRACE"
+    --output="$output_pattern"
+  )
+  if [ "$NSYS_CAPTURE_RANGE" != "none" ]; then
+    nsys_cmd+=(--capture-range-end="$NSYS_CAPTURE_RANGE_END")
+  fi
+
+  echo "[Cosmos-RL] ${TYPE^^} Nsight Systems profiling enabled. Reports: ${output_pattern}.nsys-rep"
+  LAUNCH_CMD=("${nsys_cmd[@]}" "${NSYS_EXTRA_ARGS[@]}" "${LAUNCH_CMD[@]}")
 }
 
 while [[ $# -gt 0 ]]; do
@@ -77,6 +197,35 @@ while [[ $# -gt 0 ]]; do
     ;;
   --wfm-mode)
     WFM_MODE="$2"
+    shift 2
+    ;;
+  --nsys)
+    NSYS="1"
+    NSYS_EXPLICIT="1"
+    shift
+    ;;
+  --nsys-output-dir)
+    NSYS_OUTPUT_DIR="$2"
+    shift 2
+    ;;
+  --nsys-output-prefix)
+    NSYS_OUTPUT_PREFIX="$2"
+    shift 2
+    ;;
+  --nsys-trace)
+    NSYS_TRACE="$2"
+    shift 2
+    ;;
+  --nsys-capture-range)
+    NSYS_CAPTURE_RANGE="$2"
+    shift 2
+    ;;
+  --nsys-capture-range-end)
+    NSYS_CAPTURE_RANGE_END="$2"
+    shift 2
+    ;;
+  --nsys-extra-arg)
+    NSYS_EXTRA_ARGS+=("$2")
     shift 2
     ;;
   --help)
@@ -237,6 +386,9 @@ if [ -n "$CONFIG" ]; then
     --config "$CONFIG"
   )
 fi
+
+load_nsys_config
+apply_nsys_wrapper
 
 echo "Launching command: ${LAUNCH_CMD[@]}"
 
