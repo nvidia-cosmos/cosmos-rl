@@ -15,7 +15,7 @@
 
 import os
 import subprocess
-from typing import List, Optional, Dict, Any, NamedTuple, Iterator, Callable
+from typing import List, Optional, Dict, Any, NamedTuple, Iterator, Callable, Tuple
 import time
 import argparse
 import sys
@@ -381,9 +381,11 @@ class CommandItem(NamedTuple):
     control_url: Optional[str]
     output_file: Optional[str]
     env: Optional[Dict[str, str]]
+    # File descriptors (e.g. a pre-bound listening socket) the subprocess inherits.
+    pass_fds: Tuple[int, ...] = ()
 
     def __repr__(self) -> str:
-        return f"CommandItem(command={self.command}, gpu_devices={self.gpu_devices}, control_url={self.control_url}, output_file={self.output_file}, env={self.env})"
+        return f"CommandItem(command={self.command}, gpu_devices={self.gpu_devices}, control_url={self.control_url}, output_file={self.output_file}, env={self.env}, pass_fds={self.pass_fds})"
 
 
 class SingleWorkerCommands:
@@ -399,12 +401,13 @@ class SingleWorkerCommands:
         control_url: Optional[str],
         output_file: Optional[str],
         env: Optional[Dict[str, str]] = None,
+        pass_fds: Tuple[int, ...] = (),
     ):
         logger.info(
-            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}, env: {env}"
+            f"Appending command: {command} with gpu devices: {gpu_devices}, control URL: {control_url}, output files: {output_file}, env: {env}, pass_fds: {pass_fds}"
         )
         self.command_items.append(
-            CommandItem(command, gpu_devices, control_url, output_file, env)
+            CommandItem(command, gpu_devices, control_url, output_file, env, pass_fds)
         )
 
     def extend_commands(
@@ -827,7 +830,12 @@ def launch_processes(
             # Launch process and capture output
             logger.info(f"Launching process with command: {cmd}")
             process = subprocess.Popen(
-                cmd, shell=True, stdout=cout, stderr=cerr, env=env
+                cmd,
+                shell=True,
+                stdout=cout,
+                stderr=cerr,
+                env=env,
+                pass_fds=command_item.pass_fds,
             )
             processes.append(process)
             if ofile is not None:

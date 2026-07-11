@@ -16,6 +16,7 @@
 import os
 import argparse
 import signal
+import socket
 import time
 import uvicorn
 import toml
@@ -55,7 +56,7 @@ from cosmos_rl.dispatcher.protocol import (
     Role,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.network_util import find_available_port
+from cosmos_rl.utils.network_util import bind_available_port
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_HEARTBEAT_TIMEOUT,
@@ -877,12 +878,28 @@ def main(
             f"Failed to load or parse config file {args.config}: {e}.",
         )
 
-    config = uvicorn.Config(
-        app, host="0.0.0.0", port=find_available_port(args.port), access_log=False
-    )
+    # Serve on the port every worker was told to reach us at. Re-probing for a
+    # different port here would silently strand the workers (and the launcher,
+    # which polls the advertised URL for readiness). Prefer the pre-bound
+    # listening socket inherited from the launcher — that reservation is
+    # race-free; otherwise bind exactly args.port and fail fast if it is taken.
+    listen_fd = os.environ.get("COSMOS_CONTROLLER_LISTEN_FD")
+    if listen_fd is not None:
+        listen_sock = socket.socket(fileno=int(listen_fd))
+        port = listen_sock.getsockname()[1]
+    else:
+        try:
+            listen_sock = bind_available_port(args.port, args.port + 1)
+        except RuntimeError:
+            raise RuntimeError(
+                f"Controller port {args.port} is already in use. It cannot be "
+                "substituted because workers connect to this exact endpoint."
+            )
+        port = args.port
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False)
     global server
     server = uvicorn.Server(config)
-    server.run()
+    server.run(sockets=[listen_sock])
 
 
 if __name__ == "__main__":

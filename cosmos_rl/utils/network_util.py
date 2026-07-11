@@ -268,21 +268,61 @@ def get_eth_ips():
 
 
 def is_port_free(port: int) -> bool:
+    # A bind test on the wildcard address is the only reliable probe: services
+    # here bind 0.0.0.0, so a port held on any interface (or bound but not yet
+    # listening, which a connect() probe misses) must count as taken.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.connect_ex(("127.0.0.1", port)) != 0
+        try:
+            s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
 
 
 def find_available_port(start_port, max_port=65536):
+    """Return the first port in [start_port, max_port) that is currently free.
+
+    WARNING: this only probes; it cannot reserve the port. Another process may
+    grab the port between this call and the caller's own bind. Callers that can
+    hold a socket should use ``bind_available_port`` instead; remaining callers
+    (e.g. ports handed to subprocesses or remote peers) must tolerate losing
+    the race by retrying their own bind.
+    """
     for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("localhost", port))
+                # Bind the wildcard address: consumers of the returned port
+                # bind 0.0.0.0, so a port taken on any interface is not free.
+                s.bind(("0.0.0.0", port))
                 return port
         except OSError:
             continue
 
     raise RuntimeError("No available port found in the specified range.")
+
+
+def bind_available_port(start_port: int, max_port: int = 65536) -> socket.socket:
+    """Bind and return a listening socket on the first free port in range.
+
+    Unlike ``find_available_port``, the returned socket *owns* the port: the
+    kernel reserves it at selection time, so there is no window in which
+    another process can steal it. Hand the socket (or its fd) to the server
+    that will serve on it; read the port via ``sock.getsockname()[1]``.
+
+    Use ``bind_available_port(port, port + 1)`` to reserve exactly ``port``.
+    """
+    for port in range(start_port, max_port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+            sock.listen(128)
+            return sock
+        except OSError:
+            sock.close()
+            continue
+
+    raise RuntimeError(f"No available port found in range [{start_port}, {max_port}).")
 
 
 def _redis_legacy_skip_tls_port() -> bool:

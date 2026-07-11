@@ -48,6 +48,26 @@ from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 
 
+def _wait_for_redis_ready(port: int, timeout: float) -> bool:
+    """Return True once a redis server on ``port`` answers PING, False on timeout."""
+    import redis
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            # socket_timeout bounds the PING reply as well: if a non-redis
+            # process holds the port, the connect succeeds but no RESP answer
+            # ever comes, and an unbounded recv would hang here forever.
+            client = redis.Redis(
+                port=port, socket_connect_timeout=1.0, socket_timeout=1.0
+            )
+            if client.ping():
+                return True
+        except redis.exceptions.RedisError:
+            time.sleep(0.2)
+    return False
+
+
 class Controller:
     _instance = None
 
@@ -138,9 +158,6 @@ class Controller:
             is_rl=self.is_rl,
         )
 
-        redis_free_port = network_util.find_available_port(redis_port)
-        self.config.redis = str(redis_free_port)
-
         ips = network_util.get_eth_ips()
         if len(ips) > 0:
             self.config.eth_ips = ";".join(ips)
@@ -154,30 +171,55 @@ class Controller:
 maxmemory 500G
 maxmemory-policy allkeys-lfu
 """
-        redis_cfg_path = network_util.write_redis_config(
-            redis_free_port,
-            redis_logfile_path,
-            file_path=config_file_path.name,
-            custom_config=custom_config,
-        )
-        redis_server_cmd = f'redis-server {redis_cfg_path} --dbfilename {random_db_file_name} --save ""'
-
-        redis_server_proc = subprocess.Popen(
-            redis_server_cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr
-        )
-
-        # Check if the redis server started successfully
-        redis_server_proc.wait()
-        ret_code = redis_server_proc.returncode
-
-        if ret_code is not None and ret_code != 0:
-            raise RuntimeError(
-                f"Failed to start redis server with command: {redis_server_cmd} with return code {ret_code}"
+        # redis-server binds its port itself, in a daemonized child (see
+        # write_redis_config), so neither the port probe nor the parent exit
+        # code can guarantee the port: a process grabbing it between the probe
+        # and redis's bind used to go unnoticed until workers failed to
+        # connect. Only a successful PING proves the server is up; on failure
+        # retry on the next free port. self.config.redis is set only after
+        # verification, so workers never see a port redis does not serve on.
+        max_attempts = 10
+        candidate_port = redis_port
+        for attempt in range(max_attempts):
+            redis_free_port = network_util.find_available_port(candidate_port)
+            redis_cfg_path = network_util.write_redis_config(
+                redis_free_port,
+                redis_logfile_path,
+                file_path=config_file_path.name,
+                custom_config=custom_config,
             )
+            redis_server_cmd = f'redis-server {redis_cfg_path} --dbfilename {random_db_file_name} --save ""'
+
+            redis_server_proc = subprocess.Popen(
+                redis_server_cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr
+            )
+
+            # The parent exits immediately after daemonizing; a non-zero code
+            # still catches config errors, for which retrying cannot help.
+            redis_server_proc.wait()
+            ret_code = redis_server_proc.returncode
+            if ret_code is not None and ret_code != 0:
+                raise RuntimeError(
+                    f"Failed to start redis server with command: {redis_server_cmd} with return code {ret_code}"
+                )
+
+            if _wait_for_redis_ready(redis_free_port, timeout=10.0):
+                logger.info(
+                    f"[Controller] Redis server started on port {redis_free_port} with command {redis_server_cmd}"
+                )
+                break
+            logger.warning(
+                f"[Controller] Redis server did not come up on port {redis_free_port} "
+                f"(attempt {attempt + 1}/{max_attempts}, likely lost the port to another "
+                "process); retrying on the next free port"
+            )
+            candidate_port = redis_free_port + 1
         else:
-            logger.info(
-                f"[Controller] Redis server started on port {redis_free_port} with command {redis_server_cmd}"
+            raise RuntimeError(
+                f"Redis server failed to start after {max_attempts} attempts, "
+                f"starting from port {redis_port}. Check {redis_logfile_path} for details."
             )
+        self.config.redis = str(redis_free_port)
 
         self.redis_controller = RedisStreamHandler(
             ips=["0.0.0.0"], port=redis_free_port

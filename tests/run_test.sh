@@ -84,6 +84,7 @@ run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract
 run python -m unittest -v tests.contracts.test_rl_worker_trainer_surface_contract
+run python -m unittest -v tests.utils.test_network_util
 run python tests/test_sequence_packing.py
 run python tests/test_integration.py --stream
 run python tests/test_hf_models.py

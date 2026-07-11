@@ -741,26 +741,21 @@ class DistKVStore:
             local_ips = network_util.get_eth_ips()
             assert len(local_ips) > 0, "No IP addresses found"
             local_ip = local_ips[0]
-            free_port = network_util.find_available_port(22000)
-
-            max_retry = 300
-            for _ in range(max_retry):
-                try:
-                    # Init TCPStore may fail when multi processes concurrently init TCPStore, so we need to retry to find another available port
-                    self.local_store = dist.TCPStore(
-                        host_name="0.0.0.0",
-                        port=free_port,
-                        # world_size=self.world_size,
-                        is_master=True,
-                        timeout=timedelta(seconds=constant.COSMOS_TCP_STORE_TIMEOUT),
-                    )
-                    break
-                except Exception:
-                    logger.error(
-                        f"[DistKVStore] Failed to bind port {free_port}, try another"
-                    )
-                    time.sleep(1)
-                    free_port = network_util.find_available_port(20000)
+            # Bind the listening socket ourselves and hand its fd to TCPStore.
+            # The kernel reserves the port at selection time, so concurrent
+            # processes scanning the same range can no longer race us between
+            # probing a port and serving on it. Keep a reference: the fd must
+            # outlive the store.
+            self._listen_sock = network_util.bind_available_port(22000)
+            free_port = self._listen_sock.getsockname()[1]
+            self.local_store = dist.TCPStore(
+                host_name="0.0.0.0",
+                port=free_port,
+                # world_size=self.world_size,
+                is_master=True,
+                timeout=timedelta(seconds=constant.COSMOS_TCP_STORE_TIMEOUT),
+                master_listen_fd=self._listen_sock.fileno(),
+            )
 
             logger.info(f"Local store started at {local_ip}:{free_port}")
             dist.broadcast_object_list(
