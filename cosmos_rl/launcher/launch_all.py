@@ -15,7 +15,7 @@
 
 #!/usr/bin/env python3
 
-import socket
+import http.client
 import subprocess
 import sys
 import time
@@ -47,38 +47,37 @@ from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
     """
-    Wait for a URL to be ready by sending a GET request.
+    Wait for the controller HTTP API to be ready.
 
     Args:
-        url: The URL to check
+        url: The controller URL to check
 
     Returns:
         None
     """
+    host, port = url.rsplit(":", 1)
     while True:
-        # create TCP socket
+        if process is not None and process.poll() is not None:
+            if process.returncode != 0:
+                logger.error(
+                    f"Process {process.pid} exited with code {process.returncode}. Exiting."
+                )
+                sys.exit(process.returncode)
+            logger.error(f"Process {process.pid} exited as soon as launched. Exiting.")
+            sys.exit(1)
+
+        connection = http.client.HTTPConnection(host, int(port), timeout=1)
         try:
-            if process is not None:
-                if process.poll() is not None:
-                    if process.returncode != 0:
-                        logger.error(
-                            f"Process {process.pid} exited with code {process.returncode}. Exiting."
-                        )
-                        sys.exit(process.returncode)
-                    else:
-                        logger.error(
-                            f"Process {process.pid} exited as soon as launched. Exiting."
-                        )
-                        sys.exit(1)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            host, port = url.split(":")
-            sock.connect((host, int(port)))
-            sock.close()
-            break
-        except socket.error:
-            # If the connection fails, wait and retry
-            time.sleep(1)
+            connection.request("GET", "/api/meta")
+            response = connection.getresponse()
+            response.read()
+            if response.status == 200:
+                return
+        except (OSError, http.client.HTTPException):
+            pass
+        finally:
+            connection.close()
+        time.sleep(1)
 
 
 def read_config(config_file: str) -> Dict[str, Any]:
