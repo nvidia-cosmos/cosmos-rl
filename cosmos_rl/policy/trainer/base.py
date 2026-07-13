@@ -184,6 +184,28 @@ class Trainer(ABC):
             "model_resume_from_checkpoint method must be implemented"
         )
 
+    def save_checkpoint(
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        *,
+        is_final: bool,
+    ) -> None:
+        """Save trainer state for a normal or terminal checkpoint."""
+        raise NotImplementedError(
+            f"{type(self).__name__}: checkpoint saving is not supported"
+        )
+
+    def invalidate_checkpoint_completion(self, current_step: int) -> None:
+        """Invalidate this rank before a coordinated same-step final save."""
+        manager = getattr(self, "ckpt_manager", None)
+        if manager is None or not hasattr(manager, "invalidate_completion_marker"):
+            raise NotImplementedError(
+                f"{type(self).__name__}: checkpoint invalidation is not supported"
+            )
+        manager.invalidate_completion_marker(current_step)
+
     @property
     def pp_loss_fn(self):
         raise NotImplementedError("pp_loss_fn must be provided by subclass")

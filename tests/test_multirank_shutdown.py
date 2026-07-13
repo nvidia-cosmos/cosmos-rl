@@ -381,21 +381,21 @@ def _replica(name, ended, start_time):
 
 
 class _RolloutMgrStub:
-    def __init__(self, replicas):
+    def __init__(self, replicas, ranked_ended=()):
         self._replicas = replicas
+        self._command_participant_ended_replicas = set(ranked_ended)
         self.rollout_atoms_in_replica = 1
 
     def get_all_atoms_arrived_replicas(self):
         return list(self._replicas)
 
+    get_safe_weight_sync_replicas = RolloutStatusManager.get_safe_weight_sync_replicas
 
-class TestTriggerWeightSyncExcludesEnded(unittest.TestCase):
-    """Corners 1-3: the controller must not issue P2R/R2R to a rollout
-    that has already POSTed ``is_end`` (and is self-terminating), unless
-    validation is enabled (then the rollout stays for the final
-    validation and must keep receiving the sync)."""
 
-    def _run(self, replicas, validation_enabled):
+class TestTriggerWeightSyncTopology(unittest.TestCase):
+    """R2R recipients must match a communicator whose members stay alive."""
+
+    def _run(self, replicas, validation_enabled, ranked_ended=()):
         mgr = PolicyStatusManager()
         mgr.config = SimpleNamespace(
             validation=SimpleNamespace(enable=validation_enabled)
@@ -403,7 +403,7 @@ class TestTriggerWeightSyncExcludesEnded(unittest.TestCase):
         mgr.policy_atoms_in_replica = 1
         mgr.redis_handler = object()
         policy_replica = _replica("policy-0", ended=False, start_time=0)
-        rollout_mgr = _RolloutMgrStub(replicas)
+        rollout_mgr = _RolloutMgrStub(replicas, ranked_ended)
 
         with (
             patch(
@@ -431,19 +431,19 @@ class TestTriggerWeightSyncExcludesEnded(unittest.TestCase):
         p2r.assert_not_called()
         r2r.assert_not_called()
 
-    def test_mixed_excludes_only_ended(self):
-        """Live + ended replicas, validation off -> sync targets only the
-        live replica (ended dropped from P2R target and R2R recipients)."""
+    def test_ranked_ended_replica_keeps_full_topology(self):
         live = _replica("r-live", ended=False, start_time=1)
         ended = _replica("r-ended", ended=True, start_time=0)
-        p2r, r2r = self._run([live, ended], validation_enabled=False)
+        p2r, r2r = self._run(
+            [live, ended],
+            validation_enabled=False,
+            ranked_ended={"r-ended"},
+        )
         p2r.assert_called_once()
         r2r.assert_called_once()
-        # P2R unicast target is the (only) live replica.
-        self.assertIs(p2r.call_args.kwargs["dst_replica"], live)
-        # R2R recipient list excludes the ended replica.
+        self.assertIs(p2r.call_args.kwargs["dst_replica"], ended)
         dst_replicas = r2r.call_args.kwargs["dst_replicas"]
-        self.assertEqual(dst_replicas, [live])
+        self.assertEqual(dst_replicas, [ended, live])
 
     def test_ended_included_when_validation_enabled(self):
         """Validation on -> exclusion disabled; ended replica still synced
@@ -961,7 +961,7 @@ class TestQueryCommandStopsAfterStop(unittest.TestCase):
 # Controller -- JobPhase end-of-data model
 # ---------------------------------------------------------------------------
 class TestJobPhaseEnterDraining(unittest.TestCase):
-    def test_first_is_end_enters_draining_and_recomputes(self):
+    def test_last_is_end_enters_draining_and_freezes_horizon(self):
         recompute_args = []
 
         def _recompute(explicit_num_remaining_samples=None):
@@ -969,13 +969,17 @@ class TestJobPhaseEnterDraining(unittest.TestCase):
 
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
-            total_pending_rollouts=lambda: 8,
+            total_steps=10,
+            draining_total_steps=None,
             recompute_total_steps=_recompute,
         )
         psm.enter_draining_phase = PolicyStatusManager.enter_draining_phase.__get__(psm)
         psm.enter_draining_phase()
         self.assertEqual(psm.job_phase, JobPhase.DRAINING)
-        self.assertEqual(recompute_args, [8])
+        self.assertEqual(psm.draining_total_steps, 10)
+        psm.total_steps = 99
+        self.assertEqual(psm.draining_total_steps, 10)
+        self.assertEqual(recompute_args, [])
 
     def test_second_enter_stays_draining(self):
         recompute_args = []
@@ -985,7 +989,8 @@ class TestJobPhaseEnterDraining(unittest.TestCase):
 
         psm = SimpleNamespace(
             job_phase=JobPhase.DRAINING,
-            total_pending_rollouts=lambda: 4,
+            total_steps=10,
+            draining_total_steps=10,
             recompute_total_steps=_recompute,
         )
         psm.enter_draining_phase = PolicyStatusManager.enter_draining_phase.__get__(psm)
@@ -1028,6 +1033,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
             all_rollouts_ended=lambda: False,
             rollout_replicas={"r0": ended, "r1": live},
             get_all_atoms_arrived_replicas=lambda: [ended, live],
+            get_safe_weight_sync_replicas=lambda **_kwargs: [ended, live],
         )
         psm.should_weight_sync_after_train_ack = (
             PolicyStatusManager.should_weight_sync_after_train_ack.__get__(psm)
@@ -1052,6 +1058,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
             all_rollouts_ended=lambda: True,
             rollout_replicas={"r0": ended},
             get_all_atoms_arrived_replicas=lambda: [ended],
+            get_safe_weight_sync_replicas=lambda **_kwargs: [ended],
         )
         psm.should_weight_sync_after_train_ack = (
             PolicyStatusManager.should_weight_sync_after_train_ack.__get__(psm)
@@ -1082,118 +1089,6 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         self.assertFalse(psm.should_weight_sync_after_train_ack(1, rsm))
 
 
-class TestJobPhaseFinishDraining(unittest.TestCase):
-    def test_finish_triggers_training_complete_when_buffer_empty(self):
-        training_complete = []
-        recompute_calls = []
-
-        def _recompute(explicit_num_remaining_samples=None):
-            recompute_calls.append(explicit_num_remaining_samples)
-            psm.total_steps = psm.current_step
-
-        def _trigger_training_complete():
-            training_complete.append(True)
-
-        psm = SimpleNamespace(
-            total_steps=10,
-            current_step=9,
-            policy_replicas={},
-            total_pending_rollouts=lambda: 0,
-            all_ready_or_reduced=lambda: True,
-            recompute_total_steps=_recompute,
-            trigger_training_complete=_trigger_training_complete,
-            rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        rsm = SimpleNamespace(all_rollouts_ended=lambda: True)
-        psm.finish_draining_phase(rsm)
-        self.assertEqual(recompute_calls, [0])
-        self.assertEqual(psm.total_steps, 10)
-        self.assertEqual(training_complete, [True])
-
-    def test_finish_happen_to_finish_skips_when_buffer_empty(self):
-        """When the buffer is already drained, no TrainingComplete is needed."""
-        training_complete = []
-
-        psm = SimpleNamespace(
-            total_steps=3,
-            current_step=3,
-            total_pending_rollouts=lambda: 0,
-            recompute_total_steps=lambda **kw: None,
-            trigger_training_complete=lambda: training_complete.append(True),
-            rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
-        self.assertEqual(training_complete, [])
-
-    def test_finish_buffered_rollouts_triggers_training_complete(self):
-        """Regression: buffered rollouts at the final step must still dispatch."""
-        cleared = []
-        training_complete = []
-        queue = SimpleNamespace(clear=lambda: cleared.append(True))
-
-        psm = SimpleNamespace(
-            total_steps=3,
-            current_step=3,
-            policy_replicas={},
-            total_pending_rollouts=lambda: 8,
-            all_ready_or_reduced=lambda: True,
-            recompute_total_steps=lambda **kw: None,
-            trigger_training_complete=lambda: training_complete.append(True),
-            rollout_buffer=SimpleNamespace(queue=queue),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
-        self.assertEqual(cleared, [True])
-        self.assertEqual(psm.total_steps, 4)
-        self.assertEqual(training_complete, [True])
-
-    def test_finish_defers_when_buffer_can_fill_remaining_steps(self):
-        """Do not fire TrainingComplete while a full step of rollouts waits."""
-        training_complete = []
-
-        psm = SimpleNamespace(
-            total_steps=3,
-            current_step=2,
-            policy_replicas={},
-            total_pending_rollouts=lambda: 16,
-            all_ready_or_reduced=lambda: True,
-            trigger_training_complete=lambda: training_complete.append(True),
-            rollout_buffer=SimpleNamespace(
-                queue=SimpleNamespace(
-                    clear=lambda: (_ for _ in ()).throw(
-                        AssertionError("buffer should not be cleared")
-                    )
-                )
-            ),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-
-        def _recompute(**_kw):
-            psm.total_steps = 2
-
-        psm.recompute_total_steps = _recompute
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
-        self.assertEqual(training_complete, [])
-
-
 class TestJobPhaseValidationBypass(unittest.TestCase):
     def test_on_rollout_is_end_noop_when_validation_enabled(self):
         psm = SimpleNamespace(
@@ -1217,6 +1112,8 @@ class TestTrainingCompleteCommand(unittest.TestCase):
             "policy-0",
             global_step=3,
             total_steps=3,
+            final_step=2,
+            checkpoint_total_steps=7,
             remain_samples_num=0,
         )
         restored = Command.depack(cmd.pack())
@@ -1224,107 +1121,13 @@ class TestTrainingCompleteCommand(unittest.TestCase):
         self.assertEqual(restored.replica_name, "policy-0")
         self.assertEqual(restored.global_step, 3)
         self.assertEqual(restored.total_steps, 3)
+        self.assertEqual(restored.final_step, 2)
+        self.assertEqual(restored.checkpoint_total_steps, 7)
         self.assertEqual(restored.command_type, "TRAINING_COMPLETE")
-
-    def test_trigger_training_complete_dispatch(self):
-        triggered = []
-        replica = SimpleNamespace(
-            name="policy-0",
-            sub_profiler_config=SimpleNamespace(
-                do_profile=False,
-                active_steps=None,
-                rank_filter=None,
-                record_shape=None,
-                profile_memory=None,
-                with_stack=None,
-                with_modules=None,
-            ),
-        )
-
-        def fake_trigger(**kwargs):
-            triggered.append(kwargs)
-
-        psm = SimpleNamespace(
-            data_fetcher=SimpleNamespace(activated_val_iter=None),
-            current_step=2,
-            total_steps=3,
-            remain_samples_num=0,
-            dispatched_rollouts_by_step={},
-            config=SimpleNamespace(
-                validation=SimpleNamespace(enable=False, freq=1),
-                train=SimpleNamespace(
-                    ckpt=SimpleNamespace(
-                        enable_checkpoint=False, save_freq=1, save_freq_in_epoch=None
-                    ),
-                    epoch=1,
-                ),
-            ),
-            redis_handler=object(),
-            get_all_atoms_arrived_replicas=lambda: [replica],
-            training_finished=lambda: False,
-            check_checkpoint_saving=lambda n: False,
-            set_status=lambda name, status: None,
-        )
-        psm.trigger_training_complete = (
-            PolicyStatusManager.trigger_training_complete.__get__(psm)
-        )
-        with patch.object(TrainingCompleteCommand, "trigger", fake_trigger):
-            psm.trigger_training_complete()
-        self.assertEqual(psm.current_step, 3)
-        self.assertEqual(psm.dispatched_rollouts_by_step[3], 0)
-        self.assertEqual(len(triggered), 1)
-        self.assertEqual(triggered[0]["global_step"], 3)
-
-    def test_finish_draining_calls_training_complete(self):
-        calls = []
-
-        def _trigger():
-            calls.append(True)
-
-        psm = SimpleNamespace(
-            total_steps=10,
-            current_step=9,
-            policy_replicas={},
-            total_pending_rollouts=lambda: 0,
-            all_ready_or_reduced=lambda: True,
-            recompute_total_steps=lambda **kw: setattr(
-                psm, "total_steps", psm.current_step
-            ),
-            trigger_training_complete=_trigger,
-            rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
-        self.assertEqual(calls, [True])
-
-    def test_finish_draining_defers_while_policy_in_flight(self):
-        calls = []
-
-        psm = SimpleNamespace(
-            total_steps=1,
-            current_step=1,
-            policy_replicas={"p0": SimpleNamespace(status="running")},
-            total_pending_rollouts=lambda: 8,
-            all_ready_or_reduced=lambda: False,
-            recompute_total_steps=lambda **kw: None,
-            trigger_training_complete=lambda: calls.append(True),
-            rollout_buffer=SimpleNamespace(queue=SimpleNamespace(clear=lambda: None)),
-            config=SimpleNamespace(train=SimpleNamespace(train_batch_per_replica=8)),
-            get_all_atoms_arrived_replicas=lambda: [object()],
-        )
-        psm.finish_draining_phase = PolicyStatusManager.finish_draining_phase.__get__(
-            psm
-        )
-        psm.finish_draining_phase(SimpleNamespace(all_rollouts_ended=lambda: True))
-        self.assertEqual(calls, [])
 
 
 class TestOnRolloutIsEndSequence(unittest.TestCase):
-    def test_enter_once_finish_only_when_all_ended(self):
+    def test_finish_only_when_all_ended(self):
         enter_count = []
         finish_count = []
 
@@ -1343,14 +1146,14 @@ class TestOnRolloutIsEndSequence(unittest.TestCase):
 
         rsm_partial = SimpleNamespace(all_rollouts_ended=lambda: False)
         psm.on_rollout_is_end(rsm_partial)
-        self.assertEqual(enter_count, [1])
-        self.assertEqual(finish_count, [False])
-        self.assertEqual(psm.job_phase, JobPhase.DRAINING)
+        self.assertEqual(enter_count, [])
+        self.assertEqual(finish_count, [])
+        self.assertEqual(psm.job_phase, JobPhase.RUNNING)
 
         rsm_all = SimpleNamespace(all_rollouts_ended=lambda: True)
         psm.on_rollout_is_end(rsm_all)
-        self.assertEqual(enter_count, [1])
-        self.assertEqual(finish_count, [False, True])
+        self.assertEqual(enter_count, [])
+        self.assertEqual(finish_count, [True])
 
 
 class TestTrainAckDuringPartialDrain(unittest.TestCase):
@@ -1374,45 +1177,6 @@ class TestTrainAckDuringPartialDrain(unittest.TestCase):
             PolicyStatusManager.should_weight_sync_after_train_ack.__get__(psm)
         )
         self.assertFalse(psm.should_weight_sync_after_train_ack(2, rsm))
-
-
-class TestEndOfDataRecomputeUsesBufferOnly(unittest.TestCase):
-    """Regression: ``enter_draining_phase`` uses ``total_pending_rollouts`` only."""
-
-    def test_recompute_uses_buffer_count_on_first_is_end(self):
-        from cosmos_rl.dispatcher import run_web_panel
-
-        recompute_args = []
-
-        def _recompute(explicit_num_remaining_samples=None):
-            recompute_args.append(explicit_num_remaining_samples)
-
-        psm = SimpleNamespace(
-            job_phase=JobPhase.RUNNING,
-            config=SimpleNamespace(validation=SimpleNamespace(enable=False)),
-            total_steps=10,
-            current_step=10,
-            total_pending_rollouts=lambda: 8,
-            recompute_total_steps=_recompute,
-            finish_draining_phase=lambda rsm: None,
-        )
-        psm.enter_draining_phase = PolicyStatusManager.enter_draining_phase.__get__(psm)
-        psm.on_rollout_is_end = PolicyStatusManager.on_rollout_is_end.__get__(psm)
-        rsm = SimpleNamespace(
-            rollout_end=lambda name: None,
-            all_rollouts_ended=lambda: False,
-        )
-        fake_controller = SimpleNamespace(
-            rollout_status_manager=rsm,
-            policy_status_manager=psm,
-        )
-        req = SimpleNamespace(
-            is_end=True, src_replica_name="r0", payloads=[], metrics={}
-        )
-        with patch.object(run_web_panel, "controller", fake_controller):
-            asyncio.run(run_web_panel.put_rollout_group(req))
-        self.assertEqual(recompute_args, [8])
-        self.assertEqual(psm.job_phase, JobPhase.DRAINING)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from pydantic import BaseModel, model_validator
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from cosmos_rl.dispatcher.data.schema import RLPayload
 
 
@@ -79,6 +79,8 @@ class ValidationReportRequest(BaseModel):
 
 class RolloutRequest(BaseModel):
     src_replica_name: str
+    src_global_rank: Optional[int] = None
+    stays_command_participant: bool = False
     payloads: List[RLPayload]
     metrics: Dict[str, Any] = {}
     is_end: bool = False

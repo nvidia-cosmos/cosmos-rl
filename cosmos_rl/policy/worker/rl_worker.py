@@ -600,6 +600,52 @@ class RLPolicyWorker(PolicyWorkerBase):
             f"[Policy] Training complete at global step {command.global_step}, skip training."
         )
 
+        save_requested = command.do_save and self.is_master_replica
+        if save_requested:
+
+            def all_ranks_succeeded(error: Optional[Exception]) -> bool:
+                return bool(
+                    dist_util.all_reduce_tensor_object_cpu(
+                        torch.tensor([1 if error is None else 0], dtype=torch.int32),
+                        op=dist.ReduceOp.MIN,
+                    ).item()
+                )
+
+            invalidation_error: Optional[Exception] = None
+            try:
+                self.trainer.invalidate_checkpoint_completion(command.final_step)
+            except Exception as error:
+                invalidation_error = error
+
+            if not all_ranks_succeeded(invalidation_error):
+                if invalidation_error is not None:
+                    raise invalidation_error
+                raise RuntimeError(
+                    "Final checkpoint invalidation failed on another rank in "
+                    "the policy replica"
+                )
+
+            save_error: Optional[Exception] = None
+            try:
+                self.trainer.save_checkpoint(
+                    current_step=command.final_step,
+                    total_steps=command.checkpoint_total_steps,
+                    remain_samples_num=command.remain_samples_num,
+                    is_final=True,
+                )
+            except Exception as error:
+                # Every rank must reach the agreement below even when its
+                # local shard/future fails, or rank 0 could ACK an incomplete
+                # distributed checkpoint.
+                save_error = error
+
+            if not all_ranks_succeeded(save_error):
+                if save_error is not None:
+                    raise save_error
+                raise RuntimeError(
+                    "Final checkpoint failed on another rank in the policy replica"
+                )
+
         self.profiler.step()
 
         if is_master_rank(self.parallel_dims, self.global_rank):

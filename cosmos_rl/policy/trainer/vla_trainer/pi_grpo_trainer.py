@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any, Dict, List
 
@@ -28,13 +27,16 @@ from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
+from cosmos_rl.utils.util import is_master_rank
 
 
 @TrainerRegistry.register(trainer_type="grpo_pi05")
 class PI05GRPOTrainer(GRPOTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    def should_export_checkpoint(self, *, is_final: bool) -> bool:
+        return self.config.train.ckpt.export_safetensors
 
     def step_training(
         self,
@@ -235,25 +237,10 @@ class PI05GRPOTrainer(GRPOTrainer):
             report_data["train_step"] = int(current_step)
 
         if is_master_replica and do_save_checkpoint:
-            if self.config.train.ckpt.export_safetensors:
-                self.export_safetensors(
-                    output_dir=self.config.train.output_dir,
-                    rel_path=os.path.join(
-                        "safetensors",
-                        f"step_{current_step}",
-                    ),
-                    trainable_only=False,
-                    is_final=current_step == total_steps,
-                    dtype=str2torch_dtype(self.config.train.param_dtype),
-                )
-            self.ckpt_manager.save_checkpoint(
-                model=self.model,
-                optimizer=self.optimizers,
-                scheduler=self.lr_schedulers,
-                step=current_step,
+            self.save_checkpoint(
+                current_step=current_step,
                 total_steps=total_steps,
                 remain_samples_num=remain_samples_num,
                 is_final=current_step == total_steps,
             )
-            self.ckpt_manager.save_check(step=current_step)
         return report_data

@@ -18,7 +18,9 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
+from concurrent import futures
 
 import torch
 import torch.distributed as dist
@@ -360,6 +362,214 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(ckpt_dir, "step_100")))
         self.assertTrue(os.path.exists(os.path.join(ckpt_dir, "step_200")))
         self.assertTrue(os.path.exists(os.path.join(ckpt_dir, "step_300")))
+
+    def test_final_async_save_propagates_background_failure(self):
+        """A final save must not report success when an async write fails."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(
+            output_dir=output_dir, resume=False, save_mode="async"
+        )
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+        )
+
+        model = {"unpicklable": (item for item in ())}
+        parameter = torch.nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.Adam([parameter], lr=0.001)
+
+        try:
+            with self.assertRaises(Exception):
+                manager.save_checkpoint(
+                    model,
+                    optimizer,
+                    SimpleScheduler(),
+                    step=100,
+                    total_steps=100,
+                    is_final=True,
+                )
+        finally:
+            manager.finalize()
+
+    def test_async_rewrite_waits_for_prior_failure_before_writing(self):
+        """A failed prior save must abort a rewrite before files are replaced."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(
+            output_dir=output_dir, resume=False, save_mode="async"
+        )
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+        )
+        parameter = torch.nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.Adam([parameter], lr=0.001)
+
+        manager.save_checkpoint(
+            {"unpicklable": (item for item in ())},
+            optimizer,
+            SimpleScheduler(),
+            step=100,
+            total_steps=100,
+        )
+        config_path = os.path.join(
+            output_dir, "checkpoints", "step_100", "policy", "cosmos_config"
+        )
+        sentinel = "prior save failed"
+        with open(config_path, "w") as config_file:
+            config_file.write(sentinel)
+
+        try:
+            with self.assertRaises(Exception):
+                manager.save_checkpoint(
+                    SimpleModel(),
+                    optimizer,
+                    SimpleScheduler(),
+                    step=100,
+                    total_steps=100,
+                    is_final=True,
+                )
+            with open(config_path, "r") as config_file:
+                self.assertEqual(config_file.read(), sentinel)
+        finally:
+            manager.finalize()
+
+    def test_invalidation_waits_for_prior_async_marker(self):
+        """Invalidation must remove a marker written by an older async save."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(
+            output_dir=output_dir, resume=False, save_mode="async"
+        )
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+        )
+        marker_path = os.path.join(
+            output_dir,
+            "checkpoints",
+            "step_100",
+            "policy",
+            ".rank_0_complete",
+        )
+        os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+        marker_future_started = threading.Event()
+        release_marker_future = threading.Event()
+
+        def write_delayed_marker():
+            marker_future_started.set()
+            release_marker_future.wait()
+            with open(marker_path, "w") as marker_file:
+                marker_file.write("")
+
+        manager.pre_save_futures = [manager.executor.submit(write_delayed_marker)]
+        with futures.ThreadPoolExecutor(max_workers=1) as executor:
+            invalidation = executor.submit(manager.invalidate_completion_marker, 100)
+            self.assertTrue(marker_future_started.wait(timeout=5))
+            self.assertFalse(invalidation.done())
+            release_marker_future.set()
+            invalidation.result(timeout=5)
+
+        self.assertFalse(os.path.exists(marker_path))
+        manager.finalize()
+
+    def test_same_step_rewrite_removes_only_its_stale_completion_marker(self):
+        """A failed rewrite must not leave this rank looking complete."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(output_dir=output_dir, resume=False)
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+        )
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+        manager.save_checkpoint(model, optimizer, scheduler, step=100, total_steps=100)
+
+        policy_dir = os.path.join(output_dir, "checkpoints", "step_100", "policy")
+        rank_zero_marker = os.path.join(policy_dir, ".rank_0_complete")
+        rank_one_marker = os.path.join(policy_dir, ".rank_1_complete")
+        with open(rank_one_marker, "w") as marker_file:
+            marker_file.write("")
+
+        with self.assertRaises(ValueError):
+            manager.save_checkpoint(
+                object(),
+                optimizer,
+                scheduler,
+                step=100,
+                total_steps=100,
+                is_final=True,
+            )
+
+        self.assertFalse(os.path.exists(rank_zero_marker))
+        self.assertTrue(os.path.exists(rank_one_marker))
+
+    def test_same_step_final_promotion_is_retained_with_max_keep_one(self):
+        """Promoting a retained step must not prune that same checkpoint."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(output_dir=output_dir, resume=False, max_keep=1)
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+        )
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+
+        manager.save_checkpoint(model, optimizer, scheduler, step=100, total_steps=100)
+        manager.save_check(100)
+        manager.save_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            step=100,
+            total_steps=100,
+            is_final=True,
+        )
+        manager.save_check(100)
+
+        step_path = os.path.join(output_dir, "checkpoints", "step_100")
+        self.assertTrue(os.path.isdir(step_path))
+        self.assertEqual(manager.saved_ckpt_step_dirs, [step_path])
+
+    def test_final_promotion_is_not_deleted_when_only_other_checkpoint_is_best(self):
+        """Retention must preserve both the best and just-promoted checkpoints."""
+        output_dir = os.path.join(self.test_dir, self.timestamp1)
+        config = create_test_config(output_dir=output_dir, resume=False, max_keep=1)
+        manager = CheckpointMananger(
+            config,
+            parallel_dims=create_test_parallel_dims(),
+            global_rank=0,
+            metric="val_loss",
+        )
+        model = SimpleModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = SimpleScheduler()
+
+        manager.save_checkpoint(model, optimizer, scheduler, step=50, total_steps=100)
+        manager.save_check(50, val_score=0.1)
+        manager.save_checkpoint(model, optimizer, scheduler, step=100, total_steps=100)
+        manager.save_check(100, val_score=0.2)
+
+        manager.save_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            step=100,
+            total_steps=100,
+            is_final=True,
+        )
+        manager.save_check(100)
+
+        best_path = os.path.join(output_dir, "checkpoints", "step_50")
+        final_path = os.path.join(output_dir, "checkpoints", "step_100")
+        self.assertTrue(os.path.isdir(best_path))
+        self.assertTrue(os.path.isdir(final_path))
+        self.assertEqual(manager.saved_ckpt_step_dirs, [best_path, final_path])
 
     def _state_dicts_equal(self, sd1, sd2):
         """Helper to compare two state dicts."""

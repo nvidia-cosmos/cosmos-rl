@@ -622,10 +622,9 @@ maxmemory-policy allkeys-lfu
         # used to rely on a forced last-step weight sync ("ending signal") that
         # races rollout teardown and wedges ``ncclCommAbort`` (see
         # rollout_multirank_shutdown.md).  Asserting ``is_end`` once training is
-        # finished routes BOTH cases through the same prompt-stream
-        # ``prompt_consume_end`` stop path (keyed on ``prompt_fetch_end``);
-        # the explicit ``StopCommand`` broadcast is the cross-rank backstop
-        # for any rank that never observes ``is_end``.
+        # finished routes BOTH cases through the same prompt-stream checkout
+        # path (keyed on ``prompt_fetch_end``). Checked-out workers remain
+        # command participants until the explicit ``StopCommand`` broadcast.
         #
         # Safe against starvation: the controller advances ``current_step``
         # only at dispatch time, and only after it has buffered enough rollouts

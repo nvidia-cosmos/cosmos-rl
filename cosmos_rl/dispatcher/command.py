@@ -565,6 +565,8 @@ class TrainingCompleteCommand(Command):
         profile_memory: Optional[bool] = None,
         with_stack: Optional[bool] = None,
         with_modules: Optional[bool] = None,
+        final_step: Optional[int] = None,
+        checkpoint_total_steps: Optional[int] = None,
         **kwargs,
     ):
         kwargs["scope"] = CommandScope.LOCAL
@@ -573,6 +575,10 @@ class TrainingCompleteCommand(Command):
         self.replica_name = replica_name
         self.global_step = global_step
         self.total_steps = total_steps
+        self.final_step = global_step - 1 if final_step is None else final_step
+        self.checkpoint_total_steps = (
+            total_steps if checkpoint_total_steps is None else checkpoint_total_steps
+        )
         self.remain_samples_num = remain_samples_num
         self.do_save = do_save
         self.do_profile = do_profile
@@ -592,20 +598,24 @@ class TrainingCompleteCommand(Command):
         remain_samples_num: int,
         do_save: bool,
         redis_handler: RedisStreamHandler,
+        final_step: Optional[int] = None,
+        checkpoint_total_steps: Optional[int] = None,
     ):
         cmd = cls(
-            replica.name,
-            global_step,
-            total_steps,
-            remain_samples_num,
-            do_save,
-            replica.sub_profiler_config.do_profile,
-            replica.sub_profiler_config.active_steps,
-            replica.sub_profiler_config.rank_filter,
-            replica.sub_profiler_config.record_shape,
-            replica.sub_profiler_config.profile_memory,
-            replica.sub_profiler_config.with_stack,
-            replica.sub_profiler_config.with_modules,
+            replica_name=replica.name,
+            global_step=global_step,
+            total_steps=total_steps,
+            final_step=final_step,
+            checkpoint_total_steps=checkpoint_total_steps,
+            remain_samples_num=remain_samples_num,
+            do_save=do_save,
+            do_profile=replica.sub_profiler_config.do_profile,
+            active_steps=replica.sub_profiler_config.active_steps,
+            rank_filter=replica.sub_profiler_config.rank_filter,
+            record_shape=replica.sub_profiler_config.record_shape,
+            profile_memory=replica.sub_profiler_config.profile_memory,
+            with_stack=replica.sub_profiler_config.with_stack,
+            with_modules=replica.sub_profiler_config.with_modules,
         )
         redis_handler.publish_command(cmd.pack(), replica.name)
 

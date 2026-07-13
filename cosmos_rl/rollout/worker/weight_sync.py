@@ -64,6 +64,7 @@ from torch.distributed.tensor import DTensor
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
+    nccl_abort_all,
     nccl_broadcast,
     nccl_group_end,
     nccl_group_start,
@@ -76,6 +77,9 @@ from cosmos_rl.utils.pynccl import (
 # ``stop()`` (and in turn ``destroy_distributed``) cannot wedge.
 _WST_STREAM_DRAIN_TIMEOUT_S = float(
     os.getenv("COSMOS_WST_STREAM_DRAIN_TIMEOUT_S", "10.0")
+)
+_WST_QUEUE_DRAIN_TIMEOUT_S = float(
+    os.getenv("COSMOS_WST_QUEUE_DRAIN_TIMEOUT_S", "120.0")
 )
 
 if TYPE_CHECKING:
@@ -383,6 +387,9 @@ class WeightSyncThread:
         self._idle = threading.Event()
         self._idle.set()
         self._last_event: torch.cuda.Event | None = None
+        self._fence_failed = False
+        self._fenced_seq = -1
+        self._task_failed = False
         # Backlog observability (see weight-sync coalescing plan): high-water
         # queue depth and total executed transfers.  A healthy (coalesced) run
         # keeps ``_max_qdepth`` ~1; a piled-up run shows it climbing while most
@@ -436,10 +443,30 @@ class WeightSyncThread:
             self._max_qdepth,
         )
 
-    def drain(self, timeout: float = 120.0) -> None:
-        """Block until the queue is empty and no operation is in-flight."""
-        if not self._thread.is_alive():
-            return
+    def fence(
+        self,
+        queue_timeout: float = _WST_QUEUE_DRAIN_TIMEOUT_S,
+        stream_timeout: float = _WST_STREAM_DRAIN_TIMEOUT_S,
+    ) -> bool:
+        """Fence every command received before STOP.
+
+        Queue completion only proves that the background thread has enqueued
+        the CUDA work.  The stream fence is therefore ordered strictly after
+        ``queue.join()``.  A queue timeout is an abnormal teardown path: abort
+        NCCL, attempt the bounded stream drain, and report failure instead of
+        allowing the caller to treat a warning as successful synchronization.
+        """
+        if getattr(self, "_fence_failed", False):
+            return False
+
+        current_seq = getattr(self, "_seq", None)
+        if (
+            current_seq is not None
+            and getattr(self, "_fenced_seq", None) == current_seq
+            and getattr(self._queue, "unfinished_tasks", 1) == 0
+        ):
+            return True
+
         done = threading.Event()
 
         def _join_with_timeout():
@@ -448,36 +475,75 @@ class WeightSyncThread:
 
         t = threading.Thread(target=_join_with_timeout, daemon=True)
         t.start()
-        if not done.wait(timeout=timeout):
-            logger.warning(
-                "[WeightSyncThread] drain() timed out after %.1fs",
-                timeout,
+        queue_drained = done.wait(timeout=queue_timeout)
+        if not queue_drained:
+            logger.error(
+                "[ABNORMAL teardown] WeightSyncThread[%s] queue did not "
+                "drain within %.1fs; aborting NCCL before shutdown",
+                self._worker.replica_name,
+                queue_timeout,
             )
+            try:
+                nccl_abort_all()
+            except Exception:
+                logger.exception(
+                    "[WeightSyncThread] NCCL abort failed after queue timeout"
+                )
 
-    def stop(self) -> None:
+        stream_drained = bounded_drain_or_abort(
+            self._stream,
+            stream_timeout,
+            f"WeightSyncThread[{self._worker.replica_name}]",
+        )
+        result = (
+            queue_drained
+            and stream_drained
+            and not getattr(self, "_task_failed", False)
+        )
+        self._fence_failed = not result
+        self._fenced_seq = current_seq
+        return result
+
+    def drain(self, timeout: float = _WST_QUEUE_DRAIN_TIMEOUT_S) -> bool:
+        """Compatibility wrapper for the full queue-and-stream fence."""
+        return self.fence(queue_timeout=timeout)
+
+    def stop(self) -> bool:
         """Signal the thread to stop and wait for it to finish.
 
-        The Python thread joining is not sufficient: a grouped R2R broadcast
+        A Python thread join is not sufficient: a grouped R2R broadcast
         enqueued on ``self._stream`` runs asynchronously on the GPU, and pynccl
         only bounds the *enqueue* phase (``run_task`` stops polling after
-        ``ncclSuccess``).  If a peer already departed, that broadcast kernel can
-        hang on the device while this thread reports ``thread_alive=False`` --
-        which later wedges any device sync (``inference_stream.synchronize()``)
-        and ``destroy_distributed``.  After joining we therefore bounded-drain
-        the stream and, on timeout, abort all NCCL communicators.
+        ``ncclSuccess``).  Fence the queue and stream before asking the thread
+        to exit so no accepted task is dropped; timeout paths abort NCCL and
+        report failure.
         """
+        fenced = self.fence()
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=10.0)
-        # Backstop for an orphaned in-flight R2R broadcast on our stream (peer
-        # departed mid-collective).  Should never fire once the controller waits
-        # for all rollouts to check out before shutting down; logs loudly if it
-        # does.  See ``bounded_drain_or_abort``.
-        bounded_drain_or_abort(
+        if self._thread.is_alive():
+            logger.error(
+                "[ABNORMAL teardown] WeightSyncThread[%s] did not stop "
+                "within 10s; aborting NCCL",
+                self._worker.replica_name,
+            )
+            try:
+                nccl_abort_all()
+            except Exception:
+                logger.exception(
+                    "[WeightSyncThread] NCCL abort failed after thread timeout"
+                )
+            fenced = False
+        # A timed-out task can leave its barrier only after _stop is set. Drain
+        # once more after the thread exits so no CUDA work can appear behind
+        # the earlier timeout-path drain.
+        post_stop_drained = bounded_drain_or_abort(
             self._stream,
             _WST_STREAM_DRAIN_TIMEOUT_S,
-            f"WeightSyncThread[{self._worker.replica_name}]",
+            f"WeightSyncThread[{self._worker.replica_name}] post-stop",
         )
+        return fenced and post_stop_drained
 
     def _run(self) -> None:
         torch.cuda.set_device(self._worker.device)
@@ -497,6 +563,7 @@ class WeightSyncThread:
                 elif cmd_type == "r2r":
                     self._execute_r2r(command)
             except Exception:
+                self._task_failed = True
                 logger.exception(
                     "[WeightSyncThread] Error executing %s command",
                     cmd_type,
@@ -546,13 +613,26 @@ class WeightSyncThread:
         # Use the controller's authoritative recipient set for this round as the
         # barrier participant count so it stays in lockstep as replicas finish.
         expected_world_size = len(getattr(command, "dst_replica_names", None) or [])
-        r2r_barrier(worker, weight_step, expected_world_size=expected_world_size)
+        if expected_world_size > 1 and not r2r_barrier(
+            worker, weight_step, expected_world_size=expected_world_size
+        ):
+            logger.info(
+                "[WeightSyncThread] R2R cancelled during teardown (step=%s)",
+                weight_step,
+            )
+            return
         t0 = time.monotonic()
-        transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
-            worker,
-            command.src_replica_name,
-            self._stream,
-        )
+        if expected_world_size <= 1:
+            # BuildMesh intentionally creates no NCCL communicator for one
+            # replica. P2R already populated its buffer; retain R2R's version
+            # and validation bookkeeping without touching a stale communicator.
+            transferred_cnt, bytes_broadcast = 0, 0
+        else:
+            transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
+                worker,
+                command.src_replica_name,
+                self._stream,
+            )
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
         worker._buffer_version += 1
@@ -669,7 +749,7 @@ def setup_redis_barrier(worker) -> None:
 
 def r2r_barrier(
     worker, weight_step: int, expected_world_size: Optional[int] = None
-) -> None:
+) -> bool:
     """Redis-based barrier so all rollout workers start R2R broadcast together.
 
     Uses an atomic INCR counter per weight step.  The last worker to arrive
@@ -694,7 +774,7 @@ def r2r_barrier(
             worker, "_r2r_world_size", 0
         )
     if r2r_redis is None or world_size <= 1:
-        return
+        return True
 
     prefix = worker._r2r_barrier_prefix
     barrier_key = f"{prefix}:barrier:{weight_step}"
@@ -713,7 +793,7 @@ def r2r_barrier(
                 world_size,
                 weight_step,
             )
-            return
+            return True
 
         logger.info(
             "[R2R Barrier] Waiting for other workers (count=%d/%d, step=%d)...",
@@ -736,7 +816,7 @@ def r2r_barrier(
                     world_size,
                     elapsed_ms,
                 )
-                return
+                return True
 
             # Allow teardown to interrupt the wait: if the WeightSyncThread is
             # asked to stop, abort the barrier rather than blocking ``wst.stop()``
@@ -751,7 +831,7 @@ def r2r_barrier(
                         "aborting barrier.",
                         weight_step,
                     )
-                    return
+                    return False
                 msg = pubsub.get_message(timeout=1.0)
                 if msg is not None and msg.get("type") == "message":
                     break
@@ -772,8 +852,10 @@ def r2r_barrier(
             weight_step,
             elapsed_ms,
         )
+        return True
     except Exception as exc:
         logger.warning("[R2R Barrier] Redis error (%s); skipping barrier.", exc)
+        return True
 
 
 # ---------------------------------------------------------------------------

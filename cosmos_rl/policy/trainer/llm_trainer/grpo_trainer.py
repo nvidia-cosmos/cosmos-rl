@@ -937,6 +937,43 @@ class GRPOTrainer(LLMTrainer):
             del self.teacher_interact_results[id]
         self.fetched_teacher_uuids.clear()
 
+    def should_export_checkpoint(self, *, is_final: bool) -> bool:
+        return is_final or self.config.train.ckpt.export_safetensors
+
+    def save_checkpoint(
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        *,
+        is_final: bool,
+    ) -> None:
+        if self.should_export_checkpoint(is_final=is_final):
+            logger.info(
+                f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+            )
+            self.export_safetensors(
+                output_dir=self.config.train.output_dir,
+                rel_path=os.path.join(
+                    "safetensors",
+                    f"step_{current_step}",
+                ),
+                trainable_only=False,
+                is_final=is_final,
+                dtype=str2torch_dtype(self.config.train.param_dtype),
+            )
+        logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+        self.ckpt_manager.save_checkpoint(
+            model=self.model,
+            optimizer=self.optimizers,
+            scheduler=self.lr_schedulers,
+            step=current_step,
+            total_steps=total_steps,
+            remain_samples_num=remain_samples_num,
+            is_final=is_final,
+        )
+        self.ckpt_manager.save_check(step=current_step)
+
     def step_training(
         self,
         rollouts: List[Rollout],
@@ -1881,34 +1918,12 @@ class GRPOTrainer(LLMTrainer):
 
         # checkpointing
         if is_master_replica and (do_save_checkpoint):
-            is_last_step = current_step == total_steps
-            if is_last_step or self.config.train.ckpt.export_safetensors:
-                logger.info(
-                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
-                )
-                self.export_safetensors(
-                    output_dir=self.config.train.output_dir,
-                    rel_path=os.path.join(
-                        "safetensors",
-                        f"step_{current_step}",
-                    ),
-                    trainable_only=False,
-                    is_final=is_last_step,
-                    dtype=str2torch_dtype(self.config.train.param_dtype),
-                )
-            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-            self.ckpt_manager.save_checkpoint(
-                model=self.model,
-                optimizer=self.optimizers,
-                scheduler=self.lr_schedulers,
-                step=current_step,
+            self.save_checkpoint(
+                current_step=current_step,
                 total_steps=total_steps,
-                **{
-                    "remain_samples_num": remain_samples_num,
-                    "is_final": is_last_step,
-                },
+                remain_samples_num=remain_samples_num,
+                is_final=current_step == total_steps,
             )
-            self.ckpt_manager.save_check(step=current_step)
 
         self.reference_reset(current_step)
 

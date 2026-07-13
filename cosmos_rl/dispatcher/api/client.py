@@ -588,7 +588,7 @@ class APIClient(object):
             )
             return [], False
 
-    def post_rollout_completion(self, response: RolloutRequest):
+    def post_rollout_completion(self, response: RolloutRequest) -> bool:
         try:
             make_request_with_retry(
                 partial(
@@ -598,7 +598,9 @@ class APIClient(object):
                 self.get_alternative_urls(COSMOS_API_ROLLOUT_SUFFIX),
                 max_retries=self.max_retries,
             )
+            return True
         except Exception as e:
             logger.error(
                 f"[Rollout] Failed in sending rollout completion to controller after retries {e}."
             )
+            return False

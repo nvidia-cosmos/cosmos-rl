@@ -676,29 +676,45 @@ async def put_rollout_group(rollout: RolloutRequest):
     try:
         if rollout.is_end:
             logger.info(
-                f"[Controller] Received rollout end signal from {rollout.src_replica_name}"
+                "[Controller] Received rollout end signal from %s rank=%s",
+                rollout.src_replica_name,
+                rollout.src_global_rank,
             )
-            controller.rollout_status_manager.rollout_end(rollout.src_replica_name)
-            controller.policy_status_manager.on_rollout_is_end(
-                controller.rollout_status_manager
+            replica_ended = controller.rollout_status_manager.rollout_end(
+                rollout.src_replica_name,
+                src_global_rank=rollout.src_global_rank,
+                stays_command_participant=rollout.stays_command_participant,
             )
+            if replica_ended:
+                controller.policy_status_manager.on_rollout_is_end(
+                    controller.rollout_status_manager
+                )
 
             return {"message": "Rollout end signal received"}
 
         rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
-        # Update the statistics for dynamic sampling used for metrics collection
-        if controller.config.train.train_policy.variant == "dapo":
-            controller.policy_status_manager.update_dynamic_sampling_statistics(
-                rollout.metrics
-            )
-        # Flatten the rollouts into a single list
+        # Flatten immediately after extraction so terminal cleanup has concrete
+        # payload references, but runs before any metric/filter mutation.
         rollouts = [
-            rollout
+            extracted
             for rollouts_group in rollouts_list
-            for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
+            for extracted in rollouts_group
         ]
+        policy_status = controller.policy_status_manager
+        is_dapo = controller.config.train.train_policy.variant == "dapo"
+        if policy_status.rollout_admission_closed():
+            policy_status.cleanup_terminal_rollouts(
+                rollouts,
+                rollout.metrics,
+                is_dapo=is_dapo,
+            )
+            return {"message": "Terminal rollout cleaned"}
+
+        # Update the statistics for dynamic sampling used for metrics collection
+        if is_dapo:
+            policy_status.update_dynamic_sampling_statistics(rollout.metrics)
         # Filter out outdated rollouts
-        rollouts = controller.policy_status_manager.filter_outdated_rollouts(rollouts)
+        rollouts = policy_status.filter_outdated_rollouts(rollouts)
         if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"

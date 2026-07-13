@@ -184,6 +184,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self._prompt_fetch_lock = threading.Lock()
         self.prefetch_thread: Optional[threading.Thread] = None
         self.current_weight_version = 0
+        self._rollout_end_acknowledged = False
 
         # determine the quantization type
         self.quantization_type = None
@@ -526,6 +527,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         could not reach).  No NCCL collective is involved, and teardown's
         bounded ``cleanup_ucxx`` still lets any in-flight output read drain.
         """
+        wst = getattr(self, "_weight_sync_thread", None)
+        if wst is not None:
+            fenced = wst.fence()
+            if not fenced:
+                logger.error(
+                    "[ABNORMAL teardown] WeightSyncThread fence failed for %s; "
+                    "continuing shutdown after the bounded abort path",
+                    self.replica_name,
+                )
         logger.info(
             "[Rollout] Received STOP from controller for %s; setting shutdown signal.",
             self.replica_name,
@@ -535,19 +545,30 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
-        # If this replica is already draining (prompt source exhausted),
-        # skip the NCCL mesh rebuild -- entering the collective would
-        # deadlock the peers that join while we exit shortly without
-        # them.  The controller-side filter on ``status.ended`` is the
-        # primary defence; this guard handles the race where a
-        # BuildMeshCommand was queued before that filter took effect.
-        if self.state.prompt_consume_end():
+        # Ranked-ended disaggregated workers remain command participants until
+        # STOP, so every rank in such a replica must accept topology rebuilds.
+        # Keep only the single-process delivery-failure escape: that worker is
+        # already shutting down and the controller never acknowledged it.
+        if (
+            self.state.prompt_consume_end()
+            and getattr(self.parallel_dims, "world_size", 1) == 1
+            and not getattr(self, "_rollout_end_acknowledged", False)
+        ):
             logger.info(
                 "[Rollout] Skipping BuildMeshCommand for %s: prompt "
-                "source exhausted, this replica is draining.",
+                "source exhausted without an acknowledged checkout.",
                 self.replica_name,
             )
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
             return
+
+        wst = getattr(self, "_weight_sync_thread", None)
+        if wst is not None and not wst.fence():
+            raise RuntimeError(
+                "Weight-sync work did not drain before rollout mesh rebuild"
+            )
         logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
 
         replica_name_to_rank = build_mesh_command.replica_name_to_rank
@@ -561,6 +582,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         if len(replica_name_to_rank) == 1:
             # only one rollout replica now, no need to build mesh.
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
             return
         # generate key for storing the NCCL group id.
         # group_0: [rank 0 in replica 0, rank 0 in replica 1, ..., rank 0 in replica n-1]
@@ -596,6 +620,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.global_commnicator_idex = create_nccl_comm(
             nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
         )
+        mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+        if mesh_ready is not None:
+            mesh_ready.set()
 
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
@@ -1605,6 +1632,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
 
+                if isinstance(command, BuildMeshCommand):
+                    mesh_ready = threading.Event()
+                    self._mesh_rebuild_ready = mesh_ready
+                    self._command_queue.put(command)
+                    while not mesh_ready.wait(timeout=0.1):
+                        if self.shutdown_signal.is_set():
+                            return
+                    continue
+
                 wst = getattr(self, "_weight_sync_thread", None)
                 if wst is not None and isinstance(
                     command, PolicyToRolloutUnicastCommand
@@ -1831,17 +1867,35 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        if self._rollout_end_acknowledged:
+            return True
+
         payloads, is_validation, _, empty = self.report_rollouts(block=True)
         assert not is_validation and payloads is None and empty, (
             f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         )
         response = RolloutRequest(
             src_replica_name=self.replica_name,
+            src_global_rank=self.global_rank,
             payloads=[],
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
+        self._rollout_end_acknowledged = bool(
+            self.api_client.post_rollout_completion(response)
+        )
+
+        # Disaggregated workers whose end POST was acknowledged stay in the
+        # command loop until the controller's explicit StopCommand.  Preserve
+        # the existing local escape only when a single-process worker cannot
+        # reach the controller, and for colocated mode, which has no separate
+        # rollout StopCommand channel.
+        if self.parallel_dims.world_size == 1 and (
+            self.config.mode == "colocated" or not self._rollout_end_acknowledged
+        ):
+            self.shutdown_signal.set()
+
+        return self._rollout_end_acknowledged
 
     def dynamic_sampling(self, payloads: List[RLPayload]):
         """
@@ -2160,7 +2214,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         self.state.set_prompt_fetch_end()
                         if self._prompt_queue.empty():
                             self.state.set_prompt_consume_end()
-                            if self.global_rank == 0:
+                            if self.should_report:
                                 self.send_end_signal()
                         break
                     # Controller had nothing to hand out right now: stop
@@ -2174,31 +2228,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 )
                 self._mainloop_branch_counts["consume_end"] += 1
-                # Mirror the async-rollout generation path
-                # (``stream_generation_step``, used when
-                # ``config.rollout.mode == "async"`` and the backend is
-                # in ``SUPPORT_ASYNC_BACKEND``): that method already
-                # calls ``self.shutdown_signal.set()`` at the analogous
-                # ``prompt_consume_end()`` site.  Without setting it
-                # here too, the default sync path leaves worker threads
-                # spinning on this branch waiting for an external
-                # ``shutdown`` broadcast that may never arrive (e.g.
-                # when the controller has already crashed).
-                #
-                # Scope the self-terminate to single-process workers
-                # (``world_size == 1``).  In a multi-rank worker the
-                # final prompt batch is scattered round-robin and
-                # *unevenly* across DP ranks, so ranks reach
-                # ``consume_end`` on different iterations.  If the first
-                # rank to drain set ``shutdown_signal`` and left
-                # ``main_loop`` here, it would strand its peers in the
-                # next cross-rank collective -> deadlock.  Multi-rank
-                # workers therefore keep the proven controller-broadcast
-                # lockstep shutdown; only single-process workers (the
-                # prefetch / bench regime that motivated this) take the
-                # self-terminate fast path.
-                if self.parallel_dims.world_size == 1:
-                    self.shutdown_signal.set()
+                if self.should_report:
+                    self.send_end_signal()
                 continue
             elif self._prompt_queue.empty():
                 # In single-producer mode the queue draining + a
@@ -2214,7 +2245,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if self._single_producer_mode:
                     if self.state.prompt_fetch_end():
                         self.state.set_prompt_consume_end()
-                        if self.global_rank == 0:
+                        if self.should_report:
                             self.send_end_signal()
                     else:
                         time.sleep(0.05)
@@ -2266,7 +2297,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
-                    if self.global_rank == 0:
+                    if self.should_report:
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
@@ -2554,20 +2585,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # Check if all prompts are consumed, if so, send end signal to the controller.
         if self.state.prompt_consume_end():
-            # Send end signal to the controller
-            # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
-            #
-            # Scope the self-terminate to single-process workers
-            # (``world_size == 1``); see the matching guard in the
-            # synchronous ``_main_loop_impl`` consume-end branch.  A
-            # multi-rank async worker would otherwise strand its peers
-            # in the next cross-rank collective when the first rank to
-            # exhaust its (unevenly scattered) prompt share leaves
-            # ahead of the others.  Multi-rank workers shut down via
-            # the controller stop-broadcast instead.
-            if self.parallel_dims.world_size == 1:
-                self.shutdown_signal.set()
-            if self.global_rank == 0:
+            # Each reporting rank owns an independent reward dispatcher;
+            # flush it and report that rank's local drain exactly once.
+            if self.should_report:
                 self.send_end_signal()
 
     def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:

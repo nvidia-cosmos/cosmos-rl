@@ -15,7 +15,7 @@
 
 import time
 import math
-from queue import Queue
+from queue import Empty, Queue
 from strenum import StrEnum
 from typing import Dict, List, Iterator, Any, Optional, Callable
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
@@ -23,7 +23,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
-from cosmos_rl.dispatcher.protocol import Role
+from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.dispatcher.command as command
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.payload_transport import PayloadTransportRegistry
@@ -283,19 +283,9 @@ class PolicyStatusManager:
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
 
-        # Per-step record of how many rollouts the controller dispatched for
-        # each training step.  Populated at dispatch time by
-        # ``try_trigger_data_fetch_and_training`` (which knows the real count,
-        # including the ``TrainingCompleteCommand`` case where it is zero) and
-        # consumed by ``train_ack`` to compute the symmetric
-        # ``samples_on_the_fly`` decrement.  Without this, ``train_ack``
-        # decrements by ``train_batch_per_replica * arrived_replicas``
-        # unconditionally, which underflows the counter on the fake-last-cmd
-        # path (dispatched zero, decrements two) and trips the
-        # ``samples_on_the_fly >= 0`` assertion.  Keyed by ``current_step``
-        # value at dispatch (= ``global_step`` sent in DataFetchCommand =
-        # ``step`` received in train_ack); entries are popped on ack so the
-        # map size stays bounded by in-flight step count.
+        # Actual rollout count for each in-flight real training command.
+        # Entries are keyed by the command step and consumed after its full
+        # policy ACK set, keeping samples_on_the_fly accounting symmetric.
         self.dispatched_rollouts_by_step: Dict[int, int] = {}
 
         self.status = {}
@@ -319,6 +309,13 @@ class PolicyStatusManager:
 
         # Non-validation RL: explicit end-of-data phase (see ``JobPhase``).
         self.job_phase = JobPhase.RUNNING
+        self.draining_total_steps: Optional[int] = None
+        self.last_real_datafetch_acked_step: Optional[int] = None
+        self.last_real_datafetch_acked_total_steps: Optional[int] = None
+        self.completion_step: Optional[int] = None
+        self.completion_recipients: set[str] = set()
+        self.completion_acks: set[str] = set()
+        self.terminal_complete = False
 
         # For rank specific data dispatch
         self.rollout_buffer_per_rank: List[Queue] = []
@@ -415,7 +412,20 @@ class PolicyStatusManager:
         """
         Check if the training is finished.
         """
-        return self.current_step >= self.total_steps and self.total_steps > 0
+        total_steps = self.training_horizon()
+        return self.terminal_complete or (
+            self.current_step >= total_steps and total_steps > 0
+        )
+
+    def training_horizon(self) -> int:
+        """Return the immutable drain horizon once rollout input is closed."""
+        if self.draining_total_steps is not None:
+            return self.draining_total_steps
+        return self.total_steps
+
+    def rollout_admission_closed(self) -> bool:
+        """Whether new rollout results can no longer feed a training step."""
+        return self.terminal_complete or self.completion_step is not None
 
     def maintain_life_status(self):
         """
@@ -451,7 +461,7 @@ class PolicyStatusManager:
         """
         Set the ranks of the policies.
         """
-        if self.training_finished():
+        if self.job_phase == JobPhase.DRAINING or self.training_finished():
             # Training is finished, do not recompute total steps
             return
         # Update total_steps based on remaining samples and replicas
@@ -488,83 +498,43 @@ class PolicyStatusManager:
         return steps_by_dataset
 
     def enter_draining_phase(self) -> None:
-        """Enter DRAINING on the first rollout HTTP ``is_end`` POST."""
+        """Close rollout input and freeze the advertised training horizon."""
         if self.job_phase != JobPhase.RUNNING:
             return
         self.job_phase = JobPhase.DRAINING
-        logger.info("[Controller] Job phase RUNNING -> DRAINING")
-        self.recompute_total_steps(
-            explicit_num_remaining_samples=self.total_pending_rollouts()
+        self.draining_total_steps = self.total_steps
+        logger.info(
+            "[Controller] Job phase RUNNING -> DRAINING at frozen horizon %d",
+            self.draining_total_steps,
         )
 
     def finish_draining_phase(
         self,
         rollout_status_manager: "RolloutStatusManager",
     ) -> None:
-        """Final buffer reconcile when every rollout has POSTed ``is_end``."""
+        """Dispatch complete tail batches, then complete without inventing work."""
         if not rollout_status_manager.all_rollouts_ended():
             return
-        total_pending_rollouts = self.total_pending_rollouts()
-        logger.info(
-            "[Controller] DRAINING finish: recompute total steps with "
-            "%d remaining rollouts in buffer...",
-            total_pending_rollouts,
-        )
-        original_total_steps = self.total_steps
-        self.recompute_total_steps(
-            explicit_num_remaining_samples=total_pending_rollouts
-        )
-        new_total_steps = self.total_steps
-        if new_total_steps > self.current_step:
-            logger.info("[Controller] There are still remaining steps, no op required")
-            return
-        rollouts_per_step = self.config.train.train_batch_per_replica * len(
-            self.get_all_atoms_arrived_replicas()
-        )
-        if (
-            rollouts_per_step > 0
-            and total_pending_rollouts >= rollouts_per_step
-            and self.current_step < original_total_steps
-        ):
-            # Buffer still holds at least one full training step and the
-            # policy has not reached the pre-recompute ``total_steps`` yet.
-            # ``train_ack`` will dispatch that step via ``try_trigger``; do
-            # not cut training short (custom_rollout CI: computed_cnt check).
-            logger.info(
-                "[Controller] DRAINING: %d buffered rollouts (>= %d/step) "
-                "but policy at step %d/%d; deferring TrainingComplete",
-                total_pending_rollouts,
-                rollouts_per_step,
-                self.current_step,
-                original_total_steps,
-            )
-            return
-        if self.current_step == original_total_steps and total_pending_rollouts == 0:
-            logger.info(
-                "[Controller] No remaining steps, policy and rollouts happen to "
-                "finish at the same time"
-            )
+        if self.job_phase == JobPhase.RUNNING:
+            self.enter_draining_phase()
+
+        if self.rollout_admission_closed():
+            self.cleanup_buffered_rollouts()
             return
         if not self.all_ready_or_reduced():
-            logger.info(
-                "[Controller] DRAINING: policy still has in-flight work at step "
-                "%d (statuses=%s); deferring TrainingComplete until train_ack",
-                self.current_step,
-                {name: r.status for name, r in self.policy_replicas.items()},
-            )
             return
-        if self.current_step == original_total_steps:
-            logger.info(
-                "[Controller] No remaining steps with %d buffered rollouts; "
-                "clearing buffer and triggering TrainingComplete",
-                total_pending_rollouts,
-            )
-        else:
-            logger.info(
-                "[Controller] Clear the rollout buffer, and trigger TrainingComplete"
-            )
-        self.rollout_buffer.queue.clear()
-        self.total_steps = self.current_step + 1
+
+        frozen_total = self.training_horizon()
+        if self.current_step < frozen_total and self.rollouts_enough_for_one_step():
+            previous_step = self.current_step
+            self.try_trigger_data_fetch_and_training()
+            if self.current_step > previous_step:
+                return
+
+        self.cleanup_buffered_rollouts()
+        if self.real_terminal_command_acked():
+            self.terminal_complete = True
+            return
         self.trigger_training_complete()
 
     def on_rollout_is_end(
@@ -574,8 +544,8 @@ class PolicyStatusManager:
         """Single entry for rollout HTTP ``is_end`` POST (not prompt fetch)."""
         if self.config.validation.enable:
             return
-        if self.job_phase == JobPhase.RUNNING:
-            self.enter_draining_phase()
+        if not rollout_status_manager.all_rollouts_ended():
+            return
         self.finish_draining_phase(rollout_status_manager)
 
     def should_weight_sync_after_train_ack(
@@ -623,60 +593,64 @@ class PolicyStatusManager:
         return need_sync_weight
 
     def trigger_training_complete(self) -> None:
-        """Dispatch ``TrainingCompleteCommand`` for the genuine final step."""
+        """Stop policy replicas at synthetic coordinates without advancing K."""
         if self.data_fetcher.activated_val_iter is not None:
             return
 
         arrived_replicas = self.get_all_atoms_arrived_replicas()
         if len(arrived_replicas) == 0:
             return
-
-        if self.training_finished():
+        if self.completion_step is not None:
             return
 
-        required_rollouts = 0
-        assert self.current_step + 1 == self.total_steps, (
-            "TrainingComplete should advance to the final step"
-        )
+        frozen_total = self.training_horizon()
+        completion_step = self.current_step + 1
+        recipients = {replica.name for replica in arrived_replicas}
 
-        self.remain_samples_num -= required_rollouts
-        self.current_step += 1
-        self.dispatched_rollouts_by_step[self.current_step] = required_rollouts
+        # Stage the complete recipient snapshot before the first publish.  A
+        # partial publication can then hang, but can never look successful or
+        # admit late rollout results that no future trainer can consume.
+        self.completion_step = completion_step
+        self.completion_recipients = recipients
+        self.completion_acks = set()
+        for replica in arrived_replicas:
+            self.set_status(replica.name, PolicyStatus.RUNNING)
 
-        if self.config.validation.enable and (
-            self.current_step % self.config.validation.freq == 0
-            or self.current_step == self.total_steps
-        ):
-            self.data_fetcher.validation_activate_dataloader(self.current_step)
-
-        do_save = self.check_checkpoint_saving(required_rollouts)
-
+        do_save = bool(frozen_total > 0 and self.config.train.ckpt.enable_checkpoint)
         for replica in arrived_replicas:
             command.TrainingCompleteCommand.trigger(
                 replica=replica,
-                global_step=self.current_step,
-                total_steps=self.total_steps,
+                global_step=completion_step,
+                total_steps=completion_step,
+                final_step=self.current_step,
+                checkpoint_total_steps=frozen_total,
                 remain_samples_num=self.remain_samples_num,
                 do_save=do_save,
                 redis_handler=self.redis_handler,
             )
-            self.set_status(replica.name, PolicyStatus.RUNNING)
+
+    def record_completion_ack(self, replica_name: str, step: int) -> bool:
+        """Record one ACK for the active synthetic completion command."""
+        if (
+            step != self.completion_step
+            or replica_name not in self.completion_recipients
+        ):
+            return False
+        if replica_name in self.completion_acks:
+            return True
+        self.completion_acks.add(replica_name)
+        if self.completion_acks == self.completion_recipients:
+            self.terminal_complete = True
+        return True
 
     def _weight_sync_rollout_targets(
         self,
         rollout_status_manager: "RolloutStatusManager",
     ) -> List[Replica]:
-        """Rollout replicas that can still service a P2R/R2R weight sync."""
-        exclude_ended = not self.config.validation.enable
-        sorted_replicas = sorted(
-            rollout_status_manager.get_all_atoms_arrived_replicas(),
-            key=lambda x: x.start_time,
+        """Return a communicator-safe rollout recipient set."""
+        return rollout_status_manager.get_safe_weight_sync_replicas(
+            validation_enabled=self.config.validation.enable
         )
-        return [
-            rollout_replica
-            for rollout_replica in sorted_replicas
-            if not (exclude_ended and rollout_replica.status.ended)
-        ]
 
     def _expected_validation_rollout_count(self) -> int:
         val_datasize = getattr(self.data_fetcher, "val_datasize", 0)
@@ -775,7 +749,7 @@ class PolicyStatusManager:
         self.status.pop(replica_name)
         self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
 
-        if self.training_finished():
+        if self.training_finished() or replica_name in self.completion_acks:
             # This policy replica is normally finished
             # Do not trigger rebuild mesh since everything is gonna be finished shortly
             logger.info(f"[Controller] Replica {replica_name} is stopping.")
@@ -1131,6 +1105,109 @@ class PolicyStatusManager:
             return sum(q.qsize() for q in self.rollout_buffer_per_rank)
         return self.rollout_buffer.qsize()
 
+    @staticmethod
+    def _parse_non_negative_count(metrics: Dict[str, Any], key: str) -> int:
+        value = metrics.get(key, 0)
+        if type(value) is int and value >= 0:
+            return value
+        logger.warning(
+            "[Controller] Ignoring malformed DAPO metric %s=%r; expected a "
+            "non-negative integer",
+            key,
+            value,
+        )
+        return 0
+
+    @classmethod
+    def parse_dynamic_sampling_counts(
+        cls, metrics: Optional[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """Sanitize DAPO counts once before any metric or counter mutation."""
+        metrics = metrics or {}
+        return {
+            key: cls._parse_non_negative_count(metrics, key)
+            for key in ("sampled", "filtered_positive", "filtered_negative")
+        }
+
+    def _settle_samples_on_the_fly(self, count: int, source: str) -> None:
+        if count <= 0:
+            return
+        before = self.samples_on_the_fly
+        self.samples_on_the_fly = max(0, before - count)
+        _log_samples_on_the_fly_mutation(
+            source,
+            before,
+            self.samples_on_the_fly,
+            extra=f"settled_count={count}",
+        )
+
+    def _discard_rollouts(self, rollouts: List[Rollout], source: str) -> int:
+        if not rollouts:
+            return 0
+        self._publish_payload_transport_cleanup(rollouts, [])
+        self._settle_samples_on_the_fly(len(rollouts), source)
+        return len(rollouts)
+
+    def cleanup_buffered_rollouts(self) -> int:
+        """Release every buffered rollout without consuming resumable budget."""
+        dropped: List[Rollout] = []
+        queues = (
+            self.rollout_buffer_per_rank
+            if self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+            else [self.rollout_buffer]
+        )
+        for rollout_queue in queues:
+            while True:
+                try:
+                    dropped.append(rollout_queue.get_nowait())
+                except Empty:
+                    break
+        return self._discard_rollouts(dropped, "terminal_buffer_cleanup")
+
+    def cleanup_terminal_rollouts(
+        self,
+        rollouts: List[Rollout],
+        metrics: Optional[Dict[str, Any]],
+        *,
+        is_dapo: bool,
+    ) -> int:
+        """Settle a post-terminal HTTP result without normal admission."""
+        if rollouts:
+            self._publish_payload_transport_cleanup(rollouts, [])
+        settled_count = len(rollouts)
+        if is_dapo:
+            counts = self.parse_dynamic_sampling_counts(metrics)
+            if counts["sampled"] != len(rollouts):
+                logger.warning(
+                    "[Controller] DAPO sampled=%d does not match %d extracted "
+                    "terminal rollouts; using extracted count",
+                    counts["sampled"],
+                    len(rollouts),
+                )
+            settled_count += counts["filtered_positive"] + counts["filtered_negative"]
+        self._settle_samples_on_the_fly(settled_count, "terminal_result_cleanup")
+        return settled_count
+
+    def real_terminal_command_acked(self) -> bool:
+        """Whether this controller observed a fully ACKed real T/T command."""
+        terminal_step = self.training_horizon()
+        return (
+            self.last_real_datafetch_acked_step == terminal_step
+            and self.last_real_datafetch_acked_total_steps == terminal_step
+        )
+
+    def record_real_datafetch_acked(self, step: int, total_steps: int) -> None:
+        """Record a fully ACKed real command and close natural-final input."""
+        self.last_real_datafetch_acked_step = step
+        self.last_real_datafetch_acked_total_steps = total_steps
+        terminal_step = self.training_horizon()
+        if step != terminal_step or total_steps != terminal_step:
+            return
+        # Activate first so a result handler cannot re-admit work between the
+        # final ACK and cleanup.  FastAPI handlers do not yield in this region.
+        self.terminal_complete = True
+        self.cleanup_buffered_rollouts()
+
     def get_all_atoms_arrived_replicas(self) -> List[Replica]:
         """
         Get all the replicas that have all atoms arrived.
@@ -1207,14 +1284,16 @@ class PolicyStatusManager:
         """
         Update the dynamic sampling statistics.
         """
+        counts = self.parse_dynamic_sampling_counts(filter_records)
         for k in ["sampled", "filtered_positive", "filtered_negative"]:
-            self.filter_records[k] = self.filter_records.get(k, 0) + filter_records.get(
-                k, 0
-            )
+            self.filter_records[k] = self.filter_records.get(k, 0) + counts[k]
 
         # Update the remaining samples number to reflect the filtering results
-        self.remain_samples_num -= filter_records.get("filtered_positive", 0)
-        self.remain_samples_num -= filter_records.get("filtered_negative", 0)
+        filtered_count = counts["filtered_positive"] + counts["filtered_negative"]
+        self.remain_samples_num -= filtered_count
+        # Filtered DAPO generations have no payload and can never reach a
+        # training ACK, so settle their prompt-side in-flight accounting here.
+        self._settle_samples_on_the_fly(filtered_count, "dapo_filter")
 
     def filter_outdated_rollouts(self, rollouts: List[Rollout]) -> List[Rollout]:
         """
@@ -1291,21 +1370,7 @@ class PolicyStatusManager:
         self.filter_records[k] = self.filter_records.get(k, 0) + discarded_count
 
         if discarded_count > 0:
-            # Filtered rollouts were counted into ``samples_on_the_fly`` at
-            # dispatch time (controller._get_batched_prompt_impl) but are
-            # dropped here without ever reaching ``train_ack``, where the
-            # symmetric decrement lives.  Without this clamp the counter
-            # drifts upward on every filter event and eventually pins the
-            # soft throttle on permanently — the system loses its
-            # rollout-parallel regime and never autonomically recovers.
-            _sotf_before = self.samples_on_the_fly
-            self.samples_on_the_fly = max(0, self.samples_on_the_fly - discarded_count)
-            _log_samples_on_the_fly_mutation(
-                "filter_outdated",
-                _sotf_before,
-                self.samples_on_the_fly,
-                extra=f"discarded_count={discarded_count}",
-            )
+            self._settle_samples_on_the_fly(discarded_count, "filter_outdated")
             self._publish_payload_transport_cleanup(rollouts, filtered_rollouts)
 
         return filtered_rollouts
@@ -1450,6 +1515,13 @@ class PolicyStatusManager:
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
 
+        # Synthetic completion ACKs have their own persistent recipient set.
+        # Record them before logging/reduction bookkeeping and before the
+        # worker can unregister.  They are never real DataFetch evidence.
+        if self.record_completion_ack(replica_name, step):
+            self.set_status(replica_name, PolicyStatus.REDUCED)
+            return
+
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
         self.report_data_list.append(report_data)
@@ -1467,20 +1539,19 @@ class PolicyStatusManager:
 
         if self.all_reduced():
             _sotf_before = self.samples_on_the_fly
-            # Decrement by the actual rollout count we dispatched for this
-            # step (recorded in ``try_trigger_data_fetch_and_training``),
-            # NOT by ``train_batch_per_replica * arrived_replicas``.  The
-            # two are equal on normal steps but diverge on the
-            # ``TrainingCompleteCommand`` step, where the controller dispatches
-            # zero rollouts but the trainer still acks.  Without the
-            # symmetric lookup, that ack underflows the counter and trips
-            # the ``samples_on_the_fly >= 0`` assertion below.
-            _train_decrement = self.dispatched_rollouts_by_step.pop(step, 0)
-            if _train_decrement == 0 and step not in (
+            # Settle exactly the rollout count recorded for this real command.
+            _missing_dispatch = object()
+            _dispatch_record = self.dispatched_rollouts_by_step.pop(
+                step, _missing_dispatch
+            )
+            _train_decrement = (
+                0 if _dispatch_record is _missing_dispatch else _dispatch_record
+            )
+            if _dispatch_record is _missing_dispatch and step not in (
                 self.total_steps,
                 self.total_steps - 1,
             ):
-                # Unexpected: a non-fake step popped 0.  Either the
+                # Unexpected: a real step had no dispatch record. Either the
                 # dispatch record was already consumed (double-ack) or a
                 # step number is mismatched.  Log loudly but do not crash;
                 # ``samples_on_the_fly`` stays balanced regardless.
@@ -1506,13 +1577,18 @@ class PolicyStatusManager:
             assert self.samples_on_the_fly >= 0, (
                 "samples_on_the_fly should not be negative"
             )
+            if (
+                getattr(self.config, "mode", None) != "colocated"
+                and not self.config.validation.enable
+                and _dispatch_record is not _missing_dispatch
+                and _train_decrement > 0
+            ):
+                self.record_real_datafetch_acked(step, total_steps)
             # All replicas have been reduced; decide whether to weight-sync.
             # See ``need_weight_sync`` for the end-of-data rationale (the
             # final-step sync is suppressed for non-validation runs because it
             # is never consumed and races rollout teardown).
             #
-            if rollout_status_manager.all_rollouts_ended():
-                self.finish_draining_phase(rollout_status_manager)
             need_sync_weight = self.should_weight_sync_after_train_ack(
                 step, rollout_status_manager
             )
@@ -1741,8 +1817,12 @@ class PolicyStatusManager:
                         step,
                         self.total_steps,
                     )
-            # Trigger next step training if data is available
-            self.try_trigger_data_fetch_and_training()
+            # Trigger/finalize only after every policy status is normalized;
+            # otherwise a command published mid-ACK can be overwritten READY.
+            if self.job_phase == JobPhase.DRAINING:
+                self.finish_draining_phase(rollout_status_manager)
+            else:
+                self.try_trigger_data_fetch_and_training()
             if self.config.train.train_policy.on_policy:
                 # Reset on-policy rollout completed flag for next step
                 self.on_policy_rollout_completed = False
@@ -1811,6 +1891,8 @@ class PolicyStatusManager:
             return True
 
         if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            if not self.rollout_buffer_per_rank:
+                return False
             # In this dispatch mode, each rank has its own rollout buffer.
             return all(
                 q.qsize() >= self.config.train.train_batch_per_replica
@@ -1826,7 +1908,7 @@ class PolicyStatusManager:
         # Decide whether to save checkpoint
         # First check if we need to save checkpoint based on epoch
         do_save = False
-        if self.current_step == self.total_steps:
+        if self.current_step == self.training_horizon():
             # Always save checkpoint at the last step
             do_save = True
         elif self.config.train.ckpt.save_freq_in_epoch > 0:
@@ -1871,6 +1953,8 @@ class PolicyStatusManager:
         if self.training_finished():
             return
 
+        training_horizon = self.training_horizon()
+
         items_count = self.config.train.train_batch_per_replica
         required_rollouts = items_count * len(arrived_replicas)
         all_ready_or_reduced = (
@@ -1885,19 +1969,12 @@ class PolicyStatusManager:
             # From controller's perspective, the training step is already increased
             self.current_step += 1
 
-            # Record the actual rollout count dispatched for this step so
-            # ``train_ack`` can later decrement ``samples_on_the_fly`` by the
-            # symmetric amount.  ``required_rollouts`` is the authoritative
-            # count: ``train_batch_per_replica * len(arrived_replicas)`` on a
-            # normal step, ``0`` on the ``TrainingCompleteCommand`` step
-            # above).  Keyed by ``current_step`` which is exactly the
-            # ``global_step`` we send in DataFetchCommand below and the
-            # ``step`` the trainer echoes back via train_ack.
+            # Record the count echoed by this real command's eventual ACK set.
             self.dispatched_rollouts_by_step[self.current_step] = required_rollouts
 
             if self.config.validation.enable and (
                 self.current_step % self.config.validation.freq == 0
-                or self.current_step == self.total_steps
+                or self.current_step == training_horizon
             ):
                 self.data_fetcher.validation_activate_dataloader(self.current_step)
 
@@ -1945,7 +2022,7 @@ class PolicyStatusManager:
                     replica=replica,
                     items_count=items_count,
                     global_step=self.current_step,
-                    total_steps=self.total_steps,
+                    total_steps=training_horizon,
                     # `remain_samples_num` is just for checkpointing the training progress
                     remain_samples_num=self.remain_samples_num,
                     # do_save from `check_checkpoint_saving` indicates whether the replica should save checkpoint after this training step
@@ -2017,6 +2094,8 @@ class RolloutStatusManager:
         self.rollout_replicas = {}
         self.rollout_init_done = False
         self.replica_scaling_log = []
+        self._ended_reporters: Dict[str, set[int]] = {}
+        self._command_participant_ended_replicas: set[str] = set()
 
     def setup(
         self,
@@ -2113,6 +2192,8 @@ class RolloutStatusManager:
         )
 
         replica = self.rollout_replicas.pop(replica_name)
+        self._ended_reporters.pop(replica_name, None)
+        self._command_participant_ended_replicas.discard(replica_name)
         self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
         if policy_status_manager.training_finished():
             # This policy replica is normally finished
@@ -2120,27 +2201,24 @@ class RolloutStatusManager:
             logger.info(f"[Controller] Replica {replica_name} is stopping.")
             return
 
-        # Restrict the BuildMesh recipient set to replicas that have NOT
-        # already signalled ``rollout_end`` (``status.ended``).  A
-        # replica that has POSTed its final batch is on its way out of
-        # ``main_loop`` and will stop draining its command queue, so
-        # including it in the rebuild leaves a live peer waiting on a
-        # collective that will never complete.  Also require
-        # ``len(live_survivors) >= 2`` before triggering -- a 1-member
-        # rebuild is pointless and skipping it makes the decision
-        # audible in the log.
-        live_survivors = [
-            r for r in self.get_all_atoms_arrived_replicas() if not r.status.ended
+        # Workers that promise to remain in their command loop until STOP are
+        # safe mesh members. Legacy rankless-ended workers make no such
+        # guarantee and must remain excluded.
+        safe_survivors = [
+            survivor
+            for survivor in self.get_all_atoms_arrived_replicas()
+            if not survivor.status.ended
+            or survivor.name in self._command_participant_ended_replicas
         ]
-        if replica.in_mesh and len(live_survivors) >= 2:
-            self.trigger_rebuild_mesh(live_survivors)
+        if replica.in_mesh and safe_survivors:
+            # A one-member rebuild is still required: async R2R must replace
+            # the departed replica's communicator before version bookkeeping.
+            self.trigger_rebuild_mesh(safe_survivors)
         elif replica.in_mesh:
             logger.info(
-                "[Controller] Replica %s unregistering with %d live "
-                "survivor(s); skipping mesh rebuild "
-                "(graceful end-of-data path or last-replica teardown).",
+                "[Controller] Replica %s unregistering with no safe rollout "
+                "mesh survivors; skipping rebuild.",
                 replica_name,
-                len(live_survivors),
             )
 
     def register(
@@ -2191,17 +2269,83 @@ class RolloutStatusManager:
             )
         return replica
 
-    def rollout_end(self, replica_name: str):
+    @staticmethod
+    def _expected_reporting_ranks(replica: Replica) -> set[int]:
+        return {
+            atom.global_rank
+            for atom in replica.atoms.values()
+            if atom.tp_rank() == 0
+            and atom.pp_rank() == atom.group_size[MESH_NAMES.index("pp")] - 1
+        }
+
+    def get_safe_weight_sync_replicas(
+        self, *, validation_enabled: bool
+    ) -> List[Replica]:
+        """Return an R2R recipient set that matches a valid communicator."""
+        replicas = sorted(
+            self.get_all_atoms_arrived_replicas(), key=lambda item: item.start_time
+        )
+        if validation_enabled:
+            return replicas
+        if any(
+            replica.status.ended
+            and replica.name not in self._command_participant_ended_replicas
+            for replica in replicas
+        ):
+            # A rankless legacy checkout does not promise to keep consuming
+            # commands. Publishing to it or to a subset of its communicator
+            # can deadlock, so wait for unregister/rebuild.
+            return []
+        # Command-participating ended workers remain available through STOP.
+        # Keep the complete registered topology; an R2R subset would use a
+        # stale all-replica communicator.
+        return replicas
+
+    def rollout_end(
+        self,
+        replica_name: str,
+        src_global_rank: Optional[int] = None,
+        stays_command_participant: bool = False,
+    ) -> bool:
         """
-        Rollout end event.
+        Record a local reporter checkout and return a whole-replica transition.
+
+        Rankless requests retain the legacy whole-replica meaning. They may
+        explicitly promise to remain command participants through STOP.
         """
         replica = self[replica_name]
         if replica is None:
             logger.warning(
                 f"[Controller] Rollout {replica_name} not found in RolloutStatusManager"
             )
-            return
-        replica.status.ended = True
+            return False
+        if replica.status.ended:
+            return False
+        if src_global_rank is None:
+            if stays_command_participant:
+                self._command_participant_ended_replicas.add(replica_name)
+            else:
+                self._command_participant_ended_replicas.discard(replica_name)
+            replica.status.ended = True
+            return True
+
+        expected = self._expected_reporting_ranks(replica)
+        if src_global_rank not in expected:
+            logger.warning(
+                "[Controller] Ignoring rollout end from unexpected rank %s "
+                "for %s; expected one of %s",
+                src_global_rank,
+                replica_name,
+                sorted(expected),
+            )
+            return False
+        reporters = self._ended_reporters.setdefault(replica_name, set())
+        reporters.add(src_global_rank)
+        if expected and expected.issubset(reporters):
+            self._command_participant_ended_replicas.add(replica_name)
+            replica.status.ended = True
+            return True
+        return False
 
     def all_rollouts_ended(self) -> bool:
         """

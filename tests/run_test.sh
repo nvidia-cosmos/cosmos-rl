@@ -78,8 +78,8 @@ run python tests/test_dataset_signature.py
 run python tests/test_put_rollouts.py
 run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
-# pytest-style suite (CPU-only); install pytest in case the image lacks it.
-run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py"
+# Pytest-style CPU suites; install pytest in case the image lacks it.
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract

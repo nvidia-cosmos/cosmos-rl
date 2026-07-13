@@ -299,6 +299,50 @@ class NFTTrainer(DiffusersTrainer):
         ]
         self.neg_pooled_prompt_embed = neg_text_embedding_dict["pooled_projections"]
 
+    def save_checkpoint(
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        *,
+        is_final: bool,
+    ) -> None:
+        use_ema_weights = self.config.train.ema_enable and self.model.ema is not None
+        if use_ema_weights:
+            self.model.ema.copy_ema_to(self.trainable_params, store_temp=True)
+
+        try:
+            if is_final or self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{current_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=is_final,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
+                )
+
+            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+            model_state_dict = self.model.get_trained_model_state_dict()
+            self.ckpt_manager.save_checkpoint(
+                model=model_state_dict,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
+                total_steps=total_steps,
+                remain_samples_num=remain_samples_num,
+                is_final=is_final,
+            )
+            self.ckpt_manager.save_check(step=current_step)
+        finally:
+            if use_ema_weights:
+                self.model.ema.copy_temp_to(self.trainable_params)
+
     def step_training(
         self,
         rollouts: List[Rollout],
@@ -790,43 +834,11 @@ class NFTTrainer(DiffusersTrainer):
 
         # Checkpointing
         if is_master_replica and (do_save_checkpoint):
-            is_last_step = current_step == total_steps
-            # Save the ema weights if ema is enabled, and restore the current weights after saving the checkpoint
-            if self.config.train.ema_enable and self.model.ema is not None:
-                self.model.ema.copy_ema_to(self.trainable_params, store_temp=True)
-
-            if is_last_step or self.config.train.ckpt.export_safetensors:
-                logger.info(
-                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
-                )
-                self.export_safetensors(
-                    output_dir=self.config.train.output_dir,
-                    rel_path=os.path.join(
-                        "safetensors",
-                        f"step_{current_step}",
-                    ),
-                    trainable_only=False,
-                    is_final=is_last_step,
-                    dtype=str2torch_dtype(self.config.train.param_dtype),
-                )
-
-            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-            model_state_dict = self.model.get_trained_model_state_dict()
-            self.ckpt_manager.save_checkpoint(
-                model=model_state_dict,
-                optimizer=self.optimizers,
-                scheduler=self.lr_schedulers,
-                step=current_step,
+            self.save_checkpoint(
+                current_step=current_step,
                 total_steps=total_steps,
-                **{
-                    "remain_samples_num": remain_samples_num,
-                    "is_final": is_last_step,
-                },
+                remain_samples_num=remain_samples_num,
+                is_final=current_step == total_steps,
             )
-            self.ckpt_manager.save_check(step=current_step)
-
-            # Restore current weights after saving ema weights to checkpoint
-            if self.config.train.ema_enable and self.model.ema is not None:
-                self.model.ema.copy_temp_to(self.trainable_params)
 
         return report_data
