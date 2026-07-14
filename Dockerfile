@@ -102,6 +102,7 @@ RUN pip install -U pip setuptools wheel packaging psutil
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
+# Transformer Engine 2.17's NCCL-EP extension requires PyTorch 2.11 or newer.
 RUN set -eux; \
         case "${COSMOS_RL_TORCH_VARIANT}" in \
             2.8) \
@@ -132,7 +133,7 @@ RUN set -eux; \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
             flashinfer-python=="${FLASHINFER_VERSION}" \
-            transformer_engine[pytorch] --no-build-isolation
+            "transformer_engine[pytorch]==2.16.1" --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
