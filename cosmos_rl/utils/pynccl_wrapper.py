@@ -512,6 +512,20 @@ class NCCLLibrary:
             self._funcs["ncclSend"](sendbuff, count, datatype, dest, comm, stream)
         )
 
+    def _ncclSendResult(
+        self,
+        sendbuff: buffer_type,
+        count: int,
+        datatype: int,
+        dest: int,
+        comm: ncclComm_t,
+        stream: cudaStream_t,
+    ) -> int:
+        """Return the unchecked result from ``ncclSend``."""
+        return int(
+            self._funcs["ncclSend"](sendbuff, count, datatype, dest, comm, stream)
+        )
+
     def ncclRecv(
         self,
         recvbuff: buffer_type,
@@ -522,6 +536,20 @@ class NCCLLibrary:
         stream: cudaStream_t,
     ) -> None:
         self.NCCL_CHECK(
+            self._funcs["ncclRecv"](recvbuff, count, datatype, src, comm, stream)
+        )
+
+    def _ncclRecvResult(
+        self,
+        recvbuff: buffer_type,
+        count: int,
+        datatype: int,
+        src: int,
+        comm: ncclComm_t,
+        stream: cudaStream_t,
+    ) -> int:
+        """Return the unchecked result from ``ncclRecv``."""
+        return int(
             self._funcs["ncclRecv"](recvbuff, count, datatype, src, comm, stream)
         )
 
@@ -556,6 +584,12 @@ class NCCLLibrary:
         err = ncclResult_t()
         self._funcs["ncclCommGetAsyncError"](comm, ctypes.byref(err))
         return int(err.value)
+
+    def _ncclCommGetAsyncErrorResult(self, comm: ncclComm_t) -> tuple[int, int]:
+        """Return the query API result and the communicator state separately."""
+        err = ncclResult_t()
+        api_result = self._funcs["ncclCommGetAsyncError"](comm, ctypes.byref(err))
+        return int(api_result), int(err.value)
 
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         # abort can return error itself; ignore it to avoid masking original issue

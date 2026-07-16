@@ -32,7 +32,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Literal, Optional
 
 import torch
 from cosmos_rl.utils.logging import logger
@@ -179,11 +179,39 @@ def _current_ctx() -> _WatchdogContext | None:  # noqa: D401
 # ---------------------------------------------------------------------------
 
 
+_P2PPhase = Literal[
+    "raw_call_enter",
+    "raw_call_return",
+    "async_error_query_enter",
+    "async_error_query_return",
+    "abort_enter",
+    "abort_return",
+]
+_P2PPhaseObserver = Callable[[_P2PPhase, int | None, int | None], None]
+
+
+def _notify_p2p_phase(
+    observer: Optional[_P2PPhaseObserver],
+    phase: _P2PPhase,
+    api_result: int | None = None,
+    comm_state: int | None = None,
+) -> None:
+    """Notify a non-blocking observer without changing NCCL behavior."""
+    if observer is None:
+        return
+    try:
+        observer(phase, api_result, comm_state)
+    except Exception:
+        # Diagnostics must never mask or alter the NCCL operation.
+        pass
+
+
 @dataclass(slots=True)
 class _Task:
     functor: Callable[[], ncclComm_t]
     timeout_ms: int
     comm_idx: Optional[int]
+    phase_observer: Optional[_P2PPhaseObserver] = None
     done: threading.Event = field(default_factory=threading.Event)
     timed_out: threading.Event = field(default_factory=threading.Event)
 
@@ -217,7 +245,17 @@ def run_task(task: _Task):
         deadline = time.monotonic() + task.timeout_ms / 1000.0
         # Poll async error status until success or timeout.
         while time.monotonic() < deadline:
-            err = _nccl.ncclCommGetAsyncError(comm)
+            if task.phase_observer is None:
+                err = _nccl.ncclCommGetAsyncError(comm)
+            else:
+                _notify_p2p_phase(task.phase_observer, "async_error_query_enter")
+                api_result, err = _nccl._ncclCommGetAsyncErrorResult(comm)
+                _notify_p2p_phase(
+                    task.phase_observer,
+                    "async_error_query_return",
+                    api_result,
+                    err,
+                )
             if err == ncclResultEnum.ncclSuccess:
                 break
             if err != ncclResultEnum.ncclInProgress:
@@ -225,7 +263,9 @@ def run_task(task: _Task):
                 logger.error(
                     f"NCCL: async error detected (err={err}), task {task} failed"
                 )
+                _notify_p2p_phase(task.phase_observer, "abort_enter")
                 _safe_abort(task.comm_idx, comm)
+                _notify_p2p_phase(task.phase_observer, "abort_return")
                 task.timed_out.set()
                 break
             time.sleep(0.001)
@@ -233,7 +273,9 @@ def run_task(task: _Task):
         else:
             # Enqueue timeout hit – abort communicator.
             logger.error(f"NCCL: non-blocking enqueue timed out for task {task}")
+            _notify_p2p_phase(task.phase_observer, "abort_enter")
             _safe_abort(task.comm_idx, comm)
+            _notify_p2p_phase(task.phase_observer, "abort_return")
             task.timed_out.set()
     except Exception as e:
         logger.error(f"[Worker] Exception during task {task}: {e}")
@@ -280,6 +322,8 @@ def _submit_nccl(
     timeout_ms: Optional[int],
     comm_idx: Optional[int] = None,
     run_inline: bool = True,
+    *,
+    phase_observer: Optional[_P2PPhaseObserver] = None,
 ):
     """Execute *functor* in the NCCL worker thread with watchdog integration."""
     if not _worker_started:
@@ -288,7 +332,12 @@ def _submit_nccl(
         )
 
     resolved_timeout = _get_timeout_ms(timeout_ms)
-    task = _Task(functor, resolved_timeout, comm_idx)
+    task = _Task(
+        functor,
+        resolved_timeout,
+        comm_idx,
+        phase_observer=phase_observer,
+    )
     if run_inline:
         run_task(task)
     else:
@@ -654,25 +703,53 @@ def nccl_send(
     comm_idx: int,
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
+    *,
+    phase_observer: Optional[_P2PPhaseObserver] = None,
 ):
-    """Point-to-point send."""
+    """Point-to-point send with an optional synchronous phase observer.
+
+    The observer must return promptly and must not perform I/O. Its exceptions
+    are contained so diagnostics cannot change the NCCL operation's outcome.
+    """
     _check_tensor(tensor)
     meta = _COMM_REGISTRY.get(comm_idx)
 
     stream_ptr = _stream_ptr(stream)
 
     def _send_call():
-        _nccl.ncclSend(
-            _buf(tensor),
-            tensor.numel(),
-            _dtype_enum(tensor.dtype),
-            peer,
-            meta.comm,
-            stream_ptr,
-        )
+        if phase_observer is None:
+            _nccl.ncclSend(
+                _buf(tensor),
+                tensor.numel(),
+                _dtype_enum(tensor.dtype),
+                peer,
+                meta.comm,
+                stream_ptr,
+            )
+        else:
+            _notify_p2p_phase(phase_observer, "raw_call_enter")
+            api_result = _nccl._ncclSendResult(
+                _buf(tensor),
+                tensor.numel(),
+                _dtype_enum(tensor.dtype),
+                peer,
+                meta.comm,
+                stream_ptr,
+            )
+            _notify_p2p_phase(
+                phase_observer,
+                "raw_call_return",
+                api_result,
+            )
+            _nccl.NCCL_CHECK(api_result)
         return meta.comm
 
-    _submit_nccl(_send_call, timeout_ms, comm_idx)
+    _submit_nccl(
+        _send_call,
+        timeout_ms,
+        comm_idx,
+        phase_observer=phase_observer,
+    )
 
 
 def nccl_recv(
@@ -681,25 +758,53 @@ def nccl_recv(
     comm_idx: int,
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
+    *,
+    phase_observer: Optional[_P2PPhaseObserver] = None,
 ):
-    """Point-to-point receive."""
+    """Point-to-point receive with an optional synchronous phase observer.
+
+    The observer must return promptly and must not perform I/O. Its exceptions
+    are contained so diagnostics cannot change the NCCL operation's outcome.
+    """
     _check_tensor(tensor)
     meta = _COMM_REGISTRY.get(comm_idx)
 
     stream_ptr = _stream_ptr(stream)
 
     def _recv_call():
-        _nccl.ncclRecv(
-            _buf(tensor),
-            tensor.numel(),
-            _dtype_enum(tensor.dtype),
-            peer,
-            meta.comm,
-            stream_ptr,
-        )
+        if phase_observer is None:
+            _nccl.ncclRecv(
+                _buf(tensor),
+                tensor.numel(),
+                _dtype_enum(tensor.dtype),
+                peer,
+                meta.comm,
+                stream_ptr,
+            )
+        else:
+            _notify_p2p_phase(phase_observer, "raw_call_enter")
+            api_result = _nccl._ncclRecvResult(
+                _buf(tensor),
+                tensor.numel(),
+                _dtype_enum(tensor.dtype),
+                peer,
+                meta.comm,
+                stream_ptr,
+            )
+            _notify_p2p_phase(
+                phase_observer,
+                "raw_call_return",
+                api_result,
+            )
+            _nccl.NCCL_CHECK(api_result)
         return meta.comm
 
-    _submit_nccl(_recv_call, timeout_ms, comm_idx)
+    _submit_nccl(
+        _recv_call,
+        timeout_ms,
+        comm_idx,
+        phase_observer=phase_observer,
+    )
 
 
 def nccl_allreduce(
