@@ -78,17 +78,17 @@ class UCXXPayloadTransport(PayloadTransport):
           ceiling for the prefetch worker thread's result queue.  Bounds
           how long the trainer is willing to block on a single prefetch
           batch before giving up.
-        * ``ucxx_n_chunks`` (int, default 2): number of in-flight prefetch
-          slots reserved on the trainer side.
         * ``ucxx_read_max_attempts`` (int, default 2): total attempts per
           remote slot read (initial + retries).  Retries fire only on
           transient UCX errors classified in ``_TRANSIENT_UCXX_ERRORS``;
           non-transient errors short-circuit immediately.
-        * ``ucxx_read_timeout`` (float, default 60.0): per-await wall
+        * ``ucxx_read_timeout`` (float, default 30.0): per-await wall
           clock budget for each ``endpoint.send`` / ``endpoint.recv``
           inside one ``UCXXClient.read`` call (distinct from
           ``ucxx_prefetch_timeout`` above -- this bounds a single
-          network operation, not a whole batch).
+          network operation, not a whole batch).  Retries on transient
+          UCX errors use ``ucxx_read_max_attempts``, so this default
+          targets slow large-payload reads without wedging rotation.
 
         No-op for packers that do not subclass the mixin -- matches the
         defensive default of the base class.
@@ -102,29 +102,23 @@ class UCXXPayloadTransport(PayloadTransport):
         except (TypeError, ValueError):
             prefetch_timeout = 30.0
         try:
-            n_chunks = int(custom.get("ucxx_n_chunks", 2))
-        except (TypeError, ValueError):
-            n_chunks = 2
-        try:
             max_attempts = int(custom.get("ucxx_read_max_attempts", 2))
         except (TypeError, ValueError):
             max_attempts = 2
         if max_attempts < 1:
             max_attempts = 1
         try:
-            read_timeout = float(custom.get("ucxx_read_timeout", 60.0))
+            read_timeout = float(custom.get("ucxx_read_timeout", 30.0))
         except (TypeError, ValueError):
-            read_timeout = 60.0
+            read_timeout = 30.0
         logger.debug(
             f"[UCXXPayloadTransport] Attaching UCXX data packer "
             f"(device={device}, prefetch_timeout={prefetch_timeout}, "
-            f"n_chunks={n_chunks}, max_attempts={max_attempts}, "
-            f"read_timeout={read_timeout})"
+            f"max_attempts={max_attempts}, read_timeout={read_timeout})"
         )
         setup(
             device=device,
             prefetch_timeout=prefetch_timeout,
-            n_chunks=n_chunks,
             max_attempts=max_attempts,
             read_timeout=read_timeout,
         )

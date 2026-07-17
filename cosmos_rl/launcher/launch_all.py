@@ -15,7 +15,7 @@
 
 #!/usr/bin/env python3
 
-import socket
+import http.client
 import subprocess
 import sys
 import time
@@ -47,38 +47,37 @@ from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
     """
-    Wait for a URL to be ready by sending a GET request.
+    Wait for the controller HTTP API to be ready.
 
     Args:
-        url: The URL to check
+        url: The controller URL to check
 
     Returns:
         None
     """
+    host, port = url.rsplit(":", 1)
     while True:
-        # create TCP socket
+        if process is not None and process.poll() is not None:
+            if process.returncode != 0:
+                logger.error(
+                    f"Process {process.pid} exited with code {process.returncode}. Exiting."
+                )
+                sys.exit(process.returncode)
+            logger.error(f"Process {process.pid} exited as soon as launched. Exiting.")
+            sys.exit(1)
+
+        connection = http.client.HTTPConnection(host, int(port), timeout=1)
         try:
-            if process is not None:
-                if process.poll() is not None:
-                    if process.returncode != 0:
-                        logger.error(
-                            f"Process {process.pid} exited with code {process.returncode}. Exiting."
-                        )
-                        sys.exit(process.returncode)
-                    else:
-                        logger.error(
-                            f"Process {process.pid} exited as soon as launched. Exiting."
-                        )
-                        sys.exit(1)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            host, port = url.split(":")
-            sock.connect((host, int(port)))
-            sock.close()
-            break
-        except socket.error:
-            # If the connection fails, wait and retry
-            time.sleep(1)
+            connection.request("GET", "/api/meta")
+            response = connection.getresponse()
+            response.read()
+            if response.status == 200:
+                return
+        except (OSError, http.client.HTTPException):
+            pass
+        finally:
+            connection.close()
+        time.sleep(1)
 
 
 def read_config(config_file: str) -> Dict[str, Any]:
@@ -728,16 +727,33 @@ cosmos-rl --config config.toml"""
     else:
         cur_work_idx = args.worker_idx
 
+    # When this node hosts the controller, the port is reserved here by binding
+    # a listening socket that the controller process later inherits. Selecting a
+    # port without binding it would leave a window for another process to steal
+    # it; shifting to a different port instead is never safe once other workers
+    # were told to reach the controller at the advertised one.
     control_url = None
+    controller_listen_sock = None
     if args.url is not None:
         ip, port = args.url.split(":")
         if ip in get_local_ip():
-            # If the IP is the local IP, launch the controller on the local machine
-            port = network_util.find_available_port(int(port))
+            # This node hosts the controller. Every worker derived its
+            # controller URL from args.url, so exactly this port must be used.
+            try:
+                controller_listen_sock = network_util.bind_available_port(
+                    int(port), int(port) + 1
+                )
+            except RuntimeError:
+                raise RuntimeError(
+                    f"Controller port {port} from --url {args.url} is already in "
+                    "use on this node. It cannot be substituted because all "
+                    "workers connect to this exact endpoint."
+                )
             logger.info(f"Using local IP: {ip} so launching controller on port {port}")
         else:
             control_url = args.url
     else:
+        multi_worker = args.num_workers is not None and args.num_workers > 1
         if (
             "LEPTON_JOB_WORKER_INDEX" in os.environ
             and int(os.environ.get("LEPTON_JOB_WORKER_INDEX")) != 0
@@ -750,14 +766,26 @@ cosmos-rl --config config.toml"""
             primary_hostname = f"{prefix}-0.{subdomain}"
             primary_hostname = resolve_host_blocking(primary_hostname)
             control_url = f"{primary_hostname}:{args.port}"
-        elif "LEPTON_JOB_WORKER_INDEX" in os.environ:
-            # If we're in a Lepton job prime node, check if the port is available
-            if not network_util.is_port_free(args.port):
-                raise RuntimeError(f"Port {args.port} is not available")
-            else:
-                port = args.port
+        elif "LEPTON_JOB_WORKER_INDEX" in os.environ or multi_worker:
+            # Primary node of a multi-node job: non-primary workers already
+            # derived their controller URL from args.port, so exactly this
+            # port must be used.
+            try:
+                controller_listen_sock = network_util.bind_available_port(
+                    args.port, args.port + 1
+                )
+            except RuntimeError:
+                raise RuntimeError(
+                    f"Controller port {args.port} is already in use on this "
+                    "node. It cannot be substituted because non-primary "
+                    "workers connect to this exact endpoint."
+                )
+            port = args.port
         else:
-            port = network_util.find_available_port(args.port)
+            # Single-node job: nobody else derived a URL from args.port yet,
+            # so scanning for the nearest free port is safe.
+            controller_listen_sock = network_util.bind_available_port(args.port)
+            port = controller_listen_sock.getsockname()[1]
 
     if control_url is None:
         logger.info(f"Controller will be launched locally on port {port}.")
@@ -884,6 +912,8 @@ cosmos-rl --config config.toml"""
 
     if controller_cmd is not None:
         command_collections = SingleWorkerCommands(cur_work_idx)
+        # The controller inherits the pre-bound listening socket, so the port
+        # reserved above is served without ever being released in between.
         command_collections.append_command(
             controller_cmd,
             "",
@@ -891,11 +921,14 @@ cosmos-rl --config config.toml"""
             os.path.join(output_dir, "controller.log")
             if output_dir is not None
             else None,
-            env=None,
+            env={"COSMOS_CONTROLLER_LISTEN_FD": str(controller_listen_sock.fileno())},
+            pass_fds=(controller_listen_sock.fileno(),),
         )
         controller_process = launch_processes(command_collections)
         controller_id = len(processes)
         processes.append(controller_process[0])
+        # The controller process owns the socket now; drop the launcher's copy.
+        controller_listen_sock.close()
 
     logger.info(f"Waiting for controller to be ready at {control_url}")
     wait_for_url_ready(

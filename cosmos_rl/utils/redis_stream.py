@@ -21,6 +21,7 @@ from cosmos_rl.utils.constant import (
     RedisStreamConstant,
     COSMOS_HTTP_RETRY_CONFIG,
     COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
+    COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
 )
 from typing import List, Dict
 from cosmos_rl.utils.network_util import make_request_with_retry
@@ -69,6 +70,22 @@ class RedisStreamHandler:
         self.teacher_request_group = "teacher_request_group"
         self.teacher_request_stream = "teacher_request_stream"
         self.ping()
+
+    @staticmethod
+    def _is_polling_read_miss(exc: Exception) -> bool:
+        """Return True for expected streaming poll misses.
+
+        Redis stream reads use blocking XREAD as a poll primitive. A socket
+        timeout means no item arrived before the block timeout; connection
+        refused can also appear while worker polling threads unwind after the
+        controller has stopped its embedded Redis.
+        """
+        if isinstance(exc, redis.exceptions.TimeoutError):
+            return True
+        if isinstance(exc, redis.exceptions.ConnectionError):
+            message = str(exc).lower()
+            return "connection refused" in message or "error 111" in message
+        return False
 
     def set_key_value(self, key: str, value: str) -> bool:
         # Add message to stream
@@ -162,6 +179,7 @@ class RedisStreamHandler:
         Returns:
             list: A list of stream entries.
         """
+        messages = None
         try:
             messages = make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -171,9 +189,16 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.CMD_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                # Polling read: the caller loops on shutdown_signal, so fail fast
+                # instead of running the deep retry storm that hangs teardown.
+                max_retries=COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
             )
         except Exception as e:
+            if self._is_polling_read_miss(e):
+                logger.debug(
+                    f"[Redis] Poll read returned no command from {stream_name}_command: {e}"
+                )
+                return []
             logger.error(
                 f"[Redis] Failed to read from Redis stream {stream_name}_command: {e}"
             )
@@ -226,6 +251,7 @@ class RedisStreamHandler:
         Returns:
             list: A list of stream entries.
         """
+        messages = None
         try:
             messages = make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -237,9 +263,16 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.ROLLOUT_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                # Polling read: the caller loops on shutdown_signal, so fail fast
+                # instead of running the deep retry storm that hangs teardown.
+                max_retries=COSMOS_HTTP_STREAM_POLL_MAX_RETRY,
             )
         except Exception as e:
+            if self._is_polling_read_miss(e):
+                logger.debug(
+                    f"[Redis] Poll read returned no rollout from {stream_name}_rollout: {e}"
+                )
+                return []
             logger.error(
                 f"[Redis] Failed to read from Redis stream {stream_name}_rollout: {e}"
             )

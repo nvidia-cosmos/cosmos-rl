@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from enum import IntEnum
 from pathlib import Path
-import os
 
 CACHE_DIR = Path(
     os.environ.get("COSMOS_CACHE_DIR", Path.home() / ".cache" / "cosmos_rl")
@@ -32,7 +32,26 @@ COSMOS_HEARTBEAT_SEND_INTERVAL = int(
     os.environ.get("COSMOS_HEARTBEAT_SEND_INTERVAL", "60")
 )
 
+# Bound for control-plane HTTP calls (unregister/heartbeat). Without a timeout,
+# requests.post blocks forever on a hung/saturated controller socket during
+# teardown -- which strands the clean unregister.
+COSMOS_CONTROL_HTTP_TIMEOUT = float(os.environ.get("COSMOS_CONTROL_HTTP_TIMEOUT", "30"))
+
 COSMOS_ROLLOUT_SCAN_INTERVAL = int(os.environ.get("COSMOS_ROLLOUT_SCAN_INTERVAL", "10"))
+# Opt-in escalation: when truthy, the controller's replica-status monitor
+# initiates a controller-wide shutdown (SIGTERM to self -> FastAPI lifespan
+# shutdown) once every policy replica has been marked dead by the heartbeat
+# timeout.  Default is off because cosmos-rl supports dynamic replica
+# scaling (scale-to-zero, rolling restart) where ``len(policy_replicas)
+# == 0`` is a legitimate transient state and a fatal shutdown would be
+# wrong.  Deployments without auto-respawn -- where one trainer death
+# means the whole job is lost -- can set this to ``1`` to free the
+# allocation immediately instead of waiting for the wall-clock timeout.
+# See ``cosmos_rl/dispatcher/run_web_panel.py::monitor_replica_status``
+# for the escalation logic.
+COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS = os.environ.get(
+    "COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS", "0"
+).lower() in ("1", "true", "yes")
 COSMOS_ROLLOUT_STEP_INTERVAL = int(
     os.environ.get("COSMOS_ROLLOUT_STEP_INTERVAL", "100")
 )
@@ -74,6 +93,14 @@ class CosmosHttpRetryConfig:
 
 COSMOS_HTTP_RETRY_CONFIG = CosmosHttpRetryConfig()
 COSMOS_HTTP_LONG_WAIT_MAX_RETRY = 100
+# Streaming poll reads (subscribe_command / subscribe_rollout) run inside their
+# own `while not shutdown_signal` loops, so the loop itself is the retry
+# mechanism. They must NOT run the deep (max_retries=60) exponential-backoff
+# storm internally: when the controller finalizes and tears down its embedded
+# Redis during shutdown, that storm blocks for ~50min ignoring shutdown_signal,
+# which hangs the teardown join in handle_shutdown. Fail fast (one attempt) and
+# let the outer loop re-check shutdown_signal and re-poll.
+COSMOS_HTTP_STREAM_POLL_MAX_RETRY = 1
 
 COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK = int(
     os.environ.get("COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK", "64")

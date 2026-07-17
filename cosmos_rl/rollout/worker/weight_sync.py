@@ -56,12 +56,31 @@ import queue
 import threading
 import time
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.pynccl import nccl_broadcast, nccl_group_end, nccl_group_start
+from cosmos_rl.utils.pynccl import (
+    bounded_drain_or_abort,
+    nccl_abort_all,
+    nccl_broadcast,
+    nccl_group_end,
+    nccl_group_start,
+)
+
+# Bounded wait for in-flight GPU work on the WeightSyncThread stream during
+# teardown.  A grouped R2R broadcast is enqueued asynchronously and pynccl only
+# bounds the enqueue phase, so a broadcast whose peer departed can hang on the
+# device with no watchdog.  After this deadline we abort all NCCL comms so
+# ``stop()`` (and in turn ``destroy_distributed``) cannot wedge.
+_WST_STREAM_DRAIN_TIMEOUT_S = float(
+    os.getenv("COSMOS_WST_STREAM_DRAIN_TIMEOUT_S", "10.0")
+)
+_WST_QUEUE_DRAIN_TIMEOUT_S = float(
+    os.getenv("COSMOS_WST_QUEUE_DRAIN_TIMEOUT_S", "120.0")
+)
 
 if TYPE_CHECKING:
     pass
@@ -133,45 +152,126 @@ def create_buffer_model(worker, device=None) -> None:
     )
 
 
+def _storage_extent(tensor: torch.Tensor) -> int:
+    """Number of storage elements ``tensor`` spans past its storage offset."""
+    if tensor.numel() == 0:
+        return 0
+    return 1 + sum(
+        (size - 1) * stride for size, stride in zip(tensor.size(), tensor.stride())
+    )
+
+
+def _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys):
+    """Return a buffer-backed equivalent of ``view_tensor``, or ``None``.
+
+    Resolves the base parameter by untyped-storage identity, then either
+    maps the base's buffer clone directly (when ``view_tensor`` is the
+    base itself under another name) or rebuilds the same view over the
+    clone.
+    """
+    if not isinstance(view_tensor, torch.Tensor) or isinstance(view_tensor, DTensor):
+        return None
+    storage_key = (view_tensor.device, view_tensor.untyped_storage().data_ptr())
+    view_offset = view_tensor.storage_offset()
+    for sd_key in storage_to_sd_keys.get(storage_key, ()):
+        live_base = sd[sd_key]
+        buffer_base = buffer_sd.get(sd_key)
+        if buffer_base is None or buffer_base.dtype != view_tensor.dtype:
+            continue
+        # The entry is the base parameter under another name: its buffer
+        # clone is a standalone same-shape tensor, so map it directly (the
+        # clone of a non-dense base has different strides, which is fine
+        # for a whole-tensor receive target).
+        if (
+            view_tensor.size() == live_base.size()
+            and view_tensor.stride() == live_base.stride()
+            and view_offset == live_base.storage_offset()
+        ):
+            return buffer_base
+        # Otherwise rebuild the view over the clone.  The clone's storage
+        # starts at offset zero, so rebase the view's offset against the
+        # base; strides only transfer when the clone preserved the base's
+        # layout, and the rebuilt view must stay inside the base's extent.
+        relative_offset = view_offset - live_base.storage_offset()
+        if (
+            relative_offset >= 0
+            and live_base.stride() == buffer_base.stride()
+            and buffer_base.storage_offset() == 0
+            and relative_offset + _storage_extent(view_tensor)
+            <= _storage_extent(live_base)
+        ):
+            return torch.as_strided(
+                buffer_base,
+                view_tensor.size(),
+                view_tensor.stride(),
+                relative_offset,
+            )
+    return None
+
+
 def redirect_view_map_to_buffer(worker) -> None:
     """Replace weight_inplace_view_map entries with buffer_model tensors.
 
     After this call, P2R nccl_recv writes directly into the buffer
     tensors instead of the live model parameters.
+
+    Raises ``RuntimeError`` if any entry cannot be redirected: a receive
+    target left on the live model would race inference, and its received
+    updates would be overwritten with stale buffer data by the next
+    ``sync_buffer_to_live``.
     """
     buffer_sd = worker._buffer_state_dict
     old_map = worker.weight_inplace_view_map
     model = worker.rollout.get_underlying_model()
 
+    # View entries (e.g. the q/k/v slices of a fused qkv parameter) do not
+    # appear in the state dict under their own key, and their data_ptr sits
+    # somewhere inside the base parameter's storage. Resolve them by storage
+    # identity and rebuild the same view over the buffer's clone of the base
+    # tensor; matching by data_ptr alone would map an offset-zero view to the
+    # full base tensor and leave nonzero-offset views unredirected.
     sd = model.state_dict()
-    ptr_to_sd_key: dict[int, str] = {}
+    storage_to_sd_keys: dict[tuple[torch.device, int], list[str]] = {}
     for name, tensor in sd.items():
-        ptr_to_sd_key[tensor.data_ptr()] = name
+        if not isinstance(tensor, torch.Tensor) or isinstance(tensor, DTensor):
+            # DTensor storages have no accessible data pointer; DTensor
+            # entries are redirected by the exact-name match below.
+            continue
+        storage_to_sd_keys.setdefault(
+            (tensor.device, tensor.untyped_storage().data_ptr()), []
+        ).append(name)
 
     new_map: dict[str, torch.Tensor] = {}
-    redirected = 0
+    view_redirected = 0
+    failed: list[str] = []
     for hf_key, view_tensor in old_map.items():
         if hf_key in buffer_sd and buffer_sd[hf_key].shape == view_tensor.shape:
             new_map[hf_key] = buffer_sd[hf_key]
-            redirected += 1
             continue
-        sd_key = ptr_to_sd_key.get(view_tensor.data_ptr())
-        if sd_key is not None and sd_key in buffer_sd:
-            new_map[hf_key] = buffer_sd[sd_key]
-            redirected += 1
+        buffered = _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys)
+        if buffered is not None:
+            new_map[hf_key] = buffered
+            view_redirected += 1
             continue
-        logger.warning(
-            "[WeightSync] Could not redirect view map key %r to buffer; "
-            "keeping original tensor.",
-            hf_key,
+        failed.append(hf_key)
+
+    if failed:
+        raise RuntimeError(
+            f"[WeightSync] Could not redirect {len(failed)}/{len(old_map)} view "
+            f"map entries to buffer tensors (first entries: {failed[:5]}). "
+            "Async weight sync requires every receive target to be "
+            "buffer-backed: a live-model target would race inference and its "
+            "received updates would be overwritten with stale data by the "
+            'next buffer->live sync. Set rollout.async_r2r_sync="disabled" '
+            "for this model."
         )
-        new_map[hf_key] = view_tensor
 
     worker.weight_inplace_view_map = new_map
     logger.info(
-        "[WeightSync] Redirected %d/%d view map entries to buffer tensors",
-        redirected,
+        "[WeightSync] Redirected all %d view map entries to buffer tensors "
+        "(%d rebuilt as views over buffer base tensors)",
         len(old_map),
+        view_redirected,
     )
 
 
@@ -223,12 +323,17 @@ def sync_buffer_to_live(worker) -> None:
                 live_sd[name].copy_(buffer_sd[name])
     worker._buffer_synced_version = buf_ver
     elapsed_ms = (time.monotonic() - t0) * 1000
+    # ``superseded`` = buffer versions transferred since the last adopt but
+    # jumped over here (never adopted into the live model) -> wasted NCCL
+    # transfers.  Coalescing (Phase 2) should drive this to ~0.
+    superseded = max(0, buf_ver - synced_ver - 1)
     logger.info(
         "[WeightSync] Synced buffer -> live (%d params, ver %d->%d, "
-        "wait_event=%s, %.1f ms CPU enqueue)",
+        "superseded=%d, wait_event=%s, %.1f ms CPU enqueue)",
         len(live_sd),
         synced_ver,
         buf_ver,
+        superseded,
         has_event,
         elapsed_ms,
     )
@@ -282,6 +387,15 @@ class WeightSyncThread:
         self._idle = threading.Event()
         self._idle.set()
         self._last_event: torch.cuda.Event | None = None
+        self._fence_failed = False
+        self._fenced_seq = -1
+        self._task_failed = False
+        # Backlog observability (see weight-sync coalescing plan): high-water
+        # queue depth and total executed transfers.  A healthy (coalesced) run
+        # keeps ``_max_qdepth`` ~1; a piled-up run shows it climbing while most
+        # transfers are superseded before they are ever adopted.
+        self._max_qdepth = 0
+        self._executed = 0
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -298,11 +412,17 @@ class WeightSyncThread:
         self._seq += 1
         self._idle.clear()
         self._queue.put((0, self._seq, ("p2r", command)))
+        qdepth = self._queue.qsize()
+        if qdepth > self._max_qdepth:
+            self._max_qdepth = qdepth
         logger.info(
-            "[WeightSyncThread] Enqueued P2R (step=%s, seq=%d, buf_ver=%d)",
+            "[WeightSyncThread] Enqueued P2R (step=%s, seq=%d, buf_ver=%d, "
+            "qdepth=%d, max_qdepth=%d)",
             getattr(command, "weight_step", "?"),
             self._seq,
             getattr(self._worker, "_buffer_version", -1),
+            qdepth,
+            self._max_qdepth,
         )
 
     def enqueue_r2r(self, command) -> None:
@@ -310,17 +430,43 @@ class WeightSyncThread:
         self._seq += 1
         self._idle.clear()
         self._queue.put((1, self._seq, ("r2r", command)))
+        qdepth = self._queue.qsize()
+        if qdepth > self._max_qdepth:
+            self._max_qdepth = qdepth
         logger.info(
-            "[WeightSyncThread] Enqueued R2R (step=%s, seq=%d, buf_ver=%d)",
+            "[WeightSyncThread] Enqueued R2R (step=%s, seq=%d, buf_ver=%d, "
+            "qdepth=%d, max_qdepth=%d)",
             getattr(command, "weight_step", "?"),
             self._seq,
             getattr(self._worker, "_buffer_version", -1),
+            qdepth,
+            self._max_qdepth,
         )
 
-    def drain(self, timeout: float = 120.0) -> None:
-        """Block until the queue is empty and no operation is in-flight."""
-        if not self._thread.is_alive():
-            return
+    def fence(
+        self,
+        queue_timeout: float = _WST_QUEUE_DRAIN_TIMEOUT_S,
+        stream_timeout: float = _WST_STREAM_DRAIN_TIMEOUT_S,
+    ) -> bool:
+        """Fence every command received before STOP.
+
+        Queue completion only proves that the background thread has enqueued
+        the CUDA work.  The stream fence is therefore ordered strictly after
+        ``queue.join()``.  A queue timeout is an abnormal teardown path: abort
+        NCCL, attempt the bounded stream drain, and report failure instead of
+        allowing the caller to treat a warning as successful synchronization.
+        """
+        if getattr(self, "_fence_failed", False):
+            return False
+
+        current_seq = getattr(self, "_seq", None)
+        if (
+            current_seq is not None
+            and getattr(self, "_fenced_seq", None) == current_seq
+            and getattr(self._queue, "unfinished_tasks", 1) == 0
+        ):
+            return True
+
         done = threading.Event()
 
         def _join_with_timeout():
@@ -329,17 +475,75 @@ class WeightSyncThread:
 
         t = threading.Thread(target=_join_with_timeout, daemon=True)
         t.start()
-        if not done.wait(timeout=timeout):
-            logger.warning(
-                "[WeightSyncThread] drain() timed out after %.1fs",
-                timeout,
+        queue_drained = done.wait(timeout=queue_timeout)
+        if not queue_drained:
+            logger.error(
+                "[ABNORMAL teardown] WeightSyncThread[%s] queue did not "
+                "drain within %.1fs; aborting NCCL before shutdown",
+                self._worker.replica_name,
+                queue_timeout,
             )
+            try:
+                nccl_abort_all()
+            except Exception:
+                logger.exception(
+                    "[WeightSyncThread] NCCL abort failed after queue timeout"
+                )
 
-    def stop(self) -> None:
-        """Signal the thread to stop and wait for it to finish."""
+        stream_drained = bounded_drain_or_abort(
+            self._stream,
+            stream_timeout,
+            f"WeightSyncThread[{self._worker.replica_name}]",
+        )
+        result = (
+            queue_drained
+            and stream_drained
+            and not getattr(self, "_task_failed", False)
+        )
+        self._fence_failed = not result
+        self._fenced_seq = current_seq
+        return result
+
+    def drain(self, timeout: float = _WST_QUEUE_DRAIN_TIMEOUT_S) -> bool:
+        """Compatibility wrapper for the full queue-and-stream fence."""
+        return self.fence(queue_timeout=timeout)
+
+    def stop(self) -> bool:
+        """Signal the thread to stop and wait for it to finish.
+
+        A Python thread join is not sufficient: a grouped R2R broadcast
+        enqueued on ``self._stream`` runs asynchronously on the GPU, and pynccl
+        only bounds the *enqueue* phase (``run_task`` stops polling after
+        ``ncclSuccess``).  Fence the queue and stream before asking the thread
+        to exit so no accepted task is dropped; timeout paths abort NCCL and
+        report failure.
+        """
+        fenced = self.fence()
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=10.0)
+        if self._thread.is_alive():
+            logger.error(
+                "[ABNORMAL teardown] WeightSyncThread[%s] did not stop "
+                "within 10s; aborting NCCL",
+                self._worker.replica_name,
+            )
+            try:
+                nccl_abort_all()
+            except Exception:
+                logger.exception(
+                    "[WeightSyncThread] NCCL abort failed after thread timeout"
+                )
+            fenced = False
+        # A timed-out task can leave its barrier only after _stop is set. Drain
+        # once more after the thread exits so no CUDA work can appear behind
+        # the earlier timeout-path drain.
+        post_stop_drained = bounded_drain_or_abort(
+            self._stream,
+            _WST_STREAM_DRAIN_TIMEOUT_S,
+            f"WeightSyncThread[{self._worker.replica_name}] post-stop",
+        )
+        return fenced and post_stop_drained
 
     def _run(self) -> None:
         torch.cuda.set_device(self._worker.device)
@@ -359,6 +563,7 @@ class WeightSyncThread:
                 elif cmd_type == "r2r":
                     self._execute_r2r(command)
             except Exception:
+                self._task_failed = True
                 logger.exception(
                     "[WeightSyncThread] Error executing %s command",
                     cmd_type,
@@ -376,12 +581,16 @@ class WeightSyncThread:
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
         self._worker._buffer_version += 1
+        self._executed += 1
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
-            "[WeightSyncThread] P2R done (step=%s, ver=%s, %.1f ms)",
+            "[WeightSyncThread] P2R done (step=%s, ver=%s, %.1f ms, "
+            "qdepth_after=%d, executed=%d)",
             command.weight_step,
             self._worker.current_weight_version,
             elapsed_ms,
+            self._queue.qsize(),
+            self._executed,
         )
 
     def _execute_r2r(self, command) -> None:
@@ -401,16 +610,33 @@ class WeightSyncThread:
             worker.data_packer.flush_pending_sends()
 
         weight_step = command.weight_step
-        r2r_barrier(worker, weight_step)
+        # Use the controller's authoritative recipient set for this round as the
+        # barrier participant count so it stays in lockstep as replicas finish.
+        expected_world_size = len(getattr(command, "dst_replica_names", None) or [])
+        if expected_world_size > 1 and not r2r_barrier(
+            worker, weight_step, expected_world_size=expected_world_size
+        ):
+            logger.info(
+                "[WeightSyncThread] R2R cancelled during teardown (step=%s)",
+                weight_step,
+            )
+            return
         t0 = time.monotonic()
-        transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
-            worker,
-            command.src_replica_name,
-            self._stream,
-        )
+        if expected_world_size <= 1:
+            # BuildMesh intentionally creates no NCCL communicator for one
+            # replica. P2R already populated its buffer; retain R2R's version
+            # and validation bookkeeping without touching a stale communicator.
+            transferred_cnt, bytes_broadcast = 0, 0
+        else:
+            transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
+                worker,
+                command.src_replica_name,
+                self._stream,
+            )
         self._last_event = torch.cuda.Event()
         self._last_event.record(self._stream)
         worker._buffer_version += 1
+        self._executed += 1
 
         if weight_step is not None:
             worker.current_weight_version = weight_step
@@ -444,12 +670,15 @@ class WeightSyncThread:
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
-            "[WeightSyncThread] R2R done: %d params, %.1f MB, %.0f ms, step=%s, ver=%s",
+            "[WeightSyncThread] R2R done: %d params, %.1f MB, %.0f ms, step=%s, "
+            "ver=%s, qdepth_after=%d, executed=%d",
             transferred_cnt,
             bytes_broadcast / (1024 * 1024),
             elapsed_ms,
             weight_step,
             worker.current_weight_version,
+            self._queue.qsize(),
+            self._executed,
         )
 
 
@@ -518,17 +747,34 @@ def setup_redis_barrier(worker) -> None:
     )
 
 
-def r2r_barrier(worker, weight_step: int) -> None:
+def r2r_barrier(
+    worker, weight_step: int, expected_world_size: Optional[int] = None
+) -> bool:
     """Redis-based barrier so all rollout workers start R2R broadcast together.
 
     Uses an atomic INCR counter per weight step.  The last worker to arrive
     publishes a "go" signal; earlier workers block on pub/sub until they
     receive it (or timeout).  Silently skipped if Redis is unavailable.
+
+    ``expected_world_size`` is the authoritative number of participants for
+    *this* broadcast round, derived from the controller's ``dst_replica_names``
+    in the R2R command.  Using it (instead of the cached ``_r2r_world_size``,
+    which is frozen at setup) keeps the barrier in lockstep with the controller:
+    when a replica reaches end-of-data and the controller drops it from the
+    broadcast set, the remaining workers expect the shrunken count and the
+    barrier completes immediately rather than spinning for the full timeout.
     """
     r2r_redis = getattr(worker, "_r2r_redis", None)
-    world_size = getattr(worker, "_r2r_world_size", 0)
+    if expected_world_size is not None and expected_world_size > 0:
+        world_size = expected_world_size
+    else:
+        # Fall back to the live mesh size, then the cached value.  The cached
+        # ``_r2r_world_size`` becomes stale once replicas leave the mesh.
+        world_size = len(getattr(worker, "replica_name_to_rank", {})) or getattr(
+            worker, "_r2r_world_size", 0
+        )
     if r2r_redis is None or world_size <= 1:
-        return
+        return True
 
     prefix = worker._r2r_barrier_prefix
     barrier_key = f"{prefix}:barrier:{weight_step}"
@@ -547,7 +793,7 @@ def r2r_barrier(worker, weight_step: int) -> None:
                 world_size,
                 weight_step,
             )
-            return
+            return True
 
         logger.info(
             "[R2R Barrier] Waiting for other workers (count=%d/%d, step=%d)...",
@@ -570,10 +816,22 @@ def r2r_barrier(worker, weight_step: int) -> None:
                     world_size,
                     elapsed_ms,
                 )
-                return
+                return True
 
+            # Allow teardown to interrupt the wait: if the WeightSyncThread is
+            # asked to stop, abort the barrier rather than blocking ``wst.stop()``
+            # (and in turn ``destroy_distributed()``) for the full timeout.
+            wst = getattr(worker, "_weight_sync_thread", None)
+            stop_event = getattr(wst, "_stop", None)
             deadline = time.monotonic() + _R2R_BARRIER_TIMEOUT_S
             while time.monotonic() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    logger.info(
+                        "[R2R Barrier] Stop requested while waiting (step=%d); "
+                        "aborting barrier.",
+                        weight_step,
+                    )
+                    return False
                 msg = pubsub.get_message(timeout=1.0)
                 if msg is not None and msg.get("type") == "message":
                     break
@@ -594,8 +852,10 @@ def r2r_barrier(worker, weight_step: int) -> None:
             weight_step,
             elapsed_ms,
         )
+        return True
     except Exception as exc:
         logger.warning("[R2R Barrier] Redis error (%s); skipping barrier.", exc)
+        return True
 
 
 # ---------------------------------------------------------------------------

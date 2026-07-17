@@ -34,6 +34,7 @@ from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
     RolloutToRolloutBroadcastCommand,
+    StopCommand,
     Command,
 )
 from cosmos_rl.utils.pynccl import (
@@ -559,6 +560,16 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             self.cosmos_weight_sync_queue.put(ShutdownInstruction())
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
+
+    @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
+        StopCommand, backend="trtllm"
+    )
+    def handle_stop(self, command: StopCommand) -> None:
+        """Stop the executor ranks and notify the single-process wrapper."""
+        if self.global_rank == 0:
+            self.cosmos_weight_sync_queue.put(ShutdownInstruction())
+        self.shutdown_signal.set()
+        self.shutdown_mp_signal.set()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""

@@ -38,6 +38,22 @@ This rollout engine is just used for demonstration, testing and example purposes
 It demonstrates how to implement a custom rollout engine and how to register it to the RolloutRegistry to be used in the rollout worker.
 It is not optimized for performance and may not be suitable for production use.
 User can mimic this implementation to implement their own rollout engine.
+
+Two equally-supported customization shapes:
+
+* **Bespoke ``rollout_generation`` (this file).** Override the abstract method
+  on :class:`~cosmos_rl.rollout.rollout_base.RolloutBase` directly. Best when
+  the engine call is one-shot per batch and the per-payload preprocessing is
+  trivial.
+* **Compose** :class:`~cosmos_rl.rollout.generation_mixin.RolloutGenerationMixin`
+  and override the four hooks ``_prepare_sample``, ``_collate_batch``,
+  ``_generate``, ``_postprocess``. Best when per-prompt setup is non-trivial
+  (env construction, KV-cache prefill, tokenizer warmups, ...) — the mixin
+  runs ``_prepare_sample`` on a background thread when
+  ``config.rollout.prefetch_rollout = True``, overlapping that work with
+  in-flight engine calls on the previous batch. See
+  :mod:`cosmos_rl.tools.gym_example.gym_rollout_backend` for a worked
+  example.
 """
 
 

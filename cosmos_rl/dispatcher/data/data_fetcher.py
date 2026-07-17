@@ -448,6 +448,7 @@ class ControllerDataFetcher(DataFetcherBase):
             0 if self.val_dataset is None else len(self.val_dataset.val_set)
         )
         self.val_iters: Dict[int, Iterator] = {}
+        self.activated_val_step: Optional[int] = None
         self.activated_val_iter: Optional[Iterator] = None
         self.activated_val_tqdm: Optional[tqdm] = None
 
@@ -639,11 +640,13 @@ class ControllerDataFetcher(DataFetcherBase):
                 f"[DataFetcher] Activating validation dataloader for step {validation_step}, with length {(self.val_datasize or len(self.val_dataloader))}"
             )
             self.val_iters[validation_step] = iter(self.val_dataloader)
-            self.activated_val_iter = self.val_iters[validation_step]
+        if self.activated_val_tqdm is None:
             self.activated_val_tqdm = tqdm(
                 desc="validation",
                 total=(self.val_datasize or len(self.val_dataloader)),
             )
+        self.activated_val_step = validation_step
+        self.activated_val_iter = self.val_iters[validation_step]
 
     def validation_get_dataloader(
         self, validation_step: Optional[int] = None
@@ -654,6 +657,7 @@ class ControllerDataFetcher(DataFetcherBase):
             return self.val_iters[validation_step]
 
     def clear_validation_status(self):
+        self.activated_val_step = None
         self.activated_val_iter = None
         if self.activated_val_tqdm is not None:
             self.activated_val_tqdm.clear()

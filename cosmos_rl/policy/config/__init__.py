@@ -910,6 +910,18 @@ class TrainingConfig(BaseModel):
         default=1,
         description="The interval of train step for synchronizing weights between replicas.",
     )
+    coalesce_weight_sync: bool = Field(
+        default=False,
+        description="If True, the controller coalesces (drops) redundant P2R+R2R "
+        "weight-sync rounds while a round is still in flight to the rollouts "
+        "(depth-1 drop-to-latest): it re-issues at the latest step only once the "
+        "rollouts have adopted the previously staged version. No separate "
+        "'steps to drop' knob -- any number of intermediate trainer steps "
+        "collapse to a single pending round (always the latest weights). "
+        "Reduces wasted weight transfers when the trainer outruns rollout drain. "
+        "Only active for off-policy runs (allowed_outdated_steps > 0); ignored "
+        "for on-policy, which requires step-exact weight sync.",
+    )
     deterministic: bool = Field(
         default=False,
         description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
@@ -1007,6 +1019,23 @@ class TrainingConfig(BaseModel):
                 logger.warning(
                     "on_policy is enabled, so allowed_outdated_steps is set to 0."
                 )
+
+        # Weight-sync coalescing is an off-policy-only optimization: it
+        # intentionally lets rollouts run slightly stale, which on-policy (and
+        # allowed_outdated_steps == 0) cannot tolerate.  Disable it rather than
+        # silently mis-sync.
+        if self.coalesce_weight_sync:
+            outdated_ok = getattr(self.train_policy, "allowed_outdated_steps", 0) > 0
+            on_policy = getattr(self.train_policy, "on_policy", False)
+            if on_policy or not outdated_ok:
+                logger.warning(
+                    "coalesce_weight_sync requires off-policy training with "
+                    "allowed_outdated_steps > 0 (on_policy=%s, "
+                    "allowed_outdated_steps=%s); disabling it.",
+                    on_policy,
+                    getattr(self.train_policy, "allowed_outdated_steps", 0),
+                )
+                self.coalesce_weight_sync = False
 
         if self.deterministic and self.seed is None:
             self.seed = 42
@@ -1565,12 +1594,18 @@ class RolloutConfig(BaseModel):
         default=False,
         description=(
             "Enable background prompt prefetch.  A daemon thread fetches the next "
-            "prompt batch into _prompt_queue while rollout_generation() is running "
-            "and (when the rollout backend implements enqueue_prefetch_payloads) "
-            "speculatively dispatches sessions for those payloads so the backend "
-            "can stay busy across batch boundaries.  Default off — only useful for "
-            "long-running simulation backends where straggler scenes leave the "
-            "backend underutilized at the tail of each rollout_generation() call."
+            "prompt batch into _prompt_queue while rollout_generation() is running. "
+            "Backends that compose cosmos_rl.rollout.generation_mixin."
+            "RolloutGenerationMixin (e.g. the gym example) additionally have their "
+            "_prepare_sample hook dispatched on a background setup thread for each "
+            "prefetched payload, so per-prompt setup work (env construction, "
+            "tokenization, KV-cache prefill, ...) overlaps with in-flight engine "
+            "calls on the previous batch.  Default off — most useful for "
+            "simulation / multi-turn backends where per-prompt setup is non-trivial "
+            "and straggler prompts would otherwise leave the engine underutilized "
+            "at the tail of each rollout_generation() call.  The legacy "
+            "enqueue_prefetch_payloads hook on RolloutBase is supported as a "
+            "deprecation shim for backends that haven't yet migrated to the mixin."
         ),
     )
 
@@ -1591,7 +1626,12 @@ class RolloutConfig(BaseModel):
 
         backends_to_check = ["vllm", "trtllm", "vllm_async"]
         if self.backend in backends_to_check:
-            _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
+            _fields_no_need_to_check = [
+                "n_init_replicas",
+                "tp_size",
+                "pp_size",
+                "dp_shard_size",
+            ]
             for field_name, field_info in RolloutParallelismConfig.model_fields.items():
                 if field_name not in _fields_no_need_to_check:
                     default_value = field_info.default

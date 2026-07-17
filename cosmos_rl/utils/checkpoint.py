@@ -419,6 +419,34 @@ class CheckpointMananger:
                 state_dict_cpu[key] = value
         return state_dict_cpu
 
+    def _wait_for_pending_async_saves(self) -> None:
+        """Wait for pending saves and propagate any background failure."""
+        if not self.pre_save_futures:
+            return
+        futures.wait(self.pre_save_futures)
+        for future in self.pre_save_futures:
+            future.result()
+        self.pre_save_futures = []
+
+    def invalidate_completion_marker(
+        self, step: int, *, epoch: Optional[int] = None
+    ) -> None:
+        """Remove this rank's marker before rewriting a checkpoint."""
+        if self.save_mode == "async" and self.pre_save_futures:
+            self._wait_for_pending_async_saves()
+
+        checkpoint_identifier = (
+            f"epoch_{epoch}" if epoch is not None else f"step_{step}"
+        )
+        marker_path = os.path.join(
+            self.ckpt_output_dir,
+            checkpoint_identifier,
+            "policy",
+            f".rank_{self.global_rank}_complete",
+        )
+        if os.path.exists(marker_path):
+            os.remove(marker_path)
+
     def finalize(self) -> None:
         """Wait for any pending async checkpoint saves/uploads to finish.
         This should be called before process exit to avoid losing uploads when
@@ -480,6 +508,13 @@ class CheckpointMananger:
         else:
             ckpt_identifier = f"step_{step}"
         cur_step_ckpt_dir = os.path.join(ckpt_identifier, "policy")
+
+        complete_marker_path = os.path.join(
+            self.ckpt_output_dir,
+            cur_step_ckpt_dir,
+            f".rank_{self.global_rank}_complete",
+        )
+        self.invalidate_completion_marker(step, epoch=epoch)
         os.makedirs(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
         )
@@ -523,13 +558,6 @@ class CheckpointMananger:
                 "Unsupport model type, should either be a torch.nn.Module or dict"
             )
 
-        # Path for the complete marker file
-        complete_marker_path = os.path.join(
-            self.ckpt_output_dir,
-            cur_step_ckpt_dir,
-            f".rank_{self.global_rank}_complete",
-        )
-
         if self.save_mode == "async":
 
             def _write_complete_marker_after_saves(futures_to_wait, marker_path):
@@ -539,12 +567,6 @@ class CheckpointMananger:
                 # All saves completed, write the complete marker
                 with open(marker_path, "w") as f:
                     f.write("")
-
-            # wait for the previous save to finish
-            if len(self.pre_save_futures) > 0:
-                for future in futures.as_completed(self.pre_save_futures):
-                    future.result()
-                self.pre_save_futures = []
 
             # offload the state dict to CPU
             model_state_dict_cpu = self.offload_state_dict_cpu(state_dict)
@@ -597,9 +619,7 @@ class CheckpointMananger:
             self.pre_save_futures = save_futures + [complete_marker_future]
 
             if is_final:
-                # wait for all futures to complete before returning for final save
-                futures.wait(self.pre_save_futures)
-                self.pre_save_futures = []
+                self._wait_for_pending_async_saves()
         else:  # sync
             _save_upload(state_dict, model_ckpt_path, is_final)
             _save_upload(optimizer.state_dict(), optimizer_ckpt_path, is_final)
@@ -778,34 +798,33 @@ class CheckpointMananger:
                 ckpt_identifier = f"step_{step}"
                 step_ckpt_path = os.path.join(self.ckpt_output_dir, ckpt_identifier)
 
-            if step_ckpt_path not in self.saved_ckpt_step_dirs:
-                self.saved_ckpt_step_dirs.append(step_ckpt_path)
+            step_ckpt_abs_path = os.path.abspath(step_ckpt_path)
+            self.saved_ckpt_step_dirs = [
+                saved_dir
+                for saved_dir in self.saved_ckpt_step_dirs
+                if os.path.abspath(saved_dir) != step_ckpt_abs_path
+            ]
+            self.saved_ckpt_step_dirs.append(step_ckpt_path)
             # remove the old checkpoints
             # expected behavior:
             # Keep the best checkpoint, and delete the oldest checkpoint if the number of
             # checkpoints exceeds the max_keep.
-            # If the best checkpoint is the oldest checkpoint, delete the second oldest checkpoint.
+            # Never delete the checkpoint that was just saved. If all older checkpoints
+            # are protected as best, temporarily exceed max_keep.
             if len(self.saved_ckpt_step_dirs) > self.max_keep and self.max_keep != -1:
-                oldest_dir = self.saved_ckpt_step_dirs[0]  # peek
-                step_to_delete = None
-
-                if (
-                    self._is_ckpt_dir_linked_as_best(oldest_dir)
-                    and len(self.saved_ckpt_step_dirs) > 1
-                ):
-                    # Best is oldest, delete second oldest instead
-                    self.saved_ckpt_step_dirs.pop(0)  # remove best temporarily
-                    step_to_delete = self.saved_ckpt_step_dirs.pop(0)
-                    self.saved_ckpt_step_dirs.insert(0, oldest_dir)  # put best back
-                    logger.info(
-                        f"Best checkpoint is at {oldest_dir}, "
-                        f"deleting {step_to_delete} instead"
-                    )
-                else:
-                    step_to_delete = self.saved_ckpt_step_dirs.pop(0)
-                    logger.info(f"Deleting {step_to_delete}")
+                step_to_delete = next(
+                    (
+                        saved_dir
+                        for saved_dir in self.saved_ckpt_step_dirs
+                        if os.path.abspath(saved_dir) != step_ckpt_abs_path
+                        and not self._is_ckpt_dir_linked_as_best(saved_dir)
+                    ),
+                    None,
+                )
 
                 if step_to_delete is not None:
+                    self.saved_ckpt_step_dirs.remove(step_to_delete)
+                    logger.info(f"Deleting {step_to_delete}")
                     if self.save_mode == "async" and hasattr(self, "executor"):
                         self.pre_save_futures.append(
                             self.executor.submit(
@@ -814,6 +833,11 @@ class CheckpointMananger:
                         )
                     else:
                         self._delete_checkpoint(step_to_delete)
+                else:
+                    logger.info(
+                        "Keeping both the current and best checkpoints; "
+                        "checkpoint count temporarily exceeds max_keep"
+                    )
 
             val_score = kwargs.get("val_score", None)
             if val_score is not None:

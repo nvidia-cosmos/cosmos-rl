@@ -22,6 +22,7 @@ import sys
 from cosmos_rl.utils import network_util
 import toml
 import tempfile
+from subprocess_helpers import wait_all_or_fail, wait_for_controller_ready
 
 
 class TestColocated(unittest.TestCase):
@@ -55,6 +56,7 @@ class TestColocated(unittest.TestCase):
         config["policy"]["parallelism"]["dp_shard_size"] = 4
         config["rollout"]["parallelism"]["n_init_replicas"] = 2
         config["policy"]["parallelism"]["n_init_replicas"] = 2
+        config["redis"] = str(network_util.find_available_port(12808))
         if "logging" not in config:
             config["logging"] = {}
         config["logging"]["logger"] = ["console"]
@@ -71,9 +73,17 @@ class TestColocated(unittest.TestCase):
         controller_process = subprocess.Popen(
             controller_cmd,
             shell=True,
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
+        )
+        wait_for_controller_ready(
+            self,
+            controller_process,
+            port,
+            timeout_s=120,
+            context="test_colocated",
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -94,6 +104,7 @@ class TestColocated(unittest.TestCase):
         # Start the process
         policy_process0 = subprocess.Popen(
             policy_cmd,
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
@@ -104,20 +115,14 @@ class TestColocated(unittest.TestCase):
         # Start the process
         policy_process1 = subprocess.Popen(
             policy_cmd,
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
         )
 
         processes = [controller_process, policy_process0, policy_process1]
-
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(self, processes, timeout_s=300, context="test_colocated")
 
 
 if __name__ == "__main__":

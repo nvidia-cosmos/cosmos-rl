@@ -31,6 +31,7 @@ import msgpack
 import tempfile
 from transformers import AutoTokenizer
 from cosmos_rl.utils import network_util
+from subprocess_helpers import wait_all_or_fail
 
 
 class TestTeacherModel(unittest.TestCase):
@@ -250,19 +251,19 @@ dp_replicate_size = 1
         controller_process = subprocess.Popen(
             controller_cmd,
             shell=True,
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
         )
         processes = [controller_process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_distillation_flow",
+        )
 
 
 if __name__ == "__main__":

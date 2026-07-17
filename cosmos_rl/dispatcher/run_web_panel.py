@@ -15,6 +15,9 @@
 
 import os
 import argparse
+import signal
+import socket
+import time
 import uvicorn
 import toml
 from fastapi import FastAPI
@@ -27,6 +30,8 @@ import threading
 from fastapi.responses import HTMLResponse, JSONResponse
 from typing import Dict, List, Optional, Callable, Union, Iterable
 from cosmos_rl.dispatcher.controller import Controller
+from cosmos_rl.dispatcher.command import StopCommand
+from cosmos_rl.dispatcher.status import should_broadcast_stop
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 from cosmos_rl.dispatcher.replica import Atom, Replica
@@ -48,11 +53,16 @@ from cosmos_rl.dispatcher.protocol import (
     IpcInfoRequest,
     QueryIpcInfoRequest,
     ResumeInfoRequest,
+    Role,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.network_util import find_available_port
+from cosmos_rl.utils.network_util import bind_available_port
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.constant import COSMOS_ROLLOUT_SCAN_INTERVAL
+from cosmos_rl.utils.constant import (
+    COSMOS_HEARTBEAT_TIMEOUT,
+    COSMOS_ROLLOUT_SCAN_INTERVAL,
+    COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS,
+)
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_PANEL_SUFFIX,
     COSMOS_API_STATUS_SUFFIX,
@@ -99,6 +109,136 @@ def create_error_response(
 
 controller = Controller()
 server = None
+# Set True on the first successful /register.  Guards heartbeat-reap finalize
+# against the startup window where replica managers are empty but workers have
+# not connected yet (notably SFT controllers where ``not is_rl`` is always true).
+_replicas_were_registered = False
+# Set True on the first successful POLICY /register.  Unlike the monitor
+# thread's old local flag, this cannot miss short-lived policy replicas that
+# register, finish, and unregister between scan intervals.
+_policy_replicas_were_registered = False
+
+
+def _all_replicas_gone() -> bool:
+    return (
+        len(controller.policy_status_manager) == 0
+        and len(controller.rollout_status_manager) == 0
+        and len(controller.teacher_result_manager) == 0
+    )
+
+
+def _maybe_finalize(reason: str) -> bool:
+    """Shut the controller down once every replica is gone.
+
+    This must trigger regardless of *how* a replica left -- a clean HTTP
+    /unregister OR a heartbeat-timeout reap. Historically the finalize check
+    lived only in the /unregister handler, so a replica that died ungracefully
+    (no clean unregister) left the controller running forever, hanging the
+    process-flow test until the outer job timeout. Centralizing it here and
+    calling it from both paths makes liveness robust to any ungraceful exit.
+
+    The heartbeat-reap path must *not* finalize at startup (empty managers,
+    no replica has registered yet).  The /unregister path is safe without that
+    guard because it only runs after a replica actually departs.
+    """
+    if not _all_replicas_gone():
+        return False
+
+    if reason == "heartbeat-death reap":
+        # All replicas gone after having been live at least once (reaped or
+        # unregistered).  Do not require training_finished / is_rl here --
+        # that would re-introduce the stranded-controller hang when the last
+        # replica dies without a clean HTTP unregister.
+        ready = _replicas_were_registered
+    else:
+        ready = (
+            controller.policy_status_manager.training_finished() or not controller.is_rl
+        )
+
+    if ready:
+        global server
+        if server is not None and not server.should_exit:
+            data_fetcher = getattr(
+                controller.policy_status_manager, "data_fetcher", None
+            )
+            config = getattr(controller, "config", None)
+            train = getattr(config, "train", None)
+            train_policy = getattr(train, "train_policy", None)
+            train_policy_type = getattr(train_policy, "type", None)
+            if (
+                train_policy_type != "sft"
+                and getattr(data_fetcher, "activated_val_iter", None) is not None
+            ):
+                logger.error(
+                    "[Controller] Finalizing while validation is still active "
+                    "(reason=%s). This violates strict final-validation "
+                    "completion and should only occur after abnormal worker "
+                    "loss.",
+                    reason,
+                )
+            logger.info(
+                f"[Controller] All replicas are finished ({reason}); finalizing -- "
+                "shutting down controller."
+            )
+            server.should_exit = True
+        return True
+    return False
+
+
+def _await_rollout_checkout(
+    controller,
+    shutdown_event,
+    timeout_s: float = COSMOS_HEARTBEAT_TIMEOUT,
+    scan_interval_s: float = COSMOS_ROLLOUT_SCAN_INTERVAL,
+) -> bool:
+    """Block until every rollout replica has checked out, or shutdown is forced.
+
+    Gates the ``COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS`` self-SIGTERM: the policy
+    being gone does not mean the rollout side is done -- replicas still need to
+    receive end-of-data, finish the final R2R broadcast (a collective over the
+    whole rollout set), post their end signal, and tear down.  SIGTERM-ing the
+    HTTP server before that strands stragglers on a dead controller and orphans
+    the broadcast peer of the replicas that did check out.
+
+    ``maintain_life_status`` is pumped each iteration so a genuinely crashed
+    rollout (one that stopped heartbeating) is reaped and drops out of
+    ``all_rollouts_ended`` on its own -- which is why no separate timeout knob
+    is needed for that case.  The ``timeout_s`` deadline (default
+    ``COSMOS_HEARTBEAT_TIMEOUT``, the same timescale used to declare a replica
+    dead) is the backstop for the abnormal wedged-but-still-heartbeating case.
+
+    Returns True if all rollouts checked out cleanly, False if the deadline or
+    an external shutdown signal forced shutdown first.
+    """
+    rsm = controller.rollout_status_manager
+    if len(rsm.rollout_replicas) == 0:
+        logger.info(
+            "[Controller] No rollout replicas registered; rollout checkout gate "
+            "has nothing to wait for."
+        )
+        return True
+    deadline = time.monotonic() + timeout_s
+    while not rsm.all_rollouts_ended():
+        rsm.maintain_life_status(controller.policy_status_manager)
+        if time.monotonic() > deadline:
+            n_total = len(rsm.rollout_replicas)
+            n_ended = sum(1 for r in rsm.rollout_replicas.values() if r.status.ended)
+            logger.warning(
+                "[ABNORMAL shutdown] Rollout checkout gate timed out after %ss: "
+                "only %d/%d rollout replicas posted end.  A rollout likely wedged "
+                "while still heartbeating; forcing controller shutdown.",
+                timeout_s,
+                n_ended,
+                n_total,
+            )
+            return False
+        if shutdown_event.wait(timeout=scan_interval_s):
+            return False
+    logger.info(
+        "[Controller] All rollout replicas checked out; proceeding with "
+        "coordinated controller shutdown."
+    )
+    return True
 
 
 @asynccontextmanager
@@ -108,12 +248,119 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
 
     def monitor_replica_status():
+        stop_broadcast_sent = False
         while not shutdown_event.is_set():
             # Run in separate process
             controller.policy_status_manager.maintain_life_status()
             controller.rollout_status_manager.maintain_life_status(
                 controller.policy_status_manager
             )
+            # A replica reaped via heartbeat timeout is just as "gone" as one
+            # that unregistered cleanly -- finalize the controller here too so a
+            # dead/ungracefully-exiting replica can never strand it.
+            _maybe_finalize("heartbeat-death reap")
+
+            # Authoritative end-of-job stop for the rollouts.  Tracked
+            # independently of the opt-in self-SIGTERM below.  A normal
+            # non-validation run ends with every policy replica
+            # unregistering immediately after its main loop completes, and a
+            # crashed policy is reaped by ``maintain_life_status``; either
+            # way ``n_policy == 0`` after we have seen policy replicas means
+            # no policy will read this run's rollout output again.  This is
+            # the correctly-ordered moment to stop rollouts: stopping on
+            # ``training_finished()`` instead would fire at dispatch time,
+            # before the policy has pulled the final outputs over UCXX.
+            n_policy = len(controller.policy_status_manager)
+            if should_broadcast_stop(
+                n_policy=n_policy,
+                had_policy_replicas=_policy_replicas_were_registered,
+                stop_broadcast_sent=stop_broadcast_sent,
+                validation_enabled=controller.config.validation.enable,
+                training_finished=controller.policy_status_manager.training_finished(),
+                all_rollouts_ended=controller.rollout_status_manager.all_rollouts_ended(),
+            ):
+                # Publish STOP over the redis command channel (NCCL-free) so
+                # it reaches every rollout via ``consume_command`` -- including
+                # a rank wedged on the weight-version gate that never
+                # re-fetches and so never observes the prompt-stream
+                # ``is_end``.  Validation runs are excluded: they keep the
+                # final weight sync and shut down via the existing R2R
+                # ``replica_should_stop`` broadcast.
+                #
+                # The ``training_finished()`` guard distinguishes genuine
+                # end-of-job from a transient ``n_policy == 0`` during
+                # dynamic policy rescaling (scale-to-zero / rolling restart),
+                # where ``current_step < total_steps`` -- exactly the
+                # legitimate-transient case that keeps the SIGTERM escalation
+                # below opt-in.  ``training_finished()`` stays True once set
+                # (``recompute_total_steps`` early-returns), so it remains
+                # valid after the policy has unregistered.
+                rollout_replicas = list(
+                    controller.rollout_status_manager.rollout_replicas.values()
+                )
+                # Guard the publish: this monitor thread also drives
+                # ``maintain_life_status`` (rollout reaping) and the
+                # no-policy SIGTERM escalation below.  An unguarded redis
+                # error here would kill the thread and take both backstops
+                # with it.  On failure we leave ``stop_broadcast_sent``
+                # False so the next tick retries.
+                try:
+                    if rollout_replicas:
+                        logger.info(
+                            "[Controller] Policy side finished; broadcasting "
+                            "STOP to %d rollout replica(s).",
+                            len(rollout_replicas),
+                        )
+                        StopCommand.trigger(
+                            rollout_replicas,
+                            redis_handler=controller.rollout_status_manager.redis_handler,
+                        )
+                    stop_broadcast_sent = True
+                except Exception:
+                    logger.exception(
+                        "[Controller] Failed to broadcast STOP to rollouts; "
+                        "will retry next scan."
+                    )
+
+            # Opt-in escalation of "all policy replicas dead" to a
+            # controller-wide shutdown.  Default OFF because
+            # cosmos-rl supports dynamic replica scaling -- intentional
+            # scale-to-zero (model swap, maintenance) and rolling
+            # restart (old replica unregisters before new one
+            # registers) both transit ``len(policy_replicas) == 0`` as
+            # a legitimate state.  Treating it as fatal there would
+            # kill the controller during normal operation and prevent
+            # the orchestrator from bringing replicas back.
+            #
+            # The escalation IS appropriate in deployments without
+            # auto-respawn (one trainer process per job, no
+            # replacement on death).  Without it, a trainer crash that
+            # the heartbeat thread correctly reports leaves the
+            # controller idle until the orchestrator's wall-clock
+            # timeout, which can burn significant cluster time.  Those
+            # deployments set ``COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS=1``
+            # to enable the SIGTERM-self path below; FastAPI then runs
+            # its lifespan shutdown cleanly and the process exits,
+            # freeing the allocation immediately.
+            if COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS:
+                if n_policy == 0 and _policy_replicas_were_registered:
+                    logger.warning(
+                        "[Controller] All policy replicas are dead and "
+                        "COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS is set.  "
+                        "Initiating controller shutdown so the scheduling "
+                        "layer (SLURM, etc.) can release the job instead "
+                        "of waiting for the wall-clock timeout."
+                    )
+                    # Coordinated exit: 'no policy replicas' does NOT mean the
+                    # rollout side is finished.  Keep the HTTP API serving until
+                    # every rollout has checked out before self-terminating, so
+                    # stragglers don't wedge on a dead controller and the final
+                    # R2R broadcast isn't left with an orphaned peer.
+                    _await_rollout_checkout(controller, shutdown_event)
+                    shutdown_event.set()
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    break
+
             if shutdown_event.wait(timeout=COSMOS_ROLLOUT_SCAN_INTERVAL):
                 break  # Exit early if shutdown signaled during sleep
 
@@ -169,11 +416,15 @@ async def meta():
 
 @app.post(COSMOS_API_REGISTER_SUFFIX)
 async def register(request: RegisterRequest):
+    global _replicas_were_registered, _policy_replicas_were_registered
     try:
         await controller.register(
             Atom.from_register_request(request),
             role=request.role,
         )
+        _replicas_were_registered = True
+        if request.role == Role.POLICY:
+            _policy_replicas_were_registered = True
         return {"message": "Registered"}
     except Exception as e:
         import traceback
@@ -189,18 +440,7 @@ async def unregister(request: UnregisterRequest):
     except Exception as e:
         logger.error(f"[Controller] Unregister failed: {e}")
     finally:
-        if (
-            (
-                controller.policy_status_manager.training_finished()
-                or not controller.is_rl
-            )
-            and len(controller.policy_status_manager) == 0
-            and len(controller.rollout_status_manager) == 0
-            and len(controller.teacher_result_manager) == 0
-        ):
-            logger.info("[Controller] All replicas are finished, finalizing...")
-            global server
-            server.should_exit = True
+        _maybe_finalize(f"clean unregister of {request.replica_name}")
         return {"message": "Unregistered"}
 
 
@@ -436,68 +676,45 @@ async def put_rollout_group(rollout: RolloutRequest):
     try:
         if rollout.is_end:
             logger.info(
-                f"[Controller] Received rollout end signal from {rollout.src_replica_name}"
+                "[Controller] Received rollout end signal from %s rank=%s",
+                rollout.src_replica_name,
+                rollout.src_global_rank,
             )
-            controller.rollout_status_manager.rollout_end(rollout.src_replica_name)
-            if controller.rollout_status_manager.all_rollouts_ended():
-                total_pending_rollouts = (
-                    controller.policy_status_manager.total_pending_rollouts()
+            replica_ended = controller.rollout_status_manager.rollout_end(
+                rollout.src_replica_name,
+                src_global_rank=rollout.src_global_rank,
+                stays_command_participant=rollout.stays_command_participant,
+            )
+            if replica_ended:
+                controller.policy_status_manager.on_rollout_is_end(
+                    controller.rollout_status_manager
                 )
-                logger.info(
-                    f"[Controller] All rollouts have ended, recompute total steps with {total_pending_rollouts} remaining rollouts..."
-                )
-                original_total_steps = controller.policy_status_manager.total_steps
-                controller.policy_status_manager.recompute_total_steps(
-                    explicit_num_remaining_samples=total_pending_rollouts
-                )
-                new_total_steps = controller.policy_status_manager.total_steps
-                if new_total_steps > controller.policy_status_manager.current_step:
-                    logger.info(
-                        "[Controller] There are still remaining steps, no op required"
-                    )
-                    # There are still remaining steps, no op required
-                    pass
-                else:
-                    if (
-                        controller.policy_status_manager.current_step
-                        == original_total_steps
-                    ):
-                        logger.info(
-                            "[Controller] No remaining steps, policy and rollouts happen to finish at the same time"
-                        )
-                        # No remaining steps, policy and rollouts happen to finish at the same time
-                        pass
-                    else:
-                        logger.info(
-                            "[Controller] Clear the rollout buffer, and trigger an extra `DataFetch`"
-                        )
-                        # Clear the rollout buffer
-                        controller.policy_status_manager.rollout_buffer.queue.clear()
-                        controller.policy_status_manager.total_steps = (
-                            controller.policy_status_manager.current_step + 1
-                        )
-
-                        # Trigger an extra `DataFetch & P2R/R2R`
-                        controller.policy_status_manager.try_trigger_data_fetch_and_training(
-                            is_fake_last_cmd=True
-                        )
 
             return {"message": "Rollout end signal received"}
 
         rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
-        # Update the statistics for dynamic sampling used for metrics collection
-        if controller.config.train.train_policy.variant == "dapo":
-            controller.policy_status_manager.update_dynamic_sampling_statistics(
-                rollout.metrics
-            )
-        # Flatten the rollouts into a single list
+        # Flatten immediately after extraction so terminal cleanup has concrete
+        # payload references, but runs before any metric/filter mutation.
         rollouts = [
-            rollout
+            extracted
             for rollouts_group in rollouts_list
-            for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
+            for extracted in rollouts_group
         ]
+        policy_status = controller.policy_status_manager
+        is_dapo = controller.config.train.train_policy.variant == "dapo"
+        if policy_status.rollout_admission_closed():
+            policy_status.cleanup_terminal_rollouts(
+                rollouts,
+                rollout.metrics,
+                is_dapo=is_dapo,
+            )
+            return {"message": "Terminal rollout cleaned"}
+
+        # Update the statistics for dynamic sampling used for metrics collection
+        if is_dapo:
+            policy_status.update_dynamic_sampling_statistics(rollout.metrics)
         # Filter out outdated rollouts
-        rollouts = controller.policy_status_manager.filter_outdated_rollouts(rollouts)
+        rollouts = policy_status.filter_outdated_rollouts(rollouts)
         if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
@@ -677,12 +894,28 @@ def main(
             f"Failed to load or parse config file {args.config}: {e}.",
         )
 
-    config = uvicorn.Config(
-        app, host="0.0.0.0", port=find_available_port(args.port), access_log=False
-    )
+    # Serve on the port every worker was told to reach us at. Re-probing for a
+    # different port here would silently strand the workers (and the launcher,
+    # which polls the advertised URL for readiness). Prefer the pre-bound
+    # listening socket inherited from the launcher — that reservation is
+    # race-free; otherwise bind exactly args.port and fail fast if it is taken.
+    listen_fd = os.environ.get("COSMOS_CONTROLLER_LISTEN_FD")
+    if listen_fd is not None:
+        listen_sock = socket.socket(fileno=int(listen_fd))
+        port = listen_sock.getsockname()[1]
+    else:
+        try:
+            listen_sock = bind_available_port(args.port, args.port + 1)
+        except RuntimeError:
+            raise RuntimeError(
+                f"Controller port {args.port} is already in use. It cannot be "
+                "substituted because workers connect to this exact endpoint."
+            )
+        port = args.port
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False)
     global server
     server = uvicorn.Server(config)
-    server.run()
+    server.run(sockets=[listen_sock])
 
 
 if __name__ == "__main__":

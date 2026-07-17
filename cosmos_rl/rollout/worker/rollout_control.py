@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 import threading
 import uuid
@@ -23,7 +24,7 @@ import torch.distributed as dist
 
 from torch.utils.data import Dataset
 
-from queue import Queue, Empty as QueueEmpty
+from queue import Queue, Empty as QueueEmpty, Full as QueueFull
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union, Tuple
 from functools import partial
@@ -43,12 +44,14 @@ from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
     RolloutToRolloutBroadcastCommand,
+    StopCommand,
     Command,
 )
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
+    bounded_drain_or_abort,
     nccl_broadcast,
     nccl_group_start,
     nccl_group_end,
@@ -90,6 +93,39 @@ Keep in mind that torch distributed is not thread safe. So try to keep the usage
 """
 
 
+# Bounded teardown drain of ``inference_stream``.  Backstop in case an
+# in-flight NCCL op (e.g. the WeightSyncThread R2R broadcast) wedges the device;
+# on timeout we abort all NCCL communicators so teardown always completes.
+_TEARDOWN_DRAIN_TIMEOUT_S = float(os.getenv("COSMOS_TEARDOWN_DRAIN_TIMEOUT_S", "15.0"))
+
+
+_LEGACY_PREFETCH_HOOK_WARNED = False
+
+
+def _warn_legacy_prefetch_hook_once() -> None:
+    """One-shot warning for backends that still define
+    ``enqueue_prefetch_payloads`` directly on their ``RolloutBase``
+    subclass instead of composing
+    :class:`~cosmos_rl.rollout.generation_mixin.RolloutGenerationMixin`.
+
+    The legacy hook is supported as a deprecation shim; the warning
+    fires the first time the rollout controller hands a prefetched
+    batch to a legacy backend, then stays silent for the rest of the
+    process lifetime to avoid log spam in steady state.
+    """
+    global _LEGACY_PREFETCH_HOOK_WARNED
+    if _LEGACY_PREFETCH_HOOK_WARNED:
+        return
+    _LEGACY_PREFETCH_HOOK_WARNED = True
+    logger.warning(
+        "[Rollout] enqueue_prefetch_payloads is deprecated; compose "
+        "cosmos_rl.rollout.generation_mixin.RolloutGenerationMixin and "
+        "override its hooks (_prepare_sample / _collate_batch / "
+        "_generate / _postprocess) instead.  The legacy hook will be "
+        "removed in a future release."
+    )
+
+
 class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     """
     DisaggregatedRolloutControlWorker will be a replica instance of single DP.
@@ -115,12 +151,40 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
-        self._prompt_queue: Queue[List[RLPayload]] = Queue()
-        # Serializes get_next_prompt() between main_loop and the optional
-        # prefetch thread (see _prefetch_loop, gated by config.rollout.prefetch_rollout).
+
+        # ``_single_producer_mode`` is a *live* property
+        # (see below) -- intentionally not snapshotted here.  Backends
+        # subclass ``RolloutBase`` and may mutate
+        # ``config.rollout.prefetch_rollout`` from ``post_init_hook``,
+        # which is invoked from ``RolloutBase.__init__`` *after* this
+        # constructor returns.  Any value we cached here would be from
+        # the pre-override config.  Reading the property lazily in
+        # ``work()`` / ``_main_loop_impl`` / ``_prefetch_loop`` ensures
+        # we observe the post-override value at the points where the
+        # decision actually matters.
+        #
+        # Bounded queue (``maxsize=2``): in single-producer mode,
+        # ``_prefetch_loop`` would otherwise race ahead of the
+        # consumer and queue arbitrarily many batches.  Maxsize=2
+        # keeps the prefetcher exactly one batch ahead.  In legacy
+        # mode, queue depth never exceeds 1 anyway (``main_loop``
+        # only calls ``request_new_prompts`` when the queue is
+        # empty), so the cap is harmless there.
+        self._prompt_queue: Queue[List[RLPayload]] = Queue(maxsize=2)
+
+        # Vestigial lock from the dual-producer era: prior to the
+        # single-producer-mode refactor, both ``main_loop`` (via
+        # ``request_new_prompts``) and ``_prefetch_loop`` could put
+        # on ``_prompt_queue``, and this lock serialized their
+        # empty-check + fetch.  In the new world only one path puts
+        # at a time, so the lock is uncontended; we keep it because
+        # ``request_new_prompts`` is also called from non-main-loop
+        # paths (validation, stream-rollout) that may be revisited
+        # in future, and the cost is negligible.
         self._prompt_fetch_lock = threading.Lock()
         self.prefetch_thread: Optional[threading.Thread] = None
         self.current_weight_version = 0
+        self._rollout_end_acknowledged = False
 
         # determine the quantization type
         self.quantization_type = None
@@ -224,6 +288,30 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_reward_fns=kwargs.get("val_reward_fns"),
         )
         self.non_trainable_params_received = False
+
+    @property
+    def _single_producer_mode(self) -> bool:
+        """True when prefetch is on AND the worker is single-process.
+
+        Read live from ``config.rollout.prefetch_rollout`` (and
+        ``parallel_dims.world_size``) rather than snapshotted in
+        ``__init__``: backends may flip ``prefetch_rollout`` from
+        ``post_init_hook``, which runs *after* this constructor.
+
+        See the comment in ``__init__`` next to ``self._prompt_queue``
+        for the motivation.
+
+        When True, ``_prefetch_loop`` is the *sole* producer for
+        ``_prompt_queue`` and ``_main_loop_impl`` consumes only.
+        When False (prefetch off, or multi-rank where
+        ``request_new_prompts`` runs a distributed broadcast that
+        must include all ranks), we keep the legacy flow:
+        ``_main_loop_impl`` calls ``request_new_prompts`` itself
+        and the prefetch thread is not started.
+        """
+        return bool(
+            self.config.rollout.prefetch_rollout and self.parallel_dims.world_size == 1
+        )
 
     def setup(
         self,
@@ -352,20 +440,73 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.shutdown_signal.set()
             if not self.shutdown_mp_signal.is_set():
                 self.shutdown_mp_signal.set()
+            # All joins below MUST be bounded.  Worker teardown blocking
+            # on an unresponsive controller or a wedged daemon would
+            # otherwise turn into multi-minute scheduler-timeout hangs
+            # (e.g. ``unregister_from_controller`` -> ``requests.post``
+            # to a wedged controller keeping the worker alive long
+            # enough that the orchestrator hard-kills the whole job).
+            # Worst-case delay caused by a missed join is bounded: the
+            # background/heartbeat daemons are ``daemon=True`` /
+            # ``mp.Process(daemon=True)`` with PR_SET_PDEATHSIG, so the
+            # OS will reap them when the worker process exits.
+            _JOIN_TIMEOUT_S = 15.0
+            logger.info(
+                "[Teardown] %s: handle_shutdown joining daemons "
+                "(background/teacher/heartbeat)",
+                self.replica_name,
+            )
             if self.background_thread is not None:
-                self.background_thread.join()
+                logger.info("[Rollout] handle_shutdown: joining command-query thread")
+                self.background_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.background_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] background_thread did not exit within "
+                        "%.1fs of shutdown_signal; continuing teardown "
+                        "(daemon will be reaped on process exit)",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.background_thread = None
+                logger.info("[Rollout] handle_shutdown: command-query thread joined")
             if self.teacher_interact_thread is not None:
-                self.teacher_interact_thread.join()
+                logger.info(
+                    "[Rollout] handle_shutdown: joining teacher-interact thread"
+                )
+                self.teacher_interact_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.teacher_interact_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] teacher_interact_thread did not exit "
+                        "within %.1fs of shutdown_signal; continuing teardown",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.teacher_interact_thread = None
+                logger.info("[Rollout] handle_shutdown: teacher-interact thread joined")
             if self.scheduler is not None:
                 self.scheduler.stop(wait=False)
                 self.scheduler = None
 
             if self.heartbeat_thread is not None:
-                self.heartbeat_thread.join()
+                logger.info("[Rollout] handle_shutdown: joining heartbeat process")
+                self.heartbeat_thread.join(timeout=_JOIN_TIMEOUT_S)
+                if self.heartbeat_thread.is_alive():
+                    logger.warning(
+                        "[Rollout] heartbeat process did not exit within "
+                        "%.1fs of shutdown_signal; continuing teardown "
+                        "(PR_SET_PDEATHSIG will reap it on process exit)",
+                        _JOIN_TIMEOUT_S,
+                    )
                 self.heartbeat_thread = None
+                logger.info("[Rollout] handle_shutdown: heartbeat process joined")
+            logger.info(
+                "[Teardown] %s: handle_shutdown daemons joined; "
+                "calling unregister_from_controller",
+                self.replica_name,
+            )
             self.unregister_from_controller()
+            logger.info(
+                "[Teardown] %s: unregister_from_controller returned",
+                self.replica_name,
+            )
 
     def get_underlying_model(self):
         """
@@ -373,8 +514,61 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         return self.rollout.get_underlying_model()
 
+    @RolloutWorkerBase.register_rollout_command_handler(StopCommand)
+    def handle_stop(self, command: StopCommand):
+        """Controller-authoritative end-of-job stop (non-validation runs).
+
+        The controller publishes STOP once every policy replica has
+        unregistered (its main loop finished, so no policy will read this
+        rollout's output again).  Setting the shutdown signals here breaks
+        ``main_loop`` out of *any* branch -- normal drain, an empty queue,
+        or the weight-version-gate spin that no longer clears once weight
+        syncs have stopped (the residual hang the prompt-stream ``is_end``
+        could not reach).  No NCCL collective is involved, and teardown's
+        bounded ``cleanup_ucxx`` still lets any in-flight output read drain.
+        """
+        wst = getattr(self, "_weight_sync_thread", None)
+        if wst is not None:
+            fenced = wst.fence()
+            if not fenced:
+                logger.error(
+                    "[ABNORMAL teardown] WeightSyncThread fence failed for %s; "
+                    "continuing shutdown after the bounded abort path",
+                    self.replica_name,
+                )
+        logger.info(
+            "[Rollout] Received STOP from controller for %s; setting shutdown signal.",
+            self.replica_name,
+        )
+        self.shutdown_signal.set()
+        self.shutdown_mp_signal.set()
+
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
+        # Ranked-ended disaggregated workers remain command participants until
+        # STOP, so every rank in such a replica must accept topology rebuilds.
+        # Keep only the single-process delivery-failure escape: that worker is
+        # already shutting down and the controller never acknowledged it.
+        if (
+            self.state.prompt_consume_end()
+            and getattr(self.parallel_dims, "world_size", 1) == 1
+            and not getattr(self, "_rollout_end_acknowledged", False)
+        ):
+            logger.info(
+                "[Rollout] Skipping BuildMeshCommand for %s: prompt "
+                "source exhausted without an acknowledged checkout.",
+                self.replica_name,
+            )
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
+            return
+
+        wst = getattr(self, "_weight_sync_thread", None)
+        if wst is not None and not wst.fence():
+            raise RuntimeError(
+                "Weight-sync work did not drain before rollout mesh rebuild"
+            )
         logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
 
         replica_name_to_rank = build_mesh_command.replica_name_to_rank
@@ -388,6 +582,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         if len(replica_name_to_rank) == 1:
             # only one rollout replica now, no need to build mesh.
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
             return
         # generate key for storing the NCCL group id.
         # group_0: [rank 0 in replica 0, rank 0 in replica 1, ..., rank 0 in replica n-1]
@@ -423,6 +620,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.global_commnicator_idex = create_nccl_comm(
             nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
         )
+        mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+        if mesh_ready is not None:
+            mesh_ready.set()
 
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
@@ -1429,9 +1629,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"[Rollout] Failed in query commands from controller for replica {self.replica_name}\n: {str(e)}"
                 )
 
+            stop_received = False
             for instruction in commands:
                 command = Command.depack(instruction)
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
+
+                if isinstance(command, BuildMeshCommand):
+                    mesh_ready = threading.Event()
+                    self._mesh_rebuild_ready = mesh_ready
+                    self._command_queue.put(command)
+                    while not mesh_ready.wait(timeout=0.1):
+                        if self.shutdown_signal.is_set():
+                            return
+                    continue
 
                 wst = getattr(self, "_weight_sync_thread", None)
                 if wst is not None and isinstance(
@@ -1453,6 +1663,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     continue
 
                 self._command_queue.put(command)
+                if isinstance(command, StopCommand):
+                    stop_received = True
+                    break
+
+            if stop_received:
+                break
 
     def teacher_interact_loop(self):
         """Background task to interact with teacher model for distillation"""
@@ -1462,9 +1678,23 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.redis_controller.publish_teacher_request(data, self.replica_name)
             time.sleep(0.01)
 
-    def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
+    def request_new_prompts(
+        self,
+        batch_size: int,
+        prompt_queue: Queue,
+        max_pending_batches: int = 1,
+        **kwargs,
+    ):
         """
         Request new prompts from the controller for both training and validation.
+
+        ``max_pending_batches`` bounds how many batches may already be
+        queued before this call fetches another.  The default of 1
+        preserves the legacy fetch-when-empty cadence; the multi-rank
+        prep-overlap path passes 2 so it can fetch one batch ahead and
+        start that batch's preparation while the current one generates.
+        The fetch decision is taken on rank 0 and broadcast, so every
+        rank stays in lockstep regardless of this value.
         """
         prompts_and_is_end = (None, False)
         if self.global_rank == 0:
@@ -1476,7 +1706,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # by config.rollout.prefetch_rollout) can never observe an empty
             # queue concurrently and double-fetch from the controller.
             with self._prompt_fetch_lock:
-                if prompt_queue.empty():
+                if prompt_queue.qsize() < max_pending_batches:
                     # blocking request to get prompts from controller
                     # batch_size is per data parallel rank so we need to multiply it with data parallel size
                     payloads, is_end = self.api_client.get_next_prompt(
@@ -1639,17 +1869,35 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        if self._rollout_end_acknowledged:
+            return True
+
         payloads, is_validation, _, empty = self.report_rollouts(block=True)
         assert not is_validation and payloads is None and empty, (
             f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         )
         response = RolloutRequest(
             src_replica_name=self.replica_name,
+            src_global_rank=self.global_rank,
             payloads=[],
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
+        self._rollout_end_acknowledged = bool(
+            self.api_client.post_rollout_completion(response)
+        )
+
+        # Disaggregated workers whose end POST was acknowledged stay in the
+        # command loop until the controller's explicit StopCommand.  Preserve
+        # the existing local escape only when a single-process worker cannot
+        # reach the controller, and for colocated mode, which has no separate
+        # rollout StopCommand channel.
+        if self.parallel_dims.world_size == 1 and (
+            self.config.mode == "colocated" or not self._rollout_end_acknowledged
+        ):
+            self.shutdown_signal.set()
+
+        return self._rollout_end_acknowledged
 
     def dynamic_sampling(self, payloads: List[RLPayload]):
         """
@@ -1754,13 +2002,138 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         try:
             self._main_loop_impl()
         finally:
+            # Stop the UCXX output server *before* any NCCL teardown/abort.
+            # The rollout backend (e.g. rl-gym's ModularRolloutWorker via
+            # UCXXRolloutMixin) serves this replica's generated output to the
+            # trainer over a UCXX server.  cleanup_ucxx() is otherwise never
+            # invoked, so at end-of-data a trainer can still be pulling the
+            # final output when teardown begins -- and that concurrent UCXX
+            # activity wedges ncclCommAbort on the straggler.  stop_server()
+            # sets the shutdown flag and bounded-joins its threads (in-flight
+            # reads finish first), so this is a graceful close, not a kill.
+            self._cleanup_payload_server()
             wst = getattr(self, "_weight_sync_thread", None)
             if wst is not None:
+                logger.info(
+                    "[Teardown] %s: stopping WeightSyncThread", self.replica_name
+                )
+                _t_wst = time.monotonic()
                 wst.stop()
+                logger.info(
+                    "[Teardown] %s: WeightSyncThread.stop() returned in %.2fs "
+                    "(thread_alive=%s)",
+                    self.replica_name,
+                    time.monotonic() - _t_wst,
+                    wst._thread.is_alive(),
+                )
+
+    def _cleanup_payload_server(self) -> None:
+        """Best-effort, bounded shutdown of the rollout's UCXX output server.
+
+        Invoked at the very start of teardown (before NCCL abort).  The server
+        lives on the rollout backend (``self.rollout``) when it composes
+        ``UCXXRolloutMixin``; guarded with ``getattr`` so backends without a
+        UCXX server are unaffected.
+        """
+        rollout_engine = getattr(self, "rollout", None)
+        cleanup = getattr(rollout_engine, "cleanup_ucxx", None)
+        if not callable(cleanup):
+            return
+        logger.info(
+            "[Teardown] %s: stopping UCXX output server (cleanup_ucxx)",
+            self.replica_name,
+        )
+        _t0 = time.monotonic()
+        try:
+            cleanup()
+        except Exception:
+            logger.exception(
+                "[Teardown] %s: cleanup_ucxx raised (continuing teardown)",
+                self.replica_name,
+            )
+        logger.info(
+            "[Teardown] %s: UCXX output server stopped in %.2fs",
+            self.replica_name,
+            time.monotonic() - _t0,
+        )
+
+    # Main-loop branch counters and prompt-version rejection logging.
+    _MAINLOOP_LOG_INTERVAL_S = 1.0
+    _VERSION_FAIL_LOG_INTERVAL_S = 5.0
+
+    def _maybe_emit_mainloop_summary(self, now):
+        """Emit a bounded summary of which branch the loop took.
+
+        This is the *only* aggregated counter we keep in the rollout main
+        loop.  We do not log per-iteration -- a hot-spinning loop can
+        easily produce thousands of ``generate start`` lines per second per
+        worker. Instead we tally
+        branch hits in ``_mainloop_branch_counts`` and flush once per
+        ``_MAINLOOP_LOG_INTERVAL_S`` (default 1s) so a stuck rollout
+        produces a handful of lines/sec, not millions.
+        """
+        if now - self._mainloop_log_last_ts < self._MAINLOOP_LOG_INTERVAL_S:
+            return
+        c = self._mainloop_branch_counts
+        # Skip emission when the previous window was completely idle
+        # (loop-pump was blocked elsewhere).
+        total = sum(c.values())
+        if total == 0:
+            self._mainloop_log_last_ts = now
+            return
+        logger.debug(
+            "[Rollout main_loop %.1fs] rank=%d empty_q=%d consume_end=%d "
+            "version_fail=%d gen_attempted=%d gen_succeeded=%d "
+            "fetched_nonempty=%d weight_unsynced=%d",
+            self._MAINLOOP_LOG_INTERVAL_S,
+            self.global_rank,
+            c["empty_q"],
+            c["consume_end"],
+            c["version_fail"],
+            c["gen_attempted"],
+            c["gen_succeeded"],
+            c["fetched_nonempty"],
+            c["weight_unsynced"],
+        )
+        for k in c:
+            c[k] = 0
+        self._mainloop_log_last_ts = now
 
     def _main_loop_impl(self):
         """Core main loop extracted for clean WST lifecycle management."""
         async_mode = get_async_r2r_sync_mode(self)
+
+        # Per-worker branch counters for the legacy sync rollout path. The
+        # async rollout path uses ``stream_generation_step`` instead.
+        self._mainloop_branch_counts = {
+            "empty_q": 0,
+            "consume_end": 0,
+            "version_fail": 0,
+            "gen_attempted": 0,
+            "gen_succeeded": 0,
+            "fetched_nonempty": 0,
+            "weight_unsynced": 0,
+        }
+        self._mainloop_log_last_ts = time.time()
+        self._version_fail_last_log_ts = 0.0
+
+        # Multi-rank prep overlap.  When prefetch is requested but the
+        # worker is multi-rank, the dedicated rank-0 ``_prefetch_loop``
+        # (fetch overlap) is unavailable -- its HTTP fetch ends in a
+        # collective every rank must join.  Instead ``main_loop`` fetches
+        # one batch ahead (in lockstep, via ``request_new_prompts`` with
+        # ``max_pending_batches=2``) and hands the freshly-fetched batch
+        # to ``_submit_prefetch_setup`` so per-prompt ``_prepare_sample``
+        # runs on the mixin's bg setup thread while the batch ahead of it
+        # generates.  Single-process workers (``_single_producer_mode``)
+        # keep the dedicated fetch+prep loop and ``main_loop`` stays
+        # consume-only, so prep_overlap is False for them here.
+        prep_overlap = (
+            self.config.rollout.prefetch_rollout and not self._single_producer_mode
+        )
+        if prep_overlap:
+            self._bind_prefetch_context_once()
+
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
 
@@ -1772,7 +2145,22 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.validation_flag.is_set():
                 self.do_validation()
 
+            now = time.time()
+            self._maybe_emit_mainloop_summary(now)
+
+            # Multi-rank coordinated shutdown is driven by the controller's
+            # explicit ``StopCommand`` (consumed above via ``consume_command``
+            # -> ``handle_stop``).  Because ``consume_one_command`` broadcasts
+            # the dequeued command across ranks, every rank sets the shutdown
+            # signal at the same collective call and leaves ``main_loop`` in
+            # lockstep -- so no rank strands a peer in a later collective.
+            # This replaces the former Option-C per-iteration drain vote (a
+            # CPU all-reduce gated on ``prompt_fetch_end``), which existed
+            # only because the previous stop signal rode on the racy R2R
+            # weight-sync broadcast.
+
             if not self.state.weight_synced():
+                self._mainloop_branch_counts["weight_unsynced"] += 1
                 continue
 
             _, is_validation, _, _ = self.report_rollouts()
@@ -1784,47 +2172,134 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.stream_generation_step()
                 continue
 
-            if not self.state.prompt_fetch_end():
-                no_more_prompts = self.request_new_prompts(
-                    self.batch_size,
-                    self._prompt_queue,
-                    rank_in_mesh=self.rank_in_rollout_repicas,
-                )
-                if no_more_prompts:
-                    logger.info(
-                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+            # In single-producer mode the prefetch thread owns
+            # prompt fetching; ``main_loop`` is consume-only and
+            # ``state.prompt_fetch_end`` is set by the prefetch
+            # thread when the controller signals end-of-prompts.
+            # In legacy mode ``main_loop`` is the producer and
+            # drives ``request_new_prompts`` itself.
+            if not self._single_producer_mode and not self.state.prompt_fetch_end():
+                # Legacy cadence fetches one batch when the queue is
+                # empty (depth 1).  Prep-overlap stages one batch ahead
+                # (depth 2): with a batch already queued, its per-prompt
+                # prep runs on the mixin's bg setup thread while the
+                # batch in front of it generates.  The fetch is a
+                # cross-rank collective, so every rank runs this loop in
+                # lockstep -- the loop bound (queue depth, prompt_fetch_end,
+                # whether the last fetch added a batch) is identical on
+                # all ranks.
+                target_depth = 2 if prep_overlap else 1
+                while (
+                    not self.state.prompt_fetch_end()
+                    and self._prompt_queue.qsize() < target_depth
+                ):
+                    pre_qsize = self._prompt_queue.qsize()
+                    no_more_prompts = self.request_new_prompts(
+                        self.batch_size,
+                        self._prompt_queue,
+                        rank_in_mesh=self.rank_in_rollout_repicas,
+                        max_pending_batches=target_depth,
                     )
-                    self.state.set_prompt_fetch_end()
-                    if self._prompt_queue.empty():
-                        self.state.set_prompt_consume_end()
-                        if self.global_rank == 0:
-                            self.send_end_signal()
+                    made_progress = self._prompt_queue.qsize() > pre_qsize
+                    if made_progress:
+                        self._mainloop_branch_counts["fetched_nonempty"] += 1
+                        # Kick off rank-local _prepare_sample for the
+                        # batch we just enqueued (the deque tail).  No
+                        # collective here -- only the fetch above is in
+                        # lockstep.
+                        if prep_overlap:
+                            self._submit_prefetch_setup(self._prompt_queue.queue[-1])
+                    if no_more_prompts:
+                        logger.info(
+                            f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+                        )
+                        self.state.set_prompt_fetch_end()
+                        if self._prompt_queue.empty():
+                            self.state.set_prompt_consume_end()
+                            if self.should_report:
+                                self.send_end_signal()
+                        break
+                    # Controller had nothing to hand out right now: stop
+                    # filling so we don't hot-spin the fetch RPC, and let
+                    # the rest of the loop run.  Retried next iteration.
+                    if not made_progress:
+                        break
 
             if self.state.prompt_consume_end():
                 assert self._prompt_queue.empty() and self.state.prompt_fetch_end(), (
                     "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 )
+                self._mainloop_branch_counts["consume_end"] += 1
+                if self.should_report:
+                    self.send_end_signal()
                 continue
             elif self._prompt_queue.empty():
+                # In single-producer mode the queue draining + a
+                # set ``prompt_fetch_end`` means we're done; signal
+                # the controller and let the next iteration hit the
+                # ``prompt_consume_end`` gate above.  Otherwise this
+                # is a transient empty -- prefetch hasn't filled
+                # yet -- and we sleep briefly to avoid busy-waiting
+                # while the producer races to fetch.  In legacy
+                # mode an empty queue here means the controller has
+                # nothing yet; the next iteration's
+                # ``request_new_prompts`` will fetch.
+                if self._single_producer_mode:
+                    if self.state.prompt_fetch_end():
+                        self.state.set_prompt_consume_end()
+                        if self.should_report:
+                            self.send_end_signal()
+                    else:
+                        time.sleep(0.05)
+                self._mainloop_branch_counts["empty_q"] += 1
                 continue
             else:
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
                 first_payload: RLPayload = self._prompt_queue.queue[0][0]
+                allowed = self.config.train.train_policy.allowed_outdated_steps
+                ceiling = self.current_weight_version + allowed
                 is_valid_prompt_for_current_weight_version = (
-                    first_payload.weight_version
-                    <= self.current_weight_version
-                    + self.config.train.train_policy.allowed_outdated_steps
+                    first_payload.weight_version <= ceiling
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
+                    self._mainloop_branch_counts["version_fail"] += 1
+                    # Explain prompt-version rejections at most once per 5s
+                    # per worker.
+                    if (
+                        now - self._version_fail_last_log_ts
+                        >= self._VERSION_FAIL_LOG_INTERVAL_S
+                    ):
+                        self._version_fail_last_log_ts = now
+                        logger.info(
+                            "[Rollout rank=%d] prompt rejected: "
+                            "prompt.weight_version=%s current_weight_version=%s "
+                            "allowed_outdated=%d ceiling=%s; head-of-queue "
+                            "will be re-checked until current_weight_version advances",
+                            self.global_rank,
+                            first_payload.weight_version,
+                            self.current_weight_version,
+                            allowed,
+                            ceiling,
+                        )
+                    # Back off before re-checking the head-of-queue
+                    # prompt.  The rejection clears as soon as the next
+                    # P->R broadcast advances ``current_weight_version``
+                    # (typically every few seconds), so without a sleep
+                    # this branch hot-spins.  50ms wakes well within
+                    # the broadcast interval and is invisible to
+                    # throughput.
+                    time.sleep(0.05)
                     continue
 
+                self._mainloop_branch_counts["gen_attempted"] += 1
                 self.one_step_generation()
+                self._mainloop_branch_counts["gen_succeeded"] += 1
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
-                    if self.global_rank == 0:
+                    if self.should_report:
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
@@ -1931,6 +2406,24 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Perform one step of rollout generation.
         Returns the number of valid payloads generated.
         """
+        generation_start_ts = time.time()
+        try:
+            _peek_wv = (
+                self._prompt_queue.queue[0][0].weight_version
+                if not self._prompt_queue.empty()
+                else None
+            )
+        except Exception:
+            _peek_wv = None
+        # Paired with the matching exit log below for per-call latency
+        # measurements when DEBUG logging is enabled.
+        logger.debug(
+            "[one_step_generation entry] rank=%d cur_wv=%s peek_prompt_wv=%s",
+            self.global_rank,
+            self.current_weight_version,
+            _peek_wv,
+        )
+
         payloads_list: List[RLPayload] = self._prompt_queue.get()
 
         rollout_results: List[RolloutResult] = self._call_rollout_generation(
@@ -1942,6 +2435,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
 
         if len(rollout_results) == 0:
+            logger.debug(
+                "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
+                "batch=%d produced=0 returned_false=True",
+                self.global_rank,
+                (time.time() - generation_start_ts) * 1000.0,
+                len(payloads_list),
+            )
             return False
 
         assert len(rollout_results) == len(payloads_list), (
@@ -1950,9 +2450,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-        return self._filter_valid_rollout_results_and_report(
+        result = self._filter_valid_rollout_results_and_report(
             rollout_results, payloads_list
         )
+        logger.debug(
+            "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
+            "batch=%d produced=%d returned_false=False",
+            self.global_rank,
+            (time.time() - generation_start_ts) * 1000.0,
+            len(payloads_list),
+            len(rollout_results),
+        )
+        return result
 
     def _stream_generation_feed_prompts(
         self,
@@ -2078,10 +2587,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # Check if all prompts are consumed, if so, send end signal to the controller.
         if self.state.prompt_consume_end():
-            # Send end signal to the controller
-            # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
-            self.shutdown_signal.set()
-            if self.global_rank == 0:
+            # Each reporting rank owns an independent reward dispatcher;
+            # flush it and report that rank's local drain exactly once.
+            if self.should_report:
                 self.send_end_signal()
 
     def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:
@@ -2121,39 +2629,132 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 payload.prompt_token_ids = [t[0:1] for t in payload.prompt_token_ids]
         return payloads
 
-    def _prefetch_loop(self):
-        """Background loop that prefetches the next prompt batch.
-
-        While ``rollout_generation()`` is running, ``main_loop`` is blocked
-        and ``_prompt_queue`` sits empty.  This loop fills the queue in
-        advance so the next ``main_loop`` iteration skips the HTTP fetch
-        round-trip entirely.  When the rollout backend implements
-        ``enqueue_prefetch_payloads(payloads)``, the prefetched payloads are
-        also handed to it so the backend can start processing the next batch
-        before the current one finishes — useful for long-running simulation
-        backends where straggler scenes leave the backend underutilized at
-        the tail of each ``rollout_generation()`` call.
-
-        Only fires when ``config.rollout.prefetch_rollout`` is set; otherwise
-        the thread is never started.
-
-        Limitation: requires single-process rollout workers (DP/TP/PP all
-        == 1).  ``request_new_prompts`` ends with a distributed broadcast
-        that all ranks must participate in; calling that from a background
-        thread on rank 0 only would deadlock multi-rank workers.
+    def _bind_prefetch_context_once(self):
+        """Bind data_packer / data_fetcher into the mixin's prefetch
+        context so the bg setup worker resolves payloads via the same
+        packer the consumer uses.  Idempotent; no-op for backends that
+        don't compose RolloutGenerationMixin.
         """
-        while not self.shutdown_signal.is_set():
-            time.sleep(0.5)
-            if not self.state.weight_synced():
-                continue
-            if self.state.prompt_fetch_end():
-                continue
-            with self._prompt_fetch_lock:
-                if not self._prompt_queue.empty():
-                    continue
-                # ``parallel_dims.mesh["dp"]`` is not reliably resolvable
-                # from a background thread; prefetch_rollout requires DP=1
-                # so the multiplier is always 1.
+        if getattr(self, "_prefetch_context_bound", False):
+            return
+        bind = getattr(self.rollout, "bind_prefetch_context", None)
+        if callable(bind):
+            try:
+                bind(
+                    data_packer=self.data_packer,
+                    data_fetcher=self.data_fetcher,
+                )
+            except Exception:
+                logger.exception(
+                    "[Rollout] bind_prefetch_context failed; "
+                    "prefetch will run with empty context."
+                )
+        self._prefetch_context_bound = True
+
+    def _submit_prefetch_setup(self, payloads):
+        """Hand a freshly-fetched batch to the backend's prefetch setup so
+        per-prompt ``_prepare_sample`` runs on the mixin's bg setup
+        thread, overlapping with in-flight generation on earlier batches.
+
+        Rank-local and keyed by ``prompt_idx`` -- it runs no collective --
+        so it is safe to call from a multi-rank ``main_loop`` (unlike the
+        controller prompt fetch, which must stay in lockstep across
+        ranks).  Backends compose ``RolloutGenerationMixin`` (preferred)
+        or define the legacy ``enqueue_prefetch_payloads`` hook; a backend
+        with neither is legal and simply falls back to inline
+        ``_prepare_sample`` in the consumer.
+        """
+        submit = getattr(self.rollout, "submit_setup", None)
+        if callable(submit):
+            try:
+                submit(payloads)
+            except Exception:
+                logger.exception(
+                    "[Rollout] submit_setup failed for batch of %d",
+                    len(payloads),
+                )
+            return
+        legacy = getattr(self.rollout, "enqueue_prefetch_payloads", None)
+        if callable(legacy):
+            _warn_legacy_prefetch_hook_once()
+            try:
+                legacy(payloads)
+            except Exception:
+                logger.exception(
+                    "[Rollout] enqueue_prefetch_payloads failed for batch of %d",
+                    len(payloads),
+                )
+
+    def _prefetch_loop(self):
+        """Sole producer of ``_prompt_queue`` in single-producer mode.
+
+        Active only when :attr:`_single_producer_mode` is True
+        (``config.rollout.prefetch_rollout`` set + single-process
+        worker; see :meth:`__init__`).  The thread is started from
+        :meth:`work` and runs on global rank 0.
+
+        Per iteration: fetch a prompt batch from the controller,
+        notify the rollout backend via ``submit_setup`` so
+        :class:`RolloutGenerationMixin` can start ``_prepare_sample``
+        on its own bg thread, then ``put`` onto ``_prompt_queue``.
+        Back-pressure is provided by the bounded queue: ``put``
+        blocks when ``main_loop`` is behind, so this thread runs
+        exactly as fast as the consumer drains -- no polling, no
+        ``time.sleep``, no lock.
+
+        ``submit_setup`` is called *before* ``put`` so the bg setup
+        worker has a head start.  By the time ``main_loop`` pops
+        the batch and reaches ``_gather_prepared_samples``, the
+        future is typically done and the consumer waits ~0 ms.
+
+        Backends that haven't migrated to the mixin can still
+        implement the legacy ``enqueue_prefetch_payloads(payloads)``
+        hook on their ``RolloutBase`` subclass; this is supported as
+        a deprecation shim with a one-shot warning at first use.
+
+        Lifecycle:
+          * Wait for first weight-sync (a one-shot sticky bit; we
+            poll only because ``State`` doesn't expose it as an
+            event, and only at startup).
+          * On controller ``is_end=True``, set
+            ``state.prompt_fetch_end`` and exit; ``main_loop``
+            drains the queue and signals consume-end.
+          * On shutdown, exit ASAP; the bounded queue's blocking
+            ``put`` is woken by a small timeout so the thread can
+            check ``shutdown_signal`` even when ``main_loop`` is
+            stuck.
+          * On unexpected exception, set ``prompt_fetch_end`` from
+            ``finally`` so ``main_loop`` doesn't wait forever for
+            a producer that died.
+
+        Multi-rank scope: this thread overlaps the controller *fetch*
+        (the ``get_next_prompt`` HTTP round-trip), which ends in a
+        distributed broadcast/scatter that all ranks must join -- driving
+        it from rank 0 only would deadlock the peers, so the fetch-overlap
+        loop requires ``world_size == 1`` (:attr:`_single_producer_mode`).
+        The *prep* overlap (per-prompt ``_prepare_sample`` on the mixin's
+        bg setup thread) does not need a collective and is available to
+        multi-rank workers too -- see :meth:`_submit_prefetch_setup`,
+        which ``_main_loop_impl`` calls after each in-lockstep fetch.
+        """
+        self._bind_prefetch_context_once()
+
+        # Wait for first weight-sync.  ``State.weight_synced`` is a
+        # sticky bit (set once, never cleared per
+        # ``cosmos_rl/rollout/__init__.py:69``), so a tight poll
+        # here is a one-shot and the loop body below has no
+        # weight-sync gate.
+        while not self.shutdown_signal.is_set() and not self.state.weight_synced():
+            time.sleep(0.05)
+
+        try:
+            while not self.shutdown_signal.is_set():
+                if self.state.prompt_fetch_end():
+                    return
+
+                # Sole producer: no lock, no empty-check (we always
+                # try to fetch the next batch and let the bounded
+                # queue's ``put`` back-pressure us off).
                 try:
                     payloads, is_end = self.api_client.get_next_prompt(
                         self.batch_size,
@@ -2161,14 +2762,20 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     )
                 except Exception:
                     logger.exception("[Rollout] Prefetch fetch failed")
+                    # Backoff to avoid hammering an unhealthy
+                    # controller.  Re-check shutdown immediately on
+                    # the next iteration.
+                    time.sleep(0.5)
                     continue
+
                 if is_end:
                     self.state.set_prompt_fetch_end()
                 if not payloads:
                     continue
+
                 # Mirror request_new_prompts' local_dataset / RLPayload
-                # validation so main_loop sees identical objects when it
-                # pops from the queue.
+                # validation so main_loop sees identical objects when
+                # it pops from the queue.
                 if self.config.train.local_dataset:
                     for payload in payloads:
                         payload["prompt"] = self.data_fetcher.get_payload_by_index(
@@ -2183,26 +2790,36 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             )
                         )
                 payloads = [RLPayload.model_validate(p) for p in payloads]
-                self._prompt_queue.put(payloads)
+
+                # Notify the backend BEFORE put: the bg setup worker
+                # starts preparing samples while we're still preparing
+                # to enqueue, so prep overlaps in-flight generation.
+                self._submit_prefetch_setup(payloads)
+
+                # Blocking put with a small timeout so we stay
+                # responsive to ``shutdown_signal`` even if the
+                # consumer is hung.  ``queue.Full`` is the expected
+                # case during steady-state back-pressure.
+                while not self.shutdown_signal.is_set():
+                    try:
+                        self._prompt_queue.put(payloads, timeout=0.5)
+                        break
+                    except QueueFull:
+                        continue
+                if self.shutdown_signal.is_set():
+                    return
+
                 logger.info(
                     "[Rollout] Prefetched %d payloads (prompt_idxs=%s%s)",
                     len(payloads),
                     [p.prompt_idx for p in payloads[:5]],
                     " ..." if len(payloads) > 5 else "",
                 )
-            # Speculatively notify the backend.  Backends without this hook
-            # (e.g. vllm, trtllm) skip this and only benefit from the
-            # round-trip elision above.
-            enqueue_fn = getattr(self.rollout, "enqueue_prefetch_payloads", None)
-            if enqueue_fn is None:
-                continue
-            try:
-                enqueue_fn(payloads)
-            except Exception:
-                logger.exception(
-                    "[Rollout] enqueue_prefetch_payloads failed for batch of %d",
-                    len(payloads),
-                )
+        finally:
+            # Defensive: if we crash or exit early, set fetch_end so
+            # main_loop doesn't wait forever for a producer that
+            # died.  Idempotent (the bit is sticky).
+            self.state.set_prompt_fetch_end()
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.
@@ -2212,14 +2829,36 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
-            if self.config.rollout.prefetch_rollout:
-                logger.info("[Rollout] Prefetch enabled; starting background thread")
+            if self._single_producer_mode:
+                logger.info(
+                    "[Rollout] Prefetch enabled (single-producer mode); "
+                    "starting background thread"
+                )
                 self.prefetch_thread = threading.Thread(
                     target=self._prefetch_loop,
                     daemon=True,
                     name="rollout-prefetch",
                 )
                 self.prefetch_thread.start()
+            elif self.config.rollout.prefetch_rollout:
+                # Multi-rank worker (world_size>1) with prefetch on.
+                # The dedicated rank-0 ``_prefetch_loop`` can't run here
+                # because its HTTP fetch ends in a distributed
+                # broadcast/scatter that every rank must join, so the
+                # *fetch* overlap stays single-process.  The *prep*
+                # overlap is still active: ``_main_loop_impl`` fetches
+                # one batch ahead (in lockstep across ranks) and hands
+                # it to ``_submit_prefetch_setup`` so per-prompt
+                # ``_prepare_sample`` runs on the mixin's bg setup
+                # thread while earlier batches generate.
+                logger.info(
+                    "[Rollout] config.rollout.prefetch_rollout=True with "
+                    "world_size=%d (>1): per-prompt prep overlap is ENABLED "
+                    "via main_loop look-ahead; the rank-0 fetch-overlap loop "
+                    "stays single-process (set dp/tp/pp/cp=1 to also overlap "
+                    "the controller fetch).",
+                    self.parallel_dims.world_size,
+                )
         if self.config.distillation.enable:
             # create a thread to interact with teacher model
             self.teacher_interact_thread = threading.Thread(
@@ -2228,5 +2867,23 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.teacher_interact_thread.start()
 
         self.main_loop()
-        self.inference_stream.synchronize()
+        # [Teardown trace] These calls are otherwise silent; emitting a
+        # breadcrumb before/after each one means the last line in a wedged
+        # worker's log names the exact blocking call (e.g. a hung
+        # inference_stream.synchronize() from a cross-replica NCCL teardown
+        # race) instead of an un-attributable silent gap before unregister.
+        logger.info(
+            "[Teardown] %s: main_loop returned; draining inference_stream",
+            self.replica_name,
+        )
+        # Synchronous-path backstop: in async_r2r_sync=disabled there is no
+        # WeightSyncThread, so R2R/P2R run on inference_stream; an orphaned
+        # collective here is drained-or-aborted the same way.  Quiet on healthy
+        # runs now that the controller waits for rollout checkout.
+        bounded_drain_or_abort(
+            self.inference_stream,
+            _TEARDOWN_DRAIN_TIMEOUT_S,
+            f"inference_stream[{self.replica_name}]",
+        )
         self.handle_shutdown()
+        logger.info("[Teardown] %s: work() returning", self.replica_name)

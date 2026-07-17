@@ -57,13 +57,14 @@ class ColocatedAPIClient(APIClient):
         """
         return super().get_next_prompt(batch_size, validation_step, rank_in_mesh)
 
-    def post_rollout_completion(self, response: RolloutRequest):
+    def post_rollout_completion(self, response: RolloutRequest) -> bool:
         """
         Post the rollout completion response to the controller.
         Args:
             response: The rollout completion response.
         """
         self.controller.put_rollouts(response)
+        return True
 
     def post_policy_train_ack(
         self,

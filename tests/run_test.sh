@@ -26,6 +26,24 @@ run() {
     fi
 }
 
+# FP8 requires GPU compute capability >= 8.9 (Ada/Hopper, e.g. L40S/H100).
+# On older GPUs (e.g. A100, cc 8.0) it errors out, so skip it there instead of
+# recording a spurious failure. Set COSMOS_FORCE_FP8=1 to run it regardless.
+gpu_supports_fp8() {
+    [[ "${COSMOS_FORCE_FP8:-0}" == "1" ]] && return 0
+    python - <<'PY'
+import sys
+try:
+    import torch
+    if not torch.cuda.is_available():
+        sys.exit(1)
+    major, minor = torch.cuda.get_device_capability(0)
+    sys.exit(0 if (major, minor) >= (8, 9) else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
 
@@ -35,16 +53,23 @@ run python tests/test_cosmos_hf_precision.py
 run /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
 run python tests/test_cache.py
 run python tests/test_comm.py
-run python tests/test_fp8.py
+if gpu_supports_fp8; then
+    run python tests/test_fp8.py
+else
+    echo
+    echo "================ SKIP: python tests/test_fp8.py (GPU compute capability < 8.9) ================"
+fi
 run python tests/test_lora.py
 run python tests/test_freeze_pattern.py
 # run python tests/test_grad_allreduce.py
 run python tests/test_high_availability_nccl.py
 run python tests/test_nccl_collectives.py
 run python tests/test_nccl_timeout.py
+run python tests/test_pynccl_phase_observer.py
 run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
+run python tests/test_multirank_shutdown.py
 run python tests/test_process_flow.py
 run python tests/test_custom_class.py
 run python tests/test_math_verify.py
@@ -54,10 +79,13 @@ run python tests/test_dataset_signature.py
 run python tests/test_put_rollouts.py
 run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
+# Pytest-style CPU suites; install pytest in case the image lacks it.
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract
 run python -m unittest -v tests.contracts.test_rl_worker_trainer_surface_contract
+run python -m unittest -v tests.utils.test_network_util
 run python tests/test_sequence_packing.py
 run python tests/test_integration.py --stream
 run python tests/test_hf_models.py

@@ -28,6 +28,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.utils import util
 from cosmos_rl.utils import network_util
+from subprocess_helpers import wait_all_or_fail, wait_for_controller_ready
 from cosmos_rl.utils.payload import extract_rollouts
 from datasets import concatenate_datasets
 
@@ -251,6 +252,7 @@ class TestCustomRollout(unittest.TestCase):
 
         config["policy"]["parallelism"]["tp_size"] = 1
         config["policy"]["parallelism"]["dp_shard_size"] = 4
+        config["redis"] = str(network_util.find_available_port(12808))
 
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
@@ -262,11 +264,18 @@ class TestCustomRollout(unittest.TestCase):
         env_dict = os.environ.copy()
         env_dict["COSMOS_ROLE"] = "Controller"
         controller_process = subprocess.Popen(
-            controller_cmd,
-            shell=True,
+            controller_cmd.split(),
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=env_dict,
+        )
+        wait_for_controller_ready(
+            self,
+            controller_process,
+            port,
+            timeout_s=120,
+            context="test_custom_rollout",
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -297,6 +306,7 @@ class TestCustomRollout(unittest.TestCase):
         # Start the process
         policy_process = subprocess.Popen(
             policy_cmd,
+            start_new_session=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
             env=policy_env,
@@ -308,6 +318,7 @@ class TestCustomRollout(unittest.TestCase):
             rollout_processes.append(
                 subprocess.Popen(
                     rollout_cmd,
+                    start_new_session=True,
                     stdout=sys.stderr,
                     stderr=sys.stderr,
                     env=rollout_env,
@@ -315,14 +326,7 @@ class TestCustomRollout(unittest.TestCase):
             )
 
         processes = [controller_process, policy_process] + rollout_processes
-
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(self, processes, timeout_s=300, context="test_custom_rollout")
 
 
 if __name__ == "__main__":

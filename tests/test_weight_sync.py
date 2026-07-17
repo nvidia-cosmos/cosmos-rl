@@ -172,7 +172,13 @@ class TestRedirectViewMapToBuffer:
         assert worker.weight_inplace_view_map["layer.weight"] is buf_p1
         assert worker.weight_inplace_view_map["layer.weight"] is not p1
 
-    def test_keeps_unmatched_keys(self):
+    def test_raises_on_unmatched_keys(self):
+        """An entry that cannot be buffered must fail setup, not fall back.
+
+        A receive target left on the live model would race inference, and
+        its received updates would be overwritten with stale buffer data
+        by the next ``sync_buffer_to_live``.
+        """
         p1 = torch.randn(4)
         model = MagicMock()
         model.state_dict.return_value = {}
@@ -183,8 +189,157 @@ class TestRedirectViewMapToBuffer:
             _buffer_state_dict={},
         )
 
+        with pytest.raises(RuntimeError, match="unknown_key"):
+            redirect_view_map_to_buffer(worker)
+
+    def test_rebuilds_fused_qkv_views_over_buffer(self):
+        """q/k/v views of a fused parameter must land in the buffer.
+
+        Regression test: matching views by ``data_ptr`` mapped the
+        offset-zero q view to the full fused buffer tensor (wrong shape)
+        and left the k/v views pointing at the live model, so the first
+        P2R receive zeroed and checked the wrong tensors.
+        """
+        heads, dim = 4, 6
+        qkv = torch.arange(3 * heads * dim, dtype=torch.float32).reshape(3 * heads, dim)
+        buf_qkv = qkv.detach().clone()
+        model = MagicMock()
+        model.state_dict.return_value = {"visual.attn.qkv.weight": qkv}
+
+        worker = SimpleNamespace(
+            rollout=SimpleNamespace(get_underlying_model=lambda: model),
+            weight_inplace_view_map={
+                "visual.attn.q.weight": qkv[0:heads],
+                "visual.attn.k.weight": qkv[heads : 2 * heads],
+                "visual.attn.v.weight": qkv[2 * heads : 3 * heads],
+            },
+            _buffer_state_dict={"visual.attn.qkv.weight": buf_qkv},
+        )
+
         redirect_view_map_to_buffer(worker)
-        assert worker.weight_inplace_view_map["unknown_key"] is p1
+        new_map = worker.weight_inplace_view_map
+
+        for name in ("q", "k", "v"):
+            view = new_map[f"visual.attn.{name}.weight"]
+            assert view.shape == (heads, dim)
+            assert (
+                view.untyped_storage().data_ptr()
+                == buf_qkv.untyped_storage().data_ptr()
+            )
+        assert new_map["visual.attn.v.weight"].storage_offset() == 2 * heads * dim
+
+        # Writing through the redirected view mutates the buffer, not the
+        # live model.
+        new_map["visual.attn.k.weight"].zero_()
+        assert buf_qkv[heads : 2 * heads].abs().sum() == 0
+        assert qkv[heads : 2 * heads].abs().sum() > 0
+
+    def test_redirects_flat_backed_disjoint_params(self):
+        """Two params sharing one flat storage must both resolve correctly.
+
+        Regression test: a single-candidate storage index kept only the
+        last parameter per storage, so the other parameter (and any view
+        of it) failed to redirect.
+        """
+        flat = torch.arange(24, dtype=torch.float32)
+        a = flat[:8].view(2, 4)
+        b = flat[8:].view(4, 4)
+        sd = {"a.weight": a, "b.weight": b}
+        buf = {k: v.detach().clone() for k, v in sd.items()}
+        model = MagicMock()
+        model.state_dict.return_value = sd
+
+        worker = SimpleNamespace(
+            rollout=SimpleNamespace(get_underlying_model=lambda: model),
+            weight_inplace_view_map={
+                "hf.a.weight": a,
+                "hf.b.weight": b,
+                "hf.b.rows12": b[1:3],
+            },
+            _buffer_state_dict=buf,
+        )
+
+        redirect_view_map_to_buffer(worker)
+        new_map = worker.weight_inplace_view_map
+
+        assert new_map["hf.a.weight"] is buf["a.weight"]
+        assert new_map["hf.b.weight"] is buf["b.weight"]
+        rows = new_map["hf.b.rows12"]
+        assert rows.shape == (2, 4)
+        assert (
+            rows.untyped_storage().data_ptr()
+            == buf["b.weight"].untyped_storage().data_ptr()
+        )
+        # b[1:3] sits at offset 12 in the flat storage; rebased against the
+        # clone of b (whose storage starts at zero) it must land at 4.
+        assert rows.storage_offset() == 4
+        rows.zero_()
+        assert buf["b.weight"][1:3].abs().sum() == 0
+        assert b[1:3].abs().sum() > 0
+
+    def test_redirects_renamed_nondense_param(self):
+        """A renamed non-dense param maps to its same-shape buffer clone.
+
+        Regression test: the clone of a non-dense parameter is contiguous,
+        so a stride-equality guard rejected it even though the whole
+        buffer tensor is a valid receive target.
+        """
+        base = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+        p = base[:, :3]  # non-dense: stride (6, 1) over a (4, 3) shape
+        buf_p = p.detach().clone()  # contiguous clone: stride (3, 1)
+        assert p.stride() != buf_p.stride()
+        model = MagicMock()
+        model.state_dict.return_value = {"w": p}
+
+        worker = SimpleNamespace(
+            rollout=SimpleNamespace(get_underlying_model=lambda: model),
+            weight_inplace_view_map={"hf.w": p},
+            _buffer_state_dict={"w": buf_p},
+        )
+
+        redirect_view_map_to_buffer(worker)
+        assert worker.weight_inplace_view_map["hf.w"] is buf_p
+
+    def test_dtensor_state_dict_exact_key_redirect(self):
+        """DTensor state-dict entries must not crash the storage index.
+
+        Regression test: building the index called
+        ``untyped_storage().data_ptr()`` on every state-dict value, which
+        raises on DTensors before any per-entry guard can run.  Exact-name
+        DTensor entries must still redirect to their buffer clone.
+        """
+        import torch.distributed as dist
+
+        if not dist.is_available():
+            pytest.skip("torch.distributed not available")
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.tensor import Replicate, distribute_tensor
+
+        dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
+        try:
+            mesh = init_device_mesh("cpu", (1,))
+            dt = distribute_tensor(torch.randn(4, 4), mesh, [Replicate()])
+            buf_dt = dt.detach().clone()
+            plain = torch.randn(3)
+            buf_plain = plain.detach().clone()
+            model = MagicMock()
+            model.state_dict.return_value = {"dt.weight": dt, "plain.bias": plain}
+
+            worker = SimpleNamespace(
+                rollout=SimpleNamespace(get_underlying_model=lambda: model),
+                weight_inplace_view_map={
+                    "dt.weight": dt,
+                    "plain.bias": plain,
+                },
+                _buffer_state_dict={"dt.weight": buf_dt, "plain.bias": buf_plain},
+            )
+
+            redirect_view_map_to_buffer(worker)
+            new_map = worker.weight_inplace_view_map
+            assert new_map["dt.weight"] is buf_dt
+            assert new_map["plain.bias"] is buf_plain
+        finally:
+            dist.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------

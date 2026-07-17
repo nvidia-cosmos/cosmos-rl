@@ -16,6 +16,7 @@
 import torch
 import atexit
 import threading
+import time
 from queue import Queue
 from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
@@ -257,17 +258,26 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        if getattr(self, "_rollout_end_acknowledged", False):
+            return True
+
         payloads, is_validation, _, empty = self.report_rollouts(block=True)
         assert not is_validation and payloads is None and empty, (
             f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         )
         response = RolloutRequest(
             src_replica_name=self.replica_name,
+            # This wrapper aggregates the TRT-LLM executor replica. Its inner
+            # ranks keep polling commands until explicit STOP.
+            stays_command_participant=True,
             payloads=[],
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
+        self._rollout_end_acknowledged = bool(
+            self.api_client.post_rollout_completion(response)
+        )
+        return self._rollout_end_acknowledged
 
     @torch.no_grad()
     def main_loop(self):
@@ -378,6 +388,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 assert self._prompt_queue.empty() and self.state.prompt_fetch_end(), (
                     "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 )
+                if not self.send_end_signal():
+                    time.sleep(0.1)
                 continue
             elif self._prompt_queue.empty():
                 continue
