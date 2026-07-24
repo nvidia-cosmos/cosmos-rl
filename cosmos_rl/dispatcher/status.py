@@ -296,7 +296,10 @@ class PolicyStatusManager:
         self.replica_scaling_log = []
 
         # NCCL payload transfer cleanup: disabled by default, auto-enabled
-        # when the first nccl:-prefixed rollout is seen.
+        # on first detection of a transport-prefixed completion at rollout
+        # ingestion (see ``_maybe_arm_transport_cleanup``).  The discard path
+        # keeps a fallback flip so a run whose first transport activity is a
+        # discard still arms.
         self._nccl_cleanup_enabled = False
 
         # Validation related
@@ -1304,6 +1307,7 @@ class PolicyStatusManager:
                     self.tokenizer.encode(rollout.completion)
                 )
             n_samples += 1
+            self._maybe_arm_transport_cleanup(rollout)
             self.put_rollout(rollout)
             if self.config.train.train_policy.on_policy:
                 if self.total_pending_rollouts() == 0:
@@ -1409,6 +1413,26 @@ class PolicyStatusManager:
 
         return filtered_rollouts
 
+    def _maybe_arm_transport_cleanup(self, rollout: Rollout) -> None:
+        """Arm cleanup tracking on first sight of a transport-prefixed rollout.
+
+        Flip at the rollout-ingestion site (first *detection* of a completion
+        carrying a registered transport prefix) rather than on the first
+        published discard -- otherwise a run that never discards a stale
+        rollout never arms even while NCCL traffic flows.  Cheap to call per
+        rollout: short-circuits once armed, else one registry prefix match.
+        """
+        if self._nccl_cleanup_enabled:
+            return
+        completion = getattr(rollout, "completion", None)
+        if PayloadTransportRegistry.active_for_completion(completion) is None:
+            return
+        self._nccl_cleanup_enabled = True
+        logger.info(
+            "[Controller] Detected payload-transport-prefixed rollouts; "
+            "transport cleanup publishing is now active."
+        )
+
     def _publish_payload_transport_cleanup(
         self,
         rollouts: List[Rollout],
@@ -1418,7 +1442,9 @@ class PolicyStatusManager:
 
         The grouping/dispatch logic lives in
         :meth:`PayloadTransportRegistry.handle_discarded`.  This wrapper
-        only resolves the controller's Redis client and flips the
+        only resolves the controller's Redis client and, as a fallback
+        to the ingestion-site detection in
+        :meth:`_maybe_arm_transport_cleanup`, flips the
         ``_nccl_cleanup_enabled`` "first-detection" flag (used to
         debounce the "now active" log line so it appears at most once).
 
