@@ -2301,6 +2301,30 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
+    def _report_discarded_samples(self, count: int) -> None:
+        """Report fetched samples that terminated without trainable results."""
+        if count <= 0 or not self.should_report:
+            return
+
+        report_id = uuid.uuid4().hex
+        response = RolloutRequest(
+            src_replica_name=self.replica_name,
+            src_global_rank=self.global_rank,
+            payloads=[],
+            metrics={
+                "discarded_samples": count,
+                "discard_report_id": report_id,
+            },
+            is_end=False,
+        )
+        if not self.api_client.post_rollout_completion(response):
+            logger.error(
+                "[Rollout] Failed to report %d discarded samples "
+                "(discard_report_id=%s)",
+                count,
+                report_id,
+            )
+
     def _filter_valid_rollout_results_and_report(
         self, rollout_results: List[RolloutResult], payloads_list: List[RLPayload]
     ) -> Tuple[List[RolloutResult], List[RLPayload]]:
@@ -2364,6 +2388,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     rr.completions = output_texts
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
+
+        self._report_discarded_samples(
+            (len(payloads_list) - len(valid_payloads_list))
+            * self.config.rollout.n_generation
+        )
 
         should_report = self.should_report and len(valid_result) > 0
         if should_report:
@@ -2433,6 +2462,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
 
         if len(rollout_results) == 0:
+            self._report_discarded_samples(
+                len(payloads_list) * self.config.rollout.n_generation
+            )
             logger.debug(
                 "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
                 "batch=%d produced=0 returned_false=True",
