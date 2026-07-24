@@ -1179,5 +1179,85 @@ class TestTrainAckDuringPartialDrain(unittest.TestCase):
         self.assertFalse(psm.should_weight_sync_after_train_ack(2, rsm))
 
 
+# ---------------------------------------------------------------------------
+# Policy -- teardown-before-unregister ordering (clean fast-reap exit)
+# ---------------------------------------------------------------------------
+class TestPolicyShutdownTeardownOrder(unittest.TestCase):
+    """Bug fix (policy_shutdown_reaped_before_clean_exit): the policy must
+    complete NCCL + distributed teardown BEFORE ``unregister_from_controller()``
+    arms the controller's ``COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS`` fast-reap.
+    Otherwise the reap SIGTERMs the process mid-``sleep(15)``, ``destroy_worker``
+    (in ``execute``'s ``finally``) never runs, and the weight-sync comm (idx=0)
+    is left un-aborted."""
+
+    @staticmethod
+    def _worker(order):
+        return SimpleNamespace(
+            shutdown_signal=threading.Event(),
+            shutdown_mp_signal=threading.Event(),
+            inter_policy_nccl=SimpleNamespace(shutdown=lambda: None),
+            fetch_rollouts_thread=None,
+            fetch_command_thread=None,
+            teacher_interact_thread=None,
+            heartbeat_thread=None,
+            upload_thread=None,
+            destroy_worker=lambda: order.append("destroy_worker"),
+            unregister_from_controller=lambda: order.append("unregister"),
+        )
+
+    def test_abort_and_destroy_before_unregister(self):
+        from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
+
+        order = []
+        worker = self._worker(order)
+        with (
+            patch(
+                "cosmos_rl.policy.worker.rl_worker.nccl_abort_all",
+                lambda: order.append("nccl_abort_all"),
+            ),
+            patch("cosmos_rl.policy.worker.rl_worker.time.sleep", lambda _s: None),
+        ):
+            RLPolicyWorker.handle_shutdown(worker)
+        self.assertIn("nccl_abort_all", order)
+        self.assertIn("destroy_worker", order)
+        self.assertIn("unregister", order)
+        # Teardown (abort + graceful destroy) must precede the reap-arming
+        # unregister.
+        self.assertLess(order.index("nccl_abort_all"), order.index("unregister"))
+        self.assertLess(order.index("destroy_worker"), order.index("unregister"))
+
+    def test_handle_shutdown_runs_once(self):
+        from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
+
+        order = []
+        worker = self._worker(order)
+        with (
+            patch(
+                "cosmos_rl.policy.worker.rl_worker.nccl_abort_all",
+                lambda: order.append("nccl_abort_all"),
+            ),
+            patch("cosmos_rl.policy.worker.rl_worker.time.sleep", lambda _s: None),
+        ):
+            RLPolicyWorker.handle_shutdown(worker)
+            RLPolicyWorker.handle_shutdown(worker)  # idempotent -- guard flag
+        self.assertEqual(order.count("unregister"), 1)
+
+    def test_destroy_worker_is_idempotent(self):
+        from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
+
+        calls = []
+        worker = SimpleNamespace()
+        with (
+            patch(
+                "cosmos_rl.policy.worker.rl_worker.destroy_distributed",
+                lambda: calls.append(1),
+            ),
+            patch("cosmos_rl.policy.worker.rl_worker.logger"),
+        ):
+            RLPolicyWorker.destroy_worker(worker)
+            RLPolicyWorker.destroy_worker(worker)  # execute()'s finally re-calls
+        self.assertEqual(calls, [1])  # destroy_distributed ran exactly once
+
+
 if __name__ == "__main__":
     unittest.main()
