@@ -689,6 +689,9 @@ async def put_rollout_group(rollout: RolloutRequest):
                 controller.policy_status_manager.on_rollout_is_end(
                     controller.rollout_status_manager
                 )
+                controller.policy_status_manager.forget_discard_reports(
+                    rollout.src_replica_name
+                )
 
             return {"message": "Rollout end signal received"}
 
@@ -702,6 +705,15 @@ async def put_rollout_group(rollout: RolloutRequest):
         ]
         policy_status = controller.policy_status_manager
         is_dapo = controller.config.train.train_policy.variant == "dapo"
+        if "discarded_samples" in rollout.metrics:
+            discarded_samples = policy_status._parse_non_negative_count(
+                rollout.metrics, "discarded_samples"
+            )
+            policy_status.settle_discarded_samples(
+                source_replica=rollout.src_replica_name,
+                report_id=rollout.metrics.get("discard_report_id"),
+                count=discarded_samples,
+            )
         if policy_status.rollout_admission_closed():
             policy_status.cleanup_terminal_rollouts(
                 rollouts,
