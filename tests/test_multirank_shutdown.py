@@ -1201,6 +1201,7 @@ class TestPolicyShutdownTeardownOrder(unittest.TestCase):
             teacher_interact_thread=None,
             heartbeat_thread=None,
             upload_thread=None,
+            _shutdown_payload_data_packers=lambda: order.append("shutdown_payload"),
             destroy_worker=lambda: order.append("destroy_worker"),
             unregister_from_controller=lambda: order.append("unregister"),
         )
@@ -1225,6 +1226,12 @@ class TestPolicyShutdownTeardownOrder(unittest.TestCase):
         # unregister.
         self.assertLess(order.index("nccl_abort_all"), order.index("unregister"))
         self.assertLess(order.index("destroy_worker"), order.index("unregister"))
+        # Combined teardown order: the payload data packers are released FIRST
+        # (stop prefetch + abort transport comms) so their half-open 2-rank comms
+        # can't wedge the NCCL/process-group teardown, THEN nccl_abort_all sweeps
+        # any remaining comms.
+        self.assertIn("shutdown_payload", order)
+        self.assertLess(order.index("shutdown_payload"), order.index("nccl_abort_all"))
 
     def test_handle_shutdown_runs_once(self):
         from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
