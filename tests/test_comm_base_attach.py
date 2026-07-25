@@ -107,7 +107,7 @@ class TestAttachPayloadTransportContract(unittest.TestCase):
 
     def _patch_nccl_redis(self, fake_factory):
         return mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
             SimpleNamespace(Redis=fake_factory),
         )
 
@@ -125,6 +125,32 @@ class TestAttachPayloadTransportContract(unittest.TestCase):
         self.assertTrue(packer.post_called)
         # Order assertion: the hook saw the assigned client.
         self.assertIs(packer.client_at_post_call, fake)
+
+    def test_receiver_replica_plumbed_from_worker_replica_name(self):
+        # Multi-policy-replica addressing: the worker's globally-unique
+        # replica_name must land on an NCCL-aware packer's
+        # ``_nccl_dp_receiver_replica`` BEFORE attach runs setup, so the
+        # producer keys comms per receiver replica.
+        class _ReplicaAwarePacker(_NcclAwarePacker):
+            _nccl_dp_receiver_replica = None
+
+        packer = _ReplicaAwarePacker()
+        factory = _FakeRedisFactory(_FakeRedis())
+        harness = _CommHarness(mode="nccl", data_packer=packer)
+        harness.replica_name = "policy-XYZ"
+        with self._patch_nccl_redis(factory):
+            harness._attach_payload_transport()
+        self.assertEqual(packer._nccl_dp_receiver_replica, "policy-XYZ")
+
+    def test_receiver_replica_plumbing_skips_packer_without_attr(self):
+        # A packer that does not expose the attribute must not gain one.
+        packer = _NcclAwarePacker()  # no _nccl_dp_receiver_replica
+        factory = _FakeRedisFactory(_FakeRedis())
+        harness = _CommHarness(mode="nccl", data_packer=packer)
+        harness.replica_name = "policy-XYZ"
+        with self._patch_nccl_redis(factory):
+            harness._attach_payload_transport()
+        self.assertFalse(hasattr(packer, "_nccl_dp_receiver_replica"))
 
     def test_ping_failure_leaves_packer_unchanged(self):
         # If Redis ping fails, the packer must not be left in a half-
@@ -294,7 +320,7 @@ class TestOpportunisticRedisInjection(unittest.TestCase):
 
         with (
             mock.patch(
-                "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+                "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
                 SimpleNamespace(Redis=_factory),
             ),
             mock.patch(

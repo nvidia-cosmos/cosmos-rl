@@ -89,6 +89,22 @@ class TestRegistryBootstrap(unittest.TestCase):
         self.assertIsNone(PayloadTransportRegistry.active_for_completion(None))
         self.assertIsNone(PayloadTransportRegistry.active_for_completion(42))
 
+    def test_active_for_completion_matches_dict_metadata_form(self):
+        # NCCL packers return dict metadata whose "completion" field carries
+        # the nccl: string; controller cleanup must still detect it (else the
+        # producer never frees discarded buffers -- Codex P2 finding).
+        meta = {"_nccl": True, "_transfer_id": "0:abc", "completion": "nccl:0:abc"}
+        transport = PayloadTransportRegistry.active_for_completion(meta)
+        self.assertIsInstance(transport, NcclPayloadTransport)
+
+    def test_active_for_completion_dict_without_nccl_string_is_none(self):
+        self.assertIsNone(
+            PayloadTransportRegistry.active_for_completion({"observations": [1]})
+        )
+        self.assertIsNone(
+            PayloadTransportRegistry.active_for_completion({"completion": "plain"})
+        )
+
 
 class TestGetPayloadTransferMode(unittest.TestCase):
     def test_default_when_custom_empty(self):
@@ -296,7 +312,7 @@ class TestNcclAttachDataPacker(unittest.TestCase):
 
     def _patch_redis_lib(self, fake_factory):
         return mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
             SimpleNamespace(Redis=fake_factory),
         )
 
@@ -361,7 +377,9 @@ class TestNcclAttachDataPacker(unittest.TestCase):
 
     def test_attach_no_redis_lib_is_safe(self):
         packer = _NcclAwarePacker()
-        with mock.patch("cosmos_rl.utils.payload_transport.nccl._redis_lib", None):
+        with mock.patch(
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib", None
+        ):
             self.transport.attach_data_packer(
                 packer, config=self.config, redis_endpoint=self.endpoint
             )

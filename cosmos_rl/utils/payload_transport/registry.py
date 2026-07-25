@@ -211,17 +211,34 @@ class PayloadTransportRegistry:
             if transport.completion_prefix:
                 yield transport
 
+    @staticmethod
+    def _completion_string(completion: Any) -> Optional[str]:
+        """Normalize a rollout completion to its detection string.
+
+        An NCCL-aware packer may return dict *metadata* whose ``"completion"``
+        field carries the ``<prefix><id>`` string (the dict form exists for
+        UCXX parity).  Flatten that form so controller-side cleanup detection
+        AND transfer-id extraction work on either shape -- otherwise the
+        producer never receives a discard-cleanup and holds the buffer until
+        capacity eviction.
+        """
+        if isinstance(completion, dict):
+            completion = completion.get("completion")
+        return completion if isinstance(completion, str) else None
+
     @classmethod
     def active_for_completion(cls, completion: Any) -> Optional[PayloadTransport]:
         """Return the backend whose ``completion_prefix`` matches ``completion``.
 
-        Returns ``None`` for non-string completions, completions without
-        a registered prefix, or when no backend has a prefix attribute.
+        Accepts the plain ``<prefix><id>`` string or the dict-metadata form
+        (see :meth:`_completion_string`).  Returns ``None`` for completions
+        without a registered prefix, or when no backend has a prefix attribute.
         """
-        if not isinstance(completion, str):
+        text = cls._completion_string(completion)
+        if text is None:
             return None
         for transport in cls.all_with_completion_prefix():
-            if completion.startswith(transport.completion_prefix):
+            if text.startswith(transport.completion_prefix):
                 return transport
         return None
 
@@ -283,7 +300,10 @@ class PayloadTransportRegistry:
             transport = cls.active_for_completion(completion)
             if transport is None:
                 continue
-            transfer_id = completion[len(transport.completion_prefix) :]
+            # Extract the id from the normalized string form (handles both the
+            # plain "<prefix><id>" string and dict metadata).
+            text = cls._completion_string(completion)
+            transfer_id = text[len(transport.completion_prefix) :]
             per_transport.setdefault(transport, []).append(transfer_id)
 
         if not per_transport:

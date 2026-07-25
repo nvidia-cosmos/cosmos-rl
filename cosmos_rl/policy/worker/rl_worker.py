@@ -229,9 +229,46 @@ class RLPolicyWorker(PolicyWorkerBase):
                 trainable_params=list(self.trainable_params),
             )
 
+    def _shutdown_payload_data_packers(self):
+        """Tear down any payload-transport data packer(s) on this worker.
+
+        Calls ``shutdown_nccl_data_packer`` / ``shutdown_ucxx_data_packer``
+        (whichever the packer exposes) so the transport's prefetch thread is
+        stopped and its communicators are aborted before the NCCL /
+        distributed teardown.  ``data_packer`` and ``val_data_packer`` are
+        often the same object; dedupe by identity.  Best-effort: a teardown
+        error must not block shutdown.
+        """
+        seen: set = set()
+        for name in ("data_packer", "val_data_packer"):
+            packer = getattr(self, name, None)
+            if packer is None or id(packer) in seen:
+                continue
+            seen.add(id(packer))
+            for meth in ("shutdown_nccl_data_packer", "shutdown_ucxx_data_packer"):
+                fn = getattr(packer, meth, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception as e:  # pragma: no cover - best-effort
+                        logger.warning(
+                            f"[Policy] {meth} raised {type(e).__name__}: {e}; "
+                            "continuing shutdown"
+                        )
+                    break
+
     def handle_shutdown(self):
         if not hasattr(self, "_handle_shutdown_called"):
             self._handle_shutdown_called = True
+
+            # Release the payload-transport data packer FIRST: stop its
+            # prefetch thread and abort its cached communicators.  A NCCL
+            # payload transport (NCCLDataPackerMixin) holds 2-rank comms to
+            # the rollout replicas; by shutdown time those replicas have
+            # exited, so the leftover half-open comms would wedge the
+            # NCCL / process-group teardown below and hang the policy exit.
+            # Idempotent + best-effort; also covers the UCXX packer.
+            self._shutdown_payload_data_packers()
 
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
