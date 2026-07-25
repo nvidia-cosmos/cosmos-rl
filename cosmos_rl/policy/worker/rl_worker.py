@@ -43,6 +43,7 @@ from cosmos_rl.utils.parallelism_map import (
 )
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
+    nccl_abort_all,
     nccl_group_start,
     nccl_group_end,
 )
@@ -289,7 +290,21 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
-            # Manually unregister from controller
+            # Complete NCCL + distributed teardown BEFORE announcing departure.
+            # unregister_from_controller() arms the controller's
+            # COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS fast-reap, which SIGTERMs the
+            # job within ~8s.  If we unregister first, the reap pre-empts the
+            # trailing sleep and destroy_worker() (in execute()'s finally) never
+            # runs -- leaving the weight-sync comm (idx=0) un-aborted (a latent
+            # hang were the reap ever disabled) and no graceful teardown.  The
+            # background threads above are joined, so no comm is in use here;
+            # nccl_abort_all() is idempotent and forces any in-flight collective
+            # to stop, so a departed peer can't wedge the destroy.
+            nccl_abort_all()
+            self.destroy_worker()
+
+            # Announce departure LAST -- the reap now races an already-torn-down
+            # process, which exits cleanly instead of being killed mid-teardown.
             self.unregister_from_controller()
 
             if hasattr(self, "upload_thread") and self.upload_thread is not None:
@@ -1041,5 +1056,12 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
 
     def destroy_worker(self):
+        # Idempotent: handle_shutdown() now runs the teardown before the
+        # controller reap, and execute()'s finally also calls this -- the guard
+        # prevents a double destroy_distributed / duplicate log on the graceful
+        # (non-reaped) path.
+        if getattr(self, "_worker_destroyed", False):
+            return
+        self._worker_destroyed = True
         destroy_distributed()
         logger.info("[Policy] Process group destroyed.")
