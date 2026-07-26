@@ -245,8 +245,20 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         )
 
     def shutdown_ucxx_data_packer(self) -> None:
-        """Stop background thread and release UCXX resources."""
-        self.shutdown_prefetch()
+        """Stop background thread and release UCXX resources.
+
+        Unlike NCCL -- which passes ``before_join`` to abort its comms and make
+        the join immediate -- UCXX keeps its client close AFTER the join and
+        instead widens the join budget.  ``ncclCommAbort`` is explicitly
+        designed to be called while a peer thread is inside a collective;
+        closing a UCXX client from a different thread (the worker runs
+        ``_ucxx_dp_fetch_all`` on its own event loop) has no such guarantee.
+        Each ``_read_slot`` await is already bounded by ``read_timeout``, so
+        waiting that long is sufficient to let the worker unwind on its own.
+        """
+        self.shutdown_prefetch(
+            join_timeout=max(5.0, float(self._ucxx_dp_read_timeout or 5.0))
+        )
 
         if self._ucxx_dp_client is not None:
             try:

@@ -80,7 +80,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.trace import get_trace_time
@@ -135,6 +135,23 @@ class PrefetchDataPackerMixin:
         if self._prefetch_enabled:
             return
 
+        # A previous shutdown may have left a worker parked inside
+        # ``_fetch_batch``.  That thread reads ``self._prefetch_shutdown`` and
+        # ``self._prefetch_request_queue`` LIVE, so rebinding them below would
+        # hand the stale worker the fresh (cleared) event and the fresh queue:
+        # it would never exit, and it would race the new worker for the same
+        # requests while ``wait_prefetch`` pops one result per call.  Refuse
+        # rather than silently running two workers.
+        stale = self._prefetch_thread
+        if stale is not None and stale.is_alive():
+            raise RuntimeError(
+                "[PrefetchDataPackerMixin] cannot start a prefetch worker: the "
+                "previous one is still running (it did not observe shutdown "
+                "within the join timeout). The transport's shutdown must unblock "
+                "in-flight fetches (see the before_join hook) before re-init."
+            )
+        self._prefetch_thread = None
+
         self._prefetch_cache = {}
         self._prefetch_request_queue = queue.Queue()
         self._prefetch_result_queue = queue.Queue()
@@ -149,17 +166,65 @@ class PrefetchDataPackerMixin:
         self._prefetch_thread.start()
         self._prefetch_enabled = True
 
-    def shutdown_prefetch(self) -> None:
-        """Stop the background thread.  Safe to call multiple times."""
+    def shutdown_prefetch(
+        self,
+        *,
+        join_timeout: float = 5.0,
+        before_join: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Stop the background thread.  Safe to call multiple times.
+
+        Ordering matters.  The worker only observes the shutdown event
+        *between* batches, so a thread parked inside :meth:`_fetch_batch` is
+        bounded by the transport's own (much larger) first-transfer / prefetch
+        timeouts -- not by ``join_timeout``.  Joining first would therefore
+        wait out a fetch that only the transport can unwedge.
+
+        ``before_join`` runs after the event is set but BEFORE the join, so the
+        transport can force its in-flight I/O to fail fast (NCCL
+        ``comm_cache.abort_all``, UCXX client close).  The fetch then raises,
+        the worker loop catches it, and the join completes promptly.  This
+        mirrors the producer's ``cleanup_nccl``, which aborts comms *before*
+        shutting down its sender pool for exactly this reason.
+
+        When the thread does not exit within ``join_timeout`` its handle is
+        deliberately RETAINED: it is still running and still reading
+        ``self._prefetch_request_queue`` / ``self._prefetch_shutdown``, so
+        :meth:`_setup_prefetch` must be able to see it and refuse to start a
+        duplicate worker that would race it for the same queue.
+
+        Args:
+            join_timeout: Seconds to wait for the worker to exit.  Generous
+                once ``before_join`` has unblocked in-flight I/O.
+            before_join: Optional transport teardown invoked between setting
+                the shutdown event and joining.  Exceptions are logged and
+                swallowed -- teardown proceeds regardless.
+        """
         if self._prefetch_shutdown is not None:
             self._prefetch_shutdown.set()
-        if self._prefetch_thread is not None:
-            self._prefetch_thread.join(timeout=5.0)
-            if self._prefetch_thread.is_alive():
+
+        if before_join is not None:
+            try:
+                before_join()
+            except Exception as exc:  # pragma: no cover - teardown best-effort
                 logger.warning(
-                    "[PrefetchDataPackerMixin] Prefetch thread did not stop cleanly"
+                    "[PrefetchDataPackerMixin] before_join hook raised %s; "
+                    "joining anyway",
+                    exc,
                 )
-            self._prefetch_thread = None
+
+        thread = self._prefetch_thread
+        if thread is not None:
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                logger.warning(
+                    "[PrefetchDataPackerMixin] prefetch thread still running "
+                    "after %.1fs; retaining its handle so a re-init cannot "
+                    "start a duplicate worker",
+                    join_timeout,
+                )
+            else:
+                self._prefetch_thread = None
         self._prefetch_enabled = False
 
     # ------------------------------------------------------------------

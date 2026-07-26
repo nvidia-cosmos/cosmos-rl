@@ -256,14 +256,28 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
             recv_timeout,
         )
 
-    def shutdown_nccl_data_packer(self) -> None:
-        """Stop the prefetch thread and abort all cached communicators."""
-        self.shutdown_prefetch()
+    def _abort_nccl_dp_comms(self) -> None:
+        """Abort every cached comm so an in-flight ``nccl_recv`` returns.
+
+        Used as ``shutdown_prefetch``'s ``before_join`` hook: the prefetch
+        worker only checks the shutdown event *between* batches, so a recv
+        parked on a departed peer would otherwise hold the join for the full
+        first-transfer budget rather than the join timeout.
+        """
         if self._nccl_dp_comm_cache is not None:
             try:
                 self._nccl_dp_comm_cache.abort_all()
             except Exception as e:  # pragma: no cover - teardown best-effort
                 logger.warning("[NCCLDataPackerMixin] comm abort failed: %s", e)
+
+    def shutdown_nccl_data_packer(self) -> None:
+        """Stop the prefetch thread and abort all cached communicators.
+
+        Aborts BEFORE joining -- mirroring the producer's ``cleanup_nccl`` --
+        so the worker's wedged recv fails fast instead of the join waiting on
+        work only the abort can unwedge.
+        """
+        self.shutdown_prefetch(before_join=self._abort_nccl_dp_comms)
         if self._prefetch_step_count > 0:
             avg_ms = self._nccl_dp_total_latency_ms / self._prefetch_step_count
             logger.info(
