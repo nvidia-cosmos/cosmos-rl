@@ -707,8 +707,15 @@ class TestRolloutCheckoutGate(unittest.TestCase):
             rollout_replicas=replicas,
             maintain_life_status=MagicMock(),
         )
-        rsm.all_rollouts_ended = lambda: all(
-            r.status.ended for r in rsm.rollout_replicas.values()
+        # Mirror production EXACTLY (RolloutStatusManager.all_rollouts_ended):
+        # the `len(...) > 0` clause matters.  A stub that returns True for an
+        # empty set makes test_returns_true_when_no_rollouts_exist pass even if
+        # the `len(rollout_replicas) == 0` early return in _await_rollout_checkout
+        # is deleted -- the loop simply never runs.  The stub would BE the
+        # assertion, and production would spin the full heartbeat timeout.
+        rsm.all_rollouts_ended = lambda: (
+            len(rsm.rollout_replicas) > 0
+            and all(r.status.ended for r in rsm.rollout_replicas.values())
         )
         return SimpleNamespace(
             rollout_status_manager=rsm, policy_status_manager=object()
