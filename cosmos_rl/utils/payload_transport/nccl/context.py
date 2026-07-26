@@ -26,11 +26,20 @@ mismatch on the cluster.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 from cosmos_rl.utils.payload_transport.nccl.protocol import build_nccl_prefix
 
-__all__ = ["resolve_global_rank", "resolve_prefix"]
+__all__ = [
+    "resolve_custom_int",
+    "resolve_global_rank",
+    "resolve_max_live_comms",
+    "resolve_prefix",
+]
+
+#: Floor for the comm cache's live-comm cap.  Never size *below* the historical
+#: default, so auto-derivation can only ever raise the ceiling.
+DEFAULT_MAX_LIVE_COMMS = 128
 
 
 def resolve_global_rank() -> int:
@@ -65,3 +74,57 @@ def resolve_prefix(config: Any) -> str:
         pass
     job_id = os.environ.get("SLURM_JOB_ID", "test")
     return build_nccl_prefix(experiment_name=experiment_name, job_id=job_id)
+
+
+def resolve_custom_int(config: Any, key: str, default: int, *, minimum: int = 1) -> int:
+    """Read ``[custom].<key>`` as an int, clamped to ``minimum``.
+
+    Returns ``default`` when the key is absent or unparseable, so a typo
+    degrades to the documented default rather than crashing a launched job.
+    """
+    custom = getattr(config, "custom", None) or {}
+    try:
+        raw = custom.get(key)
+    except AttributeError:
+        return default
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def _replica_count(config: Any, role: str) -> Optional[int]:
+    """``<role>.parallelism.n_init_replicas`` if resolvable."""
+    try:
+        value = int(getattr(getattr(config, role).parallelism, "n_init_replicas"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def resolve_max_live_comms(config: Any, *, peer_role: str) -> int:
+    """Live-comm cap for a :class:`CommCache`, sized from the actual fan-out.
+
+    Every cached comm is an independent 2-rank P2P communicator, so the cap is
+    resource hygiene, not a correctness bound -- and the working set is
+    *topology*-bounded (pair keys carry no per-transfer component), so it equals
+    the number of distinct peers.  Sizing it blindly is what makes the cap
+    dangerous: at exactly the wrong scale, a cyclic access pattern over N+1 keys
+    with capacity N is the pathological LRU case -- ~100% miss, every transfer
+    rebuilding a comm.
+
+    ``peer_role`` names the config section holding the peers this side talks to
+    (``"policy"`` for a producer, ``"rollout"`` for a consumer).  Headroom of 4x
+    absorbs elastic scale-up; the result never drops below
+    :data:`DEFAULT_MAX_LIVE_COMMS`.  ``[custom].nccl_max_live_comms`` overrides.
+    """
+    explicit = resolve_custom_int(config, "nccl_max_live_comms", 0, minimum=0)
+    if explicit > 0:
+        return explicit
+    peers = _replica_count(config, peer_role)
+    if peers is None:
+        return DEFAULT_MAX_LIVE_COMMS
+    return max(DEFAULT_MAX_LIVE_COMMS, 4 * peers)

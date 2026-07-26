@@ -66,6 +66,7 @@ from cosmos_rl.utils.payload_transport.nccl.comm_cache import (
 )
 from cosmos_rl.utils.payload_transport.nccl.context import (
     resolve_global_rank as _resolve_global_rank,
+    resolve_max_live_comms as _resolve_max_live_comms,
     resolve_prefix as _resolve_prefix,
 )
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
@@ -236,7 +237,11 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
         self._nccl_dp_rendezvous = NcclRendezvous(
             redis_client, self._nccl_dp_prefix, uid_ttl_s=uid_ttl_s
         )
+        # Cap sized from the peer fan-out (this side talks to rollout replicas),
+        # never below the historical default.  A blind cap is what makes LRU
+        # eviction dangerous: at the wrong scale every transfer rebuilds a comm.
         self._nccl_dp_comm_cache = CommCache(
+            max_live=_resolve_max_live_comms(config, peer_role="rollout"),
             quarantine_cooldown=max(1.0, recv_timeout * 6.0),
         )
         self._nccl_dp_streams = get_transfer_stream_pool(size=1, device=device)
@@ -408,124 +413,138 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
         bind_thread_device(device)
 
         t0 = get_trace_time()
-        # Phase 1: rendezvous (control plane) — sequential Redis round-trips.
+        # Declared OUTSIDE the try so the finally can always read it.
         recvs: List[Tuple[Any, dict, int, torch.Tensor]] = []
-        for idx, ref in refs:
-            prepared = self._rendezvous_one(ref, pynccl)
-            if prepared is None:
-                continue
-            comm_idx, recv_buf = prepared
-            recvs.append((idx, ref, comm_idx, recv_buf))
+        # Pins taken during phase 1 must be released on EVERY exit path,
+        # including the early returns and any raise below.
+        try:
+            # Phase 1: rendezvous (control plane) — sequential Redis round-trips.
+            for idx, ref in refs:
+                prepared = self._rendezvous_one(ref, pynccl)
+                if prepared is None:
+                    continue
+                comm_idx, recv_buf = prepared
+                recvs.append((idx, ref, comm_idx, recv_buf))
 
-        if not recvs:
-            return {}, 0, get_trace_time() - t0
+            if not recvs:
+                return {}, 0, get_trace_time() - t0
 
-        # A batch is "warming" until every pair in it has transferred at least
-        # once; give its recvs the long cold-start budget so a slow (storm-
-        # contended) send isn't cancelled -> comm torn down -> rebuilt into the
-        # same storm.
-        receiver_rank = self._nccl_dp_receiver_rank
-        warm = self._nccl_dp_warm_pairs
-        batch_warming = any(
-            _pair_key(ref, receiver_rank) not in warm for _i, ref, _c, _b in recvs
-        )
-        recv_timeout_ms = int(
-            (
-                self._nccl_dp_first_transfer_timeout
-                if batch_warming
-                else self._nccl_dp_recv_timeout
+            # A batch is "warming" until every pair in it has transferred at least
+            # once; give its recvs the long cold-start budget so a slow (storm-
+            # contended) send isn't cancelled -> comm torn down -> rebuilt into the
+            # same storm.
+            receiver_rank = self._nccl_dp_receiver_rank
+            warm = self._nccl_dp_warm_pairs
+            batch_warming = any(
+                _pair_key(ref, receiver_rank) not in warm for _i, ref, _c, _b in recvs
             )
-            * 1000
-        )
+            recv_timeout_ms = int(
+                (
+                    self._nccl_dp_first_transfer_timeout
+                    if batch_warming
+                    else self._nccl_dp_recv_timeout
+                )
+                * 1000
+            )
 
-        # Phase 2: issue ONE STANDALONE recv per pair communicator -- NOT a
-        # cross-communicator NCCL group.  Each comm is a distinct 2-rank pair
-        # with a single send/recv, so grouping adds no overlap; it only turns
-        # independent producers into one completion unit whose native
-        # ncclGroupEnd blocks -- with NO pynccl watchdog (run_task arms its
-        # deadline only AFTER the native call returns) -- if any producer has
-        # not yet posted its matching send (its send lock is busy serving the
-        # other policy replica).  That coupling was the N_POLICY>=2 residual
-        # wedge.  Ungrouped, a slow/serialized producer only delays its own
-        # recv; the others complete independently.
-        results: Dict[int, dict] = {}
-        total_bytes = 0
-        posted: List[Tuple[Any, dict, int, torch.Tensor]] = []
-        # Serialize the NCCL recv LAUNCH on this consumer's GPU, mirroring the
-        # producer's _nccl_send_lock.  Both the prefetch worker (_fetch_all off the
-        # prefetch thread) and a trainer-thread cache-miss _sync_fetch can reach
-        # here; concurrent multi-comm recv launches on one device deadlock
-        # natively -- and because run_task arms its deadline only AFTER the native
-        # call returns, the recv timeout can't rescue a launch deadlock.  Only the
-        # async ENQUEUE + event record run under the lock (every op is a stream
-        # enqueue); the blocking synchronize() below stays lock-free so real
-        # transfers still overlap across the two callers.
-        recv_lock = self._nccl_dp_recv_lock
-        if recv_lock is None:  # bare test harness that skipped setup
-            recv_lock = self._nccl_dp_recv_lock = threading.Lock()
-        with recv_lock:
-            stream = self._nccl_dp_streams.acquire() if self._nccl_dp_streams else None
-            for idx, ref, comm_idx, recv_buf in recvs:
+            # Phase 2: issue ONE STANDALONE recv per pair communicator -- NOT a
+            # cross-communicator NCCL group.  Each comm is a distinct 2-rank pair
+            # with a single send/recv, so grouping adds no overlap; it only turns
+            # independent producers into one completion unit whose native
+            # ncclGroupEnd blocks -- with NO pynccl watchdog (run_task arms its
+            # deadline only AFTER the native call returns) -- if any producer has
+            # not yet posted its matching send (its send lock is busy serving the
+            # other policy replica).  That coupling was the N_POLICY>=2 residual
+            # wedge.  Ungrouped, a slow/serialized producer only delays its own
+            # recv; the others complete independently.
+            results: Dict[int, dict] = {}
+            total_bytes = 0
+            posted: List[Tuple[Any, dict, int, torch.Tensor]] = []
+            # Serialize the NCCL recv LAUNCH on this consumer's GPU, mirroring the
+            # producer's _nccl_send_lock.  Both the prefetch worker (_fetch_all off the
+            # prefetch thread) and a trainer-thread cache-miss _sync_fetch can reach
+            # here; concurrent multi-comm recv launches on one device deadlock
+            # natively -- and because run_task arms its deadline only AFTER the native
+            # call returns, the recv timeout can't rescue a launch deadlock.  Only the
+            # async ENQUEUE + event record run under the lock (every op is a stream
+            # enqueue); the blocking synchronize() below stays lock-free so real
+            # transfers still overlap across the two callers.
+            recv_lock = self._nccl_dp_recv_lock
+            if recv_lock is None:  # bare test harness that skipped setup
+                recv_lock = self._nccl_dp_recv_lock = threading.Lock()
+            with recv_lock:
+                stream = (
+                    self._nccl_dp_streams.acquire() if self._nccl_dp_streams else None
+                )
+                for idx, ref, comm_idx, recv_buf in recvs:
+                    try:
+                        pynccl.nccl_recv(
+                            recv_buf,
+                            SENDER_LOCAL_RANK,  # peer in the 2-rank comm is the sender
+                            comm_idx,
+                            stream=stream,
+                            timeout_ms=recv_timeout_ms,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[NCCLDataPackerMixin] recv failed for %s: %s",
+                            ref["transfer_id"],
+                            exc,
+                        )
+                        # Isolate the failure to this pair (quarantine only if warm).
+                        self._quarantine_recv_failures(
+                            [(idx, ref, comm_idx, recv_buf)], cache
+                        )
+                        continue
+                    posted.append((idx, ref, comm_idx, recv_buf))
+
+                if not posted:
+                    return {}, 0, get_trace_time() - t0
+
+                # Recv-complete event gates downstream training consumption.
+                done = record_event(stream)
+
+            wait_event(None, done)  # current (compute) stream waits before reads
+            if torch.cuda.is_available():
                 try:
-                    pynccl.nccl_recv(
-                        recv_buf,
-                        SENDER_LOCAL_RANK,  # peer in the 2-rank comm is the sender
-                        comm_idx,
-                        stream=stream,
-                        timeout_ms=recv_timeout_ms,
-                    )
+                    torch.cuda.current_stream().synchronize()
                 except Exception as exc:
+                    # A recv that ENQUEUED cleanly but whose peer never sent (dead /
+                    # hung producer) surfaces HERE at completion, not at the enqueue
+                    # try/except above.  Do NOT let it propagate: an uncaught raise
+                    # unwinds _fetch_all -> the prefetch worker marks the WHOLE batch
+                    # failed -> wait_prefetch wipes the cache -> every episode drops to
+                    # fallback AND the offending pair is never quarantined (quarantine
+                    # is only reachable from the enqueue path).  A single stream sync
+                    # can't attribute the failure to one recv, so conservatively
+                    # quarantine every posted (warm) pair and drop just this batch to
+                    # fallback; the dead pair(s) now cool down instead of re-storming.
                     logger.warning(
-                        "[NCCLDataPackerMixin] recv failed for %s: %s",
-                        ref["transfer_id"],
+                        "[NCCLDataPackerMixin] recv completion sync failed "
+                        "(%d posted pairs): %s; quarantining posted pairs",
+                        len(posted),
                         exc,
                     )
-                    # Isolate the failure to this pair (quarantine only if warm).
-                    self._quarantine_recv_failures(
-                        [(idx, ref, comm_idx, recv_buf)], cache
-                    )
-                    continue
-                posted.append((idx, ref, comm_idx, recv_buf))
+                    self._quarantine_recv_failures(posted, cache)
+                    return {}, 0, get_trace_time() - t0
 
-            if not posted:
-                return {}, 0, get_trace_time() - t0
+            for idx, ref, _comm_idx, recv_buf in posted:
+                gpu_data = _unpack(recv_buf, ref["schema"], device)
+                results[idx] = gpu_data
+                total_bytes += recv_buf.numel() * recv_buf.element_size()
+                # First successful transfer -> this pair is warm (tight timeouts +
+                # normal quarantine from here on).
+                warm.add(_pair_key(ref, receiver_rank))
 
-            # Recv-complete event gates downstream training consumption.
-            done = record_event(stream)
-
-        wait_event(None, done)  # current (compute) stream waits before reads
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.current_stream().synchronize()
-            except Exception as exc:
-                # A recv that ENQUEUED cleanly but whose peer never sent (dead /
-                # hung producer) surfaces HERE at completion, not at the enqueue
-                # try/except above.  Do NOT let it propagate: an uncaught raise
-                # unwinds _fetch_all -> the prefetch worker marks the WHOLE batch
-                # failed -> wait_prefetch wipes the cache -> every episode drops to
-                # fallback AND the offending pair is never quarantined (quarantine
-                # is only reachable from the enqueue path).  A single stream sync
-                # can't attribute the failure to one recv, so conservatively
-                # quarantine every posted (warm) pair and drop just this batch to
-                # fallback; the dead pair(s) now cool down instead of re-storming.
-                logger.warning(
-                    "[NCCLDataPackerMixin] recv completion sync failed "
-                    "(%d posted pairs): %s; quarantining posted pairs",
-                    len(posted),
-                    exc,
-                )
-                self._quarantine_recv_failures(posted, cache)
-                return {}, 0, get_trace_time() - t0
-
-        for idx, ref, _comm_idx, recv_buf in posted:
-            gpu_data = _unpack(recv_buf, ref["schema"], device)
-            results[idx] = gpu_data
-            total_bytes += recv_buf.numel() * recv_buf.element_size()
-            # First successful transfer -> this pair is warm (tight timeouts +
-            # normal quarantine from here on).
-            warm.add(_pair_key(ref, receiver_rank))
-
-        return results, total_bytes, get_trace_time() - t0
+            return results, total_bytes, get_trace_time() - t0
+        finally:
+            # Release the eviction pins taken by _rendezvous_one.  The comm
+            # was leased from build through recv completion (the
+            # synchronize above), so unpinning earlier would reopen the
+            # mid-collective eviction window.
+            receiver_rank = self._nccl_dp_receiver_rank
+            for _i, _ref, _c, _b in recvs:
+                cache.unpin(_pair_key(_ref, receiver_rank))
 
     def _quarantine_endpoint(self, cache: Any, health_key: Any, pair: Any) -> None:
         """Quarantine a warm endpoint AND demote its pair back to 'warming'.
@@ -624,10 +643,15 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
             )
             if result.status is TransferStatus.ACCEPTED:
                 try:
+                    # PIN the comm: the caller holds this comm_idx until its
+                    # recv completes, so an unpinned entry could be evicted +
+                    # aborted mid-collective by a concurrent build for another
+                    # pair.  _fetch_all releases it in a finally.
                     comm_idx = cache.get_or_create(
                         pair,
                         uid_chars=result.uid_chars or [],
                         local_rank=RECEIVER_LOCAL_RANK,
+                        pin=True,
                     )
                 except Exception as e:
                     logger.warning(
@@ -639,7 +663,12 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
                     if not warming:
                         self._quarantine_endpoint(cache, health_key, pair)
                     return None
-                recv_buf = _alloc_recv_buffer(ref["schema"], self._nccl_dp_device)
+                try:
+                    recv_buf = _alloc_recv_buffer(ref["schema"], self._nccl_dp_device)
+                except Exception:
+                    # Never returned to the caller -> nothing will unpin it here.
+                    cache.unpin(pair)
+                    raise
                 return comm_idx, recv_buf
             if result.status is TransferStatus.MISSING:
                 # Producer recycled the buffer — non-retryable, drop now.
