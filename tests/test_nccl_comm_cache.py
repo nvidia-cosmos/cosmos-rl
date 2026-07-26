@@ -170,6 +170,9 @@ class TestPinnedEviction(unittest.TestCase):
     since they are what unwedge a stuck collective."""
 
     def test_pinned_comm_is_not_evicted(self):
+        # Also the only test that pins ``_evict_if_needed_locked(protect=...)``:
+        # with (0,1) held, the freshly-built (2,3) is the sole eligible victim,
+        # so dropping either the pin skip or ``protect`` aborts a comm here.
         aborted = []
         builder = _FakeBuilder()
         cache = CommCache(
@@ -178,9 +181,11 @@ class TestPinnedEviction(unittest.TestCase):
         with cache.leased((0, 1), uid_chars=[1], local_rank=0) as pinned_idx:
             # Building a second pair puts the cache over cap, but the only
             # candidate is in use -> hold the surplus instead of aborting it.
-            cache.get_or_create((2, 3), uid_chars=[1], local_rank=0)
+            fresh = cache.get_or_create((2, 3), uid_chars=[1], local_rank=0)
             self.assertEqual(aborted, [])
             self.assertIn((0, 1), cache)
+            self.assertIn((2, 3), cache)  # the new comm survived its own insert
+            self.assertNotIn(fresh, aborted)
             self.assertEqual(len(cache), 2)  # deliberately over max_live
         # Pin released -> the next build may now evict it.
         self.assertEqual(cache.pinned_count((0, 1)), 0)
@@ -201,33 +206,24 @@ class TestPinnedEviction(unittest.TestCase):
             self.assertEqual(aborted, [idx23])  # skipped (0,1), took (2,3)
             self.assertIn((0, 1), cache)
 
-    def test_freshly_built_comm_is_not_its_own_eviction_victim(self):
-        aborted = []
-        builder = _FakeBuilder()
-        cache = CommCache(
-            max_live=1, build_fn=builder, abort_fn=lambda i: aborted.append(i)
-        )
-        cache.get_or_create((0, 1), uid_chars=[1], local_rank=0)
-        with cache.leased((2, 3), uid_chars=[1], local_rank=0) as idx:
-            self.assertIn((2, 3), cache)
-            self.assertNotIn(idx, aborted)
-
-    def test_deliberate_abort_ignores_pins(self):
-        # Quarantine/teardown must fire on a pinned pair -- the wedged operation
-        # holds the pin, so deferring the abort until it drops would deadlock.
-        aborted = []
-        cache = CommCache(build_fn=lambda u, r: 7, abort_fn=lambda i: aborted.append(i))
-        with cache.leased((0, 1), uid_chars=[1], local_rank=0):
-            self.assertTrue(cache.abort((0, 1)))
-            self.assertEqual(aborted, [7])
-            self.assertNotIn((0, 1), cache)
-
-    def test_abort_all_ignores_pins(self):
-        aborted = []
-        cache = CommCache(build_fn=lambda u, r: 9, abort_fn=lambda i: aborted.append(i))
-        with cache.leased((0, 1), uid_chars=[1], local_rank=0):
-            cache.abort_all()
-            self.assertEqual(aborted, [9])
+    def test_deliberate_aborts_ignore_pins(self):
+        # Quarantine/teardown must fire on a PINNED pair: the wedged operation
+        # is what holds the pin, so deferring the abort until the refcount drops
+        # would deadlock.  Every deliberate abort path must behave this way.
+        for name, fire in (
+            ("abort", lambda c: c.abort((0, 1))),
+            ("abort_endpoint", lambda c: c.abort_endpoint((0,))),
+            ("abort_all", lambda c: c.abort_all()),
+        ):
+            with self.subTest(path=name):
+                aborted = []
+                cache = CommCache(
+                    build_fn=lambda u, r: 7, abort_fn=lambda i: aborted.append(i)
+                )
+                with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+                    fire(cache)
+                    self.assertEqual(aborted, [7])
+                    self.assertNotIn((0, 1), cache)
 
     def test_pins_are_refcounted_and_released(self):
         cache = CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None)

@@ -50,10 +50,49 @@ class _Packer(NCCLDataPackerMixin, _StubDataPacker):
     """MRO: NCCLDataPackerMixin first, then _StubDataPacker."""
 
 
-class TestMro(unittest.TestCase):
-    def test_mixin_intercepts_first(self):
-        mro = [c.__name__ for c in _Packer.__mro__]
-        self.assertLess(mro.index("NCCLDataPackerMixin"), mro.index("_StubDataPacker"))
+class TestShutdownAbortsBeforeJoin(unittest.TestCase):
+    """The prefetch worker only checks the shutdown event BETWEEN batches, so a
+    recv parked on a departed peer outlives the join budget.  NCCL must hand
+    ``shutdown_prefetch`` an abort hook to run BEFORE the join -- mirroring the
+    producer's ``cleanup_nccl``, which aborts comms before shutting its sender
+    pool.  Joining first would wait on work only the abort can unwedge."""
+
+    def _packer(self, aborted):
+        p = _Packer()
+        p._nccl_dp_comm_cache = SimpleNamespace(
+            abort_all=lambda: aborted.append("abort_all")
+        )
+        return p
+
+    def test_abort_hook_is_passed_and_runs_before_the_join(self):
+        order = []
+        p = self._packer(order)
+
+        def _fake_shutdown_prefetch(*, join_timeout=5.0, before_join=None):
+            self.assertIsNotNone(before_join, "NCCL must supply an abort hook")
+            before_join()  # transport unblocks in-flight I/O ...
+            order.append("join")  # ... then the join happens
+
+        p.shutdown_prefetch = _fake_shutdown_prefetch
+        p.shutdown_nccl_data_packer()
+        self.assertEqual(order, ["abort_all", "join"])
+
+    def test_comms_are_aborted_through_the_real_shutdown_path(self):
+        # End-to-end through the real shutdown_prefetch: no prefetch worker was
+        # started, so this isolates "the hook actually fires".
+        aborted = []
+        p = self._packer(aborted)
+        p.shutdown_nccl_data_packer()
+        self.assertEqual(aborted, ["abort_all"])
+
+    def test_abort_failure_does_not_block_teardown(self):
+        def _boom():
+            raise RuntimeError("nccl_abort exploded")
+
+        p = _Packer()
+        p._nccl_dp_comm_cache = SimpleNamespace(abort_all=_boom)
+        p.shutdown_nccl_data_packer()  # must not raise
+        self.assertFalse(p._prefetch_enabled)
 
 
 class TestPrefetchStateMachine(unittest.TestCase):

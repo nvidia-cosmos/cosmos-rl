@@ -460,6 +460,10 @@ class TestSendLaunchSerialized(unittest.TestCase):
 
         # Never two threads inside a group at once -> launches serialized.
         self.assertEqual(st["peak"], 1)
+        # The send must LEASE the comm (pin it against LRU eviction), not just
+        # fetch it.  Without this assertion the fake's get_or_create would keep
+        # a reverted `cache.get_or_create(...)` green.
+        self.assertEqual(len(p._nccl_comm_cache.leased_pairs), 2)
         self.assertEqual(st["in_group"], 0)
 
 

@@ -391,9 +391,12 @@ class TestShutdownOrdering(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIsNone(p._prefetch_thread)
 
-    def test_handle_retained_when_worker_outlives_join(self):
-        # No before_join -> the worker stays parked past a short join.  The
-        # handle must be KEPT so a re-init can detect it (see next test).
+    def test_timed_out_worker_is_retained_and_blocks_reinit(self):
+        # Without before_join the worker stays parked past a short join.  Its
+        # handle must be KEPT: the stale thread reads _prefetch_shutdown and
+        # _prefetch_request_queue live, so a silent re-init would hand it the
+        # fresh cleared event and the fresh queue -> two workers racing one
+        # queue, forever.  Dropping the handle is what made that undetectable.
         p = _BlockingFetchPacker()
         p._setup_prefetch(prefetch_timeout=1.0)
         thread = p._prefetch_thread
@@ -404,26 +407,11 @@ class TestShutdownOrdering(unittest.TestCase):
             self.assertTrue(thread.is_alive())
             self.assertIs(p._prefetch_thread, thread)
             self.assertFalse(p._prefetch_enabled)
-        finally:
-            p.release.set()
-            thread.join(timeout=5.0)
 
-    def test_reinit_refuses_to_duplicate_a_live_worker(self):
-        # The stale worker reads _prefetch_shutdown / _prefetch_request_queue
-        # live, so a silent re-init would hand it the fresh cleared event and
-        # the fresh queue -> two workers racing one queue, forever.
-        p = _BlockingFetchPacker()
-        p._setup_prefetch(prefetch_timeout=1.0)
-        thread = p._prefetch_thread
-        p.start_prefetch([1])
-        self.assertTrue(p.entered.wait(timeout=5.0))
-        try:
-            p.shutdown_prefetch(join_timeout=0.05)
             with self.assertRaises(RuntimeError) as ctx:
                 p._setup_prefetch(prefetch_timeout=1.0)
             self.assertIn("still running", str(ctx.exception))
-            # And no second worker was started.
-            self.assertIs(p._prefetch_thread, thread)
+            self.assertIs(p._prefetch_thread, thread)  # no second worker
         finally:
             p.release.set()
             thread.join(timeout=5.0)
