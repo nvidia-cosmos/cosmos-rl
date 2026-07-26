@@ -20,6 +20,7 @@ NCCL traffic: buffers are plain CPU tensors, ``_send`` is stubbed, and the
 rendezvous is a fake that records replies.
 """
 
+import contextlib
 import threading
 import time
 import unittest
@@ -409,8 +410,19 @@ class TestSendLaunchSerialized(unittest.TestCase):
         p = _make_producer()
 
         class _Cache:  # comm build is allowed concurrent; return a dummy idx
+            def __init__(self):
+                self.leased_pairs = []
+
             def get_or_create(self, pair, **kw):
                 return 1
+
+            @contextlib.contextmanager
+            def leased(self, pair, **kw):
+                # The producer must LEASE (pin) the comm for the duration of the
+                # send, not merely fetch it, so LRU eviction cannot abort it
+                # mid-collective.
+                self.leased_pairs.append(pair)
+                yield self.get_or_create(pair, **kw)
 
         p._nccl_comm_cache = _Cache()
 

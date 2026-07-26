@@ -164,6 +164,88 @@ class TestLruEviction(unittest.TestCase):
         self.assertIn((2, 3), cache)
 
 
+class TestPinnedEviction(unittest.TestCase):
+    """A send/recv holds a bare ``comm_idx`` for the whole collective, so LRU
+    eviction must never abort a pinned pair.  Deliberate aborts still must,
+    since they are what unwedge a stuck collective."""
+
+    def test_pinned_comm_is_not_evicted(self):
+        aborted = []
+        builder = _FakeBuilder()
+        cache = CommCache(
+            max_live=1, build_fn=builder, abort_fn=lambda i: aborted.append(i)
+        )
+        with cache.leased((0, 1), uid_chars=[1], local_rank=0) as pinned_idx:
+            # Building a second pair puts the cache over cap, but the only
+            # candidate is in use -> hold the surplus instead of aborting it.
+            cache.get_or_create((2, 3), uid_chars=[1], local_rank=0)
+            self.assertEqual(aborted, [])
+            self.assertIn((0, 1), cache)
+            self.assertEqual(len(cache), 2)  # deliberately over max_live
+        # Pin released -> the next build may now evict it.
+        self.assertEqual(cache.pinned_count((0, 1)), 0)
+        cache.get_or_create((4, 5), uid_chars=[1], local_rank=0)
+        self.assertIn(pinned_idx, aborted)
+
+    def test_unpinned_neighbour_is_evicted_instead(self):
+        # With a pinned LRU entry, eviction must skip it and take the next
+        # unpinned candidate rather than giving up.
+        aborted = []
+        builder = _FakeBuilder()
+        cache = CommCache(
+            max_live=2, build_fn=builder, abort_fn=lambda i: aborted.append(i)
+        )
+        with cache.leased((0, 1), uid_chars=[1], local_rank=0):  # LRU, pinned
+            idx23 = cache.get_or_create((2, 3), uid_chars=[1], local_rank=0)
+            cache.get_or_create((4, 5), uid_chars=[1], local_rank=0)  # over cap
+            self.assertEqual(aborted, [idx23])  # skipped (0,1), took (2,3)
+            self.assertIn((0, 1), cache)
+
+    def test_freshly_built_comm_is_not_its_own_eviction_victim(self):
+        aborted = []
+        builder = _FakeBuilder()
+        cache = CommCache(
+            max_live=1, build_fn=builder, abort_fn=lambda i: aborted.append(i)
+        )
+        cache.get_or_create((0, 1), uid_chars=[1], local_rank=0)
+        with cache.leased((2, 3), uid_chars=[1], local_rank=0) as idx:
+            self.assertIn((2, 3), cache)
+            self.assertNotIn(idx, aborted)
+
+    def test_deliberate_abort_ignores_pins(self):
+        # Quarantine/teardown must fire on a pinned pair -- the wedged operation
+        # holds the pin, so deferring the abort until it drops would deadlock.
+        aborted = []
+        cache = CommCache(build_fn=lambda u, r: 7, abort_fn=lambda i: aborted.append(i))
+        with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+            self.assertTrue(cache.abort((0, 1)))
+            self.assertEqual(aborted, [7])
+            self.assertNotIn((0, 1), cache)
+
+    def test_abort_all_ignores_pins(self):
+        aborted = []
+        cache = CommCache(build_fn=lambda u, r: 9, abort_fn=lambda i: aborted.append(i))
+        with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+            cache.abort_all()
+            self.assertEqual(aborted, [9])
+
+    def test_pins_are_refcounted_and_released(self):
+        cache = CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None)
+        with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+            self.assertEqual(cache.pinned_count((0, 1)), 1)
+            with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+                self.assertEqual(cache.pinned_count((0, 1)), 2)
+            self.assertEqual(cache.pinned_count((0, 1)), 1)
+        self.assertEqual(cache.pinned_count((0, 1)), 0)
+
+    def test_pin_released_when_body_raises(self):
+        cache = CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None)
+        with self.assertRaises(RuntimeError):
+            with cache.leased((0, 1), uid_chars=[1], local_rank=0):
+                raise RuntimeError("send blew up")
+        self.assertEqual(cache.pinned_count((0, 1)), 0)
+
+
 class TestQuarantine(unittest.TestCase):
     def test_quarantine_with_cooldown(self):
         cache = CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None)
