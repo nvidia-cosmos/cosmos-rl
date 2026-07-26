@@ -174,16 +174,15 @@ class TestNcclProtocolHelpers(unittest.TestCase):
         )
 
     def test_build_transfer_rollout_candidates_valid(self):
-        ids = build_transfer_rollout_candidates(
-            transfer_id="3:abcdef", num_rollout_replicas=4
-        )
+        ids = build_transfer_rollout_candidates(transfer_id="3:abcdef")
         self.assertEqual(ids, [3])
 
-    def test_build_transfer_rollout_candidates_out_of_range(self):
-        ids = build_transfer_rollout_candidates(
-            transfer_id="9:abcdef", num_rollout_replicas=4
-        )
-        self.assertEqual(ids, [])
+    def test_build_transfer_rollout_candidates_not_bounded_by_replica_count(self):
+        # A replica added mid-run has an index beyond the INITIAL count.  It
+        # must still get a cleanup channel -- bounding here silently withheld
+        # the publish and pinned the producer's send buffer until eviction.
+        ids = build_transfer_rollout_candidates(transfer_id="9999:abcdef")
+        self.assertEqual(ids, [9999])
 
     def test_build_transfer_rollout_candidates_invalid(self):
         ids = build_transfer_rollout_candidates(transfer_id="garbage")

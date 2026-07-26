@@ -77,15 +77,21 @@ class TestPublishCleanup(unittest.TestCase):
         self.assertIn(ch0, channels)
         self.assertIn(ch2, channels)
 
-    def test_out_of_range_replica_skipped(self):
+    def test_replica_beyond_initial_count_still_gets_cleanup(self):
+        # Elastic scale-up: rollout idx 9 is past n_init_replicas(4).  Cleanup
+        # used to be withheld for exactly these transfers, so the producer held
+        # its send buffer until capacity eviction.  Publishing to a channel
+        # nobody subscribes to is a harmless no-op; withholding pins GPU memory.
         redis = FakeRedis()
         t = NcclPayloadTransport()
-        # rollout idx 9 >= n_init_replicas(4) -> no candidate -> nothing published.
         n = t.publish_cleanup_for_discarded(
             transfer_ids=["9:abc"], config=self._config(), redis_client=redis
         )
-        self.assertEqual(n, 1)  # counted as handled...
-        self.assertEqual(redis.published, [])  # ...but nothing published
+        self.assertEqual(n, 1)
+        self.assertEqual(len(redis.published), 1)
+        channel, payload = redis.published[0]
+        self.assertIn("rollout_comm:9", channel)
+        self.assertIn("9:abc", payload)
 
     def test_no_redis_client_returns_zero(self):
         t = NcclPayloadTransport()

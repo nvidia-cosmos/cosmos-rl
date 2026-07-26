@@ -149,17 +149,19 @@ def parse_transfer_rollout_idx(transfer_id: str) -> int:
         return -1
 
 
-def build_transfer_rollout_candidates(
-    *,
-    transfer_id: str,
-    num_rollout_replicas: Optional[int] = None,
-) -> List[int]:
-    """Return the canonical rollout index encoded in ``transfer_id``, if valid."""
-    normalized = _coerce_nonnegative_int(num_rollout_replicas)
+def build_transfer_rollout_candidates(*, transfer_id: str) -> List[int]:
+    """Return the canonical rollout index encoded in ``transfer_id``, if valid.
+
+    Deliberately validates the parse ONLY -- it does not bound the index against
+    a replica count.  It used to be capped by ``n_init_replicas``, which silently
+    dropped every transfer belonging to a replica added mid-run (elastic
+    scale-up): no cleanup was ever published for it, so the producer held its
+    send buffer until capacity eviction.  The trade is asymmetric -- publishing
+    to a channel nobody subscribes to is a no-op, while withholding a publish
+    pins GPU memory -- so no upper bound is the correct behaviour.
+    """
     parsed_prefix = parse_transfer_rollout_idx(transfer_id)
     if parsed_prefix < 0:
-        return []
-    if normalized is not None and parsed_prefix >= normalized:
         return []
     return [parsed_prefix]
 
