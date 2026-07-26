@@ -267,15 +267,14 @@ class TestCoalescedGpuPackPath(unittest.TestCase):
 
 
 @requires_cuda
-class TestKnownPackDefects(unittest.TestCase):
-    """Two behaviours where the UCXX pack path disagrees with NCCL's.
+class TestPackSemanticsMatchNccl(unittest.TestCase):
+    """Two behaviours where the UCXX pack path used to disagree with NCCL's.
 
-    Both are marked expectedFailure rather than asserted as-is: encoding a bug
-    as the expected result would make the eventual fix look like a regression.
-    They flip to passing when the pack loops are unified onto NCCL's semantics.
+    Both were pinned as expectedFailure when this file was written; unifying
+    the pack loops onto the shared helper fixed them, so they now assert
+    directly.
     """
 
-    @unittest.expectedFailure
     def test_episode_length_written_even_when_absent_from_the_trajectory(self):
         # `if raw is None: continue` runs BEFORE the EPISODE_LENGTH branch, so
         # a trajectory without the key leaves zeros in that slot -- even though
@@ -288,7 +287,6 @@ class TestKnownPackDefects(unittest.TestCase):
         got = _unpack(buf.raw_writes[0], p._ucxx_schema)
         self.assertEqual(int(got[EPISODE_LENGTH][0]), 4)
 
-    @unittest.expectedFailure
     def test_source_tensors_are_coerced_to_the_schema_dtype(self):
         # The schema IS the wire format: the consumer slices by spec.nbytes and
         # views with spec.dtype.  Packing a float64 observation (what a gym env

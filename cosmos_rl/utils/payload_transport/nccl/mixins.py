@@ -85,8 +85,8 @@ from cosmos_rl.utils.payload_transport.nccl.streams import (
     record_event,
     wait_event,
 )
+from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
 from cosmos_rl.utils.trace import get_trace_time as _trace_time
-from cosmos_rl.utils.trajectory import VARLEN_FIELDS as _VARLEN_FIELDS
 from cosmos_rl.utils.trajectory import episode_length as _episode_length
 from cosmos_rl.utils.trajectory import (
     EPISODE_LENGTH,
@@ -317,26 +317,14 @@ class NCCLRolloutMixin:
         gpu_packed = torch.zeros(
             self._nccl_entry_size, dtype=torch.uint8, device=device
         )
-        for spec in self._nccl_schema:
-            raw = trajectory.get(spec.name)
-            if spec.name == EPISODE_LENGTH:
-                tensor = torch.tensor([ep_len], dtype=torch.int64, device=device)
-            elif raw is None:
-                continue
-            else:
-                tensor = raw if isinstance(raw, torch.Tensor) else torch.as_tensor(raw)
-                if device is not None:
-                    tensor = tensor.to(device)
-                td = _torch_dtype(spec.dtype)
-                tensor = tensor.to(td)
-                if spec.name in _VARLEN_FIELDS and tensor.shape[0] < spec.shape[0]:
-                    padded = torch.zeros(spec.shape, dtype=td, device=tensor.device)
-                    padded[: tensor.shape[0]] = tensor
-                    tensor = padded
-            tensor = tensor.reshape(spec.shape).contiguous()
-            flat = tensor.view(torch.uint8).reshape(-1)
-            off = self._nccl_offsets[spec.name]
-            gpu_packed[off : off + flat.numel()] = flat
+        pack_trajectory_into(
+            gpu_packed,
+            trajectory,
+            self._nccl_schema,
+            self._nccl_offsets,
+            ep_len,
+            device=device,
+        )
         ready_event = record_event()  # on the current (compute) stream
         return gpu_packed, ready_event
 

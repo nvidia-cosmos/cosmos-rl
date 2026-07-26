@@ -46,14 +46,11 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     reset_ucxx_context,
 )
 
+from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
 from cosmos_rl.utils.trace import get_trace_time
 from cosmos_rl.utils.trajectory import (
-    ACTIONS,
     EPISODE_LENGTH,
-    OBSERVATIONS,
     REWARDS,
-    TERMINATED,
-    TRUNCATED,
     VARLEN_FIELDS,
     build_trajectory_schema,
     episode_length,
@@ -273,33 +270,14 @@ class UCXXRolloutMixin:
                     self._ucxx_entry_data_size, dtype=torch.uint8, device=device
                 )
 
-                for spec in self._ucxx_schema:
-                    raw = trajectory.get(spec.name)
-                    if raw is None:
-                        continue
-
-                    if isinstance(raw, torch.Tensor):
-                        tensor = raw
-                    else:
-                        tensor = torch.as_tensor(raw, device=device)
-
-                    # Pad variable-length fields
-                    if spec.name in VARLEN_FIELDS:
-                        if tensor.shape[0] < spec.shape[0]:
-                            padded = torch.zeros(
-                                spec.shape, dtype=tensor.dtype, device=device
-                            )
-                            padded[: tensor.shape[0]] = tensor
-                            tensor = padded
-                    elif spec.name == EPISODE_LENGTH:
-                        tensor = torch.tensor(
-                            [ep_len], dtype=torch.int64, device=device
-                        )
-
-                    tensor = tensor.reshape(spec.shape).contiguous()
-                    flat = tensor.view(torch.uint8).reshape(-1)
-                    off = self._ucxx_tensor_offsets[spec.name]
-                    gpu_packed[off : off + flat.numel()] = flat
+                pack_trajectory_into(
+                    gpu_packed,
+                    trajectory,
+                    self._ucxx_schema,
+                    self._ucxx_tensor_offsets,
+                    ep_len,
+                    device=device,
+                )
 
                 # Single bulk D2H copy into pinned staging buffer
                 self._ucxx_packed_cpu.copy_(gpu_packed, non_blocking=False)
@@ -314,35 +292,37 @@ class UCXXRolloutMixin:
                 total_bytes = self._ucxx_entry_data_size
             else:
                 # --- Fallback: per-tensor CPU path (no GPU tensors) ---
+                # Drive this off the SCHEMA, not the trajectory's own keys, for
+                # the same reasons as the coalesced path above: every field is
+                # emitted in its schema dtype and shape, and episode_length is
+                # written from the resolved ep_len even when the trajectory
+                # omits the key.
+                spec_by_name = {s.name: s for s in self._ucxx_schema}
                 cpu_data = {}
                 for key, value in trajectory.items():
+                    spec = spec_by_name.get(key)
+                    if key == EPISODE_LENGTH:
+                        cpu_data[key] = np.array([ep_len], dtype=np.int64)
+                        continue
+
                     if isinstance(value, torch.Tensor):
                         arr = value.cpu().numpy()
                     else:
                         arr = np.asarray(value)
+                    if spec is not None and arr.dtype != np.dtype(spec.dtype):
+                        arr = arr.astype(spec.dtype)
 
-                    if key in (OBSERVATIONS, ACTIONS, REWARDS, TERMINATED, TRUNCATED):
-                        if len(arr.shape) > 0 and arr.shape[0] < self._ucxx_max_steps:
-                            if key == OBSERVATIONS:
-                                padded = np.zeros(
-                                    (self._ucxx_max_steps, self._ucxx_obs_dim),
-                                    dtype=arr.dtype,
-                                )
-                            elif key == ACTIONS:
-                                padded = np.zeros(
-                                    (self._ucxx_max_steps, self._ucxx_action_dim),
-                                    dtype=arr.dtype,
-                                )
-                            else:
-                                padded = np.zeros(
-                                    (self._ucxx_max_steps,), dtype=arr.dtype
-                                )
+                    if key in VARLEN_FIELDS and spec is not None:
+                        if len(arr.shape) > 0 and arr.shape[0] < spec.shape[0]:
+                            padded = np.zeros(spec.shape, dtype=arr.dtype)
                             padded[: arr.shape[0]] = arr
                             arr = padded
-                    elif key == EPISODE_LENGTH:
-                        arr = np.array([ep_len], dtype=np.int64)
 
                     cpu_data[key] = arr
+
+                # episode_length may be absent from the trajectory entirely.
+                if EPISODE_LENGTH not in cpu_data:
+                    cpu_data[EPISODE_LENGTH] = np.array([ep_len], dtype=np.int64)
 
                 t_gpu2cpu_end = get_trace_time()
 
