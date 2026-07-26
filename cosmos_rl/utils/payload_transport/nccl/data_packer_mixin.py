@@ -77,7 +77,9 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     NcclRendezvous,
     TransferStatus,
 )
-from cosmos_rl.utils.payload_transport.nccl.schema import (
+from cosmos_rl.utils.trajectory import (
+    EPISODE_LENGTH,
+    VARLEN_FIELDS as _VARLEN_FIELDS,
     build_trajectory_schema,
     deserialize_schema,
     schema_layout,
@@ -93,13 +95,6 @@ from cosmos_rl.utils.payload_transport.prefetch_mixin import (
     get_trace_time,
 )
 
-EPISODE_LENGTH = "episode_length"
-OBSERVATIONS = "observations"
-ACTIONS = "actions"
-REWARDS = "rewards"
-TERMINATED = "terminated"
-TRUNCATED = "truncated"
-_VARLEN_FIELDS = (OBSERVATIONS, ACTIONS, REWARDS, TERMINATED, TRUNCATED)
 
 _LOG_INTERVAL = 50
 

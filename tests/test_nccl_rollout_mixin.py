@@ -30,7 +30,7 @@ import torch
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import SendBufferRegistry
 from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import TransferStatus
-from cosmos_rl.utils.payload_transport.nccl.schema import (
+from cosmos_rl.utils.trajectory import (
     build_trajectory_schema,
     schema_layout,
 )

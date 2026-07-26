@@ -46,27 +46,19 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     reset_ucxx_context,
 )
 
-# Trace utility is provided by a sibling MR; fall back to a wall-clock
-# stand-in when running against an older cosmos-rl that lacks it.  This
-# keeps the UCXX MR independent of the trace MR's merge order.
-try:
-    from cosmos_rl.utils.trace import get_trace_time  # type: ignore
-except ImportError:  # pragma: no cover - fallback path
-    import time as _time
-
-    def get_trace_time() -> float:  # type: ignore[no-redef]
-        return _time.perf_counter() * 1000.0
-
-
-# Canonical trajectory field names.  Mirrored from
-# ``cosmos_rl.dispatcher.data.packer.tensor_data_packer`` so this module
-# can be imported standalone without dragging in the dispatcher.
-OBSERVATIONS = "observations"
-ACTIONS = "actions"
-REWARDS = "rewards"
-TERMINATED = "terminated"
-TRUNCATED = "truncated"
-EPISODE_LENGTH = "episode_length"
+from cosmos_rl.utils.trace import get_trace_time
+from cosmos_rl.utils.trajectory import (
+    ACTIONS,
+    EPISODE_LENGTH,
+    OBSERVATIONS,
+    REWARDS,
+    TERMINATED,
+    TRUNCATED,
+    VARLEN_FIELDS,
+    build_trajectory_schema,
+    episode_length,
+    schema_layout,
+)
 
 
 def _get_iface_ip(iface: str) -> Optional[str]:
@@ -193,23 +185,15 @@ class UCXXRolloutMixin:
         self._ucxx_action_dim = action_dim
 
         try:
-            # Build schema for trajectory data (required for zero-pack protocol)
-            from cosmos_rl.utils.payload_transport.ucxx.tensor_spec import (
-                TensorSpec,
+            # Build schema for trajectory data (required for zero-pack protocol).
+            # Shared with NCCL so both transports agree on the wire layout.
+            schema = build_trajectory_schema(
+                {
+                    "max_steps": max_steps,
+                    "obs_dim": obs_dim,
+                    "action_dim": action_dim,
+                }
             )
-
-            schema = [
-                TensorSpec(
-                    name=OBSERVATIONS, shape=(max_steps, obs_dim), dtype=np.float32
-                ),
-                TensorSpec(
-                    name=ACTIONS, shape=(max_steps, action_dim), dtype=np.float32
-                ),
-                TensorSpec(name=REWARDS, shape=(max_steps,), dtype=np.float32),
-                TensorSpec(name=TERMINATED, shape=(max_steps,), dtype=np.bool_),
-                TensorSpec(name=TRUNCATED, shape=(max_steps,), dtype=np.bool_),
-                TensorSpec(name=EPISODE_LENGTH, shape=(1,), dtype=np.int64),
-            ]
 
             # Create UCXX buffer with server and schema
             buffer_config = config or UCXXBufferConfig(
@@ -223,12 +207,9 @@ class UCXXRolloutMixin:
             self._ucxx_buffer = UCXXBuffer(buffer_config)
 
             # Pre-compute schema layout for coalesced writes
-            self._ucxx_tensor_offsets = {}
-            offset = 0
-            for spec in schema:
-                self._ucxx_tensor_offsets[spec.name] = offset
-                offset += spec.nbytes
-            self._ucxx_entry_data_size = offset
+            self._ucxx_tensor_offsets, self._ucxx_entry_data_size = schema_layout(
+                schema
+            )
             self._ucxx_schema = schema
 
             # Pre-allocate pinned CPU staging buffer for bulk D2H + SHM copy.
@@ -270,17 +251,9 @@ class UCXXRolloutMixin:
             return None
 
         try:
-            ep_len_val = trajectory.get(EPISODE_LENGTH)
-            if ep_len_val is None:
-                obs = trajectory.get(OBSERVATIONS)
-                if obs is not None:
-                    ep_len = obs.shape[0] if hasattr(obs, "shape") else len(obs)
-                else:
-                    ep_len = self._ucxx_max_steps
-            elif isinstance(ep_len_val, torch.Tensor):
-                ep_len = int(ep_len_val.item())
-            else:
-                ep_len = int(ep_len_val)
+            ep_len = episode_length(
+                trajectory, self._ucxx_schema, default=self._ucxx_max_steps
+            )
 
             any_gpu = any(
                 isinstance(v, torch.Tensor) and v.is_cuda for v in trajectory.values()
@@ -311,13 +284,7 @@ class UCXXRolloutMixin:
                         tensor = torch.as_tensor(raw, device=device)
 
                     # Pad variable-length fields
-                    if spec.name in (
-                        OBSERVATIONS,
-                        ACTIONS,
-                        REWARDS,
-                        TERMINATED,
-                        TRUNCATED,
-                    ):
+                    if spec.name in VARLEN_FIELDS:
                         if tensor.shape[0] < spec.shape[0]:
                             padded = torch.zeros(
                                 spec.shape, dtype=tensor.dtype, device=device

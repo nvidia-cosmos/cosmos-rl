@@ -80,17 +80,10 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
-
-try:
-    from cosmos_rl.utils.trace import get_trace_time  # type: ignore
-except ImportError:  # pragma: no cover - fallback path
-
-    def get_trace_time() -> float:  # type: ignore[no-redef]
-        return time.perf_counter() * 1000.0
+from cosmos_rl.utils.trace import get_trace_time
 
 
 __all__ = ["PrefetchDataPackerMixin"]

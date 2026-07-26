@@ -77,31 +77,22 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     TransferStatus,
     parse_request_message,
 )
-from cosmos_rl.utils.payload_transport.nccl.schema import (
-    EPISODE_LENGTH,
-    OBSERVATIONS,
-    REWARDS,
-    build_trajectory_schema,
-    schema_layout,
-    serialize_schema,
-)
 from cosmos_rl.utils.payload_transport.nccl.streams import (
     bind_thread_device,
     get_transfer_stream_pool,
     record_event,
     wait_event,
 )
-
-try:
-    from cosmos_rl.utils.trace import get_trace_time as _trace_time
-except ImportError:  # pragma: no cover - fallback when trace util absent
-    import time as _time
-
-    def _trace_time() -> float:  # type: ignore[no-redef]
-        return _time.perf_counter() * 1000.0
-
-
-_VARLEN_FIELDS = ("observations", "actions", "rewards", "terminated", "truncated")
+from cosmos_rl.utils.trace import get_trace_time as _trace_time
+from cosmos_rl.utils.trajectory import VARLEN_FIELDS as _VARLEN_FIELDS
+from cosmos_rl.utils.trajectory import episode_length as _episode_length
+from cosmos_rl.utils.trajectory import (
+    EPISODE_LENGTH,
+    REWARDS,
+    build_trajectory_schema,
+    schema_layout,
+    serialize_schema,
+)
 
 
 def _producer_pair_key(sender_rank: int, receiver_replica: Any, receiver_rank: int):
@@ -690,19 +681,3 @@ def _torch_dtype(np_dtype) -> torch.dtype:
         np.dtype("uint8"): torch.uint8,
     }
     return mapping[np.dtype(np_dtype)]
-
-
-def _episode_length(trajectory: Dict[str, Any], schema: list) -> int:
-    ep = trajectory.get(EPISODE_LENGTH)
-    if ep is not None:
-        if isinstance(ep, torch.Tensor):
-            return int(ep.item())
-        return int(ep)
-    obs = trajectory.get(OBSERVATIONS)
-    if obs is not None and hasattr(obs, "shape"):
-        return int(obs.shape[0])
-    # Fall back to the schema's padded max.
-    for spec in schema:
-        if spec.name == OBSERVATIONS:
-            return int(spec.shape[0])
-    return 0

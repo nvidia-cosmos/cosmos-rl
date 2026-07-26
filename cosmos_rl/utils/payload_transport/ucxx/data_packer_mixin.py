@@ -51,6 +51,7 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.trajectory import EPISODE_LENGTH, VARLEN_FIELDS
 from cosmos_rl.utils.payload_transport.prefetch_mixin import (
     PrefetchDataPackerMixin,
     get_trace_time,
@@ -83,12 +84,6 @@ _TRANSIENT_UCXX_ERRORS = frozenset(
 
 _MAX_FETCH_ROUNDS = 3
 
-OBSERVATIONS = "observations"
-ACTIONS = "actions"
-REWARDS = "rewards"
-TERMINATED = "terminated"
-TRUNCATED = "truncated"
-EPISODE_LENGTH = "episode_length"
 
 _LOG_INTERVAL = 50
 
@@ -434,7 +429,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
             schema = None
             schema_info = handle.get("schema") if handle else None
             if schema_info:
-                from cosmos_rl.utils.payload_transport.ucxx.tensor_spec import (
+                from cosmos_rl.utils.trajectory import (
                     TensorSpec,
                 )
 
@@ -562,7 +557,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                     if ep_len_tensor.numel() == 1
                     else int(ep_len_tensor[0].item())
                 )
-                for key in (OBSERVATIONS, ACTIONS, REWARDS, TERMINATED, TRUNCATED):
+                for key in VARLEN_FIELDS:
                     if key in gpu_data and gpu_data[key].shape[0] > ep_len:
                         gpu_data[key] = gpu_data[key][:ep_len]
             return gpu_data

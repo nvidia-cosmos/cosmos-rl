@@ -183,7 +183,7 @@ class _FakeRv:
 
 
 def _consumer(rv, cache):
-    from cosmos_rl.utils.payload_transport.nccl.schema import (
+    from cosmos_rl.utils.trajectory import (
         build_trajectory_schema,
     )
 
@@ -247,7 +247,7 @@ class TestSyncFetchContainment(unittest.TestCase):
     try/except, so a raised rendezvous/recv error would crash the train step."""
 
     def _packer(self):
-        from cosmos_rl.utils.payload_transport.nccl.schema import (
+        from cosmos_rl.utils.trajectory import (
             build_trajectory_schema,
         )
 
