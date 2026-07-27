@@ -51,6 +51,7 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.trajectory import EPISODE_LENGTH, VARLEN_FIELDS
 from cosmos_rl.utils.payload_transport.prefetch_mixin import (
     PrefetchDataPackerMixin,
     get_trace_time,
@@ -83,12 +84,6 @@ _TRANSIENT_UCXX_ERRORS = frozenset(
 
 _MAX_FETCH_ROUNDS = 3
 
-OBSERVATIONS = "observations"
-ACTIONS = "actions"
-REWARDS = "rewards"
-TERMINATED = "terminated"
-TRUNCATED = "truncated"
-EPISODE_LENGTH = "episode_length"
 
 _LOG_INTERVAL = 50
 
@@ -250,8 +245,20 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         )
 
     def shutdown_ucxx_data_packer(self) -> None:
-        """Stop background thread and release UCXX resources."""
-        self.shutdown_prefetch()
+        """Stop background thread and release UCXX resources.
+
+        Unlike NCCL -- which passes ``before_join`` to abort its comms and make
+        the join immediate -- UCXX keeps its client close AFTER the join and
+        instead widens the join budget.  ``ncclCommAbort`` is explicitly
+        designed to be called while a peer thread is inside a collective;
+        closing a UCXX client from a different thread (the worker runs
+        ``_ucxx_dp_fetch_all`` on its own event loop) has no such guarantee.
+        Each ``_read_slot`` await is already bounded by ``read_timeout``, so
+        waiting that long is sufficient to let the worker unwind on its own.
+        """
+        self.shutdown_prefetch(
+            join_timeout=max(5.0, float(self._ucxx_dp_read_timeout or 5.0))
+        )
 
         if self._ucxx_dp_client is not None:
             try:
@@ -434,7 +441,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
             schema = None
             schema_info = handle.get("schema") if handle else None
             if schema_info:
-                from cosmos_rl.utils.payload_transport.ucxx.tensor_spec import (
+                from cosmos_rl.utils.trajectory import (
                     TensorSpec,
                 )
 
@@ -562,7 +569,7 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
                     if ep_len_tensor.numel() == 1
                     else int(ep_len_tensor[0].item())
                 )
-                for key in (OBSERVATIONS, ACTIONS, REWARDS, TERMINATED, TRUNCATED):
+                for key in VARLEN_FIELDS:
                     if key in gpu_data and gpu_data[key].shape[0] > ep_len:
                         gpu_data[key] = gpu_data[key][:ep_len]
             return gpu_data

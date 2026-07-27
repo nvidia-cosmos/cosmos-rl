@@ -63,7 +63,9 @@ from cosmos_rl.utils.payload_transport.nccl.comm_cache import (
     SENDER_LOCAL_RANK,
 )
 from cosmos_rl.utils.payload_transport.nccl.context import (
+    resolve_custom_int as _resolve_custom_int,
     resolve_global_rank as _resolve_global_rank,
+    resolve_max_live_comms as _resolve_max_live_comms,
     resolve_prefix as _resolve_prefix,
 )
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
@@ -77,31 +79,22 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     TransferStatus,
     parse_request_message,
 )
-from cosmos_rl.utils.payload_transport.nccl.schema import (
-    EPISODE_LENGTH,
-    OBSERVATIONS,
-    REWARDS,
-    build_trajectory_schema,
-    schema_layout,
-    serialize_schema,
-)
 from cosmos_rl.utils.payload_transport.nccl.streams import (
     bind_thread_device,
     get_transfer_stream_pool,
     record_event,
     wait_event,
 )
-
-try:
-    from cosmos_rl.utils.trace import get_trace_time as _trace_time
-except ImportError:  # pragma: no cover - fallback when trace util absent
-    import time as _time
-
-    def _trace_time() -> float:  # type: ignore[no-redef]
-        return _time.perf_counter() * 1000.0
-
-
-_VARLEN_FIELDS = ("observations", "actions", "rewards", "terminated", "truncated")
+from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
+from cosmos_rl.utils.trace import get_trace_time as _trace_time
+from cosmos_rl.utils.trajectory import episode_length as _episode_length
+from cosmos_rl.utils.trajectory import (
+    EPISODE_LENGTH,
+    REWARDS,
+    build_trajectory_schema,
+    schema_layout,
+    serialize_schema,
+)
 
 
 def _producer_pair_key(sender_rank: int, receiver_replica: Any, receiver_rank: int):
@@ -169,13 +162,30 @@ class NCCLRolloutMixin:
         action_dim: int = 2,
         sender_rank: Optional[int] = None,
         device: Any = None,
-        num_sender_threads: int = 2,
+        num_sender_threads: Optional[int] = None,
+        max_live_comms: Optional[int] = None,
         registry_capacity: int = 64,
         stream_pool_size: int = 1,
         registry_block_timeout: float = 30.0,
         send_timeout_ms: int = 30000,
     ) -> None:
-        """Initialise the producer state and start the serve/cleanup threads."""
+        """Initialise the producer state and start the serve/cleanup threads.
+
+        ``num_sender_threads`` and ``max_live_comms`` resolve as
+        explicit-argument -> ``[custom]`` config -> derived default, so a caller
+        that passes a value still wins while an operator can tune a deployment
+        without touching the rollout worker.
+
+        ``num_sender_threads`` bounds how many requests are served at once; it
+        should be at least the number of policy replicas fetching concurrently,
+        or requests head-of-line-block behind the pool.
+        """
+        if num_sender_threads is None:
+            num_sender_threads = _resolve_custom_int(
+                config, "nccl_num_sender_threads", 2
+            )
+        if max_live_comms is None:
+            max_live_comms = _resolve_max_live_comms(config, peer_role="policy")
         self._nccl_replica_id = replica_id
         self._nccl_send_timeout_ms = send_timeout_ms
         self._nccl_send_lock = threading.Lock()
@@ -197,7 +207,7 @@ class NCCLRolloutMixin:
             block_timeout=registry_block_timeout,
             on_free=self._on_buffer_free,
         )
-        self._nccl_comm_cache = CommCache()
+        self._nccl_comm_cache = CommCache(max_live=max_live_comms)
         self._nccl_rendezvous = NcclRendezvous(redis_client, self._nccl_prefix)
         self._nccl_streams = get_transfer_stream_pool(
             size=stream_pool_size, device=device
@@ -307,26 +317,14 @@ class NCCLRolloutMixin:
         gpu_packed = torch.zeros(
             self._nccl_entry_size, dtype=torch.uint8, device=device
         )
-        for spec in self._nccl_schema:
-            raw = trajectory.get(spec.name)
-            if spec.name == EPISODE_LENGTH:
-                tensor = torch.tensor([ep_len], dtype=torch.int64, device=device)
-            elif raw is None:
-                continue
-            else:
-                tensor = raw if isinstance(raw, torch.Tensor) else torch.as_tensor(raw)
-                if device is not None:
-                    tensor = tensor.to(device)
-                td = _torch_dtype(spec.dtype)
-                tensor = tensor.to(td)
-                if spec.name in _VARLEN_FIELDS and tensor.shape[0] < spec.shape[0]:
-                    padded = torch.zeros(spec.shape, dtype=td, device=tensor.device)
-                    padded[: tensor.shape[0]] = tensor
-                    tensor = padded
-            tensor = tensor.reshape(spec.shape).contiguous()
-            flat = tensor.view(torch.uint8).reshape(-1)
-            off = self._nccl_offsets[spec.name]
-            gpu_packed[off : off + flat.numel()] = flat
+        pack_trajectory_into(
+            gpu_packed,
+            trajectory,
+            self._nccl_schema,
+            self._nccl_offsets,
+            ep_len,
+            device=device,
+        )
         ready_event = record_event()  # on the current (compute) stream
         return gpu_packed, ready_event
 
@@ -478,46 +476,56 @@ class NCCLRolloutMixin:
                 self._nccl_sender_rank, receiver_replica, receiver_rank
             )
             uid = rv.read_uid(uid_key) if uid_key else None
-            comm_idx = cache.get_or_create(
+            # LEASE the comm rather than just fetching it: the launch below holds
+            # this comm_idx across the whole collective, so an unpinned entry
+            # could be picked as the LRU eviction victim by a concurrent build
+            # for a different pair and aborted mid-send.  The pin gates eviction
+            # only -- a quarantine abort still fires, which is what unwedges a
+            # stuck send.
+            with cache.leased(
                 pair, uid_chars=uid or [], local_rank=SENDER_LOCAL_RANK
-            )
-            # Serialize the actual NCCL launch on this producer's GPU.  NCCL
-            # requires deterministic single-threaded host launch ordering across
-            # communicators on one device; the sender pool otherwise issues
-            # concurrent group/send on the shared transfer stream from >1 thread,
-            # which deadlocks natively at N_POLICY>=2 (each rollout serves 2
-            # policy consumers -> 2 concurrent sends) -- and, because run_task
-            # only arms its deadline AFTER the native call returns, a native
-            # launch deadlock bypasses the send timeout entirely.  Comm build +
-            # rendezvous above stay concurrent; only the launch sequence is
-            # serialized, and every op under the lock is an async stream ENQUEUE
-            # (completion happens on the stream after release), so the lock stays
-            # fast and cannot deadlock on the peer's recv.
-            with self._nccl_send_lock:
-                stream = self._nccl_streams.acquire() if self._nccl_streams else None
-                # Do not send until the trajectory tensor is actually produced.
-                wait_event(stream, entry.ready_event)
-                pynccl.nccl_group_start(comm_idx)
-                # Finite timeout so a send whose peer has departed (e.g. the
-                # policy replica tore down first at job end) aborts via
-                # pynccl's watchdog instead of wedging the sender thread
-                # forever -- which would hang the worker's exit (executor
-                # threads are non-daemon).
-                pynccl.nccl_send(
-                    entry.buffer,
-                    RECEIVER_LOCAL_RANK,
-                    comm_idx,
-                    stream=stream,
-                    timeout_ms=self._nccl_send_timeout_ms,
-                )
-                pynccl.nccl_group_end(comm_idx)
-                registry_done = record_event(stream)
-                # Keep the buffer alive until this send completes.  The registry
-                # reaps it once every recorded event fires (delivery), or on
-                # cleanup / capacity pressure -- and _on_buffer_free waits before
-                # releasing so the storage is never reused while NCCL reads it.
-                registry.add_done_event(entry, registry_done)
-                recorded = True
+            ) as comm_idx:
+                # Serialize the actual NCCL launch on this producer's GPU.  NCCL
+                # requires deterministic single-threaded host launch ordering
+                # across communicators on one device; the sender pool otherwise
+                # issues concurrent group/send on the shared transfer stream from
+                # >1 thread, which deadlocks natively at N_POLICY>=2 (each
+                # rollout serves 2 policy consumers -> 2 concurrent sends) --
+                # and, because run_task only arms its deadline AFTER the native
+                # call returns, a native launch deadlock bypasses the send
+                # timeout entirely.  Comm build + rendezvous above stay
+                # concurrent; only the launch sequence is serialized, and every
+                # op under the lock is an async stream ENQUEUE (completion
+                # happens on the stream after release), so the lock stays fast
+                # and cannot deadlock on the peer's recv.
+                with self._nccl_send_lock:
+                    stream = (
+                        self._nccl_streams.acquire() if self._nccl_streams else None
+                    )
+                    # Do not send until the trajectory tensor is actually produced.
+                    wait_event(stream, entry.ready_event)
+                    pynccl.nccl_group_start(comm_idx)
+                    # Finite timeout so a send whose peer has departed (e.g. the
+                    # policy replica tore down first at job end) aborts via
+                    # pynccl's watchdog instead of wedging the sender thread
+                    # forever -- which would hang the worker's exit (executor
+                    # threads are non-daemon).
+                    pynccl.nccl_send(
+                        entry.buffer,
+                        RECEIVER_LOCAL_RANK,
+                        comm_idx,
+                        stream=stream,
+                        timeout_ms=self._nccl_send_timeout_ms,
+                    )
+                    pynccl.nccl_group_end(comm_idx)
+                    registry_done = record_event(stream)
+                    # Keep the buffer alive until this send completes.  The
+                    # registry reaps it once every recorded event fires
+                    # (delivery), or on cleanup / capacity pressure -- and
+                    # _on_buffer_free waits before releasing so the storage is
+                    # never reused while NCCL reads it.
+                    registry.add_done_event(entry, registry_done)
+                    recorded = True
         finally:
             if not recorded:
                 # Send never recorded an event (comm-build or launch failure) ->
@@ -690,19 +698,3 @@ def _torch_dtype(np_dtype) -> torch.dtype:
         np.dtype("uint8"): torch.uint8,
     }
     return mapping[np.dtype(np_dtype)]
-
-
-def _episode_length(trajectory: Dict[str, Any], schema: list) -> int:
-    ep = trajectory.get(EPISODE_LENGTH)
-    if ep is not None:
-        if isinstance(ep, torch.Tensor):
-            return int(ep.item())
-        return int(ep)
-    obs = trajectory.get(OBSERVATIONS)
-    if obs is not None and hasattr(obs, "shape"):
-        return int(obs.shape[0])
-    # Fall back to the schema's padded max.
-    for spec in schema:
-        if spec.name == OBSERVATIONS:
-            return int(spec.shape[0])
-    return 0

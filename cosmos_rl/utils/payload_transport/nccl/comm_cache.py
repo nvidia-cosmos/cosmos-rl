@@ -52,6 +52,7 @@ fakes, without a CUDA context.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -128,6 +129,9 @@ class CommCache:
         # lockstep instead of split-braining (peer on the new comm, us on the
         # stale one -> 600s init/collective hang).
         self._comm_uid: Dict[PairKey, Optional[Tuple[int, ...]]] = {}
+        # Per-pair in-use refcount.  Gates LRU EVICTION ONLY -- never a
+        # deliberate abort (see ``leased``).
+        self._pins: Dict[PairKey, int] = {}
         # Per-pair build lock so two threads racing on the same pair build
         # exactly one comm (the second waits and reuses).
         self._pair_locks: Dict[PairKey, threading.Lock] = {}
@@ -139,6 +143,7 @@ class CommCache:
 
         self._n_built = 0
         self._n_evicted = 0
+        self._n_overflow = 0
 
     # ------------------------------------------------------------------
     # Communicator lifecycle
@@ -161,7 +166,7 @@ class CommCache:
             return comm_idx
 
     def _reuse_or_drop(
-        self, pair: PairKey, fp: Optional[Tuple[int, ...]]
+        self, pair: PairKey, fp: Optional[Tuple[int, ...]], pin: bool = False
     ) -> Optional[int]:
         """Return the cached comm for ``pair`` if it is still CURRENT.
 
@@ -184,6 +189,11 @@ class CommCache:
                 stale_idx = comm_idx
             else:
                 self._comms.move_to_end(pair)
+                # Pin under the SAME lock acquisition that commits to this
+                # comm_idx -- pinning after the return would leave a window in
+                # which eviction could abort it.
+                if pin:
+                    self._pins[pair] = self._pins.get(pair, 0) + 1
                 return comm_idx
         # Peer rebuilt with a fresh UID -> tear down our stale half (outside the
         # lock; abort may be slow) so the rebuild below joins the peer's comm.
@@ -202,6 +212,7 @@ class CommCache:
         *,
         uid_chars: List[int],
         local_rank: int,
+        pin: bool = False,
     ) -> int:
         """Return the comm for ``pair``, building it under the init semaphore.
 
@@ -212,17 +223,22 @@ class CommCache:
         A non-empty ``uid_chars`` that differs from the UID the cached comm was
         built with forces an abort + rebuild (peer-rebuilt / comm-generation
         recovery) rather than silently reusing the stale half.
+
+        ``pin`` increments the pair's in-use refcount under the same lock
+        acquisition that commits to the returned ``comm_idx``, so the comm
+        cannot be evicted between resolving and using it.  Callers must balance
+        it with :meth:`unpin`; prefer :meth:`leased`, which does both.
         """
         fp = tuple(uid_chars) if uid_chars else None
 
-        cached = self._reuse_or_drop(pair, fp)
+        cached = self._reuse_or_drop(pair, fp, pin)
         if cached is not None:
             return cached
 
         pair_lock = self._pair_lock(pair)
         with pair_lock:
             # Re-check under the pair lock (another thread may have built it).
-            cached = self._reuse_or_drop(pair, fp)
+            cached = self._reuse_or_drop(pair, fp, pin)
             if cached is not None:
                 return cached
 
@@ -248,7 +264,11 @@ class CommCache:
                 self._comm_uid[pair] = fp
                 self._comms.move_to_end(pair)
                 self._n_built += 1
-                evicted = self._evict_if_needed_locked()
+                # Pin BEFORE evicting so this freshly-built comm is never the
+                # eviction victim of its own insertion.
+                if pin:
+                    self._pins[pair] = self._pins.get(pair, 0) + 1
+                evicted = self._evict_if_needed_locked(protect=pair)
             # Abort evicted comms OUTSIDE the lock -- a slow/hung nccl_abort must
             # not freeze the whole cache (get/stats/other builds), matching every
             # other abort path here (_reuse_or_drop/abort/abort_endpoint/abort_all).
@@ -263,17 +283,36 @@ class CommCache:
             )
             return comm_idx
 
-    def _evict_if_needed_locked(self) -> List[int]:
-        """Pop LRU comms until within ``max_live``; return their idxs to abort.
+    def _evict_if_needed_locked(self, protect: Optional[PairKey] = None) -> List[int]:
+        """Pop LRU *unpinned* comms until within ``max_live``; return their idxs.
+
+        ``protect`` names a pair the caller is about to return to its own
+        caller (the comm just built).  Evicting that would hand back an
+        already-aborted handle -- it is the newest entry, so it is only ever a
+        candidate when every other entry is pinned.
 
         Caller holds ``self._lock``.  Popping/bookkeeping happens under the lock,
         but the actual ``nccl_abort`` is deferred to the caller AFTER the lock is
         released (see the sibling abort paths) so a hung abort can't wedge the
         cache for every other thread.
+
+        Pinned pairs are SKIPPED, not aborted: a send/recv holds a bare
+        ``comm_idx`` across the whole collective, so evicting one mid-flight
+        aborts a live operation.  When every live comm is pinned the cache
+        deliberately exceeds ``max_live`` -- holding a few extra communicators is
+        strictly better than corrupting a transfer, and blocking here is not an
+        option because the caller holds the cache lock.
         """
         evicted: List[int] = []
-        while len(self._comms) > self._max_live:
-            old_pair, old_idx = self._comms.popitem(last=False)
+        if len(self._comms) <= self._max_live:
+            return evicted
+        # Walk LRU-first; skipping keeps relative order intact.
+        for old_pair in list(self._comms.keys()):
+            if len(self._comms) <= self._max_live:
+                break
+            if old_pair == protect or self._pins.get(old_pair, 0) > 0:
+                continue
+            old_idx = self._comms.pop(old_pair)
             self._comm_uid.pop(old_pair, None)
             self._n_evicted += 1
             logger.debug(
@@ -283,10 +322,60 @@ class CommCache:
                 self._max_live,
             )
             evicted.append(old_idx)
+        if len(self._comms) > self._max_live:
+            self._n_overflow += 1
+            logger.warning(
+                "[CommCache] %d live comms exceeds max_live=%d: every eviction "
+                "candidate is in use. Holding the surplus rather than aborting a "
+                "live transfer; raise [custom].nccl_max_live_comms if this "
+                "persists.",
+                len(self._comms),
+                self._max_live,
+            )
         return evicted
 
+    @contextlib.contextmanager
+    def leased(self, pair: PairKey, *, uid_chars: List[int], local_rank: int):
+        """Yield the comm for ``pair``, pinned against LRU eviction.
+
+        A send/recv holds a bare ``comm_idx`` for the whole collective, so
+        without a pin a concurrent :meth:`get_or_create` for a *different* pair
+        can push the cache over ``max_live`` and abort the comm mid-flight.
+
+        The pin is taken while the comm is resolved and released on every exit
+        path.  It gates eviction ONLY: :meth:`abort`, :meth:`abort_endpoint` and
+        :meth:`abort_all` still fire immediately on a pinned pair, because those
+        are the recovery paths that unwedge a stuck collective -- deferring them
+        until the refcount drops would deadlock, since the wedged operation is
+        what holds the pin.
+        """
+        comm_idx = self.get_or_create(
+            pair, uid_chars=uid_chars, local_rank=local_rank, pin=True
+        )
+        try:
+            yield comm_idx
+        finally:
+            self.unpin(pair)
+
+    def unpin(self, pair: PairKey) -> None:
+        """Release one pin on ``pair``.  Idempotent below zero."""
+        with self._lock:
+            remaining = self._pins.get(pair, 0) - 1
+            if remaining > 0:
+                self._pins[pair] = remaining
+            else:
+                self._pins.pop(pair, None)
+
+    def pinned_count(self, pair: PairKey) -> int:
+        """Current pin refcount for ``pair`` (0 when unpinned).  For tests."""
+        with self._lock:
+            return self._pins.get(pair, 0)
+
     def abort(self, pair: PairKey) -> bool:
-        """Abort + drop the comm for ``pair``.  Idempotent."""
+        """Abort + drop the comm for ``pair``.  Idempotent.
+
+        Fires regardless of pins -- see :meth:`leased`.
+        """
         with self._lock:
             comm_idx = self._comms.pop(pair, None)
             self._comm_uid.pop(pair, None)

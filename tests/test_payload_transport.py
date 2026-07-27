@@ -49,6 +49,11 @@ from cosmos_rl.utils.payload_transport import (
     is_payload_transfer_mode_explicit,
     validate_single_receiver_topology,
 )
+from cosmos_rl.utils.payload_transport.nccl.context import (
+    DEFAULT_MAX_LIVE_COMMS,
+    resolve_custom_int,
+    resolve_max_live_comms,
+)
 from cosmos_rl.utils.payload_transport.nccl import (
     NCCL_COMPLETION_PREFIX,
     NcclPayloadTransport,
@@ -644,6 +649,76 @@ class TestValidateSingleReceiverTopology(unittest.TestCase):
             )
         )
         validate_single_receiver_topology(cfg_none, "nccl")
+
+
+class TestCommCapSizing(unittest.TestCase):
+    """``max_live`` is resource hygiene, not a correctness bound, and the comm
+    working set is topology-bounded -- so sizing it blindly is what makes LRU
+    eviction dangerous.  Derive it from the actual peer fan-out instead."""
+
+    @staticmethod
+    def _cfg(*, peers=None, custom=None, role="policy"):
+        cfg = SimpleNamespace(custom=custom or {})
+        if peers is not None:
+            setattr(
+                cfg,
+                role,
+                SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=peers)),
+            )
+        return cfg
+
+    def test_defaults_to_historical_cap_without_config(self):
+        self.assertEqual(
+            resolve_max_live_comms(SimpleNamespace(), peer_role="policy"),
+            DEFAULT_MAX_LIVE_COMMS,
+        )
+
+    def test_small_fan_out_never_lowers_the_cap(self):
+        # Auto-sizing must only ever RAISE the ceiling -- a 2-replica job must
+        # not end up with a cap of 8.
+        self.assertEqual(
+            resolve_max_live_comms(self._cfg(peers=2), peer_role="policy"),
+            DEFAULT_MAX_LIVE_COMMS,
+        )
+
+    def test_large_fan_out_raises_the_cap_above_the_peer_count(self):
+        # 200 peers would thrash a cap of 128: cycling over N+1 keys with
+        # capacity N is the pathological LRU case (~100% miss).
+        self.assertEqual(
+            resolve_max_live_comms(self._cfg(peers=200), peer_role="policy"), 800
+        )
+
+    def test_reads_the_role_that_owns_the_peers(self):
+        # A producer's peers are policy replicas; a consumer's are rollout ones.
+        cfg = self._cfg(peers=500, role="rollout")
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="rollout"), 2000)
+        self.assertEqual(
+            resolve_max_live_comms(cfg, peer_role="policy"), DEFAULT_MAX_LIVE_COMMS
+        )
+
+    def test_explicit_custom_override_wins(self):
+        cfg = self._cfg(peers=500, custom={"nccl_max_live_comms": 64})
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="policy"), 64)
+
+    def test_unparseable_override_falls_back_to_derivation(self):
+        cfg = self._cfg(peers=200, custom={"nccl_max_live_comms": "not-a-number"})
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="policy"), 800)
+
+
+class TestResolveCustomInt(unittest.TestCase):
+    def test_reads_and_clamps(self):
+        cfg = SimpleNamespace(custom={"nccl_num_sender_threads": 8})
+        self.assertEqual(resolve_custom_int(cfg, "nccl_num_sender_threads", 2), 8)
+        # Clamped so a 0/negative config cannot disable the sender pool.
+        cfg0 = SimpleNamespace(custom={"nccl_num_sender_threads": 0})
+        self.assertEqual(resolve_custom_int(cfg0, "nccl_num_sender_threads", 2), 1)
+
+    def test_missing_or_bad_values_use_the_default(self):
+        self.assertEqual(resolve_custom_int(SimpleNamespace(), "k", 3), 3)
+        self.assertEqual(resolve_custom_int(SimpleNamespace(custom={}), "k", 3), 3)
+        self.assertEqual(
+            resolve_custom_int(SimpleNamespace(custom={"k": "twelve"}), "k", 3), 3
+        )
 
 
 class TestPayloadTransportDefaults(unittest.TestCase):

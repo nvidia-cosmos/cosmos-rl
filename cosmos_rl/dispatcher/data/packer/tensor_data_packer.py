@@ -48,24 +48,21 @@ from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 
-
-# Canonical field names used by ``TensorDataPacker``-compatible
-# trajectories.  Subclasses and rollout engines should agree on these
-# keys so the analyzer / trainer can introspect trajectories uniformly.
-OBSERVATIONS = "observations"
-ACTIONS = "actions"
-REWARDS = "rewards"
-TERMINATED = "terminated"
-TRUNCATED = "truncated"
-EPISODE_LENGTH = "episode_length"
-
-TRAJECTORY_KEYS = (
-    OBSERVATIONS,
+# Canonical field names used by ``TensorDataPacker``-compatible trajectories.
+# Subclasses and rollout engines should agree on these keys so the analyzer /
+# trainer can introspect trajectories uniformly.  Defined in
+# ``cosmos_rl.utils.trajectory`` -- low enough in the layering that the payload
+# transports can share them (they cannot import this module, which pulls in
+# ``dispatcher`` and ``policy.config``) -- and re-exported here, which remains
+# the natural place to look for them.
+from cosmos_rl.utils.trajectory import (  # noqa: F401  re-exported
     ACTIONS,
+    EPISODE_LENGTH,
+    OBSERVATIONS,
     REWARDS,
     TERMINATED,
+    TRAJECTORY_KEYS,
     TRUNCATED,
-    EPISODE_LENGTH,
 )
 
 

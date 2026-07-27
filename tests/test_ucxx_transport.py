@@ -594,17 +594,17 @@ class TestUCXXAttachDataPacker(unittest.TestCase):
 
 
 class TestOptionalUcxxExtra(unittest.TestCase):
-    """When ``ucxx-cu12`` is not installed, importing the buffer module
-    must still succeed and surface ``UCXX_AVAILABLE = False``.  Attempts
-    to actually start a server should raise ``RuntimeError`` rather than
-    failing at module import."""
+    """Graceful degradation when ``ucxx-cu12`` is not installed: importing the
+    buffer module must still succeed, and starting a server must raise
+    ``RuntimeError`` rather than failing at import.
 
-    def test_ucxx_available_is_bool(self):
-        self.assertIn(UCXX_AVAILABLE, (True, False))
+    ``UCXX_AVAILABLE`` is read as a module global at call time, so the absence
+    is SIMULATED rather than requiring an environment without the extra.  That
+    keeps this path covered in both configurations -- previously it skipped
+    itself wherever ucxx happened to be installed, which is now every CI run.
+    """
 
     def test_starting_server_without_ucxx_raises(self):
-        if UCXX_AVAILABLE:
-            self.skipTest("ucxx-cu12 is installed; skip the negative path")
         from cosmos_rl.utils.payload_transport.ucxx import (
             UCXXBuffer,
             UCXXBufferConfig,
@@ -617,8 +617,12 @@ class TestOptionalUcxxExtra(unittest.TestCase):
         )
         try:
             buf = UCXXBuffer(cfg)
-            with self.assertRaises(RuntimeError):
-                buf.start_server()
+            with mock.patch(
+                "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.UCXX_AVAILABLE",
+                False,
+            ):
+                with self.assertRaises(RuntimeError):
+                    buf.start_server()
         finally:
             try:
                 buf._buffer.unlink()
