@@ -327,5 +327,72 @@ class TestSetupViaTransportAttach(unittest.TestCase):
         )
 
 
+class TestInterceptAndPrefetchAgree(unittest.TestCase):
+    """What the trainer intercepts must be exactly what gets prefetched.
+
+    These are the two halves of one decision: ``_should_intercept`` decides
+    whether ``get_policy_input`` resolves a ref, and ``_filter_prefetch_tasks``
+    decides whether the background worker fetches it.  When they disagreed on a
+    MISSING ``_ucxx_enabled`` -- intercept read absent as enabled, the old UCXX
+    override read it as disabled -- such refs were intercepted but never
+    prefetched, so every episode fell to the blocking ``_sync_fetch`` path
+    forever.  Silent and permanent, never a failure.  The two are now the same
+    predicate by construction (no override), and these cases pin that.
+    """
+
+    def setUp(self) -> None:
+        self.p = _Packer()
+
+    @staticmethod
+    def _ref(**extra):
+        ref = {"_ucxx": True, "_worker_ip": "10.0.0.1", "_ucxx_port": 7000, "_slot": 1}
+        ref.update(extra)
+        return ref
+
+    def _prefetched(self, ref):
+        return self.p._filter_prefetch_tasks([ref])
+
+    def test_flag_absent_is_enabled_for_both(self):
+        # The back-compat default: a producer predating the kill-switch.
+        ref = self._ref()
+        self.assertTrue(self.p._should_intercept(ref))
+        self.assertEqual(self._prefetched(ref), [(0, ref)])
+
+    def test_flag_true_is_enabled_for_both(self):
+        ref = self._ref(_ucxx_enabled=True)
+        self.assertTrue(self.p._should_intercept(ref))
+        self.assertEqual(self._prefetched(ref), [(0, ref)])
+
+    def test_flag_false_is_disabled_for_both(self):
+        # The runtime kill-switch: a worker that fell back to redis mid-flight.
+        ref = self._ref(_ucxx_enabled=False)
+        self.assertFalse(self.p._should_intercept(ref))
+        self.assertEqual(self._prefetched(ref), [])
+
+    def test_non_ucxx_refs_are_excluded_from_both(self):
+        for ro in ({"observations": [1]}, "nccl:0:abc", None, 42):
+            with self.subTest(ro=ro):
+                self.assertFalse(self.p._should_intercept(ro))
+                self.assertEqual(self._prefetched(ro), [])
+
+    def test_the_two_predicates_agree_on_every_flag_state(self):
+        # The invariant itself, stated directly: no ref may be intercepted
+        # without also being prefetchable, or vice versa.
+        for extra in ({}, {"_ucxx_enabled": True}, {"_ucxx_enabled": False}):
+            with self.subTest(flag=extra or "absent"):
+                ref = self._ref(**extra)
+                self.assertEqual(
+                    self.p._should_intercept(ref),
+                    bool(self._prefetched(ref)),
+                )
+
+    def test_mixed_batch_indices_are_preserved(self):
+        # _fetch_batch correlates results back by the returned index, so the
+        # filter must report each ref's ORIGINAL position, not a compacted one.
+        on, off = self._ref(_slot=1), self._ref(_ucxx_enabled=False, _slot=2)
+        plain = {"observations": [1]}
+        self.assertEqual(self.p._filter_prefetch_tasks([plain, off, on]), [(2, on)])
+
+
 if __name__ == "__main__":
     unittest.main()

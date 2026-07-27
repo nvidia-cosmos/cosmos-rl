@@ -302,21 +302,15 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
     def _cache_key(self, rollout_output: Any) -> str:
         return self._ucxx_dp_cache_key(rollout_output)
 
-    def _filter_prefetch_tasks(self, rollouts: List[Any]) -> List[Any]:
-        """UCXX requires both ``_ucxx`` AND ``_ucxx_enabled`` true.
-
-        Slightly stricter than the base default (which would defer to
-        :meth:`_should_intercept` -- equivalent here, but kept explicit
-        because UCXX shipped with the dual-flag check before the base
-        mixin existed and downstream observability hooks may rely on
-        seeing both flags evaluated).
-        """
-        tasks: List[Any] = []
-        for i, rollout in enumerate(rollouts):
-            ro = rollout.completion if hasattr(rollout, "completion") else rollout
-            if isinstance(ro, dict) and ro.get("_ucxx") and ro.get("_ucxx_enabled"):
-                tasks.append((i, ro))
-        return tasks
+    # NOTE: deliberately NO _filter_prefetch_tasks override.  The base default
+    # already delegates to :meth:`_should_intercept`, which is the only way to
+    # guarantee that what the trainer intercepts is exactly what gets
+    # prefetched.  The override that used to live here re-implemented the
+    # predicate as ``ro.get("_ucxx") and ro.get("_ucxx_enabled")`` -- reading a
+    # MISSING ``_ucxx_enabled`` as disabled, where _should_intercept reads it as
+    # enabled.  Such a ref was intercepted but never prefetched, so every one of
+    # its episodes took the blocking _sync_fetch path forever: a silent,
+    # permanent slow path rather than a failure.
 
     def _fetch_batch(self, tasks: List[Any]) -> Dict[str, Any]:
         """Run the async UCXX fetch on this thread's event loop.

@@ -350,19 +350,12 @@ class NcclPayloadTransport(PayloadTransport):
         job_id = os.environ.get("SLURM_JOB_ID", "test")
         prefix = build_nccl_prefix(experiment_name=experiment_name, job_id=job_id)
 
-        num_rollout_replicas: Optional[int] = None
-        try:
-            num_rollout_replicas = config.rollout.parallelism.n_init_replicas
-        except AttributeError:
-            pass
-
         published = 0
         max_retries = 3
         for transfer_id in transfer_ids:
             try:
                 rollout_indices = build_transfer_rollout_candidates(
-                    transfer_id=transfer_id,
-                    num_rollout_replicas=num_rollout_replicas,
+                    transfer_id=transfer_id
                 )
                 for rollout_idx in rollout_indices:
                     channel = build_cleanup_channel(

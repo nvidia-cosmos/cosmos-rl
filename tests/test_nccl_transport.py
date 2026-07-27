@@ -13,21 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the NCCL transport backend: registration, cleanup dispatch,
-and the two ``attach_data_packer`` paths (in-tree mixin vs legacy)."""
+"""Tests for the NCCL transport backend.
+
+Scoped to behaviour unique to this module.  Registration, ``active_for_completion``
+dispatch, the legacy attach path, and the no-op-for-unrelated-packer contract are
+covered once in ``test_payload_transport.py`` with stronger assertions, so they
+are deliberately not duplicated here.
+"""
 
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from cosmos_rl.utils.payload_transport import PayloadTransportRegistry, RedisEndpoint
-from cosmos_rl.utils.payload_transport.nccl import (
-    NCCL_COMPLETION_PREFIX,
-    NcclPayloadTransport,
-    build_cleanup_channel,
-    build_nccl_prefix,
-    build_rollout_prefix,
-)
+from cosmos_rl.utils.payload_transport import RedisEndpoint
+from cosmos_rl.utils.payload_transport.nccl import NcclPayloadTransport
 
 
 class FakeRedis:
@@ -39,21 +38,6 @@ class FakeRedis:
         return 1
 
 
-class TestRegistration(unittest.TestCase):
-    def test_registered_with_prefix(self):
-        t = PayloadTransportRegistry.get("nccl")
-        self.assertIsInstance(t, NcclPayloadTransport)
-        self.assertEqual(t.completion_prefix, NCCL_COMPLETION_PREFIX)
-
-    def test_active_for_completion(self):
-        t = PayloadTransportRegistry.active_for_completion("nccl:0:abc")
-        self.assertIsInstance(t, NcclPayloadTransport)
-        self.assertIsNone(PayloadTransportRegistry.active_for_completion("plain"))
-        self.assertIsNone(
-            PayloadTransportRegistry.active_for_completion({"_nccl": True})
-        )
-
-
 class TestPublishCleanup(unittest.TestCase):
     def _config(self):
         return SimpleNamespace(
@@ -61,40 +45,21 @@ class TestPublishCleanup(unittest.TestCase):
             rollout=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=4)),
         )
 
-    def test_publishes_to_rollout_cleanup_channel(self):
+    def test_replica_beyond_initial_count_still_gets_cleanup(self):
+        # Elastic scale-up: rollout idx 9 is past n_init_replicas(4).  Cleanup
+        # used to be withheld for exactly these transfers, so the producer held
+        # its send buffer until capacity eviction.  Publishing to a channel
+        # nobody subscribes to is a harmless no-op; withholding pins GPU memory.
         redis = FakeRedis()
         t = NcclPayloadTransport()
-        n = t.publish_cleanup_for_discarded(
-            transfer_ids=["0:abc", "2:def"],
-            config=self._config(),
-            redis_client=redis,
-        )
-        self.assertEqual(n, 2)
-        prefix = build_nccl_prefix(experiment_name="exp", job_id="test")
-        ch0 = build_cleanup_channel(build_rollout_prefix(prefix, 0))
-        ch2 = build_cleanup_channel(build_rollout_prefix(prefix, 2))
-        channels = {c for c, _ in redis.published}
-        self.assertIn(ch0, channels)
-        self.assertIn(ch2, channels)
-
-    def test_out_of_range_replica_skipped(self):
-        redis = FakeRedis()
-        t = NcclPayloadTransport()
-        # rollout idx 9 >= n_init_replicas(4) -> no candidate -> nothing published.
         n = t.publish_cleanup_for_discarded(
             transfer_ids=["9:abc"], config=self._config(), redis_client=redis
         )
-        self.assertEqual(n, 1)  # counted as handled...
-        self.assertEqual(redis.published, [])  # ...but nothing published
-
-    def test_no_redis_client_returns_zero(self):
-        t = NcclPayloadTransport()
-        self.assertEqual(
-            t.publish_cleanup_for_discarded(
-                transfer_ids=["0:a"], config=self._config(), redis_client=None
-            ),
-            0,
-        )
+        self.assertEqual(n, 1)
+        self.assertEqual(len(redis.published), 1)
+        channel, payload = redis.published[0]
+        self.assertIn("rollout_comm:9", channel)
+        self.assertIn("9:abc", payload)
 
 
 class TestAttachDataPacker(unittest.TestCase):
@@ -140,48 +105,3 @@ class TestAttachDataPacker(unittest.TestCase):
                     device="cuda:0",
                     redis_endpoint=RedisEndpoint("h", 1),
                 )
-
-    def test_legacy_path_assigns_client_then_hooks(self):
-        t = NcclPayloadTransport()
-        order = []
-
-        class _LegacyPacker:
-            redis_client = None
-
-            def post_redis_injection(self):
-                # Client must already be assigned when the hook runs.
-                order.append(("hook", self.redis_client))
-
-        packer = _LegacyPacker()
-        with mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl.transport._build_redis_client",
-            return_value="legacy-client",
-        ):
-            t.attach_data_packer(
-                packer,
-                config=SimpleNamespace(custom={}),
-                redis_endpoint=RedisEndpoint("h", 1),
-            )
-        self.assertEqual(packer.redis_client, "legacy-client")
-        self.assertEqual(order, [("hook", "legacy-client")])
-
-    def test_no_op_for_unrelated_packer(self):
-        t = NcclPayloadTransport()
-
-        class _Plain:
-            pass
-
-        # Neither surface present -> no error, no redis client built.
-        with mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl.transport._build_redis_client"
-        ) as build:
-            t.attach_data_packer(
-                _Plain(),
-                config=SimpleNamespace(custom={}),
-                redis_endpoint=RedisEndpoint("h", 1),
-            )
-            build.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main()
