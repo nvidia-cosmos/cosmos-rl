@@ -41,11 +41,13 @@ from unittest import mock
 from cosmos_rl.utils.payload_transport import (
     PAYLOAD_TRANSFER_KEY,
     LEGACY_NCCL_KEY,
+    P2P_TRANSFER_MODES,
     PayloadTransport,
     PayloadTransportRegistry,
     RedisEndpoint,
     get_payload_transfer_mode,
     is_payload_transfer_mode_explicit,
+    validate_single_receiver_topology,
 )
 from cosmos_rl.utils.payload_transport.nccl import (
     NCCL_COMPLETION_PREFIX,
@@ -563,6 +565,86 @@ class TestIsPayloadTransferModeExplicit(unittest.TestCase):
     def test_empty_string_is_not_explicit(self):
         config = SimpleNamespace(custom={PAYLOAD_TRANSFER_KEY: "   "})
         self.assertFalse(is_payload_transfer_mode_explicit(config))
+
+
+def _cfg_parallelism(*, tp_size=1, cp_size=1, pp_size=1, **extra):
+    """Config exposing only ``policy.parallelism`` (transport mode is passed
+    to the validator directly, so ``custom`` is irrelevant here)."""
+    return SimpleNamespace(
+        policy=SimpleNamespace(
+            parallelism=SimpleNamespace(
+                tp_size=tp_size, cp_size=cp_size, pp_size=pp_size, **extra
+            )
+        )
+    )
+
+
+class TestValidateSingleReceiverTopology(unittest.TestCase):
+    """nccl/ucxx deliver each payload to exactly ONE receiver, but the policy
+    hands the same rollout reference to every rank sharing a DP coordinate
+    (``cp * tp * pp`` of them).  Any non-DP policy parallelism must fail loud
+    at startup rather than dropping episodes and hanging mid-run."""
+
+    def test_pure_data_parallel_is_allowed(self):
+        for mode in P2P_TRANSFER_MODES:
+            with self.subTest(mode=mode):
+                validate_single_receiver_topology(_cfg_parallelism(), mode)
+
+    def test_tensor_parallel_rejected(self):
+        for mode in P2P_TRANSFER_MODES:
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError) as ctx:
+                    validate_single_receiver_topology(_cfg_parallelism(tp_size=2), mode)
+                self.assertIn("tp_size=2", str(ctx.exception))
+
+    def test_context_parallel_rejected(self):
+        # cp is NOT covered by a tp_size==1 check -- it splits the same batch
+        # across ranks just like tp, so it must be caught too.
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(_cfg_parallelism(cp_size=2), "nccl")
+        self.assertIn("cp_size=2", str(ctx.exception))
+
+    def test_pipeline_parallel_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(_cfg_parallelism(pp_size=4), "ucxx")
+        self.assertIn("pp_size=4", str(ctx.exception))
+
+    def test_error_reports_every_offending_dim_and_receiver_count(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(
+                _cfg_parallelism(tp_size=2, cp_size=2, pp_size=2), "nccl"
+            )
+        msg = str(ctx.exception)
+        for field in ("tp_size=2", "cp_size=2", "pp_size=2"):
+            self.assertIn(field, msg)
+        # cp * tp * pp = 8 ranks would race for one payload.
+        self.assertIn("8 ranks", msg)
+        # Actionable: names both escape hatches.
+        self.assertIn("redis", msg)
+
+    def test_redis_is_unaffected(self):
+        # A redis GET is non-destructive/repeatable, so model parallelism is
+        # fine there -- the guard must not fire.
+        validate_single_receiver_topology(
+            _cfg_parallelism(tp_size=8, cp_size=2, pp_size=4), "redis"
+        )
+
+    def test_missing_policy_config_is_tolerated(self):
+        # Rollout/reference workers may carry a config without policy dims;
+        # the guard must not crash on them.
+        validate_single_receiver_topology(SimpleNamespace(), "nccl")
+        validate_single_receiver_topology(SimpleNamespace(policy=None), "nccl")
+
+    def test_absent_or_none_dims_default_to_one(self):
+        # Sparse configs (missing keys, explicit None) must read as 1, not fail.
+        cfg = SimpleNamespace(policy=SimpleNamespace(parallelism=SimpleNamespace()))
+        validate_single_receiver_topology(cfg, "nccl")
+        cfg_none = SimpleNamespace(
+            policy=SimpleNamespace(
+                parallelism=SimpleNamespace(tp_size=None, cp_size=None, pp_size=None)
+            )
+        )
+        validate_single_receiver_topology(cfg_none, "nccl")
 
 
 class TestPayloadTransportDefaults(unittest.TestCase):
