@@ -14,13 +14,42 @@ set -uo pipefail
 
 FAILED=()
 
+SKIPPED=()
+RUN_IDX=0
+# Per-suite logs land here and are KEPT.  Override with TEST_LOG_DIR to put
+# them somewhere the scheduler collects; the default sits beside the repo so a
+# local run keeps them too.
+TEST_LOG_DIR="${TEST_LOG_DIR:-${PWD}/test-logs}"
+mkdir -p "${TEST_LOG_DIR}"
+echo "Per-suite logs: ${TEST_LOG_DIR}"
 run() {
+    RUN_IDX=$((RUN_IDX + 1))
+    local rc log slug
+    # Every suite's output goes to its OWN file, always, in full.  Nothing is
+    # buffered in memory and nothing is filtered on the way in: a suite killed
+    # by the outer timeout must still leave everything it printed on disk, and
+    # what turns out to matter is never known in advance.  An earlier version
+    # captured into a shell variable and echoed it afterwards -- the echo never
+    # runs when the process is killed, so a 2h timeout produced a log
+    # containing nothing but the RUN banner.
+    slug="$(printf '%s' "$*" | tr -cs 'A-Za-z0-9_.-' '_' | cut -c1-80)"
+    log="${TEST_LOG_DIR}/$(printf '%03d' "${RUN_IDX}")_${slug}.log"
+
     echo
     echo "================ RUN: $* ================"
-    if "$@"; then
-        echo "---- PASS: $* ----"
+    echo "---- log: ${log} ----"
+    "$@" 2>&1 | tee "${log}"
+    rc=${PIPESTATUS[0]}
+
+    # Classify by reading the FILE, not a copy held in memory.
+    if (( rc == 0 )); then
+        if grep -qE "OK \(skipped=[0-9]+\)|^Ran 0 tests" "${log}"; then
+            echo "---- SKIP: $* ----"
+            SKIPPED+=("$*")
+        else
+            echo "---- PASS: $* ----"
+        fi
     else
-        local rc=$?
         echo "---- FAIL(rc=${rc}): $* ----"
         FAILED+=("$*")
     fi
@@ -70,6 +99,36 @@ run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
 run python tests/test_multirank_shutdown.py
+
+# Only end-to-end guard for the NCCL payload transport; it was referenced by no
+# workflow, so it had never executed anywhere until a targeted Slurm probe, where
+# it PASSED. It self-skips unless it finds >=2 GPUs and a Redis, and starts its
+# own redis-server when nothing is listening -- so it needs no setup here.
+run python tests/test_nccl_e2e.py
+
+# The payload transport's CPU unit tests.  run_test.sh names every file it
+# runs, and these 16 were never named -- so ~340 tests covering the wire
+# format, rendezvous, comm cache, buffer registry, slot rotation and both
+# consumer/producer paths have never executed in CI, including the ones added
+# alongside the transport itself.  They are fast and CPU-only; the cost of
+# listing them is far below the cost of a silent gap this size.
+run python tests/test_comm_base_attach.py
+run python tests/test_nccl_addressing.py
+run python tests/test_nccl_buffer_registry.py
+run python tests/test_nccl_comm_cache.py
+run python tests/test_nccl_data_packer_mixin.py
+run python tests/test_nccl_rendezvous.py
+run python tests/test_nccl_rollout_mixin.py
+run python tests/test_nccl_streams.py
+run python tests/test_nccl_transport.py
+run python tests/test_payload_rotation.py
+run python tests/test_payload_transport.py
+run python tests/test_profiler_ucxx.py
+run python tests/test_ucxx_data_packer_mixin.py
+run python tests/test_ucxx_fetch_engine.py
+run python tests/test_ucxx_rollout_mixin.py
+run python tests/test_ucxx_transport.py
+run python tests/test_launcher_shutdown.py
 run python tests/test_process_flow.py
 run python tests/test_custom_class.py
 run python tests/test_math_verify.py
@@ -108,6 +167,12 @@ run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
 # run python tests/test_wfm_dpo.py
 # run python tests/test_wfm_nft.py
 # run python tests/test_refactor_contracts.py
+
+if (( ${#SKIPPED[@]} > 0 )); then
+    echo
+    echo "================ SUMMARY: ${#SKIPPED[@]} suite(s) SKIPPED (ran nothing) ================"
+    printf '  - %s\n' "${SKIPPED[@]}"
+fi
 
 if (( ${#FAILED[@]} > 0 )); then
     echo

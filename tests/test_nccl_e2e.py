@@ -17,12 +17,14 @@
 
 Spawns two processes on two GPUs (rank 0 = rollout producer, rank 1 =
 trainer consumer) that rendezvous over a real Redis and move one
-trajectory GPU→GPU via ``nccl_send`` / ``nccl_recv``.  Self-skips unless
-CUDA is available with ``>= 2`` devices and a Redis is reachable — so it is
-a no-op on CPU-only / single-GPU CI and only runs where the full path can
-actually be exercised.
+trajectory GPU→GPU via ``nccl_send`` / ``nccl_recv``.  Self-skips unless CUDA
+is available with ``>= 2`` devices — so it is a no-op on CPU-only / single-GPU
+CI and only runs where the full path can actually be exercised.
 
-Run explicitly on a 2-GPU box with Redis on localhost:6379:
+Redis is *not* a precondition: if nothing is listening, :func:`_ensure_redis`
+starts a throwaway ``redis-server`` on a free port (see its docstring for why
+depending on an ambient one silently disabled this test).  Point it at an
+existing instance with ``COSMOS_TEST_REDIS_HOST`` / ``COSMOS_TEST_REDIS_PORT``.
 
     pytest tests/test_nccl_e2e.py -q
 """
@@ -166,11 +168,70 @@ except Exception:  # pragma: no cover - import guarded for CPU-only collection
     _ConsumerPacker = None
 
 
+def _ensure_redis() -> bool:
+    """Make a Redis available, starting a throwaway one if nothing is listening.
+
+    Without this the test only ran where a Redis happened to already be bound
+    to :data:`REDIS_PORT`, and self-skipped everywhere else -- including CI,
+    where nothing binds 6379 (the dispatcher starts its own server on a *free*
+    port).  A skip there is indistinguishable from a pass, so the transport's
+    only end-to-end guard would have been silently absent.
+
+    ``redis-server`` ships in the CI image, so start one rather than depend on
+    ambient state.  The chosen port is exported so the spawned ranks -- which
+    re-import this module -- connect to the same instance instead of each
+    starting another; that env var is also why re-entry here is a no-op in the
+    children.
+    """
+    global REDIS_PORT
+
+    if _redis_reachable():
+        return True
+
+    import atexit
+    import shutil
+    import socket
+    import subprocess
+
+    exe = shutil.which("redis-server")
+    if exe is None:
+        return False
+
+    with socket.socket() as probe:
+        probe.bind((REDIS_HOST, 0))
+        port = probe.getsockname()[1]
+
+    try:
+        proc = subprocess.Popen(
+            [exe, "--port", str(port), "--save", "", "--appendonly", "no"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+
+    REDIS_PORT = port
+    os.environ["COSMOS_TEST_REDIS_PORT"] = str(port)
+    atexit.register(lambda: (proc.terminate(), proc.wait(timeout=10)))
+
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        if proc.poll() is not None:  # died on startup; nothing to wait for
+            return False
+        if _redis_reachable():
+            return True
+        time.sleep(0.1)
+    return False
+
+
 @unittest.skipUnless(
     torch.cuda.is_available() and torch.cuda.device_count() >= 2,
     "requires >= 2 CUDA devices for NCCL P2P",
 )
-@unittest.skipUnless(_redis_reachable(), f"requires Redis at {REDIS_HOST}:{REDIS_PORT}")
+@unittest.skipUnless(
+    _ensure_redis(),
+    f"requires Redis at {REDIS_HOST}:{REDIS_PORT} (and no redis-server)",
+)
 class TestNcclE2E(unittest.TestCase):
     def setUp(self):
         import redis
