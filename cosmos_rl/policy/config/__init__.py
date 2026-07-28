@@ -1566,6 +1566,18 @@ class RolloutConfig(BaseModel):
         ),
     )
 
+    prefetch_queue_maxsize: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Maximum number of rollout prompt batches to keep in the bounded "
+            "_prompt_queue when prefetch_rollout is enabled.  The default of 2 "
+            "preserves the original one-batch look-ahead behavior; increase it "
+            "only when deeper prompt/setup overlap is useful and the extra "
+            "queued payloads fit comfortably in memory."
+        ),
+    )
+
     broadcast_all_params: bool = Field(
         default=False,
         description=(

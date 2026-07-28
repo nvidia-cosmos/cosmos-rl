@@ -415,6 +415,40 @@ class TestPrefetchLoopSubmitSetupWiring(unittest.TestCase):
         self.assertEqual(len(recorder), n_batches, "submit_setup once per batch")
 
 
+class TestPrefetchQueueMaxsize(unittest.TestCase):
+    def _make_minimal_worker(self, *, prefetch_queue_maxsize: int = 2) -> Any:
+        worker = DisaggregatedRolloutControlWorker.__new__(
+            DisaggregatedRolloutControlWorker
+        )
+        worker.config = SimpleNamespace(
+            rollout=SimpleNamespace(prefetch_queue_maxsize=prefetch_queue_maxsize)
+        )
+        return worker
+
+    def test_prefetch_queue_maxsize_reads_rollout_config(self) -> None:
+        worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
+
+        self.assertEqual(worker._prefetch_queue_maxsize, 5)
+
+    def test_prompt_fetch_target_depth_uses_queue_maxsize_for_overlap(self) -> None:
+        worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
+
+        self.assertEqual(worker._prompt_fetch_target_depth(prep_overlap=True), 5)
+        self.assertEqual(worker._prompt_fetch_target_depth(prep_overlap=False), 1)
+
+    def test_rollout_config_validates_prefetch_queue_maxsize(self) -> None:
+        from cosmos_rl.policy.config import RolloutConfig
+        from pydantic import ValidationError
+
+        self.assertEqual(RolloutConfig().prefetch_queue_maxsize, 2)
+        self.assertEqual(
+            RolloutConfig(prefetch_queue_maxsize=5).prefetch_queue_maxsize,
+            5,
+        )
+        with self.assertRaises(ValidationError):
+            RolloutConfig(prefetch_queue_maxsize=0)
+
+
 class TestSingleProducerModeIsLive(unittest.TestCase):
     """``_single_producer_mode`` must reflect live config, not a snapshot.
 
