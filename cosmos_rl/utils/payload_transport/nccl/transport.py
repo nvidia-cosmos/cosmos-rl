@@ -64,6 +64,8 @@ as a deprecated alias.
 
 from __future__ import annotations
 
+import functools
+
 import json
 import os
 import time
@@ -167,7 +169,12 @@ class NcclPayloadTransport(PayloadTransport):
              must wait out the cold-start comm-init storm; floored at
              ``nccl_recv_timeout``.
 
-        2. **Legacy fallback** (deprecated).  Packers exposing a
+        2. **Composed** -- a packer that only schedules (exposes
+           ``set_transport_strategy``) gets a strategy built and attached,
+           which is how a transport can be chosen from config without
+           subclassing a per-transport packer class.
+
+        3. **Legacy fallback** (deprecated).  Packers exposing a
            ``redis_client`` attribute get a live client assigned followed
            by an optional ``post_redis_injection()`` call, in that order
            (PR #670 contract).  Superseded by the mixin path; retained
@@ -176,6 +183,19 @@ class NcclPayloadTransport(PayloadTransport):
         No-op for packers that expose neither surface.
         """
         setup = getattr(packer, "_setup_nccl_data_packer", None)
+        if not callable(setup) and callable(
+            getattr(packer, "set_transport_strategy", None)
+        ):
+            # Composed packer: it schedules (PrefetchDataPackerMixin) but has no
+            # NCCL ancestry, so synthesise the same setup signature the mixin
+            # exposes.  Reusing _attach_via_mixin verbatim is deliberate -- the
+            # tunable resolution below it (cold-start floors, batch hint) is
+            # subtle enough that a second copy would drift.
+            from cosmos_rl.utils.payload_transport.nccl.strategy import (
+                compose_nccl_transport,
+            )
+
+            setup = functools.partial(compose_nccl_transport, packer)
         if callable(setup):
             self._attach_via_mixin(
                 setup, config=config, device=device, redis_endpoint=redis_endpoint

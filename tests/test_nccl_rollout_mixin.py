@@ -576,7 +576,7 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
     """
 
     def test_pack_then_unpack_on_device(self):
-        from cosmos_rl.utils.payload_transport.nccl.data_packer_mixin import _unpack
+        from cosmos_rl.utils.payload_transport.nccl.strategy import _unpack
 
         device = torch.device("cuda:0")
         p = _make_producer()
