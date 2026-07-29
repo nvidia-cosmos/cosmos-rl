@@ -26,7 +26,7 @@ the request channel, and the per-pair UID key.
 
 import unittest
 
-from cosmos_rl.utils.payload_transport.nccl.data_packer_mixin import (
+from cosmos_rl.utils.payload_transport.nccl.strategy import (
     _pair_key,
     _parse_ref,
 )

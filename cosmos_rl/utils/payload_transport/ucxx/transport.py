@@ -94,6 +94,17 @@ class UCXXPayloadTransport(PayloadTransport):
         defensive default of the base class.
         """
         setup = getattr(packer, "_setup_ucxx_data_packer", None)
+        if setup is None and callable(getattr(packer, "set_transport_strategy", None)):
+            # Composed packer: schedules but has no UCXX ancestry.  Synthesise
+            # the mixin's setup signature so the tunable resolution below is
+            # shared rather than copied.
+            import functools
+
+            from cosmos_rl.utils.payload_transport.ucxx.strategy import (
+                compose_ucxx_transport,
+            )
+
+            setup = functools.partial(compose_ucxx_transport, packer)
         if setup is None:
             return
         custom = getattr(config, "custom", None) or {}

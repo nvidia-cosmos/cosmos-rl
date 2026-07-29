@@ -43,8 +43,14 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.payload_transport.ucxx.data_packer_mixin import (
-    _MAX_FETCH_ROUNDS,
     UCXXDataPackerMixin,
+)
+
+# The fetch engine and its round cap moved to the strategy that the mixin
+# now composes; these tests drive that engine directly.
+from cosmos_rl.utils.payload_transport.ucxx.strategy import (
+    _MAX_FETCH_ROUNDS,
+    UCXXTransportStrategy,
 )
 
 # Imported from the data-packer layer, which owns the trajectory field names
@@ -127,17 +133,17 @@ def _meta(slot=1, ip="10.0.0.1", port=7000):
 
 
 def _make_consumer(client, *, max_attempts=2, device="cpu"):
-    p = _Packer()
-    p._ucxx_dp_client = client
-    p._ucxx_dp_device = device
-    p._ucxx_dp_max_attempts = max_attempts
-    p._ucxx_dp_read_timeout = 0.01
+    p = UCXXTransportStrategy()
+    p._client = client
+    p._device = device
+    p._max_attempts = max_attempts
+    p._read_timeout = 0.01
     return p
 
 
 def _fetch(p, metas):
     """Drive the real entry point: [(idx, metadata), ...] -> {cache_key: data}."""
-    return p._fetch_batch([(i, m) for i, m in enumerate(metas)])
+    return p.fetch_batch([(i, m) for i, m in enumerate(metas)])
 
 
 class TestTransientRetryWithinARound(unittest.TestCase):
@@ -285,16 +291,16 @@ class TestSyncFetchContainment(unittest.TestCase):
     def test_returns_none_on_failure(self):
         client = _FakeClient({1: [StaleSlotError("gone")]})
         p = _make_consumer(client)
-        self.assertIsNone(p._sync_fetch(_meta(slot=1)))
+        self.assertIsNone(p.sync_fetch(_meta(slot=1)))
 
     def test_returns_none_when_the_client_is_absent(self):
         p = _make_consumer(None)
-        self.assertIsNone(p._sync_fetch(_meta(slot=1)))
+        self.assertIsNone(p.sync_fetch(_meta(slot=1)))
 
     def test_returns_data_on_success(self):
         client = _FakeClient({1: [_payload()]})
         p = _make_consumer(client)
-        got = p._sync_fetch(_meta(slot=1))
+        got = p.sync_fetch(_meta(slot=1))
         self.assertIsNotNone(got)
         self.assertIn(OBSERVATIONS, got)
 
@@ -303,9 +309,7 @@ class TestFetchAllReportsTiming(unittest.TestCase):
     def test_returns_results_and_both_timings(self):
         client = _FakeClient({1: [_payload()]})
         p = _make_consumer(client)
-        results, transfer_ms, copy_ms = asyncio.run(
-            p._ucxx_dp_fetch_all([(0, _meta(slot=1))])
-        )
+        results, transfer_ms, copy_ms = asyncio.run(p._fetch_all([(0, _meta(slot=1))]))
         self.assertIn(0, results)
         self.assertGreaterEqual(transfer_ms, 0.0)
         self.assertGreaterEqual(copy_ms, 0.0)

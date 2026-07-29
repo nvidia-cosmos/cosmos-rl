@@ -39,6 +39,7 @@ from typing import Any, List
 from cosmos_rl.utils.payload_transport.ucxx.data_packer_mixin import (
     UCXXDataPackerMixin,
 )
+from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
 
 
 class _StubDataPacker:
@@ -72,7 +73,16 @@ class _StubDataPacker:
 
 
 class _Packer(UCXXDataPackerMixin, _StubDataPacker):
-    """MRO: UCXXDataPackerMixin first, then _StubDataPacker."""
+    """MRO: UCXXDataPackerMixin first, then _StubDataPacker.
+
+    Auto-attaches a strategy.  The transport moved off the mixin, so without
+    one the hooks are pass-throughs by design and these tests would exercise
+    nothing -- setup is what normally attaches it, and most tests here skip it.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.set_transport_strategy(UCXXTransportStrategy())
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +203,7 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
             "_ucxx_port": 7000,
             "_slot": 5,
         }
-        cache_key = UCXXDataPackerMixin._ucxx_dp_cache_key(ref)
+        cache_key = UCXXTransportStrategy._ref_cache_key(ref)
         # Inject directly into the cache (bypass UCXX entirely).
         self.p._ucxx_dp_prefetch_cache = {cache_key: resolved}
 
@@ -211,7 +221,7 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
 
 class TestCacheKey(unittest.TestCase):
     def test_cache_key_format(self):
-        key = UCXXDataPackerMixin._ucxx_dp_cache_key(
+        key = UCXXTransportStrategy._ref_cache_key(
             {
                 "_worker_ip": "10.0.0.1",
                 "_ucxx_port": 7000,
@@ -223,7 +233,7 @@ class TestCacheKey(unittest.TestCase):
     def test_cache_key_handles_missing_fields(self):
         # Missing fields should yield a still-deterministic string so
         # collisions show up rather than crashes.
-        key = UCXXDataPackerMixin._ucxx_dp_cache_key({"_worker_ip": "x"})
+        key = UCXXTransportStrategy._ref_cache_key({"_worker_ip": "x"})
         self.assertIn("x:", key)
 
 

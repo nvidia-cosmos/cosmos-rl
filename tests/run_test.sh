@@ -130,6 +130,14 @@ run python tests/test_ucxx_rollout_mixin.py
 run python tests/test_ucxx_transport.py
 run python tests/test_launcher_shutdown.py
 run python tests/test_process_flow.py
+# Composed-transport seam and the UCXX end-to-end guard.  A test file
+# does nothing until it is named here -- run_test.sh is the only thing
+# build_and_test runs.
+run python tests/test_transport_strategy.py
+run python tests/test_prefetch_mixin.py
+run python tests/test_trajectory.py
+run python tests/test_rollout_prefetch_loop_integration.py
+run python tests/test_ucxx_e2e.py
 run python tests/test_custom_class.py
 run python tests/test_math_verify.py
 run python tests/test_policy_overfit.py

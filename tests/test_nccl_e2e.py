@@ -65,7 +65,7 @@ def _make_trajectory(device, ep_len=8, obs_dim=4, action_dim=2):
     }
 
 
-def _worker(rank: int, world_size: int, err_queue):
+def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
     """Entry point for each spawned rank.  Reports failures via err_queue."""
     try:
         import redis
@@ -103,16 +103,34 @@ def _worker(rank: int, world_size: int, err_queue):
                 time.sleep(0.05)
             producer.cleanup_nccl()
         else:
-            # Consumer.
-            packer = _ConsumerPacker()
-            packer._setup_nccl_data_packer(
-                device=device,
-                redis_client=client,
-                config=config,
-                prefetch_timeout=30.0,
-                max_attempts=3,
-                recv_timeout=10.0,
-            )
+            # Consumer, built one of the two supported ways.  Both must move
+            # real bytes GPU->GPU; the composed path is otherwise only covered
+            # by CPU tests with a fake transport.
+            if composed:
+                from cosmos_rl.utils.payload_transport.nccl.strategy import (
+                    compose_nccl_transport,
+                )
+
+                packer = _ComposedPacker()
+                compose_nccl_transport(
+                    packer,
+                    device=device,
+                    redis_client=client,
+                    config=config,
+                    prefetch_timeout=30.0,
+                    max_attempts=3,
+                    recv_timeout=10.0,
+                )
+            else:
+                packer = _ConsumerPacker()
+                packer._setup_nccl_data_packer(
+                    device=device,
+                    redis_client=client,
+                    config=config,
+                    prefetch_timeout=30.0,
+                    max_attempts=3,
+                    recv_timeout=10.0,
+                )
             # Wait for the producer's metadata.
             raw = None
             deadline = time.monotonic() + 30
@@ -129,7 +147,14 @@ def _worker(rank: int, world_size: int, err_queue):
             expected = _make_trajectory(device)["observations"]
             assert torch.allclose(obs.float(), expected), "payload mismatch"
             client.set(_DONE_KEY, "1")
-            packer.shutdown_nccl_data_packer()
+            if composed:
+                # No transport-specific teardown to call: shutdown_prefetch
+                # defaults before_join to the attached strategy, which is the
+                # abort that lets a parked recv fail fast.
+                packer.shutdown_prefetch()
+                packer._transport_strategy.shutdown()
+            else:
+                packer.shutdown_nccl_data_packer()
     except Exception as e:  # pragma: no cover - surfaced to the parent
         import traceback
 
@@ -164,8 +189,16 @@ try:
     class _ConsumerPacker(_NCCLDataPackerMixin, _BaseTrajPacker):
         pass
 
+    from cosmos_rl.utils.payload_transport.prefetch_mixin import (
+        PrefetchDataPackerMixin as _PrefetchDataPackerMixin,
+    )
+
+    class _ComposedPacker(_PrefetchDataPackerMixin, _BaseTrajPacker):
+        """No NCCL ancestry -- the transport arrives as an attached strategy."""
+
 except Exception:  # pragma: no cover - import guarded for CPU-only collection
     _ConsumerPacker = None
+    _ComposedPacker = None
 
 
 def _ensure_redis() -> bool:
@@ -242,13 +275,14 @@ class TestNcclE2E(unittest.TestCase):
         for key in (_META_KEY, _DONE_KEY):
             self.client.delete(key)
 
-    def test_two_rank_roundtrip(self):
+    def _run_roundtrip(self, composed: bool):
         import torch.multiprocessing as mp
 
         ctx = mp.get_context("spawn")
         err_queue = ctx.Queue()
         procs = [
-            ctx.Process(target=_worker, args=(rank, 2, err_queue)) for rank in range(2)
+            ctx.Process(target=_worker, args=(rank, 2, err_queue, composed))
+            for rank in range(2)
         ]
         for p in procs:
             p.start()
@@ -263,6 +297,20 @@ class TestNcclE2E(unittest.TestCase):
                 p.terminate()
                 errors.append("a rank hung and was terminated")
         self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_two_rank_roundtrip(self):
+        """Consumer built by subclassing the NCCL mixin (the original path)."""
+        self._run_roundtrip(composed=False)
+
+    def test_two_rank_roundtrip_composed(self):
+        """Consumer built by COMPOSING the transport -- no NCCL ancestry.
+
+        The composed path's other coverage is CPU-only with a stand-in
+        transport, so without this it never actually moves bytes between two
+        GPUs. Same assertions as above: if composition wires anything
+        differently, the payload comes back wrong or not at all.
+        """
+        self._run_roundtrip(composed=True)
 
 
 if __name__ == "__main__":

@@ -18,9 +18,21 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Type,
+)
 
 from cosmos_rl.utils.logging import logger
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
+    from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
 
 
 # Canonical TOML keys read from the experiment ``[custom]`` section.
@@ -511,6 +523,41 @@ def _maybe_autoload_backend(name: str) -> None:
             )
 
 
+def make_transport_strategy(config: Any) -> Optional["PayloadTransportStrategy"]:
+    """Build the transport strategy this config selects, or None for redis.
+
+    The point of the strategy seam: a consumer composes a transport from config
+    instead of picking a packer *class* per transport at import time.
+
+    Returns None for the default ``redis`` mode, which moves payloads through
+    the control plane and needs no strategy at all -- so ``None`` means "no
+    interception", exactly what an unattached packer already does.
+
+    The guard runs first, for the same reason ``CommMixin`` calls it outside
+    its attach try/except: ``nccl`` and ``ucxx`` each deliver a payload to
+    exactly one receiver, and a topology that violates that must fail loudly
+    here rather than be discovered as a hang mid-run.
+
+    Imports are deferred so this module stays importable where a backend's
+    optional dependency is missing -- ``ucxx`` in particular is an extra.
+    """
+    mode = get_payload_transfer_mode(config)
+    if mode not in P2P_TRANSFER_MODES:
+        return None
+    validate_single_receiver_topology(config, mode)
+
+    if mode == "nccl":
+        from cosmos_rl.utils.payload_transport.nccl.strategy import (
+            NCCLTransportStrategy,
+        )
+
+        return NCCLTransportStrategy()
+
+    from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+
+    return UCXXTransportStrategy()
+
+
 __all__ = [
     "DEFAULT_TRANSFER_MODE",
     "LEGACY_NCCL_KEY",
@@ -521,5 +568,6 @@ __all__ = [
     "RedisEndpoint",
     "get_payload_transfer_mode",
     "is_payload_transfer_mode_explicit",
+    "make_transport_strategy",
     "validate_single_receiver_topology",
 ]
