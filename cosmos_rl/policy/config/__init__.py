@@ -1572,9 +1572,11 @@ class RolloutConfig(BaseModel):
         description=(
             "Maximum number of rollout prompt batches to keep in the bounded "
             "_prompt_queue when prefetch_rollout is enabled.  The default of 2 "
-            "preserves the original one-batch look-ahead behavior; increase it "
-            "only when deeper prompt/setup overlap is useful and the extra "
-            "queued payloads fit comfortably in memory."
+            "preserves the original one-batch look-ahead behavior.  Values above "
+            "2 are useful only for absorbing bursty fetch/setup latency; each "
+            "queued batch consumes the controller's samples_on_the_fly budget "
+            "and can engage the soft throttle earlier, so keep this small relative "
+            "to train.train_policy.allowed_outdated_steps."
         ),
     )
 

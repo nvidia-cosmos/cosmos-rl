@@ -114,7 +114,9 @@ def _make_worker_for_prefetch(
         except StopIteration:
             return ([], True)
 
-    worker.api_client = SimpleNamespace(get_next_prompt=_get_next_prompt)
+    worker.api_client = SimpleNamespace(
+        get_next_prompt=MagicMock(side_effect=_get_next_prompt)
+    )
 
     # Fake rollout backend: records bind_prefetch_context/submit_setup
     # calls.  Mimics the surface a RolloutGenerationMixin-composing
@@ -362,10 +364,7 @@ class TestPrefetchLoopSubmitSetupWiring(unittest.TestCase):
         self.assertEqual(len(recorder), 2)
 
     def test_bounded_queue_back_pressure(self) -> None:
-        """``put`` blocks when the bounded queue is full; the producer
-        runs at the consumer's pace.  This is the back-pressure
-        mechanism that replaces the old 500 ms polling sleep.
-        """
+        """A full queue prevents the producer from leasing another batch."""
         recorder: List[List[dict]] = []
         # Many batches, small queue.  Producer should not race ahead.
         n_batches = 6
@@ -385,18 +384,23 @@ class TestPrefetchLoopSubmitSetupWiring(unittest.TestCase):
         thread = threading.Thread(target=worker._prefetch_loop, daemon=True)
         thread.start()
 
-        # Sleep without draining: queue should fill to maxsize=1 and
-        # producer should block on put.  After this sleep,
-        # exactly 1 batch should be queued and 1 submit_setup
-        # should have been recorded (the one currently blocked on
-        # put), or possibly 2 (the one in-queue plus the one stuck
-        # at put).  The strict invariant is that submit_setup has
-        # NOT been called n_batches times yet.
-        time.sleep(0.3)
-        self.assertLess(
+        deadline = time.monotonic() + 3.0
+        while worker._prompt_queue.qsize() < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(worker._prompt_queue.qsize(), 1)
+
+        # Leave the queue full long enough for an ungated producer to
+        # lease and submit the next batch before blocking on put.
+        time.sleep(0.1)
+        self.assertEqual(
+            worker.api_client.get_next_prompt.call_count,
+            1,
+            "a full queue must prevent another controller lease",
+        )
+        self.assertEqual(
             len(recorder),
-            n_batches,
-            "producer must not race ahead of bounded queue",
+            1,
+            "a full queue must prevent setup for an unqueued batch",
         )
 
         # Drain: pop one at a time and verify the producer keeps up.
@@ -425,14 +429,16 @@ class TestPrefetchQueueMaxsize(unittest.TestCase):
         )
         return worker
 
-    def test_prefetch_queue_maxsize_reads_rollout_config(self) -> None:
-        worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
+    def test_prompt_queue_and_target_depth_use_post_override_config(self) -> None:
+        worker = self._make_minimal_worker(prefetch_queue_maxsize=2)
 
+        # Simulate a rollout backend overriding config from post_init_hook
+        # before the worker configures its queue.
+        worker.config.rollout.prefetch_queue_maxsize = 5
+        worker._configure_prompt_queue()
+
+        self.assertEqual(worker._prompt_queue.maxsize, 5)
         self.assertEqual(worker._prefetch_queue_maxsize, 5)
-
-    def test_prompt_fetch_target_depth_uses_queue_maxsize_for_overlap(self) -> None:
-        worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
-
         self.assertEqual(worker._prompt_fetch_target_depth(prep_overlap=True), 5)
         self.assertEqual(worker._prompt_fetch_target_depth(prep_overlap=False), 1)
 
