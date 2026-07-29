@@ -501,6 +501,13 @@ class GrpoConfig(BaseModel):
         description="Whether to divide the advantage by the standard deviation of rewards.",
     )
 
+    algo: str = Field(
+        default="grpo",
+        description="Name of the registered rule-based algo that computes rewards and advantages "
+        "(see `cosmos_rl.utils.constant.Algo`). Register additional algos with "
+        "`cosmos_rl.dispatcher.algo.base.register_rule_based_algo`.",
+    )
+
     overlong_reward: OverlongRewardConfig = Field(
         default_factory=OverlongRewardConfig,
         description="Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long.",

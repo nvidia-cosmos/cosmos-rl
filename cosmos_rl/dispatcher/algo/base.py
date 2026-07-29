@@ -21,6 +21,16 @@ REGISTERED_ALGOs = {}
 
 
 class RuleBasedAlgo(ABC):
+    def __init__(self, config: Any = None, **kwargs):
+        """Store the run config so an algo can read its own settings.
+
+        Subclasses forward unrecognized keyword arguments here, so accepting
+        and absorbing them keeps a registered algo free to declare only the
+        arguments it uses.
+        """
+        del kwargs
+        self.config = config
+
     @abstractmethod
     def compute_reward(
         self, to_be_evaluated: Any, reference: Any, prompt: Any = None, **kwargs
@@ -36,5 +46,10 @@ class RuleBasedAlgo(ABC):
         return False
 
 
-def _register_rule_based_algo(name: str, algo: RuleBasedAlgo):
+def register_rule_based_algo(name: str, algo: RuleBasedAlgo):
+    """Register an algo under a name selectable by `train.train_policy.algo`."""
     REGISTERED_ALGOs[name] = algo
+
+
+# Retained for callers that registered before the name was made public.
+_register_rule_based_algo = register_rule_based_algo
