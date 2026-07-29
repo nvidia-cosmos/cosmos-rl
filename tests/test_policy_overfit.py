@@ -85,15 +85,36 @@ class TestPolicyOverfit(unittest.TestCase):
             env=policy_env,
         )
 
-        processes = [controller_process, policy_process]
-
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
+        # Wait on the POLICY, not the controller.  The controller is an HTTP
+        # server: it exits only when training completes normally, so waiting on
+        # it first turns *any* policy-side failure into an unbounded hang --
+        # the policy dies, the controller never sees completion, never exits,
+        # and communicate() blocks forever.  Observed twice on an 8-GPU node,
+        # each time consuming the suite's entire remaining budget (a 2h
+        # ceiling, and 29 later suites that never ran).
+        timeout_s = float(os.environ.get("COSMOS_TEST_OVERFIT_TIMEOUT_S", "1800"))
+        try:
+            policy_process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            policy_process.kill()
+            policy_process.communicate()
+            raise AssertionError(
+                f"policy did not finish within {timeout_s:.0f}s; killed it. "
+                "Set COSMOS_TEST_OVERFIT_TIMEOUT_S to raise the budget."
             )
+        finally:
+            # The controller has no reason to exit if the policy failed, so
+            # never wait on it -- just reap it.
+            controller_process.terminate()
+            try:
+                controller_process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                controller_process.kill()
+                controller_process.communicate()
+
+        assert policy_process.returncode == 0, (
+            f"policy process failed with code: {policy_process.returncode}"
+        )
 
 
 if __name__ == "__main__":
