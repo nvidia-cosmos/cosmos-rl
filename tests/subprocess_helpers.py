@@ -55,7 +55,16 @@ def kill_process_group(process):
         try:
             _kill_descendants(process.pid)
             pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGKILL)
+            # Only killpg a group the child actually leads.  A Popen without
+            # ``start_new_session=True`` leaves the child in *our* process
+            # group, and killpg on that would SIGKILL the test runner itself --
+            # turning a bounded timeout into a suite that dies with no report.
+            # ``_kill_descendants`` above already walked the tree, so skipping
+            # the group signal costs nothing.
+            if pgid != os.getpgrp():
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
         except (ProcessLookupError, PermissionError):
             pass
         except Exception:
@@ -95,8 +104,31 @@ def wait_for_controller_ready(
     )
 
 
+def resolve_timeout(timeout_s):
+    """Scale a test's wait budget by ``COSMOS_TEST_TIMEOUT_SCALE``.
+
+    The per-call budgets below are sized for a healthy GPU node.  A slow or
+    contended cluster needs all of them raised at once, so the knob is a single
+    multiplier on the helper rather than one env var per test.
+    """
+    try:
+        scale = float(os.environ.get("COSMOS_TEST_TIMEOUT_SCALE", "1"))
+    except ValueError:
+        scale = 1.0
+    if scale <= 0:
+        scale = 1.0
+    return timeout_s * scale
+
+
 def wait_all_or_fail(testcase, processes, timeout_s, context):
-    """Bounded wait for subprocess trees; always reaps process groups."""
+    """Bounded wait for subprocess trees; always reaps process groups.
+
+    Waits against a single shared deadline, not a per-process one: these tests
+    launch a controller plus its peers, and the controller is an HTTP server
+    that exits only on normal completion.  Waiting on it first would otherwise
+    turn any peer-side failure into an unbounded hang.
+    """
+    timeout_s = resolve_timeout(timeout_s)
     deadline = time.monotonic() + timeout_s
     try:
         try:

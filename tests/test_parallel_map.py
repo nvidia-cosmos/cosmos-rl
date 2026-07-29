@@ -19,6 +19,8 @@ import sys
 import subprocess
 import unittest
 
+from subprocess_helpers import wait_all_or_fail
+
 
 class TestParallelMap(unittest.TestCase):
     def test_parallel_topo_mapper(self):
@@ -49,28 +51,15 @@ class TestParallelMap(unittest.TestCase):
             stderr=sys.stderr,
             env=env,
         )
-        try:
-            # Wait for process to complete
-            for process in [policy_process]:
-                stdout, stderr = process.communicate()
-
-                # stdout/stderr are both piped directly to sys.stderr above, so
-                # communicate() returns (None, None). Only decode when we
-                # actually captured bytes.
-                stderr_msg = (
-                    stderr.decode(errors="replace")
-                    if isinstance(stderr, (bytes, bytearray))
-                    else ""
-                )
-                assert process.returncode == 0, (
-                    f"Process failed with return code {process.returncode}. "
-                    f"See subprocess output above. {stderr_msg}"
-                )
-
-        finally:
-            # Ensure process is terminated
-            for process in [policy_process]:
-                process.wait()
+        # stdout/stderr are piped straight to sys.stderr above, so the
+        # subprocess output is already on the console; the helper only needs to
+        # bound the wait and check the exit code.
+        wait_all_or_fail(
+            self,
+            [policy_process],
+            timeout_s=600,
+            context="test_parallel_map_check",
+        )
 
     def test_policy_parallelism_extract(self):
         """Test policy parallelism extraction using torchrun."""
@@ -116,26 +105,12 @@ class TestParallelMap(unittest.TestCase):
                 stderr=sys.stderr,
                 env=env,
             )
-            try:
-                # Wait for process to complete
-                for process in [policy_process]:
-                    stdout, stderr = process.communicate()
-
-                    stderr_msg = (
-                        stderr.decode(errors="replace")
-                        if isinstance(stderr, (bytes, bytearray))
-                        else ""
-                    )
-                    assert process.returncode == 0, (
-                        f"Process failed with return code {process.returncode} "
-                        f"(fsdp={fsdp}, tp={tp}, pp={pp}). "
-                        f"See subprocess output above. {stderr_msg}"
-                    )
-
-            finally:
-                # Ensure process is terminated
-                for process in [policy_process]:
-                    process.wait()
+            wait_all_or_fail(
+                self,
+                [policy_process],
+                timeout_s=600,
+                context=f"test_policy_parallelism_extract fsdp={fsdp} tp={tp} pp={pp}",
+            )
 
     def test_rollout_parallelism_extract(self):
         """Test rollout parallelism extraction using torchrun."""
@@ -176,26 +151,12 @@ class TestParallelMap(unittest.TestCase):
                 stderr=sys.stderr,
                 env=env,
             )
-            try:
-                # Wait for process to complete
-                for process in [policy_process]:
-                    stdout, stderr = process.communicate()
-
-                    stderr_msg = (
-                        stderr.decode(errors="replace")
-                        if isinstance(stderr, (bytes, bytearray))
-                        else ""
-                    )
-                    assert process.returncode == 0, (
-                        f"Process failed with return code {process.returncode} "
-                        f"(fsdp={fsdp}, tp={tp}, pp={pp}). "
-                        f"See subprocess output above. {stderr_msg}"
-                    )
-
-            finally:
-                # Ensure process is terminated
-                for process in [policy_process]:
-                    process.wait()
+            wait_all_or_fail(
+                self,
+                [policy_process],
+                timeout_s=600,
+                context=f"test_rollout_parallelism_extract fsdp={fsdp} tp={tp} pp={pp}",
+            )
 
 
 if __name__ == "__main__":

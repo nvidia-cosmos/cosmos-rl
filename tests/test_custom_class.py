@@ -60,13 +60,12 @@ class TestCustomSampler(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_data_packer_factory",
+        )
 
     def test_custom_sampler(self):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
@@ -94,13 +93,12 @@ class TestCustomSampler(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_custom_sampler",
+        )
 
 
 class TestCustomRolloutOutput(unittest.TestCase):

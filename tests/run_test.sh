@@ -129,6 +129,8 @@ run python tests/test_ucxx_fetch_engine.py
 run python tests/test_ucxx_rollout_mixin.py
 run python tests/test_ucxx_transport.py
 run python tests/test_launcher_shutdown.py
+# Guards the wait/teardown helper the GPU suites below rely on to stay bounded.
+run python tests/test_subprocess_helpers.py
 run python tests/test_process_flow.py
 # Composed-transport seam and the UCXX end-to-end guard.  A test file
 # does nothing until it is named here -- run_test.sh is the only thing

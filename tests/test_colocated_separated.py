@@ -25,6 +25,7 @@ import tempfile
 
 from cosmos_rl.utils import network_util
 from launch_test_worker import load_simple_grpo_config
+from subprocess_helpers import wait_all_or_fail
 
 
 class TestColocatedSeparated(unittest.TestCase):
@@ -125,13 +126,12 @@ class TestColocatedSeparated(unittest.TestCase):
 
         processes = [controller_process, policy_process, rollout_process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_colocated_separated",
+        )
 
 
 if __name__ == "__main__":

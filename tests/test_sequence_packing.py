@@ -18,6 +18,8 @@ import os
 import sys
 import subprocess
 import torch
+
+from subprocess_helpers import wait_all_or_fail
 from transformers import AutoProcessor, AutoModelForCausalLM
 from transformers.utils.import_utils import (
     is_causal_conv1d_available,
@@ -158,13 +160,12 @@ class SeqPackingTest(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context=f"run_train_for_sequence_packing fsdp={fsdp} tp={tp} cp={cp}",
+        )
 
     def test_train_for_sequence_packing(self):
         self.run_train_for_sequence_packing(4, 1, 1)

@@ -18,6 +18,8 @@ import unittest
 import torch
 import subprocess
 import sys
+
+from subprocess_helpers import wait_all_or_fail
 from multiprocessing import shared_memory
 import numpy as np
 from launch_test_worker import POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE
@@ -98,20 +100,12 @@ class TestPolicyToRollout(unittest.TestCase):
                 env=rollout_env,
             )
 
-            try:
-                # Wait for process to complete
-                for process in [policy_process, rollout_process]:
-                    stdout, stderr = process.communicate()
-
-                    # Check if process completed successfully
-                    assert process.returncode == 0, (
-                        f"Process failed: {stderr.decode() if stderr else ''}"
-                    )
-
-            finally:
-                # Ensure process is terminated
-                for process in [policy_process, rollout_process]:
-                    process.wait()
+            wait_all_or_fail(
+                self,
+                [policy_process, rollout_process],
+                timeout_s=600,
+                context="policy_to_rollout_wieght_sync",
+            )
         finally:
             # Clean up shared memory
             try:
