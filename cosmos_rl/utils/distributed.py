@@ -93,17 +93,44 @@ def destroy_distributed():
 def gradient_reduce_across_dp_replicas_(
     parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
     comm: "HighAvailabilitylNccl",
+    *,
+    reduce_op: dist.ReduceOp = dist.ReduceOp.AVG,
+    require_all_gradients: bool = False,
+    expected_participants: Optional[int] = None,
 ):
     """
-    Reduce a tensor across data parallel replicas.
+    Reduce parameter gradients across data parallel replicas.
     TODO, we need make sure this function is atomic.
 
     Args:
         parameters: an iterable of Tensors or a single Tensor that will reduce gradients.
-        comm_idx (int): The nccl communicator id for the reduction.
+        comm: The high-availability NCCL communicator.
+        reduce_op: Collective reduction operation. Existing callers default to AVG.
+        require_all_gradients: Collectively validate a fixed complete gradient set.
+        expected_participants: Expected collective membership for strict validation.
     """
-
-    grads = [p.grad for p in parameters if p.grad is not None]
+    parameter_list = (
+        [parameters] if isinstance(parameters, torch.Tensor) else list(parameters)
+    )
+    if expected_participants is not None and not require_all_gradients:
+        raise ValueError(
+            "expected_participants requires strict gradient validation."
+        )
+    if require_all_gradients:
+        if reduce_op != dist.ReduceOp.SUM:
+            raise ValueError(
+                "strict gradient reduction requires ReduceOp.SUM so participant "
+                "and missing-gradient sentinels remain countable."
+            )
+        _strict_gradient_reduce_across_dp_replicas_(
+            parameter_list,
+            comm,
+            expected_participants=expected_participants,
+        )
+        return
+    grads = [
+        parameter.grad for parameter in parameter_list if parameter.grad is not None
+    ]
 
     # We only need to reduce DTensor's local grad, this is to avoid tensor.grad == nullptr
     for i, g in enumerate(grads):
@@ -163,7 +190,10 @@ def gradient_reduce_across_dp_replicas_(
                 gradient_reduce_across_dp_replicas_.first_invoke = False
 
             comm.allreduce(
-                tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms
+                tmp_buffer,
+                tmp_buffer,
+                reduce_op,
+                timeout_ms=timeout_ms,
             )
             tmp_buffer = tmp_buffer.to(original_dtype).to(original_device)
 
@@ -176,6 +206,104 @@ def gradient_reduce_across_dp_replicas_(
                 assert offset <= tmp_buffer.numel(), (
                     "offset should be equal to total size"
                 )
+
+
+def _strict_gradient_reduce_across_dp_replicas_(
+    parameters: List[torch.Tensor],
+    comm: "HighAvailabilitylNccl",
+    *,
+    expected_participants: Optional[int],
+) -> None:
+    """SUM one fixed FP32 layout and validate the same collective.
+
+    Strict mode deliberately uses one flattened buffer so participant and
+    missing-gradient sentinels share the gradient collective. It is intended
+    for compact trainable subsets; large models should use the bucketed
+    non-strict path until strict bucketing preserves equivalent atomic checks.
+    """
+    if not parameters:
+        raise RuntimeError(
+            "strict gradient reduction requires at least one parameter."
+        )
+
+    local_gradients = []
+    missing_gradient_count = 0
+    for parameter in parameters:
+        gradient = parameter.grad
+        if isinstance(gradient, DTensor):
+            gradient = gradient.to_local()
+        if gradient is None:
+            missing_gradient_count += 1
+            local_parameter = (
+                parameter.to_local() if isinstance(parameter, DTensor) else parameter
+            )
+            gradient = torch.zeros_like(local_parameter)
+        local_gradients.append(gradient)
+
+    comm.wait_comm_ready()
+    if expected_participants is None:
+        expected_participants = int(comm.world_size())
+    if expected_participants < 1:
+        raise RuntimeError(
+            "strict gradient reduction requires a positive participant count; "
+            f"got {expected_participants}."
+        )
+
+    original_device = local_gradients[0].device
+    flat_sizes = [gradient.numel() for gradient in local_gradients]
+    packed_gradients = torch.cat(
+        [gradient.detach().reshape(-1).float() for gradient in local_gradients]
+        + [
+            torch.tensor(
+                [1.0, float(missing_gradient_count)],
+                dtype=torch.float32,
+                device=original_device,
+            )
+        ]
+    ).contiguous()
+    if (
+        packed_gradients.device == torch.device("cpu")
+        and expected_participants > 1
+    ):
+        packed_gradients = packed_gradients.cuda()
+
+    # Keep the send buffer immutable so a retried in-place collective cannot
+    # reuse partially reduced values from an earlier failed attempt.
+    comm.allreduce(
+        packed_gradients.clone(),
+        packed_gradients,
+        dist.ReduceOp.SUM,
+        timeout_ms=get_nccl_timeout_ms(),
+    )
+    reduced_participants, reduced_missing_count = (
+        float(value) for value in packed_gradients[-2:].detach().cpu().tolist()
+    )
+    if reduced_participants != float(expected_participants):
+        raise RuntimeError(
+            "gradient reduction did not include every expected participant: "
+            f"reduced participant sentinel={reduced_participants!r}, "
+            f"expected={expected_participants}."
+        )
+    if reduced_missing_count != 0.0:
+        raise RuntimeError(
+            "gradient reduction is missing gradients across policy replicas; "
+            f"reduced missing-gradient count={reduced_missing_count!r}."
+        )
+    if not bool(torch.isfinite(packed_gradients[:-2]).all().item()):
+        raise RuntimeError(
+            "gradient reduction produced non-finite globally reduced gradients."
+        )
+
+    reduced_gradients = packed_gradients[:-2].to(original_device)
+    offset = 0
+    for gradient, flat_size in zip(local_gradients, flat_sizes):
+        gradient.copy_(
+            reduced_gradients[offset : offset + flat_size]
+            .view_as(gradient)
+            .to(gradient.dtype)
+        )
+        offset += flat_size
+    assert offset == reduced_gradients.numel()
 
 
 gradient_reduce_across_dp_replicas_.first_invoke = True
@@ -578,13 +706,19 @@ class HighAvailabilitylNccl:
         if self.is_single_peer.is_set():
             # single peer, no need to do nccl op
             return
+        if self.max_retry < 1:
+            raise RuntimeError(
+                f"{self.__log_prefix()} nccl op '{func.__name__}' has invalid "
+                f"max_retry={self.max_retry}; expected at least one attempt."
+            )
 
-        for i in range(self.max_retry):
+        last_error = None
+        for attempt in range(1, self.max_retry + 1):
             try:
-                self.wait_comm_ready()
                 timeout_ms = (
                     timeout_ms if timeout_ms is not None else self.default_timeout_ms
                 )
+                self.wait_comm_ready(timeout=timeout_ms / 1000)
                 with (
                     nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms),
                     self.build_mesh_lock,
@@ -595,18 +729,29 @@ class HighAvailabilitylNccl:
                         **kwargs,
                     )
 
-                # if success, break the loop
-                break
+                return
             except Exception as e:
+                last_error = e
                 # mark the communicator is not ready
                 self.is_comm_ready.clear()
 
                 # report the error to the controller
                 # the communicator will destroy before buildmesh
-                self.api_client.post_nccl_comm_error(self.replica_name, e)
+                try:
+                    self.api_client.post_nccl_comm_error(self.replica_name, e)
+                except Exception:
+                    logger.exception(
+                        "%s failed to report nccl error to the controller",
+                        self.__log_prefix(),
+                    )
                 logger.error(
-                    f"{self.__log_prefix()} recovering nccl op '{func.__name__}' with kwargs {kwargs} after {i} retries: {e}"
+                    f"{self.__log_prefix()} recovering nccl op '{func.__name__}' "
+                    f"with kwargs {kwargs} after attempt {attempt}/{self.max_retry}: {e}"
                 )
+        raise RuntimeError(
+            f"{self.__log_prefix()} nccl op '{func.__name__}' failed after "
+            f"{self.max_retry} attempts."
+        ) from last_error
 
     def destroy_nccl_comm(self):
         self.cmd_queue.put(self.DESTROY_CMD)
