@@ -18,6 +18,8 @@ import unittest
 import torch
 import subprocess
 import sys
+
+from subprocess_helpers import wait_all_or_fail
 from multiprocessing import shared_memory
 import numpy as np
 from cosmos_rl.utils.pynccl import (
@@ -97,18 +99,12 @@ class TestPolicyToPolicy(unittest.TestCase):
                 env=policy_dst_env,
             )
 
-            try:
-                # Wait for process to complete
-                for process in [policy_process, policy_dst_process]:
-                    stdout, stderr = process.communicate()
-
-                    # Check if process completed successfully
-                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
-
-            finally:
-                # Ensure process is terminated
-                for process in [policy_process, policy_dst_process]:
-                    process.wait()
+            wait_all_or_fail(
+                self,
+                [policy_process, policy_dst_process],
+                timeout_s=600,
+                context="test_policy_to_policy",
+            )
         finally:
             # Clean up shared memory
             try:
@@ -197,18 +193,12 @@ class TestPolicyToPolicy(unittest.TestCase):
                         env=policy_dst_env,
                     )
                 )
-            try:
-                # Wait for process to complete
-                for process in [policy_process] + policy_dst_process:
-                    stdout, stderr = process.communicate()
-
-                    # Check if process completed successfully
-                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
-
-            finally:
-                # Ensure process is terminated
-                for process in [policy_process] + policy_dst_process:
-                    process.wait()
+            wait_all_or_fail(
+                self,
+                [policy_process] + policy_dst_process,
+                timeout_s=600,
+                context="test_policy_to_multi_policy",
+            )
         finally:
             # Clean up shared memory
             try:
