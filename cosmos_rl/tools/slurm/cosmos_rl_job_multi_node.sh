@@ -241,6 +241,41 @@ submit_autoresume() {
     return ${status}
 }
 
+# Is a non-zero controller exit actually a deliberate, successful shutdown?
+#
+# COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS makes the controller SIGTERM ITSELF once
+# the last policy replica unregisters, so the allocation is released instead of
+# idling to wall-clock.  That is how a *successful* run ends, but it surfaces
+# here as 128+SIGTERM and was indistinguishable from a crash -- so every
+# successful multi-node run burned its whole retry budget re-running completed
+# training, then reported FAILED to SLURM.
+#
+# Mirrors ``_is_coordinated_controller_exit`` in launcher/launch_all.py, which
+# fixed the same misreading for the single-node CLI path.  Deliberately narrow,
+# so a SIGTERM from anywhere else still fails loudly:
+#
+#   * only the controller -- the caller passes ${exit_code_controller};
+#   * only 128+SIGTERM;
+#   * only when the feature that produces it is on.  Truthiness matches
+#     utils/constant.py, which accepts 1/true/yes;
+#   * only when this script was NOT itself signalled.  ``scancel`` and the
+#     ``--signal=B:SIGUSR1@...`` pre-timeout both set ``received_signal``, and
+#     a SLURM time-limit SIGTERM reaches the controller as 143 too -- without
+#     this clause a job killed at its wall-clock limit would report success.
+is_coordinated_controller_exit() {
+    local code=$1
+
+    [[ ${code} -eq $((128 + 15)) ]] || return 1
+    [[ -z "${received_signal}" ]] || return 1
+
+    local flag
+    flag=$(printf '%s' "${COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS:-0}" | tr '[:upper:]' '[:lower:]')
+    case "${flag}" in
+        1 | true | yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Retry the job on transient failures (decrements remaining-retries counter).
 handle_auto_retry() {
     local status=$1
@@ -579,7 +614,16 @@ while true; do
     fi
 
     if [[ -n "${exit_code_controller}" ]] && [[ ${exit_code_controller} -ne 0 ]]; then
-        log "Controller failed with exit code ${exit_code_controller}. Terminating other processes."
+        if is_coordinated_controller_exit "${exit_code_controller}"; then
+            log "Controller exited ${exit_code_controller} via coordinated shutdown (COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS). Treating as success."
+            status=0
+        else
+            log "Controller failed with exit code ${exit_code_controller}. Terminating other processes."
+            status=${exit_code_controller}
+        fi
+        # Reap peers either way.  On a coordinated shutdown the policy replicas
+        # have already exited -- that is what triggered it -- so these are
+        # normally no-ops, but a rollout can still be draining.
         if [[ "${policy_waited}" == "false" ]]; then
             kill "$pid_policy" 2>/dev/null || true
             wait "$pid_policy" 2>/dev/null || true
@@ -588,7 +632,6 @@ while true; do
             kill "$pid_rollout" 2>/dev/null || true
             wait "$pid_rollout" 2>/dev/null || true
         fi
-        status=${exit_code_controller}
         break
     fi
 
