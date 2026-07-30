@@ -429,6 +429,13 @@ class TestPrefetchQueueMaxsize(unittest.TestCase):
         )
         return worker
 
+    def test_prompt_queue_uses_configured_maxsize(self) -> None:
+        worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
+
+        worker._configure_prompt_queue()
+
+        self.assertEqual(worker._prompt_queue.maxsize, 5)
+
     def test_prompt_queue_and_target_depth_use_post_override_config(self) -> None:
         worker = self._make_minimal_worker(prefetch_queue_maxsize=2)
 
