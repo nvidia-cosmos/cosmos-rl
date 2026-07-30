@@ -113,9 +113,7 @@ def gradient_reduce_across_dp_replicas_(
         [parameters] if isinstance(parameters, torch.Tensor) else list(parameters)
     )
     if expected_participants is not None and not require_all_gradients:
-        raise ValueError(
-            "expected_participants requires strict gradient validation."
-        )
+        raise ValueError("expected_participants requires strict gradient validation.")
     if require_all_gradients:
         if reduce_op != dist.ReduceOp.SUM:
             raise ValueError(
@@ -222,9 +220,7 @@ def _strict_gradient_reduce_across_dp_replicas_(
     non-strict path until strict bucketing preserves equivalent atomic checks.
     """
     if not parameters:
-        raise RuntimeError(
-            "strict gradient reduction requires at least one parameter."
-        )
+        raise RuntimeError("strict gradient reduction requires at least one parameter.")
 
     local_gradients = []
     missing_gradient_count = 0
@@ -261,10 +257,7 @@ def _strict_gradient_reduce_across_dp_replicas_(
             )
         ]
     ).contiguous()
-    if (
-        packed_gradients.device == torch.device("cpu")
-        and expected_participants > 1
-    ):
+    if packed_gradients.device == torch.device("cpu") and expected_participants > 1:
         packed_gradients = packed_gradients.cuda()
 
     # Keep the send buffer immutable so a retried in-place collective cannot
