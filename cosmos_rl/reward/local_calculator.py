@@ -21,7 +21,6 @@ from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.reward.base import RolloutGroup
-import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.util as util
 
 
@@ -60,7 +59,7 @@ class LocalRewardCalculator:
         self.config = config
         self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
 
-        self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+        self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
             reward_fn=Reward(
                 config=config,
                 tokenier=self.tokenizer,
@@ -70,6 +69,7 @@ class LocalRewardCalculator:
                 data_packer=data_packer,
             ),
             unbiased=config.train.train_policy.unbiased_advantage,
+            config=config,
         )
         if config.validation.enable:
             if not config.validation.reward_function:
@@ -85,14 +85,15 @@ class LocalRewardCalculator:
                 logger.info(
                     "[Reward] No validation reward function config specified, using the same reward function as training."
                 )
-            self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+            self.val_rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
                 reward_fn=Reward(
                     config=config,
                     tokenier=self.tokenizer,
                     reward_function=config.validation.reward_function,
                     explicit_reward_fn=val_reward_fns,
                     data_packer=val_data_packer,
-                )
+                ),
+                config=config,
             )
 
     @classmethod
