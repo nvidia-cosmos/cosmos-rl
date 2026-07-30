@@ -37,13 +37,13 @@ import subprocess
 import unittest
 from pathlib import Path
 
-TEMPLATE = (
-    Path(__file__).resolve().parents[1]
-    / "cosmos_rl"
-    / "tools"
-    / "slurm"
-    / "cosmos_rl_job_multi_node.sh"
-)
+from cosmos_rl.tools import slurm as slurm_tools
+
+# Resolve the template next to the *installed* module, not by repo layout.
+# CI copies only tests/ into the image and installs the package into
+# site-packages, so a repo-relative path resolves to nothing there.  The .sh
+# ships alongside the module in both cases.
+TEMPLATE = Path(slurm_tools.__file__).resolve().parent / "cosmos_rl_job_multi_node.sh"
 
 SIGTERM_RC = 128 + signal.SIGTERM  # 143
 
@@ -196,10 +196,6 @@ class TestAutoRetryGate(unittest.TestCase):
         self.assertIn("No retries remaining", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMonitorLoopWiring(unittest.TestCase):
     """The predicate must actually be consulted by the loop.
 
@@ -221,3 +217,7 @@ class TestMonitorLoopWiring(unittest.TestCase):
 
     def test_all_clean_exits_are_success(self):
         self.assertEqual(_run_monitor(0, flag="1"), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
