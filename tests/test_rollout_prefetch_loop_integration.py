@@ -419,15 +419,20 @@ class TestPrefetchLoopSubmitSetupWiring(unittest.TestCase):
         self.assertEqual(len(recorder), n_batches, "submit_setup once per batch")
 
 
-class TestPrefetchQueueMaxsize(unittest.TestCase):
-    def _make_minimal_worker(self, *, prefetch_queue_maxsize: int = 2) -> Any:
-        worker = DisaggregatedRolloutControlWorker.__new__(
-            DisaggregatedRolloutControlWorker
-        )
-        worker.config = SimpleNamespace(
+class _MinimalPrefetchQueueWorker(DisaggregatedRolloutControlWorker):
+    def __init__(self, *, prefetch_queue_maxsize: int = 2) -> None:
+        self.config = SimpleNamespace(
             rollout=SimpleNamespace(prefetch_queue_maxsize=prefetch_queue_maxsize)
         )
-        return worker
+
+
+class TestPrefetchQueueMaxsize(unittest.TestCase):
+    def _make_minimal_worker(
+        self, *, prefetch_queue_maxsize: int = 2
+    ) -> _MinimalPrefetchQueueWorker:
+        return _MinimalPrefetchQueueWorker(
+            prefetch_queue_maxsize=prefetch_queue_maxsize
+        )
 
     def test_prompt_queue_uses_configured_maxsize(self) -> None:
         worker = self._make_minimal_worker(prefetch_queue_maxsize=5)
