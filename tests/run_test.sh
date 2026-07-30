@@ -129,6 +129,8 @@ run python tests/test_ucxx_fetch_engine.py
 run python tests/test_ucxx_rollout_mixin.py
 run python tests/test_ucxx_transport.py
 run python tests/test_launcher_shutdown.py
+# Same predicate as above, for the multi-node sbatch template.
+run python tests/test_slurm_multinode_exit.py
 # Guards the wait/teardown helper the GPU suites below rely on to stay bounded.
 run python tests/test_subprocess_helpers.py
 run python tests/test_process_flow.py
