@@ -48,6 +48,47 @@ TEMPLATE = (
 SIGTERM_RC = 128 + signal.SIGTERM  # 143
 
 
+def _extract_monitor_loop() -> str:
+    """Pull the process-monitoring loop out of the template.
+
+    Testing the predicate alone is not enough: it would still pass with the
+    call site deleted, i.e. with the fix reverted.  This drives the loop that
+    has to consult it.
+    """
+    src = TEMPLATE.read_text()
+    start = src.index("\nwhile true; do\n")
+    end = src.index("\ndone\n", start)
+    return src[start : end + len("\ndone\n")]
+
+
+def _run_monitor(controller_rc, policy_rc=0, rollout_rc=0, *, flag="1"):
+    """Drive the real loop with real children and return its final status."""
+    script = "\n".join(
+        [
+            "set -u",
+            'received_signal=""',
+            f'COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS="{flag}"',
+            "log() { :; }",
+            "status=",
+            "policy_waited=false; rollout_waited=false; controller_waited=false",
+            "exit_code_policy=; exit_code_rollout=; exit_code_controller=",
+            f"bash -c 'exit {policy_rc}' & pid_policy=$!",
+            f"bash -c 'exit {rollout_rc}' & pid_rollout=$!",
+            f"bash -c 'exit {controller_rc}' & pid_controller=$!",
+            "sleep 0.3",
+            _extract("is_coordinated_controller_exit"),
+            _extract_monitor_loop(),
+            'echo "status=${status}"',
+        ]
+    )
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, f"harness failed: {out.stderr}"
+    line = [x for x in out.stdout.splitlines() if x.startswith("status=")][-1]
+    return int(line.split("=", 1)[1])
+
+
 def _extract(func_name: str) -> str:
     """Pull one shell function out of the template.
 
@@ -157,3 +198,26 @@ class TestAutoRetryGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMonitorLoopWiring(unittest.TestCase):
+    """The predicate must actually be consulted by the loop.
+
+    Without these, deleting the call site -- reverting the fix entirely --
+    leaves every predicate test still green.
+    """
+
+    def test_controller_self_sigterm_yields_success_status(self):
+        self.assertEqual(_run_monitor(SIGTERM_RC, flag="1"), 0)
+
+    def test_controller_self_sigterm_with_feature_off_still_fails(self):
+        self.assertEqual(_run_monitor(SIGTERM_RC, flag="0"), SIGTERM_RC)
+
+    def test_controller_crash_still_fails(self):
+        self.assertEqual(_run_monitor(1, flag="1"), 1)
+
+    def test_policy_failure_is_untouched_by_the_controller_path(self):
+        self.assertEqual(_run_monitor(0, policy_rc=7, flag="1"), 7)
+
+    def test_all_clean_exits_are_success(self):
+        self.assertEqual(_run_monitor(0, flag="1"), 0)
