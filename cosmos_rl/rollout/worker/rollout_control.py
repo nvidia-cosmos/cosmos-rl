@@ -162,16 +162,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # ``work()`` / ``_main_loop_impl`` / ``_prefetch_loop`` ensures
         # we observe the post-override value at the points where the
         # decision actually matters.
-        #
-        # Bounded queue (``maxsize=2``): in single-producer mode,
-        # ``_prefetch_loop`` would otherwise race ahead of the
-        # consumer and queue arbitrarily many batches.  Maxsize=2
-        # keeps the prefetcher exactly one batch ahead.  In legacy
-        # mode, queue depth never exceeds 1 anyway (``main_loop``
-        # only calls ``request_new_prompts`` when the queue is
-        # empty), so the cap is harmless there.
-        self._prompt_queue: Queue[List[RLPayload]] = Queue(maxsize=2)
-
         # Vestigial lock from the dual-producer era: prior to the
         # single-producer-mode refactor, both ``main_loop`` (via
         # ``request_new_prompts``) and ``_prefetch_loop`` could put
@@ -194,6 +184,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.rollout: RolloutBase = RolloutRegistry.get_rollout_cls(
             self.config.rollout.backend
         )(self.config, self.parallel_dims, self.device)
+        # RolloutBase.__init__ has now run post_init_hook, so backend
+        # overrides of rollout queue settings are visible.
+        self._configure_prompt_queue()
 
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
@@ -298,8 +291,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         ``__init__``: backends may flip ``prefetch_rollout`` from
         ``post_init_hook``, which runs *after* this constructor.
 
-        See the comment in ``__init__`` next to ``self._prompt_queue``
-        for the motivation.
+        See the comment in ``__init__`` next to
+        ``_configure_prompt_queue`` for the motivation.
 
         When True, ``_prefetch_loop`` is the *sole* producer for
         ``_prompt_queue`` and ``_main_loop_impl`` consumes only.
@@ -311,6 +304,21 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         return bool(
             self.config.rollout.prefetch_rollout and self.parallel_dims.world_size == 1
+        )
+
+    @property
+    def _prefetch_queue_maxsize(self) -> int:
+        """Configured bounded prompt-queue size for prefetch look-ahead."""
+        return self.config.rollout.prefetch_queue_maxsize
+
+    def _prompt_fetch_target_depth(self, *, prep_overlap: bool) -> int:
+        """Queue depth used by prompt-fetch loops."""
+        return self._prefetch_queue_maxsize if prep_overlap else 1
+
+    def _configure_prompt_queue(self) -> None:
+        """Create the bounded prompt queue from post-backend config."""
+        self._prompt_queue: Queue[List[RLPayload]] = Queue(
+            maxsize=self._prefetch_queue_maxsize
         )
 
     def setup(
@@ -2178,15 +2186,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # drives ``request_new_prompts`` itself.
             if not self._single_producer_mode and not self.state.prompt_fetch_end():
                 # Legacy cadence fetches one batch when the queue is
-                # empty (depth 1).  Prep-overlap stages one batch ahead
-                # (depth 2): with a batch already queued, its per-prompt
+                # empty (depth 1).  Prep-overlap stages queued batches
+                # according to the same cap that bounds the prefetch
+                # queue: with a batch already queued, its per-prompt
                 # prep runs on the mixin's bg setup thread while the
                 # batch in front of it generates.  The fetch is a
                 # cross-rank collective, so every rank runs this loop in
                 # lockstep -- the loop bound (queue depth, prompt_fetch_end,
                 # whether the last fetch added a batch) is identical on
                 # all ranks.
-                target_depth = 2 if prep_overlap else 1
+                target_depth = self._prompt_fetch_target_depth(
+                    prep_overlap=prep_overlap
+                )
                 while (
                     not self.state.prompt_fetch_end()
                     and self._prompt_queue.qsize() < target_depth
@@ -2727,10 +2738,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         notify the rollout backend via ``submit_setup`` so
         :class:`RolloutGenerationMixin` can start ``_prepare_sample``
         on its own bg thread, then ``put`` onto ``_prompt_queue``.
-        Back-pressure is provided by the bounded queue: ``put``
-        blocks when ``main_loop`` is behind, so this thread runs
-        exactly as fast as the consumer drains -- no polling, no
-        ``time.sleep``, no lock.
+        Before leasing a prompt from the controller, the producer
+        waits for bounded-queue capacity.  Since this is the sole
+        producer, observing capacity reserves that slot until
+        ``put``; no extra prompt is leased or submitted for setup
+        while ``main_loop`` is behind.
 
         ``submit_setup`` is called *before* ``put`` so the bg setup
         worker has a head start.  By the time ``main_loop`` pops
@@ -2782,9 +2794,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if self.state.prompt_fetch_end():
                     return
 
-                # Sole producer: no lock, no empty-check (we always
-                # try to fetch the next batch and let the bounded
-                # queue's ``put`` back-pressure us off).
+                # Wait before leasing from the controller.  Checking
+                # capacity reserves the slot because this is the sole
+                # producer; only the consumer can change the queue
+                # before the matching put.
+                while self._prompt_queue.full():
+                    if self.shutdown_signal.wait(timeout=0.05):
+                        return
+
                 try:
                     payloads, is_end = self.api_client.get_next_prompt(
                         self.batch_size,

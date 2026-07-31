@@ -1573,6 +1573,20 @@ class RolloutConfig(BaseModel):
         ),
     )
 
+    prefetch_queue_maxsize: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Maximum number of rollout prompt batches to keep in the bounded "
+            "_prompt_queue when prefetch_rollout is enabled.  The default of 2 "
+            "preserves the original one-batch look-ahead behavior.  Values above "
+            "2 are useful only for absorbing bursty fetch/setup latency; each "
+            "queued batch consumes the controller's samples_on_the_fly budget "
+            "and can engage the soft throttle earlier, so keep this small relative "
+            "to train.train_policy.allowed_outdated_steps."
+        ),
+    )
+
     broadcast_all_params: bool = Field(
         default=False,
         description=(
