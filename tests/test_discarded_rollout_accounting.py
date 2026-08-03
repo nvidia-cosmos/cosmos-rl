@@ -9,13 +9,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from cosmos_rl.dispatcher.protocol import RolloutRequest
 from cosmos_rl.dispatcher.status import PolicyStatusManager
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.rollout.worker.colocated.rollout_control import (
+    ColocatedRolloutControlWorker,
+)
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 
 
-def _rollout_worker(*, n_generation: int = 2, should_report: bool = True):
-    worker = object.__new__(DisaggregatedRolloutControlWorker)
+def _rollout_worker(
+    *,
+    n_generation: int = 2,
+    should_report: bool = True,
+    worker_type=DisaggregatedRolloutControlWorker,
+):
+    worker = object.__new__(worker_type)
     worker.config = SimpleNamespace(
         train=SimpleNamespace(
             non_text=True,
@@ -84,6 +92,19 @@ def test_non_reporting_rank_does_not_report_discard():
         [SimpleNamespace(prompt_idx=0)],
     )
 
+    worker.api_client.post_rollout_completion.assert_not_called()
+
+
+def test_colocated_worker_does_not_report_discarded_samples():
+    worker = _rollout_worker(worker_type=ColocatedRolloutControlWorker)
+
+    valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
+        [RolloutResult(completions=[])],
+        [SimpleNamespace(prompt_idx=0)],
+    )
+
+    assert valid_payloads == []
+    assert valid_results == []
     worker.api_client.post_rollout_completion.assert_not_called()
 
 
