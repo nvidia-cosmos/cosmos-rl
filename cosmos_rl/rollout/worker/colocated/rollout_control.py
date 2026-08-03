@@ -42,6 +42,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         DisaggregatedRolloutControlWorker.rollout_command_handler_registry
     )
 
+    def _report_discarded_samples(self, count: int) -> None:
+        """Skip remote capacity accounting because colocated scheduling observes its local queue."""
+
     def set_command_dispatcher(self, dispatcher: CommandDispatcher):
         """
         Set the command dispatcher for the policy worker.
