@@ -14,11 +14,13 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pynvml
 
 try:
     from torch.distributed.device_mesh import DeviceMesh
@@ -48,6 +50,82 @@ from transformers.activations import ACT2FN
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
 
+def _decode_nvml_string(value: bytes | str) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def _normalize_gpu_uuid(uuid: str) -> str:
+    return uuid[4:] if uuid.startswith("GPU-") else uuid
+
+
+def _visible_cuda_device_uuids() -> dict[str, int]:
+    visible_uuids: dict[str, int] = {}
+    for idx in range(torch.cuda.device_count()):
+        device_uuid = getattr(torch.cuda.get_device_properties(idx), "uuid", "")
+        if device_uuid:
+            visible_uuids[_normalize_gpu_uuid(str(device_uuid))] = idx
+    return visible_uuids
+
+
+@lru_cache(maxsize=1)
+def _has_visible_nvlink_topology() -> bool:
+    visible_devices = torch.cuda.device_count()
+    if visible_devices <= 1:
+        return False
+
+    try:
+        pynvml.nvmlInit()
+        visible_uuids = _visible_cuda_device_uuids()
+        handles_by_visible_idx: dict[int, object] = {}
+        for nvml_idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+            nvml_uuid = _normalize_gpu_uuid(
+                _decode_nvml_string(pynvml.nvmlDeviceGetUUID(handle))
+            )
+            visible_idx = visible_uuids.get(nvml_uuid)
+            if visible_idx is not None:
+                handles_by_visible_idx[visible_idx] = handle
+
+        if len(handles_by_visible_idx) == visible_devices:
+            handles = [
+                handles_by_visible_idx[visible_idx]
+                for visible_idx in range(visible_devices)
+            ]
+        else:
+            # Fall back to the CUDA/NVML ordinal mapping used by unrestricted jobs.
+            handles = [
+                pynvml.nvmlDeviceGetHandleByIndex(device_idx)
+                for device_idx in range(visible_devices)
+            ]
+
+        bus_ids = {
+            _decode_nvml_string(pynvml.nvmlDeviceGetPciInfo(handle).busId).upper(): idx
+            for idx, handle in enumerate(handles)
+        }
+        connected_pairs = set()
+        for idx, handle in enumerate(handles):
+            for link in range(pynvml.NVML_NVLINK_MAX_LINKS):
+                try:
+                    if not pynvml.nvmlDeviceGetNvLinkState(handle, link):
+                        continue
+                    remote_pci = pynvml.nvmlDeviceGetNvLinkRemotePciInfo(handle, link)
+                    remote_idx = bus_ids.get(
+                        _decode_nvml_string(remote_pci.busId).upper()
+                    )
+                    if remote_idx is not None and remote_idx != idx:
+                        connected_pairs.add(tuple(sorted((idx, remote_idx))))
+                except pynvml.NVMLError:
+                    continue
+        return bool(connected_pairs)
+    except Exception:
+        return False
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
 def is_deepep_supported():
     supported = False
     # DeepEP is built for TORCH_CUDA_ARCH_LIST=9.0 by default
@@ -55,7 +133,9 @@ def is_deepep_supported():
     # Judging from https://github.com/deepseek-ai/DeepEP/issues/481
     # in order to install DeepEP for older architectures we would need to
     # disable some features available for newer ones
-    if torch.cuda.get_device_properties().major >= 9:
+    if not torch.cuda.is_available():
+        return supported
+    if torch.cuda.get_device_properties().major >= 9 and _has_visible_nvlink_topology():
         # GroupedExpertsDeepEP requires both 'grouped_gemm' and 'deep_ep' packages to be installed.
         if ops is not None:
             try:

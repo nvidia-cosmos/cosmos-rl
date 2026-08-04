@@ -1,0 +1,101 @@
+# Subsampled AETC tao-vl-reason-v1.0 SFT config for the DAFT-backed hook example.
+
+redis = "12800"
+
+[custom]
+system_prompt = "You are a helpful assistant that can answer questions about street-view CCTV footage."
+
+[custom.train_dataset]
+annotation_path = [
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/bcq_openended.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/bcq.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/mcq_openended.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/mcq.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/open_qa.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/scene_description.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/video_summarization.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/temporal_localization.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/temporal_description.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0/causal_linkage.json",
+]
+response_mode = "hybrid"
+max_samples = 512
+
+[custom.val_dataset]
+annotation_path = [
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0-eval/bcq.json",
+    "/lustre/fsw/portfolios/edgeai/users/yilzhao/workspace/releases/20260501/workspace/aetc-tao-vl-reason-v1.0-eval/mcq.json",
+]
+response_mode = "answer"
+max_samples = 64
+
+[custom.vision]
+fps = 2
+max_frames = 128
+max_pixels = 186625
+
+[train]
+resume = false
+epoch = 1
+timestamp = "aetc_daft_subsample"
+output_dir = "./outputs/aetc_tao_vl_reason_daft"
+epsilon = 1e-6
+optm_name = "AdamW"
+optm_lr = 1e-5
+optm_decay_type = "none"
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_betas = [0.9, 0.999]
+optm_warmup_steps = 0.03
+optm_grad_norm_clip = 1.0
+async_tp_enabled = false
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 8
+sync_weight_interval = 1
+
+[validation]
+enable = true
+freq_in_epoch = 1
+batch_size = 1
+dataloader_num_workers = 1
+dataloader_prefetch_factor = 1
+enable_dataset_cache = false
+
+[policy]
+model_name_or_path = "/models/Cosmos-Reason2-8B-Private"
+model_max_length = 81920
+model_gradient_checkpointing = true
+
+[logging]
+logger = ["console", "tao"]
+project_name = "cr2_anomaly_reasoning"
+experiment_name = "aetc_tao_vl_reason_daft_subsample"
+
+[train.train_policy]
+dataset.name = "aetc_tao_vl_reason_daft_subsample"
+type = "sft"
+enable_dataset_cache = false
+dataloader_num_workers = 1
+dataloader_prefetch_factor = 1
+mini_batch = 1
+dataset.test_size = 0
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq_in_epoch = -1
+max_keep = 1
+save_mode = "sync"
+export_safetensors = true
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+cp_size = 1
+dp_shard_size = 4
+pp_size = 1
+dp_replicate_size = 1
+cp_rotate_method = "allgather"

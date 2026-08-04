@@ -226,6 +226,17 @@ class ParallelDims:
         logger.info(
             f"Building {len(valid_dims)}-D device mesh with {valid_names}, {valid_dims}"
         )
+        if (
+            self.world_size == 1
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        ):
+            return DeviceMesh(
+                device_type,
+                torch.tensor([torch.distributed.get_rank()], dtype=torch.int),
+                mesh_dim_names=valid_names,
+            )
         return init_device_mesh(device_type, valid_dims, mesh_dim_names=valid_names)
 
     def build_mesh(self, device_type: str) -> DeviceMesh:
