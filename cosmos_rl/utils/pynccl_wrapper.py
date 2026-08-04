@@ -83,6 +83,15 @@ class ncclDataTypeEnum:
 
     @classmethod
     def from_torch(cls, dtype: torch.dtype) -> int:
+        """Map a torch dtype to its NCCL enum, for **reductions only**.
+
+        Movement collectives (broadcast / send / recv / allgather) do not come
+        through here: they are issued as ``ncclUint8`` over a byte count, which
+        makes them dtype-agnostic.  Reductions genuinely need the dtype because
+        the arithmetic depends on it, so this mapping stays deliberately narrow
+        -- notably ``torch.bool`` keeps raising, since ``ncclSum`` over
+        bools-as-bytes yields counts rather than a logical OR.
+        """
         if dtype == torch.int8:
             return cls.ncclInt8
         if dtype == torch.uint8:
@@ -103,7 +112,10 @@ class ncclDataTypeEnum:
             return cls.ncclFloat8e4m3
         if dtype == torch.float8_e5m2:
             return cls.ncclFloat8e5m2
-        raise ValueError(f"Unsupported dtype: {dtype}")
+        raise ValueError(
+            f"Unsupported dtype for NCCL reduction: {dtype}. "
+            "Movement collectives are dtype-agnostic; cast before reducing."
+        )
 
 
 ncclRedOp_t = ctypes.c_int

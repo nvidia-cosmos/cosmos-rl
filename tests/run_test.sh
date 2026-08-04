@@ -95,6 +95,7 @@ run python tests/test_high_availability_nccl.py
 run python tests/test_nccl_collectives.py
 run python tests/test_nccl_timeout.py
 run python tests/test_pynccl_phase_observer.py
+run python tests/test_pynccl_dtype_agnostic.py
 run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py

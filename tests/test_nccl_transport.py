@@ -105,3 +105,7 @@ class TestAttachDataPacker(unittest.TestCase):
                     device="cuda:0",
                     redis_endpoint=RedisEndpoint("h", 1),
                 )
+
+
+if __name__ == "__main__":
+    unittest.main()
