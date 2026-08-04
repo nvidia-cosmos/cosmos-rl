@@ -45,6 +45,7 @@ from cosmos_rl.utils.payload_transport import (
     RedisEndpoint,
     get_payload_transfer_mode,
     is_payload_transfer_mode_explicit,
+    validate_single_receiver_topology,
 )
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -241,6 +242,13 @@ class CommMixin:
         crashes loudly.  Other failures are logged and swallowed.
         """
         mode = get_payload_transfer_mode(self.config)
+        # Fail fast (before any transfer) when a point-to-point transport is
+        # paired with policy-side model parallelism: nccl/ucxx each deliver a
+        # payload to exactly ONE receiver, but the policy hands the same
+        # rollout reference to every rank sharing a DP coordinate.  Raised
+        # OUTSIDE the attach try/except below so it is never swallowed by the
+        # non-explicit-mode path -- a broken topology is fatal either way.
+        validate_single_receiver_topology(self.config, mode)
         explicit = is_payload_transfer_mode_explicit(self.config)
         transport = PayloadTransportRegistry.get_optional(mode)
         endpoint = self._build_redis_endpoint()
@@ -254,6 +262,15 @@ class CommMixin:
             packers.append((self.val_data_packer, "val_data_packer"))
 
         for packer, packer_name in packers:
+            # Multi-policy-replica receiver addressing: hand NCCL-aware packers
+            # this worker's globally-unique ``replica_name`` BEFORE attach runs
+            # setup, so the producer keys its comm cache by
+            # (sender_rank, receiver_replica, receiver_rank) -- otherwise two
+            # policy replicas sharing ``receiver_rank`` cross-wire.  Set the
+            # attribute directly (mirrors attach_data_packer's redis_client
+            # assignment); non-NCCL packers simply lack the attribute.
+            if hasattr(packer, "_nccl_dp_receiver_replica"):
+                packer._nccl_dp_receiver_replica = getattr(self, "replica_name", None)
             if transport is not None:
                 try:
                     transport.attach_data_packer(

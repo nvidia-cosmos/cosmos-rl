@@ -21,6 +21,7 @@ import tempfile
 import toml
 
 from cosmos_rl.utils import network_util
+from subprocess_helpers import wait_all_or_fail
 
 
 class TestGspo(unittest.TestCase):
@@ -50,13 +51,12 @@ class TestGspo(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_gspo",
+        )
 
 
 class TestReferenceReset(unittest.TestCase):
@@ -86,13 +86,12 @@ class TestReferenceReset(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_reference_reset",
+        )
 
 
 class TestPolicyBatchSize(unittest.TestCase):
@@ -122,13 +121,12 @@ class TestPolicyBatchSize(unittest.TestCase):
         )
         processes = [process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_dynamic_batchsize",
+        )
 
 
 class TestDecoupledLoss(unittest.TestCase):
@@ -214,13 +212,12 @@ class TestDecoupledLoss(unittest.TestCase):
 
         processes = [controller_process, policy_process, rollout_process]
 
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_decoupled_loss",
+        )
 
 
 if __name__ == "__main__":

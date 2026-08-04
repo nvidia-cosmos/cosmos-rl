@@ -39,7 +39,7 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.payload_transport.ucxx.tensor_spec import TensorSpec
+from cosmos_rl.utils.trajectory import TensorSpec
 
 
 class SlotError(Exception):

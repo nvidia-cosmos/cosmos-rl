@@ -501,6 +501,13 @@ class GrpoConfig(BaseModel):
         description="Whether to divide the advantage by the standard deviation of rewards.",
     )
 
+    algo: str = Field(
+        default="grpo",
+        description="Name of the registered rule-based algo that computes rewards and advantages "
+        "(see `cosmos_rl.utils.constant.Algo`). Register additional algos with "
+        "`cosmos_rl.dispatcher.algo.base.register_rule_based_algo`.",
+    )
+
     overlong_reward: OverlongRewardConfig = Field(
         default_factory=OverlongRewardConfig,
         description="Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long.",
@@ -1606,6 +1613,20 @@ class RolloutConfig(BaseModel):
             "at the tail of each rollout_generation() call.  The legacy "
             "enqueue_prefetch_payloads hook on RolloutBase is supported as a "
             "deprecation shim for backends that haven't yet migrated to the mixin."
+        ),
+    )
+
+    prefetch_queue_maxsize: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Maximum number of rollout prompt batches to keep in the bounded "
+            "_prompt_queue when prefetch_rollout is enabled.  The default of 2 "
+            "preserves the original one-batch look-ahead behavior.  Values above "
+            "2 are useful only for absorbing bursty fetch/setup latency; each "
+            "queued batch consumes the controller's samples_on_the_fly budget "
+            "and can engage the soft throttle earlier, so keep this small relative "
+            "to train.train_policy.allowed_outdated_steps."
         ),
     )
 

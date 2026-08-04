@@ -16,6 +16,7 @@ NCCLDataPackerMixin lands it will pick up the same scheduling
 guarantees, and these tests guard the contract.
 """
 
+import threading
 import time
 import unittest
 from typing import Any, Dict, List
@@ -335,6 +336,107 @@ class TestShutdown(unittest.TestCase):
         self.assertTrue(thread.is_alive())
         p.shutdown_prefetch()
         thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(p._prefetch_enabled)
+
+
+class _BlockingFetchPacker(PrefetchDataPackerMixin, _StubDataPacker):
+    """Worker parks inside ``_fetch_batch`` until ``release`` is set.
+
+    Models a transport read wedged on a departed peer: the loop only checks the
+    shutdown event BETWEEN batches, so nothing but transport teardown can free
+    it.  ``release`` stands in for ``comm_cache.abort_all()``.
+    """
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def _should_intercept(self, rollout_output):
+        return True
+
+    def _cache_key(self, rollout_output):
+        return str(rollout_output)
+
+    def _fetch_batch(self, tasks):
+        self.entered.set()
+        if not self.release.wait(timeout=10.0):
+            raise AssertionError("fetch was never released")
+        raise RuntimeError("aborted")  # what a real abort surfaces as
+
+
+class TestShutdownOrdering(unittest.TestCase):
+    """Teardown must unblock in-flight I/O BEFORE joining, mirroring the
+    producer's ``cleanup_nccl`` (abort comms, then shut the sender pool)."""
+
+    def test_before_join_hook_runs_before_the_join_and_frees_the_worker(self):
+        p = _BlockingFetchPacker()
+        p._setup_prefetch(prefetch_timeout=1.0)
+        thread = p._prefetch_thread
+        p.start_prefetch([1])
+        self.assertTrue(p.entered.wait(timeout=5.0), "worker never began fetching")
+
+        order = []
+
+        def _unblock():
+            order.append("before_join")
+            p.release.set()
+
+        # Without the hook this join would time out; with it the worker's fetch
+        # raises immediately and the thread exits well inside the budget.
+        p.shutdown_prefetch(join_timeout=5.0, before_join=_unblock)
+        order.append("returned")
+
+        self.assertEqual(order, ["before_join", "returned"])
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(p._prefetch_thread)
+
+    def test_timed_out_worker_is_retained_and_blocks_reinit(self):
+        # Without before_join the worker stays parked past a short join.  Its
+        # handle must be KEPT: the stale thread reads _prefetch_shutdown and
+        # _prefetch_request_queue live, so a silent re-init would hand it the
+        # fresh cleared event and the fresh queue -> two workers racing one
+        # queue, forever.  Dropping the handle is what made that undetectable.
+        p = _BlockingFetchPacker()
+        p._setup_prefetch(prefetch_timeout=1.0)
+        thread = p._prefetch_thread
+        p.start_prefetch([1])
+        self.assertTrue(p.entered.wait(timeout=5.0))
+        try:
+            p.shutdown_prefetch(join_timeout=0.05)
+            self.assertTrue(thread.is_alive())
+            self.assertIs(p._prefetch_thread, thread)
+            self.assertFalse(p._prefetch_enabled)
+
+            with self.assertRaises(RuntimeError) as ctx:
+                p._setup_prefetch(prefetch_timeout=1.0)
+            self.assertIn("still running", str(ctx.exception))
+            self.assertIs(p._prefetch_thread, thread)  # no second worker
+        finally:
+            p.release.set()
+            thread.join(timeout=5.0)
+
+    def test_reinit_allowed_once_the_worker_has_exited(self):
+        p = _BlockingFetchPacker()
+        p._setup_prefetch(prefetch_timeout=1.0)
+        first = p._prefetch_thread
+        p.release.set()
+        p.shutdown_prefetch(join_timeout=5.0)
+        self.assertFalse(first.is_alive())
+        p._setup_prefetch(prefetch_timeout=1.0)  # must not raise
+        self.assertIsNot(p._prefetch_thread, first)
+        self.assertTrue(p._prefetch_enabled)
+        p.shutdown_prefetch(join_timeout=5.0)
+
+    def test_before_join_exception_does_not_abort_teardown(self):
+        p = _FakeTransportPacker()
+        p._setup_prefetch(prefetch_timeout=1.0)
+        thread = p._prefetch_thread
+
+        def _boom():
+            raise RuntimeError("transport teardown failed")
+
+        p.shutdown_prefetch(join_timeout=5.0, before_join=_boom)
         self.assertFalse(thread.is_alive())
         self.assertFalse(p._prefetch_enabled)
 

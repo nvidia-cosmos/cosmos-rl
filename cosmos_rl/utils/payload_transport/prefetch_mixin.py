@@ -80,17 +80,11 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
-
-try:
-    from cosmos_rl.utils.trace import get_trace_time  # type: ignore
-except ImportError:  # pragma: no cover - fallback path
-
-    def get_trace_time() -> float:  # type: ignore[no-redef]
-        return time.perf_counter() * 1000.0
+from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
+from cosmos_rl.utils.trace import get_trace_time
 
 
 __all__ = ["PrefetchDataPackerMixin"]
@@ -100,12 +94,26 @@ class PrefetchDataPackerMixin:
     """Transport-agnostic prefetch + double-buffer + early-ack scheduler.
 
     See module docstring for the subclass-hook contract.
+
+    Transport behaviour arrives one of two ways:
+
+    * **Composed** -- attach a :class:`PayloadTransportStrategy` via
+      :meth:`set_transport_strategy`.  The hooks below then delegate to it,
+      which lets the transport be chosen from config at runtime.
+    * **Subclassed** -- override the ``_``-prefixed hooks directly, the
+      original contract.  Still fully supported.
+
+    They are alternatives, not layers.  An override *replaces* the delegating
+    implementation, so a subclass that overrides a hook wins for that hook even
+    if a strategy is also attached; mixing the two on the same hook is
+    therefore legal but almost never what you want.
     """
 
     # ------------------------------------------------------------------
     # Scheduling state (owned by the base; subclasses should not touch
     # these directly -- use the public API or override the hooks).
     # ------------------------------------------------------------------
+    _transport_strategy: Optional[PayloadTransportStrategy] = None
     _prefetch_enabled: bool = False
     _prefetch_request_queue: Optional[queue.Queue] = None
     _prefetch_result_queue: Optional[queue.Queue] = None
@@ -142,6 +150,23 @@ class PrefetchDataPackerMixin:
         if self._prefetch_enabled:
             return
 
+        # A previous shutdown may have left a worker parked inside
+        # ``_fetch_batch``.  That thread reads ``self._prefetch_shutdown`` and
+        # ``self._prefetch_request_queue`` LIVE, so rebinding them below would
+        # hand the stale worker the fresh (cleared) event and the fresh queue:
+        # it would never exit, and it would race the new worker for the same
+        # requests while ``wait_prefetch`` pops one result per call.  Refuse
+        # rather than silently running two workers.
+        stale = self._prefetch_thread
+        if stale is not None and stale.is_alive():
+            raise RuntimeError(
+                "[PrefetchDataPackerMixin] cannot start a prefetch worker: the "
+                "previous one is still running (it did not observe shutdown "
+                "within the join timeout). The transport's shutdown must unblock "
+                "in-flight fetches (see the before_join hook) before re-init."
+            )
+        self._prefetch_thread = None
+
         self._prefetch_cache = {}
         self._prefetch_request_queue = queue.Queue()
         self._prefetch_result_queue = queue.Queue()
@@ -156,35 +181,109 @@ class PrefetchDataPackerMixin:
         self._prefetch_thread.start()
         self._prefetch_enabled = True
 
-    def shutdown_prefetch(self) -> None:
-        """Stop the background thread.  Safe to call multiple times."""
+    def shutdown_prefetch(
+        self,
+        *,
+        join_timeout: float = 5.0,
+        before_join: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Stop the background thread.  Safe to call multiple times.
+
+        Ordering matters.  The worker only observes the shutdown event
+        *between* batches, so a thread parked inside :meth:`_fetch_batch` is
+        bounded by the transport's own (much larger) first-transfer / prefetch
+        timeouts -- not by ``join_timeout``.  Joining first would therefore
+        wait out a fetch that only the transport can unwedge.
+
+        ``before_join`` runs after the event is set but BEFORE the join, so the
+        transport can force its in-flight I/O to fail fast (NCCL
+        ``comm_cache.abort_all``, UCXX client close).  The fetch then raises,
+        the worker loop catches it, and the join completes promptly.  This
+        mirrors the producer's ``cleanup_nccl``, which aborts comms *before*
+        shutting down its sender pool for exactly this reason.
+
+        When the thread does not exit within ``join_timeout`` its handle is
+        deliberately RETAINED: it is still running and still reading
+        ``self._prefetch_request_queue`` / ``self._prefetch_shutdown``, so
+        :meth:`_setup_prefetch` must be able to see it and refuse to start a
+        duplicate worker that would race it for the same queue.
+
+        Args:
+            join_timeout: Seconds to wait for the worker to exit.  Generous
+                once ``before_join`` has unblocked in-flight I/O.
+            before_join: Optional transport teardown invoked between setting
+                the shutdown event and joining.  Exceptions are logged and
+                swallowed -- teardown proceeds regardless.  Defaults to the
+                attached strategy's ``before_join``, so a composed transport
+                unwedges its own I/O without the caller arranging it; pass an
+                explicit callable to override.
+        """
         if self._prefetch_shutdown is not None:
             self._prefetch_shutdown.set()
-        if self._prefetch_thread is not None:
-            self._prefetch_thread.join(timeout=5.0)
-            if self._prefetch_thread.is_alive():
+
+        if before_join is None and self._transport_strategy is not None:
+            before_join = self._transport_strategy.before_join
+
+        if before_join is not None:
+            try:
+                before_join()
+            except Exception as exc:  # pragma: no cover - teardown best-effort
                 logger.warning(
-                    "[PrefetchDataPackerMixin] Prefetch thread did not stop cleanly"
+                    "[PrefetchDataPackerMixin] before_join hook raised %s; "
+                    "joining anyway",
+                    exc,
                 )
-            self._prefetch_thread = None
+
+        thread = self._prefetch_thread
+        if thread is not None:
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                logger.warning(
+                    "[PrefetchDataPackerMixin] prefetch thread still running "
+                    "after %.1fs; retaining its handle so a re-init cannot "
+                    "start a duplicate worker",
+                    join_timeout,
+                )
+            else:
+                self._prefetch_thread = None
         self._prefetch_enabled = False
 
     # ------------------------------------------------------------------
     # Subclass hooks (override in transport-specific mixin)
     # ------------------------------------------------------------------
 
+    def set_transport_strategy(
+        self, strategy: Optional[PayloadTransportStrategy]
+    ) -> None:
+        """Compose in a transport, replacing any previously attached one.
+
+        Call before :meth:`_setup_prefetch`: the strategy decides what the
+        worker fetches, and swapping it under a running worker would leave
+        already-queued tasks being resolved by the outgoing transport.  Pass
+        ``None`` to detach (the hooks fall back to their pass-through defaults).
+        """
+        self._transport_strategy = strategy
+
     def _should_intercept(self, rollout_output: Any) -> bool:
         """Return True if ``rollout_output`` is a transport reference.
 
-        Default: never intercept (the mixin becomes a no-op pass-through).
+        Delegates to the attached strategy; without one, never intercepts (the
+        mixin becomes a no-op pass-through).
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.should_intercept(rollout_output)
         return False
 
     def _cache_key(self, rollout_output: Any) -> str:
         """Stable string key for the resolved payload of ``rollout_output``.
 
-        Subclasses must override when ``_should_intercept`` can return True.
+        Delegates to the attached strategy.  Subclasses must override this when
+        they implement ``_should_intercept`` themselves.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.cache_key(rollout_output)
         raise NotImplementedError(
             "Subclass must override _cache_key when _should_intercept may return True"
         )
@@ -198,6 +297,9 @@ class PrefetchDataPackerMixin:
         layer and just propagates back to ``_fetch_batch`` so subclass
         implementations can correlate batch indices with sources.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.filter_prefetch_tasks(rollouts)
         tasks: List[Any] = []
         for i, rollout in enumerate(rollouts):
             ro = rollout.completion if hasattr(rollout, "completion") else rollout
@@ -208,8 +310,12 @@ class PrefetchDataPackerMixin:
     def _fetch_batch(self, tasks: List[Any]) -> Dict[str, Any]:
         """Fetch a batch of references; return ``{cache_key: payload}``.
 
-        Runs on the background prefetch thread.  Subclasses must implement.
+        Runs on the background prefetch thread.  Delegates to the attached
+        strategy; subclasses without one must implement it.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.fetch_batch(tasks)
         raise NotImplementedError(
             "Subclass must implement _fetch_batch to provide the actual "
             "transport-specific fetch logic"
@@ -222,6 +328,9 @@ class PrefetchDataPackerMixin:
         skip the episode).  Subclasses may override to provide a
         synchronous transport fetch for the not-yet-prefetched case.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.sync_fetch(rollout_output)
         return None
 
     def _on_prefetch_complete(
@@ -233,8 +342,15 @@ class PrefetchDataPackerMixin:
         """Hook called after each ``wait_prefetch`` populates the cache.
 
         Default: no-op.  Subclasses can use this to emit periodic INFO
-        summaries, increment cumulative counters, etc.
+        summaries, increment cumulative counters, etc.  The strategy form also
+        receives the iteration counter, which it would otherwise have to read
+        off the packer.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.on_prefetch_complete(
+                batch_id, n_results, fetch_ms, self._prefetch_step_count
+            )
         return None
 
     def _on_resolve_failed(self, rollout_output: Any, cache_key: str) -> None:
@@ -246,6 +362,9 @@ class PrefetchDataPackerMixin:
         emit transport-specific telemetry without having to override
         the entire dispatch.
         """
+        strategy = self._transport_strategy
+        if strategy is not None:
+            return strategy.on_resolve_failed(rollout_output, cache_key)
         return None
 
     # ------------------------------------------------------------------

@@ -129,7 +129,7 @@ from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
     SlotError,
     SlotState,
 )
-from cosmos_rl.utils.payload_transport.ucxx.tensor_spec import TensorSpec
+from cosmos_rl.utils.trajectory import TensorSpec
 from cosmos_rl.utils.payload_transport.ucxx.transport import UCXXPayloadTransport
 from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     UCXX_AVAILABLE,

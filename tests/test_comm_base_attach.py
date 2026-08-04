@@ -90,9 +90,13 @@ class _CommHarness(CommMixin):
     ``_attach_payload_transport`` in isolation.
     """
 
-    def __init__(self, *, mode, data_packer, val_data_packer=None):
+    def __init__(self, *, mode, data_packer, val_data_packer=None, parallelism=None):
         self.role = "test_role"
         self.config = SimpleNamespace(custom={PAYLOAD_TRANSFER_KEY: mode})
+        if parallelism is not None:
+            self.config.policy = SimpleNamespace(
+                parallelism=SimpleNamespace(**parallelism)
+            )
         self.data_packer = data_packer
         if val_data_packer is not None:
             self.val_data_packer = val_data_packer
@@ -107,7 +111,7 @@ class TestAttachPayloadTransportContract(unittest.TestCase):
 
     def _patch_nccl_redis(self, fake_factory):
         return mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
             SimpleNamespace(Redis=fake_factory),
         )
 
@@ -125,6 +129,97 @@ class TestAttachPayloadTransportContract(unittest.TestCase):
         self.assertTrue(packer.post_called)
         # Order assertion: the hook saw the assigned client.
         self.assertIs(packer.client_at_post_call, fake)
+
+    def test_receiver_replica_plumbed_from_worker_replica_name(self):
+        # Multi-policy-replica addressing: the worker's globally-unique
+        # replica_name must land on an NCCL-aware packer's
+        # ``_nccl_dp_receiver_replica`` BEFORE attach runs setup, so the
+        # producer keys comms per receiver replica.
+        class _ReplicaAwarePacker(_NcclAwarePacker):
+            _nccl_dp_receiver_replica = None
+
+        packer = _ReplicaAwarePacker()
+        factory = _FakeRedisFactory(_FakeRedis())
+        harness = _CommHarness(mode="nccl", data_packer=packer)
+        harness.replica_name = "policy-XYZ"
+        with self._patch_nccl_redis(factory):
+            harness._attach_payload_transport()
+        self.assertEqual(packer._nccl_dp_receiver_replica, "policy-XYZ")
+
+    def test_receiver_replica_plumbing_skips_packer_without_attr(self):
+        # A packer that does not expose the attribute must not gain one.
+        packer = _NcclAwarePacker()  # no _nccl_dp_receiver_replica
+        factory = _FakeRedisFactory(_FakeRedis())
+        harness = _CommHarness(mode="nccl", data_packer=packer)
+        harness.replica_name = "policy-XYZ"
+        with self._patch_nccl_redis(factory):
+            harness._attach_payload_transport()
+        self.assertFalse(hasattr(packer, "_nccl_dp_receiver_replica"))
+
+
+class TestSingleReceiverTopologyGuard(unittest.TestCase):
+    """The nccl/ucxx single-receiver guard, through the real attach path.
+
+    Both transports deliver a payload to exactly ONE receiver, while the policy
+    hands the same rollout reference to every rank sharing a DP coordinate.  The
+    guard must reject that topology at attach time -- before any transfer -- and
+    must do so regardless of whether the transport attach itself would succeed.
+    """
+
+    def _patch_nccl_redis(self, fake_factory):
+        return mock.patch(
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
+            SimpleNamespace(Redis=fake_factory),
+        )
+
+    def test_attach_rejects_model_parallel_policy(self):
+        for mode in ("nccl", "ucxx"):
+            for dim in ("tp_size", "cp_size", "pp_size"):
+                with self.subTest(mode=mode, dim=dim):
+                    harness = _CommHarness(
+                        mode=mode,
+                        data_packer=_NcclAwarePacker(),
+                        parallelism={dim: 2},
+                    )
+                    with self.assertRaises(ValueError) as ctx:
+                        harness._attach_payload_transport()
+                    self.assertIn(f"{dim}=2", str(ctx.exception))
+
+    def test_guard_raises_even_when_mode_not_explicit_is_irrelevant(self):
+        # The guard runs OUTSIDE the attach try/except, so it is never
+        # downgraded to a warning the way an attach ImportError/RuntimeError is
+        # for a non-explicitly-selected transport.
+        harness = _CommHarness(
+            mode="ucxx",  # ucxx-cu12 need not be installed; guard fires first
+            data_packer=_NoOpPacker(),
+            parallelism={"tp_size": 8},
+        )
+        with self.assertRaises(ValueError):
+            harness._attach_payload_transport()
+
+    def test_attach_allows_pure_data_parallel(self):
+        # tp/cp/pp all 1 -> exactly one receiver per transfer -> attach proceeds
+        # normally and still wires the packer.
+        packer = _NcclAwarePacker()
+        fake = _FakeRedis()
+        harness = _CommHarness(
+            mode="nccl",
+            data_packer=packer,
+            parallelism={"tp_size": 1, "cp_size": 1, "pp_size": 1},
+        )
+        with self._patch_nccl_redis(_FakeRedisFactory(fake)):
+            harness._attach_payload_transport()
+        self.assertIs(packer.redis_client, fake)
+        self.assertTrue(packer.post_called)
+
+    def test_attach_allows_model_parallel_under_redis(self):
+        # redis GETs are repeatable, so model parallelism is fine there.
+        harness = _CommHarness(
+            mode="redis",
+            data_packer=_NoOpPacker(),
+            parallelism={"tp_size": 8, "cp_size": 2, "pp_size": 4},
+        )
+        harness._attach_payload_transport()  # must not raise
 
     def test_ping_failure_leaves_packer_unchanged(self):
         # If Redis ping fails, the packer must not be left in a half-
@@ -294,7 +389,7 @@ class TestOpportunisticRedisInjection(unittest.TestCase):
 
         with (
             mock.patch(
-                "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+                "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
                 SimpleNamespace(Redis=_factory),
             ),
             mock.patch(

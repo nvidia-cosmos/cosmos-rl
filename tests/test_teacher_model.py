@@ -160,13 +160,12 @@ class TestTeacherModel(unittest.TestCase):
 
         data["is_end"] = True
         redis_controller.publish_teacher_request(data, "test_client")
-        # Wait for process to complete
-        for process in processes:
-            stdout, stderr = process.communicate()
-            # Check if process completed successfully
-            assert process.returncode == 0, (
-                f"Process failed with code: {process.returncode}"
-            )
+        wait_all_or_fail(
+            self,
+            processes,
+            timeout_s=600,
+            context="test_teacher_model",
+        )
 
 
 class TestDistillationFlow(unittest.TestCase):

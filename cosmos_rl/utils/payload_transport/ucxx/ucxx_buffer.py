@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.payload_transport.rotation import HealthSkipList
 from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
     BufferConfig,
     BufferMetrics,
@@ -905,12 +906,17 @@ class UCXXClient:
         self._rr_counter = 0
         self._rr_lock = threading.Lock()
 
-        # Per-(worker_ip, port) skip-list: maps to the ``time.monotonic()``
-        # tick at which the port becomes re-eligible for rotation.  No
-        # lock needed; CPython dict ops are atomic for single-key
-        # access and the worst-case race -- one task reading a
-        # one-tick-stale timestamp -- is harmless.
-        self._port_skip_until: Dict[Tuple[str, int], float] = {}
+        # Per-(worker_ip, port) health skip-list: quarantines a port that
+        # recently emitted a transport-class failure for
+        # ``_PORT_QUARANTINE_SEC`` and rotates around it, with a
+        # never-starve fallback.  Backed by the shared
+        # :class:`HealthSkipList` (same helper the NCCL comm cache uses);
+        # ``_port_skip_until`` is kept as a direct alias to its backing
+        # map so existing callers/tests that poke the raw dict still work.
+        self._port_skiplist = HealthSkipList(cooldown=_PORT_QUARANTINE_SEC)
+        self._port_skip_until: Dict[Tuple[str, int], float] = (
+            self._port_skiplist.skip_until
+        )
 
         self._pinned_pool: collections.deque = collections.deque()
         self._pinned_buf_size: int = 0
@@ -933,13 +939,9 @@ class UCXXClient:
         quarantined, so a transient all-port outage never starves a
         read.  Healthy-only filtering is sufficient under any
         partial-failure mode where at least one server thread is
-        alive.
+        alive.  Delegates to the shared :class:`HealthSkipList`.
         """
-        now = time.monotonic()
-        healthy = [
-            p for p in ports if self._port_skip_until.get((worker_ip, p), 0.0) <= now
-        ]
-        return healthy if healthy else list(ports)
+        return self._port_skiplist.healthy(ports, key_fn=lambda p: (worker_ip, p))
 
     def _quarantine_port(self, worker_ip: str, port: int) -> None:
         """Mark ``(worker_ip, port)`` unhealthy for the cooldown.
@@ -951,9 +953,7 @@ class UCXXClient:
         _PORT_QUARANTINE_SEC`` (no exponential backoff -- if data
         shows that's needed, it's a one-line change here).
         """
-        self._port_skip_until[(worker_ip, port)] = (
-            time.monotonic() + _PORT_QUARANTINE_SEC
-        )
+        self._port_skiplist.quarantine((worker_ip, port))
 
     def _acquire_pinned(self, nbytes: int) -> torch.Tensor:
         """Get a pinned CPU buffer from the pool, or allocate a new one."""

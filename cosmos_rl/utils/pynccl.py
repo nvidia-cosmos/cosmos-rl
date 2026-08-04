@@ -233,14 +233,61 @@ _worker_init_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 
+def _run_functor_bounded(task: _Task) -> ncclComm_t:
+    """Run the raw NCCL host call with ``task.timeout_ms`` already counting.
+
+    The raw call is the first of two phases and it can block indefinitely: a
+    receive posted against a peer that never sends does not return, so the
+    async-error deadline below is never reached and the operation is unbounded.
+    Arm an abort *before* entering the functor; aborting the communicator makes
+    the blocked call return an error instead of wedging the worker thread.
+
+    Communicator creation passes ``comm_idx=None`` because the communicator it
+    would abort does not exist yet, so that call stays unbounded here.
+    """
+    if task.comm_idx is None:
+        return task.functor()
+
+    lock = threading.Lock()
+    returned = False
+
+    def _abort_blocked_call() -> None:
+        with lock:
+            if returned:
+                return
+            logger.error(
+                f"NCCL: raw host call exceeded {task.timeout_ms} ms for task {task}; "
+                f"aborting communicator idx={task.comm_idx}"
+            )
+            task.timed_out.set()
+            _notify_p2p_phase(task.phase_observer, "abort_enter")
+            _safe_abort(task.comm_idx)
+            _notify_p2p_phase(task.phase_observer, "abort_return")
+
+    timer = threading.Timer(task.timeout_ms / 1000.0, _abort_blocked_call)
+    timer.daemon = True
+    timer.start()
+    try:
+        return task.functor()
+    finally:
+        with lock:
+            returned = True
+        timer.cancel()
+
+
 def run_task(task: _Task):
     logger.debug(f"[Worker] Got task {task} | queue_size={_task_q.qsize()}")
 
     comm: ncclComm_t | None = None
     try:
         logger.debug(f"[Worker] Executing functor for task {task}")
-        comm = task.functor()
+        comm = _run_functor_bounded(task)
         logger.debug(f"[Worker] Functor for task {task} returned comm={comm}")
+
+        if task.timed_out.is_set():
+            # The raw call blocked past the deadline and its communicator is
+            # already aborted, so there is no async error left to poll for.
+            return
 
         deadline = time.monotonic() + task.timeout_ms / 1000.0
         # Poll async error status until success or timeout.
@@ -677,24 +724,31 @@ def nccl_broadcast(
     _submit_nccl(_broadcast_call, timeout_ms, comm_idx)
 
 
-def nccl_group_start(comm_idx: int):
+def nccl_group_start(comm_idx: int, timeout_ms: Optional[int] = None):
+    """Open a NCCL group; ``timeout_ms`` bounds it like the other wrappers."""
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_start_call():
         _nccl.ncclGroupStart()
         return meta.comm
 
-    _submit_nccl(_group_start_call, None, comm_idx)
+    _submit_nccl(_group_start_call, timeout_ms, comm_idx)
 
 
-def nccl_group_end(comm_idx: int):
+def nccl_group_end(comm_idx: int, timeout_ms: Optional[int] = None):
+    """Close a NCCL group; ``timeout_ms`` bounds it like the other wrappers.
+
+    Callers that batch many point-to-point operations spend most of a grouped
+    setup here, so this must honour the caller's budget rather than silently
+    falling back to ``COSMOS_NCCL_TIMEOUT_MS``.
+    """
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_end_call():
         _nccl.ncclGroupEnd()
         return meta.comm
 
-    _submit_nccl(_group_end_call, None, comm_idx)
+    _submit_nccl(_group_end_call, timeout_ms, comm_idx)
 
 
 def nccl_send(
@@ -872,7 +926,7 @@ def get_nccl_timeout_ms() -> int:
     return _get_timeout_ms()
 
 
-def _safe_abort(comm_idx: Optional[int], comm: ncclComm_t):
+def _safe_abort(comm_idx: Optional[int], comm: Optional[ncclComm_t] = None):
     """Abort NCCL communicator gracefully, regardless of its registry state.
 
     If *comm_idx* is given, we first try to abort via :func:`nccl_abort` so the
@@ -901,6 +955,8 @@ __all__ = [
     "get_nccl_comm_nranks",
     # collectives
     "nccl_broadcast",
+    "nccl_group_start",
+    "nccl_group_end",
     "nccl_send",
     "nccl_recv",
     "nccl_allreduce",

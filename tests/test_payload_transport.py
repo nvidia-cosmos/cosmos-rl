@@ -41,11 +41,18 @@ from unittest import mock
 from cosmos_rl.utils.payload_transport import (
     PAYLOAD_TRANSFER_KEY,
     LEGACY_NCCL_KEY,
+    P2P_TRANSFER_MODES,
     PayloadTransport,
     PayloadTransportRegistry,
     RedisEndpoint,
     get_payload_transfer_mode,
     is_payload_transfer_mode_explicit,
+    validate_single_receiver_topology,
+)
+from cosmos_rl.utils.payload_transport.nccl.context import (
+    DEFAULT_MAX_LIVE_COMMS,
+    resolve_custom_int,
+    resolve_max_live_comms,
 )
 from cosmos_rl.utils.payload_transport.nccl import (
     NCCL_COMPLETION_PREFIX,
@@ -88,6 +95,22 @@ class TestRegistryBootstrap(unittest.TestCase):
     def test_active_for_completion_rejects_non_string(self):
         self.assertIsNone(PayloadTransportRegistry.active_for_completion(None))
         self.assertIsNone(PayloadTransportRegistry.active_for_completion(42))
+
+    def test_active_for_completion_matches_dict_metadata_form(self):
+        # NCCL packers return dict metadata whose "completion" field carries
+        # the nccl: string; controller cleanup must still detect it (else the
+        # producer never frees discarded buffers -- Codex P2 finding).
+        meta = {"_nccl": True, "_transfer_id": "0:abc", "completion": "nccl:0:abc"}
+        transport = PayloadTransportRegistry.active_for_completion(meta)
+        self.assertIsInstance(transport, NcclPayloadTransport)
+
+    def test_active_for_completion_dict_without_nccl_string_is_none(self):
+        self.assertIsNone(
+            PayloadTransportRegistry.active_for_completion({"observations": [1]})
+        )
+        self.assertIsNone(
+            PayloadTransportRegistry.active_for_completion({"completion": "plain"})
+        )
 
 
 class TestGetPayloadTransferMode(unittest.TestCase):
@@ -156,16 +179,15 @@ class TestNcclProtocolHelpers(unittest.TestCase):
         )
 
     def test_build_transfer_rollout_candidates_valid(self):
-        ids = build_transfer_rollout_candidates(
-            transfer_id="3:abcdef", num_rollout_replicas=4
-        )
+        ids = build_transfer_rollout_candidates(transfer_id="3:abcdef")
         self.assertEqual(ids, [3])
 
-    def test_build_transfer_rollout_candidates_out_of_range(self):
-        ids = build_transfer_rollout_candidates(
-            transfer_id="9:abcdef", num_rollout_replicas=4
-        )
-        self.assertEqual(ids, [])
+    def test_build_transfer_rollout_candidates_not_bounded_by_replica_count(self):
+        # A replica added mid-run has an index beyond the INITIAL count.  It
+        # must still get a cleanup channel -- bounding here silently withheld
+        # the publish and pinned the producer's send buffer until eviction.
+        ids = build_transfer_rollout_candidates(transfer_id="9999:abcdef")
+        self.assertEqual(ids, [9999])
 
     def test_build_transfer_rollout_candidates_invalid(self):
         ids = build_transfer_rollout_candidates(transfer_id="garbage")
@@ -296,7 +318,7 @@ class TestNcclAttachDataPacker(unittest.TestCase):
 
     def _patch_redis_lib(self, fake_factory):
         return mock.patch(
-            "cosmos_rl.utils.payload_transport.nccl._redis_lib",
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib",
             SimpleNamespace(Redis=fake_factory),
         )
 
@@ -361,7 +383,9 @@ class TestNcclAttachDataPacker(unittest.TestCase):
 
     def test_attach_no_redis_lib_is_safe(self):
         packer = _NcclAwarePacker()
-        with mock.patch("cosmos_rl.utils.payload_transport.nccl._redis_lib", None):
+        with mock.patch(
+            "cosmos_rl.utils.payload_transport.nccl.transport._redis_lib", None
+        ):
             self.transport.attach_data_packer(
                 packer, config=self.config, redis_endpoint=self.endpoint
             )
@@ -545,6 +569,156 @@ class TestIsPayloadTransferModeExplicit(unittest.TestCase):
     def test_empty_string_is_not_explicit(self):
         config = SimpleNamespace(custom={PAYLOAD_TRANSFER_KEY: "   "})
         self.assertFalse(is_payload_transfer_mode_explicit(config))
+
+
+def _cfg_parallelism(*, tp_size=1, cp_size=1, pp_size=1, **extra):
+    """Config exposing only ``policy.parallelism`` (transport mode is passed
+    to the validator directly, so ``custom`` is irrelevant here)."""
+    return SimpleNamespace(
+        policy=SimpleNamespace(
+            parallelism=SimpleNamespace(
+                tp_size=tp_size, cp_size=cp_size, pp_size=pp_size, **extra
+            )
+        )
+    )
+
+
+class TestValidateSingleReceiverTopology(unittest.TestCase):
+    """nccl/ucxx deliver each payload to exactly ONE receiver, but the policy
+    hands the same rollout reference to every rank sharing a DP coordinate
+    (``cp * tp * pp`` of them).  Any non-DP policy parallelism must fail loud
+    at startup rather than dropping episodes and hanging mid-run."""
+
+    def test_pure_data_parallel_is_allowed(self):
+        for mode in P2P_TRANSFER_MODES:
+            with self.subTest(mode=mode):
+                validate_single_receiver_topology(_cfg_parallelism(), mode)
+
+    def test_tensor_parallel_rejected(self):
+        for mode in P2P_TRANSFER_MODES:
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError) as ctx:
+                    validate_single_receiver_topology(_cfg_parallelism(tp_size=2), mode)
+                self.assertIn("tp_size=2", str(ctx.exception))
+
+    def test_context_parallel_rejected(self):
+        # cp is NOT covered by a tp_size==1 check -- it splits the same batch
+        # across ranks just like tp, so it must be caught too.
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(_cfg_parallelism(cp_size=2), "nccl")
+        self.assertIn("cp_size=2", str(ctx.exception))
+
+    def test_pipeline_parallel_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(_cfg_parallelism(pp_size=4), "ucxx")
+        self.assertIn("pp_size=4", str(ctx.exception))
+
+    def test_error_reports_every_offending_dim_and_receiver_count(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_single_receiver_topology(
+                _cfg_parallelism(tp_size=2, cp_size=2, pp_size=2), "nccl"
+            )
+        msg = str(ctx.exception)
+        for field in ("tp_size=2", "cp_size=2", "pp_size=2"):
+            self.assertIn(field, msg)
+        # cp * tp * pp = 8 ranks would race for one payload.
+        self.assertIn("8 ranks", msg)
+        # Actionable: names both escape hatches.
+        self.assertIn("redis", msg)
+
+    def test_redis_is_unaffected(self):
+        # A redis GET is non-destructive/repeatable, so model parallelism is
+        # fine there -- the guard must not fire.
+        validate_single_receiver_topology(
+            _cfg_parallelism(tp_size=8, cp_size=2, pp_size=4), "redis"
+        )
+
+    def test_missing_policy_config_is_tolerated(self):
+        # Rollout/reference workers may carry a config without policy dims;
+        # the guard must not crash on them.
+        validate_single_receiver_topology(SimpleNamespace(), "nccl")
+        validate_single_receiver_topology(SimpleNamespace(policy=None), "nccl")
+
+    def test_absent_or_none_dims_default_to_one(self):
+        # Sparse configs (missing keys, explicit None) must read as 1, not fail.
+        cfg = SimpleNamespace(policy=SimpleNamespace(parallelism=SimpleNamespace()))
+        validate_single_receiver_topology(cfg, "nccl")
+        cfg_none = SimpleNamespace(
+            policy=SimpleNamespace(
+                parallelism=SimpleNamespace(tp_size=None, cp_size=None, pp_size=None)
+            )
+        )
+        validate_single_receiver_topology(cfg_none, "nccl")
+
+
+class TestCommCapSizing(unittest.TestCase):
+    """``max_live`` is resource hygiene, not a correctness bound, and the comm
+    working set is topology-bounded -- so sizing it blindly is what makes LRU
+    eviction dangerous.  Derive it from the actual peer fan-out instead."""
+
+    @staticmethod
+    def _cfg(*, peers=None, custom=None, role="policy"):
+        cfg = SimpleNamespace(custom=custom or {})
+        if peers is not None:
+            setattr(
+                cfg,
+                role,
+                SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=peers)),
+            )
+        return cfg
+
+    def test_defaults_to_historical_cap_without_config(self):
+        self.assertEqual(
+            resolve_max_live_comms(SimpleNamespace(), peer_role="policy"),
+            DEFAULT_MAX_LIVE_COMMS,
+        )
+
+    def test_small_fan_out_never_lowers_the_cap(self):
+        # Auto-sizing must only ever RAISE the ceiling -- a 2-replica job must
+        # not end up with a cap of 8.
+        self.assertEqual(
+            resolve_max_live_comms(self._cfg(peers=2), peer_role="policy"),
+            DEFAULT_MAX_LIVE_COMMS,
+        )
+
+    def test_large_fan_out_raises_the_cap_above_the_peer_count(self):
+        # 200 peers would thrash a cap of 128: cycling over N+1 keys with
+        # capacity N is the pathological LRU case (~100% miss).
+        self.assertEqual(
+            resolve_max_live_comms(self._cfg(peers=200), peer_role="policy"), 800
+        )
+
+    def test_reads_the_role_that_owns_the_peers(self):
+        # A producer's peers are policy replicas; a consumer's are rollout ones.
+        cfg = self._cfg(peers=500, role="rollout")
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="rollout"), 2000)
+        self.assertEqual(
+            resolve_max_live_comms(cfg, peer_role="policy"), DEFAULT_MAX_LIVE_COMMS
+        )
+
+    def test_explicit_custom_override_wins(self):
+        cfg = self._cfg(peers=500, custom={"nccl_max_live_comms": 64})
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="policy"), 64)
+
+    def test_unparseable_override_falls_back_to_derivation(self):
+        cfg = self._cfg(peers=200, custom={"nccl_max_live_comms": "not-a-number"})
+        self.assertEqual(resolve_max_live_comms(cfg, peer_role="policy"), 800)
+
+
+class TestResolveCustomInt(unittest.TestCase):
+    def test_reads_and_clamps(self):
+        cfg = SimpleNamespace(custom={"nccl_num_sender_threads": 8})
+        self.assertEqual(resolve_custom_int(cfg, "nccl_num_sender_threads", 2), 8)
+        # Clamped so a 0/negative config cannot disable the sender pool.
+        cfg0 = SimpleNamespace(custom={"nccl_num_sender_threads": 0})
+        self.assertEqual(resolve_custom_int(cfg0, "nccl_num_sender_threads", 2), 1)
+
+    def test_missing_or_bad_values_use_the_default(self):
+        self.assertEqual(resolve_custom_int(SimpleNamespace(), "k", 3), 3)
+        self.assertEqual(resolve_custom_int(SimpleNamespace(custom={}), "k", 3), 3)
+        self.assertEqual(
+            resolve_custom_int(SimpleNamespace(custom={"k": "twelve"}), "k", 3), 3
+        )
 
 
 class TestPayloadTransportDefaults(unittest.TestCase):

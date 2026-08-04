@@ -18,9 +18,21 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Type,
+)
 
 from cosmos_rl.utils.logging import logger
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
+    from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
 
 
 # Canonical TOML keys read from the experiment ``[custom]`` section.
@@ -211,17 +223,34 @@ class PayloadTransportRegistry:
             if transport.completion_prefix:
                 yield transport
 
+    @staticmethod
+    def _completion_string(completion: Any) -> Optional[str]:
+        """Normalize a rollout completion to its detection string.
+
+        An NCCL-aware packer may return dict *metadata* whose ``"completion"``
+        field carries the ``<prefix><id>`` string (the dict form exists for
+        UCXX parity).  Flatten that form so controller-side cleanup detection
+        AND transfer-id extraction work on either shape -- otherwise the
+        producer never receives a discard-cleanup and holds the buffer until
+        capacity eviction.
+        """
+        if isinstance(completion, dict):
+            completion = completion.get("completion")
+        return completion if isinstance(completion, str) else None
+
     @classmethod
     def active_for_completion(cls, completion: Any) -> Optional[PayloadTransport]:
         """Return the backend whose ``completion_prefix`` matches ``completion``.
 
-        Returns ``None`` for non-string completions, completions without
-        a registered prefix, or when no backend has a prefix attribute.
+        Accepts the plain ``<prefix><id>`` string or the dict-metadata form
+        (see :meth:`_completion_string`).  Returns ``None`` for completions
+        without a registered prefix, or when no backend has a prefix attribute.
         """
-        if not isinstance(completion, str):
+        text = cls._completion_string(completion)
+        if text is None:
             return None
         for transport in cls.all_with_completion_prefix():
-            if completion.startswith(transport.completion_prefix):
+            if text.startswith(transport.completion_prefix):
                 return transport
         return None
 
@@ -283,7 +312,10 @@ class PayloadTransportRegistry:
             transport = cls.active_for_completion(completion)
             if transport is None:
                 continue
-            transfer_id = completion[len(transport.completion_prefix) :]
+            # Extract the id from the normalized string form (handles both the
+            # plain "<prefix><id>" string and dict metadata).
+            text = cls._completion_string(completion)
+            transfer_id = text[len(transport.completion_prefix) :]
             per_transport.setdefault(transport, []).append(transfer_id)
 
         if not per_transport:
@@ -401,6 +433,76 @@ def is_payload_transfer_mode_explicit(config: Any) -> bool:
     return bool(legacy)
 
 
+#: Transports that deliver each payload to exactly ONE receiver.  ``redis`` is
+#: absent on purpose: a GET is non-destructive and repeatable, so several ranks
+#: may resolve the same reference.
+P2P_TRANSFER_MODES = ("nccl", "ucxx")
+
+
+def validate_single_receiver_topology(config: Any, mode: str) -> None:
+    """Reject a point-to-point payload transport paired with policy-side
+    model parallelism.
+
+    ``nccl`` and ``ucxx`` both deliver a payload to exactly one receiver:
+
+    * a UCXX slot is single-consumer -- the server marks it ``FREE`` after the
+      first successful read, so any later reader gets ``StaleSlotError``;
+    * an NCCL send buffer is reaped once its send drains, so a later requester
+      can find the buffer already recycled.
+
+    Meanwhile the policy scatters rollout *references* by DP coordinate (see
+    ``RLWorker._prepare_rollouts``), handing the SAME reference to every rank
+    sharing a DP id; each then resolves it independently.  Ranks per DP
+    coordinate is ``cp * tp * pp`` -- ``world_size`` factorises as
+    ``dp_replicate * dp_shard * cp * tp * pp`` (see
+    :meth:`ParallelDims._validate`) -- so any of those dims above 1 puts
+    several ranks on one payload.
+
+    The result is dropped episodes, and because the ranks of a TP/CP/PP group
+    must train on the SAME batch, divergent batches then mismatch that group's
+    collectives and hang.  Refuse to start instead of failing mid-run.
+
+    Args:
+        config: A cosmos-rl ``Config``-like object.
+        mode: The resolved transport name from
+            :func:`get_payload_transfer_mode`.
+
+    Raises:
+        ValueError: when ``mode`` is point-to-point and the policy is
+            configured with non-data parallelism.
+    """
+    if mode not in P2P_TRANSFER_MODES:
+        return
+    parallelism = getattr(getattr(config, "policy", None), "parallelism", None)
+    if parallelism is None:
+        return
+
+    dims = {
+        name: int(getattr(parallelism, name, 1) or 1)
+        for name in ("tp_size", "cp_size", "pp_size")
+    }
+    offending = {name: size for name, size in dims.items() if size > 1}
+    if not offending:
+        return
+
+    receivers = dims["tp_size"] * dims["cp_size"] * dims["pp_size"]
+    detail = ", ".join(
+        f"policy.parallelism.{name}={size}" for name, size in sorted(offending.items())
+    )
+    raise ValueError(
+        f"[custom].{PAYLOAD_TRANSFER_KEY}={mode!r} requires a single-receiver "
+        f"policy topology, but {detail}. The {mode} payload transport delivers "
+        f"each trajectory to exactly ONE receiver, while the policy hands the "
+        f"same rollout reference to every rank sharing a DP coordinate "
+        f"({receivers} ranks here) -- they would race for one payload and all "
+        f"but one would drop the episode, then diverge and hang on the group's "
+        f"collectives. Set policy.parallelism.tp_size / cp_size / pp_size = 1 "
+        f"(pure data parallelism), or use "
+        f'[custom].{PAYLOAD_TRANSFER_KEY} = "redis", which supports repeated '
+        f"reads."
+    )
+
+
 def _maybe_autoload_backend(name: str) -> None:
     """Best-effort import of optional backends keyed by transport name.
 
@@ -421,13 +523,51 @@ def _maybe_autoload_backend(name: str) -> None:
             )
 
 
+def make_transport_strategy(config: Any) -> Optional["PayloadTransportStrategy"]:
+    """Build the transport strategy this config selects, or None for redis.
+
+    The point of the strategy seam: a consumer composes a transport from config
+    instead of picking a packer *class* per transport at import time.
+
+    Returns None for the default ``redis`` mode, which moves payloads through
+    the control plane and needs no strategy at all -- so ``None`` means "no
+    interception", exactly what an unattached packer already does.
+
+    The guard runs first, for the same reason ``CommMixin`` calls it outside
+    its attach try/except: ``nccl`` and ``ucxx`` each deliver a payload to
+    exactly one receiver, and a topology that violates that must fail loudly
+    here rather than be discovered as a hang mid-run.
+
+    Imports are deferred so this module stays importable where a backend's
+    optional dependency is missing -- ``ucxx`` in particular is an extra.
+    """
+    mode = get_payload_transfer_mode(config)
+    if mode not in P2P_TRANSFER_MODES:
+        return None
+    validate_single_receiver_topology(config, mode)
+
+    if mode == "nccl":
+        from cosmos_rl.utils.payload_transport.nccl.strategy import (
+            NCCLTransportStrategy,
+        )
+
+        return NCCLTransportStrategy()
+
+    from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+
+    return UCXXTransportStrategy()
+
+
 __all__ = [
     "DEFAULT_TRANSFER_MODE",
     "LEGACY_NCCL_KEY",
+    "P2P_TRANSFER_MODES",
     "PAYLOAD_TRANSFER_KEY",
     "PayloadTransport",
     "PayloadTransportRegistry",
     "RedisEndpoint",
     "get_payload_transfer_mode",
     "is_payload_transfer_mode_explicit",
+    "make_transport_strategy",
+    "validate_single_receiver_topology",
 ]

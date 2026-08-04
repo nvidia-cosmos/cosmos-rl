@@ -192,5 +192,73 @@ class TestPutRolloutsAdmissionGate(unittest.TestCase):
         )
 
 
+def _make_rollout_with_completion(completion) -> MagicMock:
+    """A rollout stub exposing both ``completion_token_ids`` and ``completion``.
+
+    ``_maybe_arm_transport_cleanup`` inspects ``rollout.completion`` to
+    detect a registered transport prefix; the token-id path still reads
+    ``completion_token_ids`` for the token count.
+    """
+    rollout = MagicMock(spec=["completion_token_ids", "completion"])
+    rollout.completion_token_ids = [0, 1, 2, 3]
+    rollout.completion = completion
+    return rollout
+
+
+class TestTransportCleanupArming(unittest.TestCase):
+    """TODO-4: ``_nccl_cleanup_enabled`` flips at ingestion on first sight
+    of a completion carrying a registered transport prefix, not only on the
+    first published discard."""
+
+    def _fixture(self):
+        # Queue never drains, so the on-policy completion flag stays put and
+        # does not interfere with what we're asserting.
+        return _ManagerFixture(on_policy=True, pending_after_each_put=[1, 2, 3])
+
+    def test_flag_arms_on_first_nccl_prefixed_completion(self):
+        fixture = self._fixture()
+        self.assertFalse(fixture.manager._nccl_cleanup_enabled)
+
+        rollouts = [_make_rollout_with_completion("nccl:0:deadbeef")]
+        fixture.manager.put_rollouts(rollouts)
+
+        self.assertTrue(
+            fixture.manager._nccl_cleanup_enabled,
+            "ingestion of an nccl:-prefixed completion must arm cleanup",
+        )
+
+    def test_flag_stays_disarmed_for_plain_completions(self):
+        fixture = self._fixture()
+        rollouts = [
+            _make_rollout_with_completion("just some generated text"),
+            _make_rollout_with_completion("more text without a prefix"),
+        ]
+        fixture.manager.put_rollouts(rollouts)
+
+        self.assertFalse(
+            fixture.manager._nccl_cleanup_enabled,
+            "plain Redis-path completions must not arm cleanup",
+        )
+
+    def test_arming_is_idempotent_and_admits_rollout(self):
+        fixture = self._fixture()
+        fixture.manager._nccl_cleanup_enabled = True  # already armed
+
+        rollouts = [_make_rollout_with_completion("nccl:0:abc")]
+        _, n_samples = fixture.manager.put_rollouts(rollouts)
+
+        # Still admitted; arming short-circuits without side effects.
+        self.assertEqual(n_samples, 1)
+        self.assertEqual(len(fixture.put_rollout_calls), 1)
+        self.assertTrue(fixture.manager._nccl_cleanup_enabled)
+
+    def test_missing_completion_attr_is_safe(self):
+        # The default ``_make_rollout`` stub has no ``completion`` attribute
+        # (spec omits it); detection must treat that as "no prefix".
+        fixture = self._fixture()
+        fixture.manager.put_rollouts([_make_rollout()])
+        self.assertFalse(fixture.manager._nccl_cleanup_enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

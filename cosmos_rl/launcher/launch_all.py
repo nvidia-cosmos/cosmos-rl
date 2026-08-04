@@ -16,6 +16,7 @@
 #!/usr/bin/env python3
 
 import http.client
+import signal
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ from typing import Dict, Optional, Any
 import toml
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.launcher.launch_vision import launch_vision_gen
+from cosmos_rl.utils.constant import COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS
 from cosmos_rl.launcher.utility import (
     get_available_gpus,
     get_non_lepton_args,
@@ -428,6 +430,34 @@ def get_hostname_from_host(ip):
     except Exception as e:
         logger.error(f"Error: {e}")
         return None
+
+
+def _is_coordinated_controller_exit(
+    proc_index: int, controller_id: int, returncode: int
+) -> bool:
+    """Is this the controller ending via its own deliberate SIGTERM?
+
+    ``COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS`` makes the controller
+    ``os.kill(os.getpid(), SIGTERM)`` once the last policy replica unregisters,
+    so the scheduling layer reclaims the allocation immediately rather than
+    idling until wall-clock.  That is a *successful* end of a run, but it
+    surfaces here as a non-zero return code and was previously indistinguishable
+    from a crash.
+
+    Deliberately narrow -- only the controller, only SIGTERM, and only when the
+    feature that produces it is enabled -- so a SIGTERM from anywhere else (a
+    scheduler pre-emption, an operator ``scancel``, a replica killed by the OOM
+    reaper) still fails the job loudly.
+
+    A signalled child reports ``-SIGTERM`` via :mod:`subprocess`, but these are
+    launched through a shell wrapper that exits ``128 + SIGTERM`` instead;
+    accept both rather than depend on which layer relays it.
+    """
+    if controller_id < 0 or proc_index != controller_id:
+        return False
+    if not COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS:
+        return False
+    return returncode in (-signal.SIGTERM, 128 + signal.SIGTERM)
 
 
 def main():
@@ -974,6 +1004,19 @@ cosmos-rl --config config.toml"""
                     returncode = process.returncode
                     if returncode == 0:
                         logger.info(f"Process {i} completed successfully")
+                    elif _is_coordinated_controller_exit(i, controller_id, returncode):
+                        # Not a failure: the controller SIGTERMs ITSELF once the
+                        # last policy replica unregisters, so the scheduler can
+                        # release the allocation instead of idling to wall-clock
+                        # (see COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS in
+                        # run_web_panel).  Treating that as a crash made every
+                        # successful run report FAILED to SLURM, which is worse
+                        # than cosmetic -- it leaves no way to tell a completed
+                        # job from a broken one without reading the logs.
+                        logger.info(
+                            f"Process {i} (controller) exited via the coordinated "
+                            f"shutdown path (rc={returncode}); treating as success"
+                        )
                     else:
                         logger.error(
                             f"Process {i} failed with return code {returncode}"

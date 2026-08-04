@@ -43,6 +43,7 @@ from cosmos_rl.utils.parallelism_map import (
 )
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
+    nccl_abort_all,
     nccl_group_start,
     nccl_group_end,
 )
@@ -229,9 +230,46 @@ class RLPolicyWorker(PolicyWorkerBase):
                 trainable_params=list(self.trainable_params),
             )
 
+    def _shutdown_payload_data_packers(self):
+        """Tear down any payload-transport data packer(s) on this worker.
+
+        Calls ``shutdown_nccl_data_packer`` / ``shutdown_ucxx_data_packer``
+        (whichever the packer exposes) so the transport's prefetch thread is
+        stopped and its communicators are aborted before the NCCL /
+        distributed teardown.  ``data_packer`` and ``val_data_packer`` are
+        often the same object; dedupe by identity.  Best-effort: a teardown
+        error must not block shutdown.
+        """
+        seen: set = set()
+        for name in ("data_packer", "val_data_packer"):
+            packer = getattr(self, name, None)
+            if packer is None or id(packer) in seen:
+                continue
+            seen.add(id(packer))
+            for meth in ("shutdown_nccl_data_packer", "shutdown_ucxx_data_packer"):
+                fn = getattr(packer, meth, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception as e:  # pragma: no cover - best-effort
+                        logger.warning(
+                            f"[Policy] {meth} raised {type(e).__name__}: {e}; "
+                            "continuing shutdown"
+                        )
+                    break
+
     def handle_shutdown(self):
         if not hasattr(self, "_handle_shutdown_called"):
             self._handle_shutdown_called = True
+
+            # Release the payload-transport data packer FIRST: stop its
+            # prefetch thread and abort its cached communicators.  A NCCL
+            # payload transport (NCCLDataPackerMixin) holds 2-rank comms to
+            # the rollout replicas; by shutdown time those replicas have
+            # exited, so the leftover half-open comms would wedge the
+            # NCCL / process-group teardown below and hang the policy exit.
+            # Idempotent + best-effort; also covers the UCXX packer.
+            self._shutdown_payload_data_packers()
 
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
@@ -252,7 +290,21 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
-            # Manually unregister from controller
+            # Complete NCCL + distributed teardown BEFORE announcing departure.
+            # unregister_from_controller() arms the controller's
+            # COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS fast-reap, which SIGTERMs the
+            # job within ~8s.  If we unregister first, the reap pre-empts the
+            # trailing sleep and destroy_worker() (in execute()'s finally) never
+            # runs -- leaving the weight-sync comm (idx=0) un-aborted (a latent
+            # hang were the reap ever disabled) and no graceful teardown.  The
+            # background threads above are joined, so no comm is in use here;
+            # nccl_abort_all() is idempotent and forces any in-flight collective
+            # to stop, so a departed peer can't wedge the destroy.
+            nccl_abort_all()
+            self.destroy_worker()
+
+            # Announce departure LAST -- the reap now races an already-torn-down
+            # process, which exits cleanly instead of being killed mid-teardown.
             self.unregister_from_controller()
 
             if hasattr(self, "upload_thread") and self.upload_thread is not None:
@@ -1004,5 +1056,12 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
 
     def destroy_worker(self):
+        # Idempotent: handle_shutdown() now runs the teardown before the
+        # controller reap, and execute()'s finally also calls this -- the guard
+        # prevents a double destroy_distributed / duplicate log on the graceful
+        # (non-reaped) path.
+        if getattr(self, "_worker_destroyed", False):
+            return
+        self._worker_destroyed = True
         destroy_distributed()
         logger.info("[Policy] Process group destroyed.")

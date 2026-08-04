@@ -26,8 +26,11 @@ jobs:
 
       - name: Build image
         run: |
-          docker build -t ${{ steps.vars.outputs.image_tag }} .
-          docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla,wfm,rl .
+          # The ucxx extra must be on THIS image, not just the -vla one
+          # below: this is the image that runs tests/run_test.sh, and the
+          # UCXX suites self-skip without ucxx importable (46 tests).
+          docker build -t ${{ steps.vars.outputs.image_tag }} --build-arg COSMOS_RL_EXTRAS=ucxx .
+          docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla,wfm,rl,ucxx .
 
       - name: Run vla tests
         id: vla-tests

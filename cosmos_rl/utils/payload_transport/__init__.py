@@ -72,12 +72,14 @@ from cosmos_rl.utils.payload_transport.prefetch_mixin import (
 from cosmos_rl.utils.payload_transport.registry import (
     DEFAULT_TRANSFER_MODE,
     LEGACY_NCCL_KEY,
+    P2P_TRANSFER_MODES,
     PAYLOAD_TRANSFER_KEY,
     PayloadTransport,
     PayloadTransportRegistry,
     RedisEndpoint,
     get_payload_transfer_mode,
     is_payload_transfer_mode_explicit,
+    validate_single_receiver_topology,
 )
 
 # Importing the NCCL submodule registers the backend as a side effect.
@@ -91,6 +93,7 @@ PayloadTransportRegistry.register_default_redis()
 __all__ = [
     "DEFAULT_TRANSFER_MODE",
     "LEGACY_NCCL_KEY",
+    "P2P_TRANSFER_MODES",
     "PAYLOAD_TRANSFER_KEY",
     "PayloadTransport",
     "PayloadTransportRegistry",
@@ -98,4 +101,5 @@ __all__ = [
     "RedisEndpoint",
     "get_payload_transfer_mode",
     "is_payload_transfer_mode_explicit",
+    "validate_single_receiver_topology",
 ]
