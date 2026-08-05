@@ -176,6 +176,47 @@ def holds_payload_egress(handler: Callable) -> Callable:
 
 
 # ---------------------------------------------------------------------------
+# Generation safe point
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def generation_paused(worker) -> Iterator[None]:
+    """Quiesce generation while weight sync writes the served model in place.
+
+    A weight sync that runs while a forward is in flight can overwrite the
+    tensors that forward is reading.  Nothing runs concurrently for an engine
+    whose generation call blocks the main loop, which is why the backend's
+    ``paused`` does nothing by default, but stream generation feeds a scheduler
+    that keeps working while the main loop dequeues a command, and an engine
+    that serves on a thread of its own never stops on its own account.
+
+    A sync in one of the async modes is exempt: it writes a buffer clone and
+    ``install_inference_sync`` swaps that in at its own safe point, so the
+    served tensors are never written under a forward.
+
+    Yields:
+        Control, with generation quiesced for as long as the block runs.
+    """
+    if get_async_r2r_sync_mode(worker) != AsyncR2RSyncMode.DISABLED:
+        yield
+        return
+    with worker.rollout.paused():
+        yield
+
+
+def pauses_generation(handler: Callable) -> Callable:
+    """Run a weight-sync command handler with generation quiesced."""
+
+    @functools.wraps(handler)
+    def handler_with_generation_paused(self, command: Any, *args, **kwargs):
+        with generation_paused(self):
+            return handler(self, command, *args, **kwargs)
+
+    return handler_with_generation_paused
+
+
+# ---------------------------------------------------------------------------
 # Buffer model helpers
 # ---------------------------------------------------------------------------
 

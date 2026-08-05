@@ -10,7 +10,7 @@ being checked.
 
 import queue
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -68,7 +68,8 @@ def _make_worker(events, packer):
     worker.current_weight_version = 3
     worker.prepare_trainable_params = lambda: None
     worker.rollout = SimpleNamespace(
-        model_param_map=lambda _mapper: {"a.weight": torch.zeros(2)}
+        model_param_map=lambda _mapper: {"a.weight": torch.zeros(2)},
+        paused=nullcontext,
     )
     worker.state = SimpleNamespace(
         weight_synced=lambda: True, set_weight_synced=lambda: None
@@ -97,6 +98,10 @@ def _broadcast(worker, events):
         ),
         patch(
             "cosmos_rl.rollout.worker.rollout_control.get_async_r2r_sync_mode",
+            lambda _worker: AsyncR2RSyncMode.DISABLED,
+        ),
+        patch(
+            "cosmos_rl.rollout.worker.weight_sync.get_async_r2r_sync_mode",
             lambda _worker: AsyncR2RSyncMode.DISABLED,
         ),
         patch(
@@ -137,7 +142,11 @@ def test_p2r_holds_egress_too():
         dst_replica_size=1,
     )
 
-    worker.policy_to_rollout_unicast(command)
+    with patch(
+        "cosmos_rl.rollout.worker.weight_sync.get_async_r2r_sync_mode",
+        lambda _worker: AsyncR2RSyncMode.DISABLED,
+    ):
+        worker.policy_to_rollout_unicast(command)
 
     assert events == ["hold", "lazy init", "release"]
 

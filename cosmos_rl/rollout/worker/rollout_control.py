@@ -82,6 +82,7 @@ from cosmos_rl.rollout.worker.weight_sync import (
     get_async_r2r_sync_mode,
     get_broadcast_all_params,
     holds_payload_egress,
+    pauses_generation,
     ensure_wst,
     sync_buffer_to_live,
     process_wst_deferred_actions,
@@ -1214,6 +1215,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @holds_payload_egress
+    @pauses_generation
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         """Sync the weight from policy to rollout.
@@ -1418,6 +1420,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         RolloutToRolloutBroadcastCommand
     )
     @holds_payload_egress
+    @pauses_generation
     def broadcast_to_all_rollout_replica(
         self, broadcast_command: RolloutToRolloutBroadcastCommand
     ) -> None:
