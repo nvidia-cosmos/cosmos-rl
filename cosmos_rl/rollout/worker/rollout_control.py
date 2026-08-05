@@ -81,6 +81,7 @@ from cosmos_rl.rollout.worker.weight_sync import (
     AsyncR2RSyncMode,
     get_async_r2r_sync_mode,
     get_broadcast_all_params,
+    holds_payload_egress,
     ensure_wst,
     sync_buffer_to_live,
     process_wst_deferred_actions,
@@ -1212,6 +1213,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ensure_wst(self)
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
+    @holds_payload_egress
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         """Sync the weight from policy to rollout.
@@ -1415,6 +1417,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand
     )
+    @holds_payload_egress
     def broadcast_to_all_rollout_replica(
         self, broadcast_command: RolloutToRolloutBroadcastCommand
     ) -> None:
@@ -1431,13 +1434,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         src_replica_name: str = broadcast_command.src_replica_name
         dst_replica_names: List[str] = broadcast_command.dst_replica_names
-
-        # Forward-compat: flush any pending async NCCL sends (e.g. from data
-        # packers) so they complete before weight sync reuses the communicator.
-        if hasattr(self, "data_packer") and hasattr(
-            self.data_packer, "flush_pending_sends"
-        ):
-            self.data_packer.flush_pending_sends()
 
         # lazy initialization of the rollout engine.
         if self.replica_name != src_replica_name:
