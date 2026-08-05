@@ -23,6 +23,7 @@ class TestP2PPhaseObserver(unittest.TestCase):
     ) -> dict[str, Mock]:
         tensor = Mock()
         tensor.numel.return_value = 8
+        tensor.element_size.return_value = 2
         meta = pynccl._CommMeta(comm=Mock(), rank=1, world_size=2)
         legacy_raw = Mock()
         result_raw = Mock(return_value=raw_result)

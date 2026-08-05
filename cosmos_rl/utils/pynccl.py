@@ -410,8 +410,27 @@ def _submit_nccl(
 
 
 def _dtype_enum(dtype: torch.dtype) -> int:
-    """Map torch.dtype to NCCL enum (raises on unsupported)."""
+    """Map torch.dtype to NCCL enum (raises on unsupported).
+
+    Only reductions need this; movement collectives use :func:`_byte_count`.
+    """
     return ncclDataTypeEnum.from_torch(dtype)
+
+
+def _byte_count(tensor: torch.Tensor) -> int:
+    """Byte extent of a contiguous tensor.
+
+    Movement collectives (broadcast / send / recv / allgather) never interpret
+    the payload -- NCCL uses the datatype solely to derive ``count * itemsize``
+    -- so they are issued as ``ncclUint8`` over this count instead.  That keeps
+    them dtype-agnostic: ``torch.bool``, ``int16``, the unsigned types and any
+    dtype torch adds later all transfer without an entry in
+    :class:`ncclDataTypeEnum`, several of which NCCL has no enum for at all.
+
+    Contiguity is guaranteed by :func:`_check_tensor`, and ``storage_offset`` is
+    already folded into ``data_ptr()``, so this is the exact wire extent.
+    """
+    return tensor.numel() * tensor.element_size()
 
 
 def _redop_enum(op: ReduceOp) -> int:
@@ -713,8 +732,8 @@ def nccl_broadcast(
         _nccl.ncclBroadcast(
             sendbuf,
             recvbuf,
-            tensor.numel(),
-            _dtype_enum(tensor.dtype),
+            _byte_count(tensor),
+            ncclDataTypeEnum.ncclUint8,
             rank,
             meta.comm,
             stream_ptr,
@@ -774,8 +793,8 @@ def nccl_send(
         if phase_observer is None:
             _nccl.ncclSend(
                 _buf(tensor),
-                tensor.numel(),
-                _dtype_enum(tensor.dtype),
+                _byte_count(tensor),
+                ncclDataTypeEnum.ncclUint8,
                 peer,
                 meta.comm,
                 stream_ptr,
@@ -784,8 +803,8 @@ def nccl_send(
             _notify_p2p_phase(phase_observer, "raw_call_enter")
             api_result = _nccl._ncclSendResult(
                 _buf(tensor),
-                tensor.numel(),
-                _dtype_enum(tensor.dtype),
+                _byte_count(tensor),
+                ncclDataTypeEnum.ncclUint8,
                 peer,
                 meta.comm,
                 stream_ptr,
@@ -829,8 +848,8 @@ def nccl_recv(
         if phase_observer is None:
             _nccl.ncclRecv(
                 _buf(tensor),
-                tensor.numel(),
-                _dtype_enum(tensor.dtype),
+                _byte_count(tensor),
+                ncclDataTypeEnum.ncclUint8,
                 peer,
                 meta.comm,
                 stream_ptr,
@@ -839,8 +858,8 @@ def nccl_recv(
             _notify_p2p_phase(phase_observer, "raw_call_enter")
             api_result = _nccl._ncclRecvResult(
                 _buf(tensor),
-                tensor.numel(),
-                _dtype_enum(tensor.dtype),
+                _byte_count(tensor),
+                ncclDataTypeEnum.ncclUint8,
                 peer,
                 meta.comm,
                 stream_ptr,
@@ -908,8 +927,8 @@ def nccl_alltoall(
         _nccl.ncclAllGather(
             _buf(sendbuff),
             _buf(recvbuff),
-            sendbuff.numel(),
-            _dtype_enum(sendbuff.dtype),
+            _byte_count(sendbuff),
+            ncclDataTypeEnum.ncclUint8,
             meta.comm,
             stream_ptr,
         )
