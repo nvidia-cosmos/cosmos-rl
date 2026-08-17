@@ -283,6 +283,10 @@ class PolicyStatusManager:
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
         self._applied_discard_report_ids: Dict[str, set[str]] = {}
+        # Prompt-denominated dispatch slots, shared with Controller. A slot
+        # remains filled when its prompt produces trainable work, but must be
+        # returned when the whole prompt terminates without a trainable rollout.
+        self.weight_version_to_prompt_num: Dict[int, int] = {}
 
         # Actual rollout count for each in-flight real training command.
         # Entries are keyed by the command step and consumed after its full
@@ -1133,16 +1137,93 @@ class PolicyStatusManager:
             for key in ("sampled", "filtered_positive", "filtered_negative")
         }
 
-    def _settle_samples_on_the_fly(self, count: int, source: str) -> None:
+    def _infer_prompt_slots(self, sample_count: int, source: str) -> int:
+        """Infer whole prompt groups for reports from older rollout workers."""
+        rollout_config = getattr(getattr(self, "config", None), "rollout", None)
+        n_generation = getattr(rollout_config, "n_generation", None)
+        if not isinstance(n_generation, int) or n_generation <= 0:
+            return 0
+        prompt_slots, remainder = divmod(sample_count, n_generation)
+        if remainder:
+            logger.warning(
+                "[Controller] Cannot release prompt slots for %s: "
+                "sample_count=%d is not divisible by n_generation=%d",
+                source,
+                sample_count,
+                n_generation,
+            )
+            return 0
+        return prompt_slots
+
+    def release_prompt_slots(self, count: int, source: str) -> int:
+        """Return fungible dispatch slots from the highest active versions.
+
+        Rollout workers replace the dispatch weight version with their live
+        version before reporting results, so a dead prompt cannot identify its
+        original bucket. The buckets only gate how far dispatch may advance;
+        retiring the leading edge therefore restores the same capacity without
+        requiring a new wire-level prompt identity. Buckets behind
+        ``current_step`` no longer affect future dispatch and are discarded.
+        """
+        if count <= 0:
+            return 0
+
+        active_versions = []
+        for version in list(self.weight_version_to_prompt_num):
+            if version < self.current_step:
+                self.weight_version_to_prompt_num.pop(version)
+            else:
+                active_versions.append(version)
+
+        remaining = count
+        for version in sorted(active_versions, reverse=True):
+            held = self.weight_version_to_prompt_num[version]
+            released = min(held, remaining)
+            if released == held:
+                self.weight_version_to_prompt_num.pop(version)
+            else:
+                self.weight_version_to_prompt_num[version] = held - released
+            remaining -= released
+            if remaining == 0:
+                break
+
+        released = count - remaining
+        if released:
+            held = sum(
+                prompt_count
+                for version, prompt_count in self.weight_version_to_prompt_num.items()
+                if version >= self.current_step
+            )
+            logger.debug(
+                "[Controller prompt slots] source=%s requested=%d released=%d "
+                "held=%d current_step=%d",
+                source,
+                count,
+                released,
+                held,
+                self.current_step,
+            )
+        return released
+
+    def _settle_samples_on_the_fly(
+        self,
+        count: int,
+        source: str,
+        *,
+        prompt_slots: int = 0,
+    ) -> None:
         if count <= 0:
             return
         before = self.samples_on_the_fly
         self.samples_on_the_fly = max(0, before - count)
+        released_prompt_slots = self.release_prompt_slots(prompt_slots, source)
         _log_samples_on_the_fly_mutation(
             source,
             before,
             self.samples_on_the_fly,
-            extra=f"settled_count={count}",
+            extra=(
+                f"settled_count={count} released_prompt_slots={released_prompt_slots}"
+            ),
         )
 
     def settle_discarded_samples(
@@ -1150,6 +1231,7 @@ class PolicyStatusManager:
         source_replica: str,
         report_id: Any,
         count: int,
+        prompt_slots: Optional[int] = None,
     ) -> int:
         """Settle one idempotent report of terminally discarded samples."""
         if count <= 0:
@@ -1171,7 +1253,13 @@ class PolicyStatusManager:
         self.filter_records["rollout_failed"] = (
             self.filter_records.get("rollout_failed", 0) + count
         )
-        self._settle_samples_on_the_fly(count, "rollout_failure")
+        if prompt_slots is None:
+            prompt_slots = self._infer_prompt_slots(count, "rollout_failure")
+        self._settle_samples_on_the_fly(
+            count,
+            "rollout_failure",
+            prompt_slots=prompt_slots,
+        )
         return count
 
     def forget_discard_reports(self, source_replica: str) -> None:
@@ -1331,9 +1419,27 @@ class PolicyStatusManager:
         self.remain_samples_num -= filtered_count
         # Filtered DAPO generations have no payload and can never reach a
         # training ACK, so settle their prompt-side in-flight accounting here.
-        self._settle_samples_on_the_fly(filtered_count, "dapo_filter")
+        filtered_prompt_slots = None
+        if "filtered_prompt_slots" in filter_records:
+            filtered_prompt_slots = self._parse_non_negative_count(
+                filter_records, "filtered_prompt_slots"
+            )
+        if filtered_prompt_slots is None:
+            filtered_prompt_slots = self._infer_prompt_slots(
+                filtered_count, "dapo_filter"
+            )
+        self._settle_samples_on_the_fly(
+            filtered_count,
+            "dapo_filter",
+            prompt_slots=filtered_prompt_slots,
+        )
 
-    def filter_outdated_rollouts(self, rollouts: List[Rollout]) -> List[Rollout]:
+    def filter_outdated_rollouts(
+        self,
+        rollouts: List[Rollout],
+        *,
+        prompt_groups: Optional[List[List[Rollout]]] = None,
+    ) -> List[Rollout]:
         """
         Filter out the outdated rollouts based on the current step.
 
@@ -1341,6 +1447,10 @@ class PolicyStatusManager:
         GPU buffers on the rollout worker.  This method publishes explicit
         cleanup messages so the rollout worker releases them immediately
         instead of waiting for age-based cleanup.
+
+        ``prompt_groups`` preserves the payload boundary that is lost when
+        rollouts are flattened. It lets slot accounting distinguish a fully
+        discarded prompt from a partial group that still has trainable work.
         """
         allowed_outdated_steps = self.config.train.train_policy.allowed_outdated_steps
         filtered_rollouts = []
@@ -1408,7 +1518,19 @@ class PolicyStatusManager:
         self.filter_records[k] = self.filter_records.get(k, 0) + discarded_count
 
         if discarded_count > 0:
-            self._settle_samples_on_the_fly(discarded_count, "filter_outdated")
+            discarded_prompt_slots = 0
+            if prompt_groups is not None:
+                accepted_ids = {id(rollout) for rollout in filtered_rollouts}
+                discarded_prompt_slots = sum(
+                    bool(group)
+                    and all(id(rollout) not in accepted_ids for rollout in group)
+                    for group in prompt_groups
+                )
+            self._settle_samples_on_the_fly(
+                discarded_count,
+                "filter_outdated",
+                prompt_slots=discarded_prompt_slots,
+            )
             self._publish_payload_transport_cleanup(rollouts, filtered_rollouts)
 
         return filtered_rollouts

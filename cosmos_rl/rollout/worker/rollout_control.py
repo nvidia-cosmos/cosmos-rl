@@ -1925,6 +1925,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 filter_reward = payload.filter_rewards[0]
                 key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
                 metadata[key] = metadata.get(key, 0) + len(payload.completions)
+                if not getattr(self, "colocated", False):
+                    metadata["filtered_prompt_slots"] = (
+                        metadata.get("filtered_prompt_slots", 0) + 1
+                    )
         return valid_payloads, metadata
 
     def report_rollouts(self, block=False):
@@ -2317,6 +2321,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if count <= 0 or not self.should_report:
             return
 
+        n_generation = self.config.rollout.n_generation
+        assert count % n_generation == 0, (
+            "Terminal generation failures must report whole prompt groups"
+        )
         report_id = uuid.uuid4().hex
         response = RolloutRequest(
             src_replica_name=self.replica_name,
@@ -2324,6 +2332,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads=[],
             metrics={
                 "discarded_samples": count,
+                "discarded_prompt_slots": count // n_generation,
                 "discard_report_id": report_id,
             },
             is_end=False,
@@ -2400,9 +2409,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
 
+        discarded_prompt_slots = len(payloads_list) - len(valid_payloads_list)
         self._report_discarded_samples(
-            (len(payloads_list) - len(valid_payloads_list))
-            * self.config.rollout.n_generation
+            discarded_prompt_slots * self.config.rollout.n_generation
         )
 
         should_report = self.should_report and len(valid_result) > 0

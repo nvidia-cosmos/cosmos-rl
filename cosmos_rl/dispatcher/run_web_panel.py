@@ -709,10 +709,16 @@ async def put_rollout_group(rollout: RolloutRequest):
             discarded_samples = policy_status._parse_non_negative_count(
                 rollout.metrics, "discarded_samples"
             )
+            discarded_prompt_slots = None
+            if "discarded_prompt_slots" in rollout.metrics:
+                discarded_prompt_slots = policy_status._parse_non_negative_count(
+                    rollout.metrics, "discarded_prompt_slots"
+                )
             policy_status.settle_discarded_samples(
                 source_replica=rollout.src_replica_name,
                 report_id=rollout.metrics.get("discard_report_id"),
                 count=discarded_samples,
+                prompt_slots=discarded_prompt_slots,
             )
         if policy_status.rollout_admission_closed():
             policy_status.cleanup_terminal_rollouts(
@@ -726,7 +732,10 @@ async def put_rollout_group(rollout: RolloutRequest):
         if is_dapo:
             policy_status.update_dynamic_sampling_statistics(rollout.metrics)
         # Filter out outdated rollouts
-        rollouts = policy_status.filter_outdated_rollouts(rollouts)
+        rollouts = policy_status.filter_outdated_rollouts(
+            rollouts,
+            prompt_groups=rollouts_list,
+        )
         if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"

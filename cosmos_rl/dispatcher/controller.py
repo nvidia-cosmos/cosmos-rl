@@ -145,7 +145,15 @@ class Controller:
             task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
         )
         self.is_diffusers = self.config.policy.is_diffusers
-        self.weight_version_to_prompt_num = {}  # Only for on-policy.
+        # PolicyStatusManager owns this ledger because terminal rollout
+        # settlement must return prompt-denominated dispatch slots.
+        self.weight_version_to_prompt_num = (
+            self.policy_status_manager.weight_version_to_prompt_num
+        )
+        # DAPO's retry limit is cumulative, unlike the active slot ledger.
+        # Keep attempt history separate so returning filtered slots does not
+        # silently disable max_retry_for_on_policy.
+        self.weight_version_to_prompt_attempt_num: Dict[int, int] = {}
 
         self.data_fetcher = ControllerDataFetcher(
             config=config,
@@ -564,16 +572,31 @@ maxmemory-policy allkeys-lfu
                     self.weight_version_to_prompt_num[
                         weight_version_for_current_batch
                     ] += current_fetch_count
+                for version in list(self.weight_version_to_prompt_attempt_num):
+                    if version < self.policy_status_manager.current_step:
+                        self.weight_version_to_prompt_attempt_num.pop(version)
+                self.weight_version_to_prompt_attempt_num[
+                    weight_version_for_current_batch
+                ] = (
+                    self.weight_version_to_prompt_attempt_num.get(
+                        weight_version_for_current_batch, 0
+                    )
+                    + current_fetch_count
+                )
                 for i in range(current_fetch_count):
                     # Assign estimated weight version to each payload for weight version control.
                     payloads_list[i].weight_version = weight_version_for_current_batch
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                already_retried_times = math.ceil(
-                    self.weight_version_to_prompt_num[weight_version_for_current_batch]
-                    / global_batch_size
-                )
+                prompt_count = self.weight_version_to_prompt_num[
+                    weight_version_for_current_batch
+                ]
+                if self.config.train.train_policy.variant == "dapo":
+                    prompt_count = self.weight_version_to_prompt_attempt_num[
+                        weight_version_for_current_batch
+                    ]
+                already_retried_times = math.ceil(prompt_count / global_batch_size)
                 if (
                     already_retried_times
                     > self.config.train.train_policy.max_retry_for_on_policy
