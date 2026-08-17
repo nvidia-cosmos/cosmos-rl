@@ -490,6 +490,7 @@ def test_http_discard_report_settles_before_normal_admission():
     from cosmos_rl.dispatcher import run_web_panel
 
     policy_status = SimpleNamespace(
+        accept_rollout_request=lambda *_args: True,
         _parse_non_negative_count=PolicyStatusManager._parse_non_negative_count,
         parse_prompt_dispatch_ids=PolicyStatusManager.parse_prompt_dispatch_ids,
         settle_discarded_samples=MagicMock(),
@@ -524,6 +525,59 @@ def test_http_discard_report_settles_before_normal_admission():
         prompt_dispatch_ids=["dispatch-0", "dispatch-1"],
     )
     fake_controller.put_rollouts.assert_awaited_once_with([])
+
+
+def test_rollout_request_retry_is_idempotent_before_all_mutations():
+    from cosmos_rl.dispatcher import run_web_panel
+
+    policy_status = PolicyStatusManager()
+    policy_status.rollout_admission_closed = MagicMock(return_value=False)
+    policy_status.update_dynamic_sampling_statistics = MagicMock()
+    policy_status.filter_outdated_rollouts = MagicMock(return_value=[])
+    fake_controller = SimpleNamespace(
+        policy_status_manager=policy_status,
+        config=SimpleNamespace(
+            train=SimpleNamespace(train_policy=SimpleNamespace(variant="dapo"))
+        ),
+        put_rollouts=AsyncMock(),
+    )
+    request = RolloutRequest(
+        request_id="rollout-request-1",
+        src_replica_name="rollout-0",
+        src_global_rank=3,
+        payloads=[],
+        metrics={
+            "sampled": 0,
+            "filtered_positive": 0,
+            "filtered_negative": 0,
+        },
+    )
+
+    with patch.object(run_web_panel, "controller", fake_controller):
+        first_response = asyncio.run(run_web_panel.put_rollout_group(request))
+        retry_response = asyncio.run(run_web_panel.put_rollout_group(request))
+
+    assert first_response == {"message": "Rollout put"}
+    assert retry_response == {"message": "Rollout request already applied"}
+    policy_status.update_dynamic_sampling_statistics.assert_called_once_with(
+        request.metrics
+    )
+    policy_status.filter_outdated_rollouts.assert_called_once_with(
+        [],
+        prompt_groups=[],
+    )
+    fake_controller.put_rollouts.assert_awaited_once_with([])
+
+
+def test_rollout_request_id_survives_serialization_for_http_retry():
+    request = RolloutRequest(
+        src_replica_name="rollout-0",
+        payloads=[],
+    )
+
+    replayed = RolloutRequest.model_validate(request.model_dump())
+
+    assert replayed.request_id == request.request_id
 
 
 def _prompt_dispatch_controller(*, variant="grpo", max_retry=0):

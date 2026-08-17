@@ -76,9 +76,13 @@ class TestRankedRolloutEnd(unittest.TestCase):
 
         rollout_end = MagicMock(return_value=False)
         fake_controller = SimpleNamespace(
-            rollout_status_manager=SimpleNamespace(rollout_end=rollout_end)
+            rollout_status_manager=SimpleNamespace(rollout_end=rollout_end),
+            policy_status_manager=SimpleNamespace(
+                accept_rollout_request=lambda *_args: True
+            ),
         )
         request = SimpleNamespace(
+            request_id="end-request-1",
             is_end=True,
             src_replica_name="trtllm",
             src_global_rank=None,
@@ -411,6 +415,7 @@ class TestTerminalHttpAdmission(unittest.TestCase):
         extracted = object()
         cleaned = []
         policy_status = SimpleNamespace(
+            accept_rollout_request=lambda *_args: True,
             rollout_admission_closed=lambda: True,
             cleanup_terminal_rollouts=lambda rollouts, metrics, is_dapo: cleaned.append(
                 (rollouts, metrics, is_dapo)
@@ -432,8 +437,10 @@ class TestTerminalHttpAdmission(unittest.TestCase):
             ),
         )
         request = SimpleNamespace(
+            request_id="terminal-request-1",
             is_end=False,
             src_replica_name="rollout-0",
+            src_global_rank=0,
             payloads=[object()],
             metrics={"filtered_positive": 2},
         )

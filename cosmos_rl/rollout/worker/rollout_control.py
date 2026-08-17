@@ -1978,6 +1978,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
+                    src_global_rank=self.global_rank,
                     payloads=payloads,
                     metrics=metadata,
                     is_end=False,
@@ -2344,6 +2345,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
         report_id = uuid.uuid4().hex
         response = RolloutRequest(
+            request_id=report_id,
             src_replica_name=self.replica_name,
             src_global_rank=self.global_rank,
             payloads=[],

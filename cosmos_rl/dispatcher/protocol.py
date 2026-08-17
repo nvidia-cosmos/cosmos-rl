@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pydantic import BaseModel, model_validator
+import uuid
+
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Dict, Any, Optional
 from cosmos_rl.dispatcher.data.schema import RLPayload
 
@@ -78,6 +80,11 @@ class ValidationReportRequest(BaseModel):
 
 
 class RolloutRequest(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        min_length=1,
+        description="Stable idempotency key reused by HTTP retries.",
+    )
     src_replica_name: str
     src_global_rank: Optional[int] = None
     stays_command_participant: bool = False

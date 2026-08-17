@@ -259,6 +259,8 @@ class PolicyStatusManager:
     A class to manage the status of a policy.
     """
 
+    _ROLLOUT_REQUEST_DEDUP_HISTORY = 4096
+
     policy_replicas: Dict[str, Replica]
     policy_init_done: bool = False
     replica_scaling_log: List[ReplicaScalingLog]
@@ -284,6 +286,12 @@ class PolicyStatusManager:
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
         self._applied_discard_report_ids: Dict[str, set[str]] = {}
+        # Network retries reuse a RolloutRequest.request_id. Keep a bounded
+        # per-reporting-rank history so the full mutation/admission path is
+        # at-most-once without growing controller memory for the whole run.
+        self._applied_rollout_request_ids: Dict[
+            tuple[str, Optional[int]], Dict[str, None]
+        ] = {}
         # Prompt-denominated dispatch slots, shared with Controller. A slot
         # remains filled when its prompt produces trainable work, but must be
         # returned when the whole prompt terminates without a trainable rollout.
@@ -1278,6 +1286,22 @@ class PolicyStatusManager:
         )
         self._settle_samples_on_the_fly(count, "rollout_failure")
         return count
+
+    def accept_rollout_request(
+        self,
+        source_replica: str,
+        source_global_rank: Optional[int],
+        request_id: str,
+    ) -> bool:
+        """Claim a rollout POST once before it performs any state mutation."""
+        stream_key = (source_replica, source_global_rank)
+        applied_ids = self._applied_rollout_request_ids.setdefault(stream_key, {})
+        if request_id in applied_ids:
+            return False
+        applied_ids[request_id] = None
+        if len(applied_ids) > self._ROLLOUT_REQUEST_DEDUP_HISTORY:
+            applied_ids.pop(next(iter(applied_ids)))
+        return True
 
     def forget_discard_reports(self, source_replica: str) -> None:
         """Release discard-report deduplication state for an ended replica."""

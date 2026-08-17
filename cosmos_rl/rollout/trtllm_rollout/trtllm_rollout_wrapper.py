@@ -240,6 +240,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         )
         report_id = uuid.uuid4().hex
         response = RolloutRequest(
+            request_id=report_id,
             src_replica_name=self.replica_name,
             payloads=[],
             metrics={

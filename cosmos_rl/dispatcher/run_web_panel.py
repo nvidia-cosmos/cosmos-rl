@@ -674,6 +674,20 @@ async def validation_report(request: ValidationReportRequest):
 @app.post(COSMOS_API_ROLLOUT_SUFFIX)
 async def put_rollout_group(rollout: RolloutRequest):
     try:
+        policy_status = controller.policy_status_manager
+        if not policy_status.accept_rollout_request(
+            rollout.src_replica_name,
+            rollout.src_global_rank,
+            rollout.request_id,
+        ):
+            logger.info(
+                "[Controller] Ignoring duplicate rollout request %s from %s rank=%s",
+                rollout.request_id,
+                rollout.src_replica_name,
+                rollout.src_global_rank,
+            )
+            return {"message": "Rollout request already applied"}
+
         if rollout.is_end:
             logger.info(
                 "[Controller] Received rollout end signal from %s rank=%s",
@@ -703,7 +717,6 @@ async def put_rollout_group(rollout: RolloutRequest):
             for rollouts_group in rollouts_list
             for extracted in rollouts_group
         ]
-        policy_status = controller.policy_status_manager
         is_dapo = controller.config.train.train_policy.variant == "dapo"
         if "discarded_samples" in rollout.metrics:
             discarded_samples = policy_status._parse_non_negative_count(
