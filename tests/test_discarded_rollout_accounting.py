@@ -90,6 +90,64 @@ def test_empty_outer_result_reports_every_consumed_prompt():
     assert request.metrics["discarded_prompt_slots"] == 2
 
 
+def test_partial_result_reports_only_missing_samples():
+    worker = _rollout_worker(n_generation=4)
+    payload = SimpleNamespace(prompt_idx=7)
+
+    valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
+        [RolloutResult(completions=["a", "b", "c"])],
+        [payload],
+    )
+
+    assert valid_payloads == [payload]
+    assert len(valid_results) == 1
+    request = worker.api_client.post_rollout_completion.call_args.args[0]
+    assert request.metrics["discarded_samples"] == 1
+    assert request.metrics["discarded_prompt_slots"] == 0
+
+
+def test_mixed_results_report_reserved_minus_emitted_samples():
+    worker = _rollout_worker(n_generation=4)
+    payloads = [SimpleNamespace(prompt_idx=index) for index in range(3)]
+
+    valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
+        [
+            RolloutResult(completions=["a", "b", "c", "d"]),
+            RolloutResult(completions=["e", "f", "g"]),
+            RolloutResult(completions=[]),
+        ],
+        payloads,
+    )
+
+    assert valid_payloads == payloads[:2]
+    assert len(valid_results) == 2
+    request = worker.api_client.post_rollout_completion.call_args.args[0]
+    assert request.metrics["discarded_samples"] == 5
+    assert request.metrics["discarded_prompt_slots"] == 1
+
+
+def test_partial_result_settlement_balances_reserved_capacity():
+    worker = _rollout_worker(n_generation=4)
+    manager = PolicyStatusManager()
+    manager.config = SimpleNamespace(rollout=SimpleNamespace(n_generation=4))
+
+    for report_index in range(5):
+        manager.samples_on_the_fly += 4
+        worker._filter_valid_rollout_results_and_report(
+            [RolloutResult(completions=["a", "b", "c"])],
+            [SimpleNamespace(prompt_idx=report_index)],
+        )
+        request = worker.api_client.post_rollout_completion.call_args.args[0]
+        manager.settle_discarded_samples(
+            "rollout-0",
+            request.metrics["discard_report_id"],
+            request.metrics["discarded_samples"],
+            prompt_slots=request.metrics["discarded_prompt_slots"],
+        )
+        manager.samples_on_the_fly -= 3
+        assert manager.samples_on_the_fly == 0
+
+
 def test_non_reporting_rank_does_not_report_discard():
     worker = _rollout_worker(should_report=False)
 

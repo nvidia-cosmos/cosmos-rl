@@ -2316,14 +2316,21 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
-    def _report_discarded_samples(self, count: int) -> None:
-        """Report fetched samples that terminated without trainable results."""
+    def _report_discarded_samples(
+        self, count: int, *, prompt_slots: Optional[int] = None
+    ) -> None:
+        """Report reserved samples and prompt slots that produced no output."""
         if count <= 0 or not self.should_report:
             return
 
         n_generation = self.config.rollout.n_generation
-        assert count % n_generation == 0, (
-            "Terminal generation failures must report whole prompt groups"
+        if prompt_slots is None:
+            assert count % n_generation == 0, (
+                "Prompt slots can only be inferred from whole prompt groups"
+            )
+            prompt_slots = count // n_generation
+        assert 0 <= prompt_slots * n_generation <= count, (
+            "Discarded prompt slots cannot exceed discarded sample capacity"
         )
         report_id = uuid.uuid4().hex
         response = RolloutRequest(
@@ -2332,7 +2339,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads=[],
             metrics={
                 "discarded_samples": count,
-                "discarded_prompt_slots": count // n_generation,
+                "discarded_prompt_slots": prompt_slots,
                 "discard_report_id": report_id,
             },
             is_end=False,
@@ -2409,9 +2416,22 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
 
+        n_generation = self.config.rollout.n_generation
+        if self.config.rollout.multi_turn_config.enable:
+            emitted_samples = sum(
+                len(result.completed_conversations or []) for result in valid_result
+            )
+        else:
+            emitted_samples = sum(len(result.completions) for result in valid_result)
+        reserved_samples = len(payloads_list) * n_generation
+        assert emitted_samples <= reserved_samples, (
+            f"Rollout engine emitted {emitted_samples} samples for "
+            f"{reserved_samples} reserved slots"
+        )
+        discarded_samples = reserved_samples - emitted_samples
         discarded_prompt_slots = len(payloads_list) - len(valid_payloads_list)
         self._report_discarded_samples(
-            discarded_prompt_slots * self.config.rollout.n_generation
+            discarded_samples, prompt_slots=discarded_prompt_slots
         )
 
         should_report = self.should_report and len(valid_result) > 0
