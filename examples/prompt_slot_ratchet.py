@@ -97,7 +97,7 @@ def stuck_slots(status):
 def run(*, release_slots):
     controller, status = build_controller()
     if not release_slots:
-        status.release_prompt_slots = lambda count, source: 0
+        status.resolve_prompt_dispatches = lambda *args, **kwargs: 0
 
     dispatched = 0
     dead = 0
@@ -132,13 +132,14 @@ def run(*, release_slots):
                     "rollout-0",
                     f"discard-{dispatched}",
                     N_GENERATION,
-                    prompt_slots=1,
+                    prompt_dispatch_ids=[payload.prompt_dispatch_id],
                 )
                 continue
             prompt_groups.append(
                 [
                     Rollout(
                         prompt_idx=payload.prompt_idx,
+                        prompt_dispatch_id=payload.prompt_dispatch_id,
                         completion=f"completion-{payload.prompt_idx}-{generation}",
                         weight_version=status.current_step,
                     )
@@ -159,6 +160,7 @@ def run(*, release_slots):
                 status.rollout_buffer.get()
             status.samples_on_the_fly -= TRAIN_BATCH_SIZE
             status.current_step += 1
+            status.prune_prompt_dispatches()
 
         max_stuck_slots = max(max_stuck_slots, stuck_slots(status))
 

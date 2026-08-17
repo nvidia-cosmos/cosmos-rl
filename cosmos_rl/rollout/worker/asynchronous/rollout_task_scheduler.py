@@ -45,7 +45,7 @@ class CompletedRollout:
     # the index of the payload in the dataset
     idx: int
     payload: RLPayload
-    result: RolloutResult
+    result: Optional[RolloutResult]
 
 
 class RolloutTaskScheduler:
@@ -267,7 +267,22 @@ class RolloutTaskScheduler:
             f"(total submitted: {self.total_submitted})"
         )
 
-    async def _generate_single(self, task: RolloutTask) -> Optional[CompletedRollout]:
+    def _complete_task(
+        self,
+        task: RolloutTask,
+        result: Optional[RolloutResult],
+    ) -> CompletedRollout:
+        """Publish one terminal task outcome, including generation failures."""
+        completed = CompletedRollout(
+            idx=task.idx,
+            payload=task.payload,
+            result=result,
+        )
+        self.complete_queue.put(completed)
+        self.total_processed += 1
+        return completed
+
+    async def _generate_single(self, task: RolloutTask) -> CompletedRollout:
         """
         Generate completion for a single task asynchronously.
 
@@ -290,14 +305,7 @@ class RolloutTaskScheduler:
             if results and len(results) > 0:
                 # because we only put one payload into the rollout engine, so the results is a list with one element
                 result = results[0]
-                completed = CompletedRollout(
-                    idx=task.idx, payload=task.payload, result=result
-                )
-
-                # Put the completed result into the queue
-                self.complete_queue.put(completed)
-
-                self.total_processed += 1
+                completed = self._complete_task(task, result)
                 logger.debug(
                     f"[RolloutTaskScheduler] Completed generation for payload "
                     f"({self.total_processed} total processed)"
@@ -308,14 +316,14 @@ class RolloutTaskScheduler:
                 logger.warning(
                     "[RolloutTaskScheduler] Generation returned empty results"
                 )
-                return None
+                return self._complete_task(task, None)
 
         except Exception as e:
             logger.error(f"[RolloutTaskScheduler] Error during generation: {str(e)}")
             import traceback
 
             traceback.print_exc()
-            return None
+            return self._complete_task(task, None)
 
     async def _worker_loop(self):
         """

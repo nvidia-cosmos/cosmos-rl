@@ -1062,11 +1062,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 # get processed results
                 completed_rollouts = self.scheduler.get_all()
 
+                failed_validation_count = sum(
+                    cr.result is None for cr in completed_rollouts
+                )
+                if failed_validation_count:
+                    raise RuntimeError(
+                        f"Async rollout generation failed for "
+                        f"{failed_validation_count} validation prompts"
+                    )
                 for cr in completed_rollouts:
                     payloads_list.append(cr.payload)
                     rollout_results.append(cr.result)
 
-                total_validation_payload_count += len(payloads_list)
+                total_validation_payload_count += len(completed_rollouts)
             else:
                 is_end = self.request_new_prompts(
                     self.val_batch_size,
@@ -1926,9 +1934,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
                 metadata[key] = metadata.get(key, 0) + len(payload.completions)
                 if not getattr(self, "colocated", False):
-                    metadata["filtered_prompt_slots"] = (
-                        metadata.get("filtered_prompt_slots", 0) + 1
-                    )
+                    dispatch_id = getattr(payload, "prompt_dispatch_id", None)
+                    if dispatch_id is not None:
+                        metadata.setdefault(
+                            "filtered_prompt_dispatch_ids",
+                            [],
+                        ).append(dispatch_id)
         return valid_payloads, metadata
 
     def report_rollouts(self, block=False):
@@ -2317,20 +2328,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def _report_discarded_samples(
-        self, count: int, *, prompt_slots: Optional[int] = None
+        self,
+        count: int,
+        *,
+        prompt_dispatch_ids: Optional[List[str]] = None,
     ) -> None:
-        """Report reserved samples and prompt slots that produced no output."""
+        """Report reserved samples and exact prompt dispatches with no output."""
         if count <= 0 or not self.should_report:
             return
 
+        prompt_dispatch_ids = list(dict.fromkeys(prompt_dispatch_ids or []))
         n_generation = self.config.rollout.n_generation
-        if prompt_slots is None:
-            assert count % n_generation == 0, (
-                "Prompt slots can only be inferred from whole prompt groups"
-            )
-            prompt_slots = count // n_generation
-        assert 0 <= prompt_slots * n_generation <= count, (
-            "Discarded prompt slots cannot exceed discarded sample capacity"
+        assert len(prompt_dispatch_ids) * n_generation <= count, (
+            "Discarded prompt dispatches cannot exceed discarded sample capacity"
         )
         report_id = uuid.uuid4().hex
         response = RolloutRequest(
@@ -2339,7 +2349,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads=[],
             metrics={
                 "discarded_samples": count,
-                "discarded_prompt_slots": prompt_slots,
+                "discarded_prompt_dispatch_ids": prompt_dispatch_ids,
                 "discard_report_id": report_id,
             },
             is_end=False,
@@ -2354,11 +2364,46 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
     def _filter_valid_rollout_results_and_report(
         self, rollout_results: List[RolloutResult], payloads_list: List[RLPayload]
-    ) -> Tuple[List[RolloutResult], List[RLPayload]]:
+    ) -> Tuple[List[RLPayload], List[RolloutResult]]:
         """
         Filter the rollout results with valid completions or valid completed_conversations.
         Returns the valid payloads and valid results for reporting.
         """
+        n_generation = self.config.rollout.n_generation
+        emitted_per_result = [
+            (
+                len(result.completed_conversations)
+                if result.completed_conversations is not None
+                else 0
+            )
+            if self.config.rollout.multi_turn_config.enable
+            else (len(result.completions) if result.completions is not None else 0)
+            for result in rollout_results
+        ]
+        if any(count > n_generation for count in emitted_per_result):
+            logger.error(
+                "[Rollout] Engine emitted an oversized prompt group %s for "
+                "n_generation=%d; discarding the malformed batch",
+                emitted_per_result,
+                n_generation,
+            )
+            self._report_discarded_samples(
+                len(payloads_list) * n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in payloads_list
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
+            )
+            return [], []
+
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
@@ -2416,7 +2461,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
 
-        n_generation = self.config.rollout.n_generation
         if self.config.rollout.multi_turn_config.enable:
             emitted_samples = sum(
                 len(result.completed_conversations or []) for result in valid_result
@@ -2429,9 +2473,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             f"{reserved_samples} reserved slots"
         )
         discarded_samples = reserved_samples - emitted_samples
-        discarded_prompt_slots = len(payloads_list) - len(valid_payloads_list)
+        valid_payload_ids = {id(payload) for payload in valid_payloads_list}
+        discarded_prompt_dispatch_ids = [
+            dispatch_id
+            for payload in payloads_list
+            if id(payload) not in valid_payload_ids
+            and (dispatch_id := getattr(payload, "prompt_dispatch_id", None))
+            is not None
+        ]
         self._report_discarded_samples(
-            discarded_samples, prompt_slots=discarded_prompt_slots
+            discarded_samples,
+            prompt_dispatch_ids=discarded_prompt_dispatch_ids,
         )
 
         should_report = self.should_report and len(valid_result) > 0
@@ -2493,17 +2545,51 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         payloads_list: List[RLPayload] = self._prompt_queue.get()
 
-        rollout_results: List[RolloutResult] = self._call_rollout_generation(
-            payloads=payloads_list,
-            stream=self.inference_stream,
-            data_packer=self.data_packer,
-            data_fetcher=self.data_fetcher,
-            is_validation=False,
-        )
+        try:
+            rollout_results: List[RolloutResult] = self._call_rollout_generation(
+                payloads=payloads_list,
+                stream=self.inference_stream,
+                data_packer=self.data_packer,
+                data_fetcher=self.data_fetcher,
+                is_validation=False,
+            )
+        except Exception:
+            logger.exception(
+                "[Rollout] Generation failed for %d prompts",
+                len(payloads_list),
+            )
+            self._report_discarded_samples(
+                len(payloads_list) * self.config.rollout.n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in payloads_list
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
+            )
+            return False
 
         if len(rollout_results) == 0:
             self._report_discarded_samples(
-                len(payloads_list) * self.config.rollout.n_generation
+                len(payloads_list) * self.config.rollout.n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in payloads_list
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
             )
             logger.debug(
                 "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
@@ -2514,9 +2600,56 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             return False
 
-        assert len(rollout_results) == len(payloads_list), (
-            f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
-        )
+        if len(rollout_results) > len(payloads_list):
+            logger.error(
+                "[Rollout] Engine returned %d results for %d prompts; "
+                "discarding the malformed batch",
+                len(rollout_results),
+                len(payloads_list),
+            )
+            self._report_discarded_samples(
+                len(payloads_list) * self.config.rollout.n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in payloads_list
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
+            )
+            return False
+
+        original_batch_size = len(payloads_list)
+        if len(rollout_results) < original_batch_size:
+            missing_payloads = payloads_list[len(rollout_results) :]
+            logger.warning(
+                "[Rollout] Engine returned %d results for %d prompts; "
+                "settling %d missing prompt results",
+                len(rollout_results),
+                original_batch_size,
+                len(missing_payloads),
+            )
+            self._report_discarded_samples(
+                len(missing_payloads) * self.config.rollout.n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in missing_payloads
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
+            )
+            payloads_list = payloads_list[: len(rollout_results)]
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
@@ -2528,7 +2661,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             "batch=%d produced=%d returned_false=False",
             self.global_rank,
             (time.time() - generation_start_ts) * 1000.0,
-            len(payloads_list),
+            original_batch_size,
             len(rollout_results),
         )
         return result
@@ -2619,11 +2752,35 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         payloads_list: List[RLPayload] = []
         rollout_results: List[RolloutResult] = []
+        failed_payloads: List[RLPayload] = []
         for cr in results:
+            if cr.result is None:
+                failed_payloads.append(cr.payload)
+                continue
             payloads_list.append(cr.payload)
             rollout_results.append(cr.result)
 
-        self._filter_valid_rollout_results_and_report(rollout_results, payloads_list)
+        if failed_payloads:
+            self._report_discarded_samples(
+                len(failed_payloads) * self.config.rollout.n_generation,
+                prompt_dispatch_ids=[
+                    dispatch_id
+                    for payload in failed_payloads
+                    if (
+                        dispatch_id := getattr(
+                            payload,
+                            "prompt_dispatch_id",
+                            None,
+                        )
+                    )
+                    is not None
+                ],
+            )
+        if rollout_results:
+            self._filter_valid_rollout_results_and_report(
+                rollout_results,
+                payloads_list,
+            )
 
     def stream_generation_step(self):
         """

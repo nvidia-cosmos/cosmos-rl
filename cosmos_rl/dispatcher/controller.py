@@ -514,6 +514,27 @@ maxmemory-policy allkeys-lfu
             # Don't do the weight version control at fetching when there is replica scaling since the pending rollout count may not reflect the real training status of the policy replicas during scaling, which may lead to too aggressive throttling and cause starvation of rollout generation.
             and len(self.policy_status_manager.replica_scaling_log) == 0
         ):
+            if (
+                n > 0
+                and self.config.train.train_policy.variant == "dapo"
+                and self.config.train.train_policy.max_retry_for_on_policy > 0
+            ):
+                max_prompt_attempts = (
+                    self.config.train.train_policy.max_retry_for_on_policy
+                    * global_batch_size
+                )
+                attempted_prompts = self.weight_version_to_prompt_attempt_num.get(
+                    weight_version_for_current_batch,
+                    0,
+                )
+                remaining_prompt_attempts = max_prompt_attempts - attempted_prompts
+                if remaining_prompt_attempts <= 0:
+                    raise RuntimeError(
+                        f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
+                    )
+                # Do not consume dataset rows or reserve prompt slots that the
+                # cumulative DAPO retry limit would immediately reject.
+                n = min(n, remaining_prompt_attempts)
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
                 validation_step,
@@ -544,34 +565,13 @@ maxmemory-policy allkeys-lfu
                             f"[Controller] For weight version {weight_version_for_each_payload}, the number of fetched prompts {self.weight_version_to_prompt_num[weight_version_for_each_payload]} exceeds the global batch size {global_batch_size}."
                         )
                         weight_version_for_each_payload += 1
-                    # record the number of valid prompts for each weight version
-                    # tag the payload with the corresponding weight version
-                    if (
-                        weight_version_for_each_payload
-                        not in self.weight_version_to_prompt_num
-                    ):
-                        payload.weight_version = weight_version_for_each_payload
-                        self.weight_version_to_prompt_num[
+                    payload.weight_version = weight_version_for_each_payload
+                    payload.prompt_dispatch_id = (
+                        self.policy_status_manager.register_prompt_dispatch(
                             weight_version_for_each_payload
-                        ] = 1
-                    else:
-                        payload.weight_version = weight_version_for_each_payload
-                        self.weight_version_to_prompt_num[
-                            weight_version_for_each_payload
-                        ] += 1
+                        )
+                    )
             else:
-                # record the number of valid prompts for current weight version
-                if (
-                    weight_version_for_current_batch
-                    not in self.weight_version_to_prompt_num
-                ):
-                    self.weight_version_to_prompt_num[
-                        weight_version_for_current_batch
-                    ] = current_fetch_count
-                else:
-                    self.weight_version_to_prompt_num[
-                        weight_version_for_current_batch
-                    ] += current_fetch_count
                 for version in list(self.weight_version_to_prompt_attempt_num):
                     if version < self.policy_status_manager.current_step:
                         self.weight_version_to_prompt_attempt_num.pop(version)
@@ -586,16 +586,24 @@ maxmemory-policy allkeys-lfu
                 for i in range(current_fetch_count):
                     # Assign estimated weight version to each payload for weight version control.
                     payloads_list[i].weight_version = weight_version_for_current_batch
+                    payloads_list[
+                        i
+                    ].prompt_dispatch_id = (
+                        self.policy_status_manager.register_prompt_dispatch(
+                            weight_version_for_current_batch
+                        )
+                    )
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                prompt_count = self.weight_version_to_prompt_num[
-                    weight_version_for_current_batch
-                ]
                 if self.config.train.train_policy.variant == "dapo":
-                    prompt_count = self.weight_version_to_prompt_attempt_num[
-                        weight_version_for_current_batch
-                    ]
+                    prompt_count = self.weight_version_to_prompt_attempt_num.get(
+                        weight_version_for_current_batch, 0
+                    )
+                else:
+                    prompt_count = self.weight_version_to_prompt_num.get(
+                        weight_version_for_current_batch, 0
+                    )
                 already_retried_times = math.ceil(prompt_count / global_batch_size)
                 if (
                     already_retried_times
@@ -616,6 +624,7 @@ maxmemory-policy allkeys-lfu
             )
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
+                payloads_list[i].prompt_dispatch_id = None
                 if is_sft:
                     # For SFT with multiple replicas, we need to set the weight version, epoch and remain_samples_num for the replica side control
                     payloads_list[

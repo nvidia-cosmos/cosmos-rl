@@ -68,6 +68,7 @@ def extract_rollouts(
             Rollout(
                 prompt=payload.prompt,
                 prompt_idx=payload.prompt_idx,
+                prompt_dispatch_id=payload.prompt_dispatch_id,
                 conversation=payload.conversation,
                 completion=completion,
                 completed_conversation=completed_conversation,

@@ -60,6 +60,11 @@ class RLPayload(BaseModel):
         default=-1, description="The index of the prompt for the rollout."
     )
 
+    prompt_dispatch_id: Optional[str] = Field(
+        default=None,
+        description="Unique controller dispatch identity used for exact prompt-slot accounting.",
+    )
+
     conversation: Optional[ConversationType] = Field(
         default=None, description="The input conversation for the rollout."
     )
@@ -176,6 +181,11 @@ class Rollout(BaseModel):
 
     prompt_idx: int = Field(
         default=-1, description="The index of the prompt for the rollout."
+    )
+
+    prompt_dispatch_id: Optional[str] = Field(
+        default=None,
+        description="Unique controller dispatch identity used for exact prompt-slot accounting.",
     )
 
     conversation: Optional[ConversationType] = Field(

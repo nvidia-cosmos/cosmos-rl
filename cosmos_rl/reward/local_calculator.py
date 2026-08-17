@@ -149,6 +149,7 @@ class LocalRewardCalculator:
                 RLPayload(
                     prompt=rollouts_group[0].prompt,
                     prompt_idx=rollouts_group[0].prompt_idx,
+                    prompt_dispatch_id=payloads[idx].prompt_dispatch_id,
                     conversation=rollouts_group[0].conversation,
                     completions=[rollout.completion for rollout in rollouts_group],
                     completed_conversations=[
@@ -271,6 +272,7 @@ class LocalRewardCalculator:
                     RLPayload(
                         prompt=rollouts_group[0].prompt,
                         prompt_idx=rollouts_group[0].prompt_idx,
+                        prompt_dispatch_id=payloads[idx].prompt_dispatch_id,
                         conversation=rollouts_group[0].conversation,
                         completions=[rollout.completion for rollout in rollouts_group],
                         completed_conversations=[
@@ -317,6 +319,7 @@ class LocalRewardCalculator:
                     RLPayload(
                         prompt=rollouts_group[0].prompt,
                         prompt_idx=rollouts_group[0].prompt_idx,
+                        prompt_dispatch_id=payloads[idx].prompt_dispatch_id,
                         conversation=rollouts_group[0].conversation,
                         completions=[rollout.completion for rollout in rollouts_group],
                         completed_conversations=[

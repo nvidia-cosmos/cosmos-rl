@@ -426,10 +426,12 @@ class RemoteRewardCalculator:
             new_payload = RLPayload(
                 prompt=payload.prompt,
                 prompt_idx=payload.prompt_idx,
+                prompt_dispatch_id=payload.prompt_dispatch_id,
                 completions=payload.completions,
                 rewards=rewards.tolist(),
                 advantages=advantages.tolist(),
                 extra_info=payload.extra_info,
+                weight_version=payload.weight_version,
             )
             payload_list.append(new_payload)
 

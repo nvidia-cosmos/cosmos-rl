@@ -17,6 +17,7 @@ import torch
 import atexit
 import threading
 import time
+import uuid
 from queue import Queue
 from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
@@ -225,6 +226,37 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 break
         return payloads, is_validation, step, empty
 
+    def _report_discarded_samples(
+        self,
+        count: int,
+        prompt_dispatch_ids: List[str],
+    ) -> None:
+        """Settle TRT-LLM prompts that cannot reach reward calculation."""
+        if count <= 0:
+            return
+        prompt_dispatch_ids = list(dict.fromkeys(prompt_dispatch_ids))
+        assert len(prompt_dispatch_ids) * self.config.rollout.n_generation <= count, (
+            "Discarded prompt dispatches cannot exceed discarded sample capacity"
+        )
+        report_id = uuid.uuid4().hex
+        response = RolloutRequest(
+            src_replica_name=self.replica_name,
+            payloads=[],
+            metrics={
+                "discarded_samples": count,
+                "discarded_prompt_dispatch_ids": prompt_dispatch_ids,
+                "discard_report_id": report_id,
+            },
+            is_end=False,
+        )
+        if not self.api_client.post_rollout_completion(response):
+            logger.error(
+                "[Rollout] Failed to report %d discarded TRT-LLM samples "
+                "(discard_report_id=%s)",
+                count,
+                report_id,
+            )
+
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
         Request new prompts from the controller for both training and validation.
@@ -398,54 +430,59 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 payloads: List[RLPayload] = self._prompt_queue.get()
                 logger.debug(f"[Rollout] generate start for prompts: {payloads}")
 
-                completions: List[List[str]] = self.rollout.rollout_generation(
-                    payloads=payloads,
-                    data_packer=self.data_packer,
-                    data_fetcher=self.data_fetcher,
-                    sampling_params=self.sampling_params,
-                )
-
-                logger.debug(
-                    f"[Rollout] completions[-1][-1] of {len(completions[-1])} completions from trtllm: {completions[-1][-1]}"
-                )
+                try:
+                    completions: List[List[str]] = (
+                        self.rollout.rollout_generation(
+                            payloads=payloads,
+                            data_packer=self.data_packer,
+                            data_fetcher=self.data_fetcher,
+                            sampling_params=self.sampling_params,
+                        )
+                        or []
+                    )
+                except Exception:
+                    self._report_discarded_samples(
+                        len(payloads) * self.config.rollout.n_generation,
+                        [
+                            payload.prompt_dispatch_id
+                            for payload in payloads
+                            if payload.prompt_dispatch_id is not None
+                        ],
+                    )
+                    raise
 
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
-                prompt_indices_to_remove: List[int] = []
-                if len(completions):
-                    batch_size = len(payloads)
-                    for i in range(batch_size):
-                        completion = completions[i]
-                        skip_output = False
-                        total_generation_count = len(completion)
-                        empty_generation_count = 0
-                        output_texts = []
-                        for j in range(total_generation_count):
-                            output_text = completion[j]
-                            if output_text == "":
-                                logger.warning(
-                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                                )
-                                empty_generation_count += 1
-                            else:
-                                output_texts.append(output_text)
-                        # Skip the output if there is one or zero non-empty completions
-                        skip_output = (
-                            total_generation_count - empty_generation_count
-                        ) <= 1
-                        if not skip_output:
-                            valid_completions.append(output_texts)
+                valid_payloads: List[RLPayload] = []
+                discarded_prompt_dispatch_ids: List[str] = []
+                for i, payload in enumerate(payloads):
+                    completion = completions[i] if i < len(completions) else []
+                    output_texts = []
+                    for j, output_text in enumerate(completion):
+                        if output_text == "":
+                            logger.warning(
+                                f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                            )
                         else:
-                            prompt_indices_to_remove.append(i)
-                if len(prompt_indices_to_remove):
-                    payloads = [
-                        payload
-                        for i, payload in enumerate(payloads)
-                        if i not in prompt_indices_to_remove
-                    ]
-                    assert len(payloads) == len(valid_completions), (
-                        "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
-                    )
+                            output_texts.append(output_text)
+                    # Preserve TRT-LLM's existing requirement of at least two
+                    # non-empty completions for a trainable prompt group.
+                    if len(output_texts) > 1:
+                        valid_payloads.append(payload)
+                        valid_completions.append(output_texts)
+                    elif payload.prompt_dispatch_id is not None:
+                        discarded_prompt_dispatch_ids.append(payload.prompt_dispatch_id)
+
+                emitted_samples = sum(len(group) for group in valid_completions)
+                reserved_samples = len(payloads) * self.config.rollout.n_generation
+                assert emitted_samples <= reserved_samples, (
+                    f"TRT-LLM emitted {emitted_samples} samples for "
+                    f"{reserved_samples} reserved slots"
+                )
+                self._report_discarded_samples(
+                    reserved_samples - emitted_samples,
+                    discarded_prompt_dispatch_ids,
+                )
 
                 logger.debug("[Rollout] generate end!")
 
@@ -453,10 +490,10 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
                 if should_report:
                     # only the first tp rank in the rollout replica will post the completion to the controller.
-                    valid_payloads = []
-                    for old_payload, completions in zip(payloads, valid_completions):
+                    for old_payload, completions in zip(
+                        valid_payloads, valid_completions
+                    ):
                         old_payload.completions = completions
-                        valid_payloads.append(old_payload)
 
                     self.reward_dispatcher.enqueue_rewards_cal(
                         valid_payloads,

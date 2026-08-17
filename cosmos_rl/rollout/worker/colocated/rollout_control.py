@@ -27,7 +27,7 @@ from cosmos_rl.dispatcher.command import (
 from cosmos_rl.utils import constant
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.colocated.utils import CommandDispatcher
-from typing import Optional, Type
+from typing import List, Optional, Type
 
 
 class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
@@ -43,7 +43,10 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
     )
 
     def _report_discarded_samples(
-        self, count: int, *, prompt_slots: Optional[int] = None
+        self,
+        count: int,
+        *,
+        prompt_dispatch_ids: Optional[List[str]] = None,
     ) -> None:
         """Skip remote capacity accounting because colocated scheduling observes its local queue."""
 

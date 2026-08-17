@@ -709,16 +709,15 @@ async def put_rollout_group(rollout: RolloutRequest):
             discarded_samples = policy_status._parse_non_negative_count(
                 rollout.metrics, "discarded_samples"
             )
-            discarded_prompt_slots = None
-            if "discarded_prompt_slots" in rollout.metrics:
-                discarded_prompt_slots = policy_status._parse_non_negative_count(
-                    rollout.metrics, "discarded_prompt_slots"
-                )
+            discarded_prompt_dispatch_ids = policy_status.parse_prompt_dispatch_ids(
+                rollout.metrics,
+                "discarded_prompt_dispatch_ids",
+            )
             policy_status.settle_discarded_samples(
                 source_replica=rollout.src_replica_name,
                 report_id=rollout.metrics.get("discard_report_id"),
                 count=discarded_samples,
-                prompt_slots=discarded_prompt_slots,
+                prompt_dispatch_ids=discarded_prompt_dispatch_ids,
             )
         if policy_status.rollout_admission_closed():
             policy_status.cleanup_terminal_rollouts(
