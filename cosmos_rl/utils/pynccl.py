@@ -51,35 +51,90 @@ from torch.distributed import ReduceOp
 
 
 # ---------------------------------------------------------------------------
-# NCCL ctypes binding instance (shared)
+# NCCL ctypes binding instance (shared, lazily constructed)
 # ---------------------------------------------------------------------------
+
+_NCCL_SO_ENV = "COSMOS_NCCL_SO_PATH"
+
+
+def _nccl_so_files_in(candidate_dir: str) -> list[str]:
+    """Return the libnccl.so* files in <candidate_dir>/lib, one per real file."""
+    if not candidate_dir or not os.path.isdir(candidate_dir):
+        return []
+    lib_dir = os.path.join(candidate_dir, "lib")
+    if not os.path.isdir(lib_dir):
+        return []
+    found = glob.glob(os.path.join(lib_dir, "libnccl.so*"))
+    # Dedupe by real target rather than dropping symlinks: a wheel collapses
+    # libnccl.so -> libnccl.so.2, while symlink-based install trees contain
+    # nothing but links, so excluding links would find nothing at all.
+    by_real = {os.path.realpath(f): f for f in found if os.path.exists(f)}
+    return sorted(by_real.values())
+
+
 def _find_nccl_so_file() -> str:
-    """Find the libnccl.so* shared object file from the nvidia-nccl-cu* package."""
+    """Find libnccl.so* from the nvidia-nccl-cu* package, in any layout."""
 
-    # we assume `nvidia-nccl-cu*` python package is installed next to the torch
-    # package (under site-packages directory)
+    # 0) Explicit override. Escape hatch for system NCCL or an unusual layout.
+    override = os.environ.get(_NCCL_SO_ENV)
+    if override:
+        if os.path.isfile(override):
+            return override
+        if _nccl_so_files_in(override):
+            return _nccl_so_files_in(override)[0]
+        raise RuntimeError(
+            f"{_NCCL_SO_ENV}={override!r} does not name a libnccl.so* file "
+            "or a directory containing lib/libnccl.so*"
+        )
+
+    candidates: list[str] = []
+
+    # 1) Ask Python. Correct in any layout where the wheel is importable.
+    #    nvidia.nccl is a namespace package: read __path__, not __file__.
+    try:
+        import nvidia.nccl as _nvidia_nccl
+
+        candidates.extend(list(getattr(_nvidia_nccl, "__path__", []) or []))
+    except (ImportError, AttributeError):
+        pass
+
+    # 2) Current behaviour: next to torch. Retained so nothing regresses.
     torch_dir = os.path.dirname(torch.__file__)
-    nvidia_nccl_dir = os.path.join(os.path.dirname(torch_dir), "nvidia", "nccl")
-    if not os.path.isdir(nvidia_nccl_dir):
-        raise RuntimeError(
-            f"Could not find `nvidia-nccl-cu*` package directory: {nvidia_nccl_dir}"
-            "Please install the `nvidia-nccl-cu*` package."
-        )
-    # find the so files in nvidia-nccl directory
-    so_files = glob.glob(os.path.join(nvidia_nccl_dir, "lib", "libnccl.so*"))
-    # filter out the symbolic links
-    so_files = [f for f in so_files if not os.path.islink(f)]
-    if len(so_files) != 1:
-        raise RuntimeError(
-            f"Expected exactly one libnccl.so* file in {nvidia_nccl_dir}/lib, "
-            f"but found {len(so_files)}: {so_files}. Please check your installation."
-        )
+    candidates.append(os.path.join(os.path.dirname(torch_dir), "nvidia", "nccl"))
 
-    so_file = so_files[0]
-    return so_file
+    for candidate in candidates:
+        so_files = _nccl_so_files_in(candidate)
+        if len(so_files) == 1:
+            return so_files[0]
+
+    raise RuntimeError(
+        "Could not locate libnccl.so* from the `nvidia-nccl-cu*` package.\n"
+        f"Searched: {candidates}\n"
+        f"Install the `nvidia-nccl-cu*` package, or set {_NCCL_SO_ENV} to the "
+        "libnccl.so file or to the directory containing lib/libnccl.so*."
+    )
 
 
-_nccl = NCCLLibrary(so_file=_find_nccl_so_file())
+_nccl_instance: Optional[NCCLLibrary] = None
+_nccl_lock = threading.Lock()
+
+
+def get_nccl() -> NCCLLibrary:
+    """Return the shared NCCLLibrary handle, constructing it on first use."""
+    global _nccl_instance
+    if _nccl_instance is None:
+        with _nccl_lock:
+            if _nccl_instance is None:
+                _nccl_instance = NCCLLibrary(so_file=_find_nccl_so_file())
+    return _nccl_instance
+
+
+def __getattr__(name: str):
+    """PEP 562: keep ``pynccl._nccl`` resolving for external callers."""
+    if name == "_nccl":
+        return get_nccl()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # ---------------------------------------------------------------------------
 # Communicator registry (thread-safe singleton)
@@ -293,10 +348,10 @@ def run_task(task: _Task):
         # Poll async error status until success or timeout.
         while time.monotonic() < deadline:
             if task.phase_observer is None:
-                err = _nccl.ncclCommGetAsyncError(comm)
+                err = get_nccl().ncclCommGetAsyncError(comm)
             else:
                 _notify_p2p_phase(task.phase_observer, "async_error_query_enter")
-                api_result, err = _nccl._ncclCommGetAsyncErrorResult(comm)
+                api_result, err = get_nccl()._ncclCommGetAsyncErrorResult(comm)
                 _notify_p2p_phase(
                     task.phase_observer,
                     "async_error_query_return",
@@ -564,7 +619,7 @@ def nccl_timeout_watchdog(
 
 def create_nccl_uid() -> List[int]:
     """Generate a NCCL unique ID and return it as a list of 128 bytes."""
-    uid = _nccl.ncclGetUniqueId()
+    uid = get_nccl().ncclGetUniqueId()
     return list(uid.internal)
 
 
@@ -583,7 +638,7 @@ def create_nccl_comm(
     holder: Dict[str, ncclComm_t] = {}
 
     def _init_functor() -> ncclComm_t:
-        comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
+        comm_local = get_nccl().ncclCommInitRankConfig(world_size, uid, rank)
         holder["comm"] = comm_local
         return comm_local
 
@@ -619,9 +674,9 @@ def nccl_abort(comm_idx: int):
     meta = _COMM_REGISTRY.pop(comm_idx)
     if meta is not None and meta.comm is not None:
         try:
-            _nccl.ncclCommAbort(meta.comm)
+            get_nccl().ncclCommAbort(meta.comm)
         except Exception:
-            _nccl.ncclCommDestroy(meta.comm)
+            get_nccl().ncclCommDestroy(meta.comm)
         logger.warning(f"[NCCL] Aborted communicator idx={comm_idx}")
 
 
@@ -729,7 +784,7 @@ def nccl_broadcast(
     stream_ptr = _stream_ptr(stream)
 
     def _broadcast_call():
-        _nccl.ncclBroadcast(
+        get_nccl().ncclBroadcast(
             sendbuf,
             recvbuf,
             _byte_count(tensor),
@@ -748,7 +803,7 @@ def nccl_group_start(comm_idx: int, timeout_ms: Optional[int] = None):
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_start_call():
-        _nccl.ncclGroupStart()
+        get_nccl().ncclGroupStart()
         return meta.comm
 
     _submit_nccl(_group_start_call, timeout_ms, comm_idx)
@@ -764,7 +819,7 @@ def nccl_group_end(comm_idx: int, timeout_ms: Optional[int] = None):
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_end_call():
-        _nccl.ncclGroupEnd()
+        get_nccl().ncclGroupEnd()
         return meta.comm
 
     _submit_nccl(_group_end_call, timeout_ms, comm_idx)
@@ -791,7 +846,7 @@ def nccl_send(
 
     def _send_call():
         if phase_observer is None:
-            _nccl.ncclSend(
+            get_nccl().ncclSend(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -801,7 +856,7 @@ def nccl_send(
             )
         else:
             _notify_p2p_phase(phase_observer, "raw_call_enter")
-            api_result = _nccl._ncclSendResult(
+            api_result = get_nccl()._ncclSendResult(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -814,7 +869,7 @@ def nccl_send(
                 "raw_call_return",
                 api_result,
             )
-            _nccl.NCCL_CHECK(api_result)
+            get_nccl().NCCL_CHECK(api_result)
         return meta.comm
 
     _submit_nccl(
@@ -846,7 +901,7 @@ def nccl_recv(
 
     def _recv_call():
         if phase_observer is None:
-            _nccl.ncclRecv(
+            get_nccl().ncclRecv(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -856,7 +911,7 @@ def nccl_recv(
             )
         else:
             _notify_p2p_phase(phase_observer, "raw_call_enter")
-            api_result = _nccl._ncclRecvResult(
+            api_result = get_nccl()._ncclRecvResult(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -869,7 +924,7 @@ def nccl_recv(
                 "raw_call_return",
                 api_result,
             )
-            _nccl.NCCL_CHECK(api_result)
+            get_nccl().NCCL_CHECK(api_result)
         return meta.comm
 
     _submit_nccl(
@@ -895,7 +950,7 @@ def nccl_allreduce(
     stream_ptr = _stream_ptr(stream)
 
     def _allreduce_call():
-        _nccl.ncclAllReduce(
+        get_nccl().ncclAllReduce(
             _buf(sendbuff),
             _buf(recvbuff),
             sendbuff.numel(),
@@ -924,7 +979,7 @@ def nccl_alltoall(
     stream_ptr = _stream_ptr(stream)
 
     def _alltoall_call():
-        _nccl.ncclAllGather(
+        get_nccl().ncclAllGather(
             _buf(sendbuff),
             _buf(recvbuff),
             _byte_count(sendbuff),
@@ -958,7 +1013,7 @@ def _safe_abort(comm_idx: Optional[int], comm: Optional[ncclComm_t] = None):
         if comm_idx is not None:
             nccl_abort(comm_idx)
         else:
-            _nccl.ncclCommAbort(comm)
+            get_nccl().ncclCommAbort(comm)
     except Exception:
         # Best-effort abort; ignore secondary failures
         pass
