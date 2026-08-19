@@ -129,11 +129,21 @@ def get_nccl() -> NCCLLibrary:
     return _nccl_instance
 
 
-def __getattr__(name: str):
-    """PEP 562: keep ``pynccl._nccl`` resolving for external callers."""
-    if name == "_nccl":
-        return get_nccl()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+class _LazyNCCL:
+    """Forwards attribute access to :func:`get_nccl`, constructing on first use.
+
+    A module-scope ``__getattr__`` (PEP 562) only intercepts *external*
+    lookups like ``pynccl._nccl``; bare references to ``_nccl`` inside this
+    module resolve straight from ``globals()`` and would bypass it. Binding a
+    real proxy object to the module-level ``_nccl`` name keeps both paths --
+    and ``unittest.mock.patch.object(pynccl, "_nccl", ...)`` -- consistent.
+    """
+
+    def __getattr__(self, name: str):
+        return getattr(get_nccl(), name)
+
+
+_nccl = _LazyNCCL()
 
 
 # ---------------------------------------------------------------------------
@@ -348,10 +358,10 @@ def run_task(task: _Task):
         # Poll async error status until success or timeout.
         while time.monotonic() < deadline:
             if task.phase_observer is None:
-                err = get_nccl().ncclCommGetAsyncError(comm)
+                err = _nccl.ncclCommGetAsyncError(comm)
             else:
                 _notify_p2p_phase(task.phase_observer, "async_error_query_enter")
-                api_result, err = get_nccl()._ncclCommGetAsyncErrorResult(comm)
+                api_result, err = _nccl._ncclCommGetAsyncErrorResult(comm)
                 _notify_p2p_phase(
                     task.phase_observer,
                     "async_error_query_return",
@@ -619,7 +629,7 @@ def nccl_timeout_watchdog(
 
 def create_nccl_uid() -> List[int]:
     """Generate a NCCL unique ID and return it as a list of 128 bytes."""
-    uid = get_nccl().ncclGetUniqueId()
+    uid = _nccl.ncclGetUniqueId()
     return list(uid.internal)
 
 
@@ -638,7 +648,7 @@ def create_nccl_comm(
     holder: Dict[str, ncclComm_t] = {}
 
     def _init_functor() -> ncclComm_t:
-        comm_local = get_nccl().ncclCommInitRankConfig(world_size, uid, rank)
+        comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
         holder["comm"] = comm_local
         return comm_local
 
@@ -674,9 +684,9 @@ def nccl_abort(comm_idx: int):
     meta = _COMM_REGISTRY.pop(comm_idx)
     if meta is not None and meta.comm is not None:
         try:
-            get_nccl().ncclCommAbort(meta.comm)
+            _nccl.ncclCommAbort(meta.comm)
         except Exception:
-            get_nccl().ncclCommDestroy(meta.comm)
+            _nccl.ncclCommDestroy(meta.comm)
         logger.warning(f"[NCCL] Aborted communicator idx={comm_idx}")
 
 
@@ -784,7 +794,7 @@ def nccl_broadcast(
     stream_ptr = _stream_ptr(stream)
 
     def _broadcast_call():
-        get_nccl().ncclBroadcast(
+        _nccl.ncclBroadcast(
             sendbuf,
             recvbuf,
             _byte_count(tensor),
@@ -803,7 +813,7 @@ def nccl_group_start(comm_idx: int, timeout_ms: Optional[int] = None):
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_start_call():
-        get_nccl().ncclGroupStart()
+        _nccl.ncclGroupStart()
         return meta.comm
 
     _submit_nccl(_group_start_call, timeout_ms, comm_idx)
@@ -819,7 +829,7 @@ def nccl_group_end(comm_idx: int, timeout_ms: Optional[int] = None):
     meta = _COMM_REGISTRY.get(comm_idx)
 
     def _group_end_call():
-        get_nccl().ncclGroupEnd()
+        _nccl.ncclGroupEnd()
         return meta.comm
 
     _submit_nccl(_group_end_call, timeout_ms, comm_idx)
@@ -846,7 +856,7 @@ def nccl_send(
 
     def _send_call():
         if phase_observer is None:
-            get_nccl().ncclSend(
+            _nccl.ncclSend(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -856,7 +866,7 @@ def nccl_send(
             )
         else:
             _notify_p2p_phase(phase_observer, "raw_call_enter")
-            api_result = get_nccl()._ncclSendResult(
+            api_result = _nccl._ncclSendResult(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -869,7 +879,7 @@ def nccl_send(
                 "raw_call_return",
                 api_result,
             )
-            get_nccl().NCCL_CHECK(api_result)
+            _nccl.NCCL_CHECK(api_result)
         return meta.comm
 
     _submit_nccl(
@@ -901,7 +911,7 @@ def nccl_recv(
 
     def _recv_call():
         if phase_observer is None:
-            get_nccl().ncclRecv(
+            _nccl.ncclRecv(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -911,7 +921,7 @@ def nccl_recv(
             )
         else:
             _notify_p2p_phase(phase_observer, "raw_call_enter")
-            api_result = get_nccl()._ncclRecvResult(
+            api_result = _nccl._ncclRecvResult(
                 _buf(tensor),
                 _byte_count(tensor),
                 ncclDataTypeEnum.ncclUint8,
@@ -924,7 +934,7 @@ def nccl_recv(
                 "raw_call_return",
                 api_result,
             )
-            get_nccl().NCCL_CHECK(api_result)
+            _nccl.NCCL_CHECK(api_result)
         return meta.comm
 
     _submit_nccl(
@@ -950,7 +960,7 @@ def nccl_allreduce(
     stream_ptr = _stream_ptr(stream)
 
     def _allreduce_call():
-        get_nccl().ncclAllReduce(
+        _nccl.ncclAllReduce(
             _buf(sendbuff),
             _buf(recvbuff),
             sendbuff.numel(),
@@ -979,7 +989,7 @@ def nccl_alltoall(
     stream_ptr = _stream_ptr(stream)
 
     def _alltoall_call():
-        get_nccl().ncclAllGather(
+        _nccl.ncclAllGather(
             _buf(sendbuff),
             _buf(recvbuff),
             _byte_count(sendbuff),
@@ -1013,7 +1023,7 @@ def _safe_abort(comm_idx: Optional[int], comm: Optional[ncclComm_t] = None):
         if comm_idx is not None:
             nccl_abort(comm_idx)
         else:
-            get_nccl().ncclCommAbort(comm)
+            _nccl.ncclCommAbort(comm)
     except Exception:
         # Best-effort abort; ignore secondary failures
         pass
