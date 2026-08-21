@@ -893,5 +893,130 @@ class TestUidTtlCoversColdStart(unittest.TestCase):
         self.assertGreaterEqual(captured["uid_ttl_s"], 90.0)
 
 
+class TestRendezvousRecvInterleaved(unittest.TestCase):
+    """Every accepted recv is enqueued BEFORE the next ref is negotiated.
+
+    Rendezvousing the whole batch first (the previous two-phase structure)
+    deadlocks against a producer that accepts more refs from that batch than
+    it has sender threads: those threads block in ``nccl_send`` waiting for
+    recvs this consumer will not post until every remaining rendezvous has
+    returned -- including the ones queued behind those very sends.  It is a
+    circular wait, so a bigger sender pool only moves the batch size that
+    trips it; only posting recv(A) before negotiating B removes the cycle.
+    """
+
+    @staticmethod
+    def _ref(transfer_id):
+        # Every ref names the SAME producer: that is the deadlocking case.
+        return {
+            "sender_replica": "rA",
+            "sender_rank": 0,
+            "transfer_id": transfer_id,
+            "schema": None,  # _unpack is stubbed; only the key lookup matters
+        }
+
+    def _strategy(self):
+        import threading
+
+        from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
+
+        p = NCCLTransportStrategy()
+        p._rendezvous = object()  # never called: _rendezvous_one is stubbed
+        p._comm_cache = CommCache(build_fn=lambda u, r: 55, abort_fn=lambda i: None)
+        p._device = None
+        p._streams = None
+        p._recv_lock = threading.Lock()
+        p._receiver_rank = 0
+        p._recv_timeout = 5.0
+        p._first_transfer_timeout = 30.0
+        p._warm_pairs = set()
+        return p
+
+    def _run(self, p, refs, failing_recv=None):
+        """Drive ``_fetch_all`` with fakes that record control/data call ORDER."""
+        import torch
+
+        import cosmos_rl.utils.pynccl as pynccl_mod
+        from cosmos_rl.utils.payload_transport.nccl import strategy as dpm
+
+        events = []
+        comm_of = {ref["transfer_id"]: i for i, (_idx, ref) in enumerate(refs)}
+        id_of = {i: tid for tid, i in comm_of.items()}
+
+        def fake_rendezvous(ref, _pynccl):
+            events.append(("rendezvous", ref["transfer_id"]))
+            return comm_of[ref["transfer_id"]], torch.zeros(4, dtype=torch.uint8)
+
+        def fake_recv(buf, peer, comm_idx, **kwargs):
+            transfer_id = id_of[comm_idx]
+            events.append(("recv", transfer_id))
+            if transfer_id == failing_recv:
+                raise RuntimeError("enqueue failed")
+
+        p._rendezvous_one = fake_rendezvous
+        with (
+            mock.patch.object(pynccl_mod, "nccl_recv", fake_recv),
+            mock.patch.object(dpm, "record_event", lambda stream=None: object()),
+            mock.patch.object(dpm, "wait_event", lambda s, e: None),
+            mock.patch.object(dpm, "_unpack", lambda b, s, d: {"ok": True}),
+            # Pin the completion path off so the assertion is the call order,
+            # not whether the host running the suite has a GPU.
+            mock.patch("torch.cuda.is_available", return_value=False),
+        ):
+            results, _nbytes, _ms = p._fetch_all(refs)
+        return events, results
+
+    def test_recv_posted_before_the_next_same_producer_rendezvous(self):
+        p = self._strategy()
+        events, results = self._run(
+            p, [(0, self._ref("0:first")), (1, self._ref("0:second"))]
+        )
+        self.assertEqual(
+            events,
+            [
+                ("rendezvous", "0:first"),
+                ("recv", "0:first"),
+                ("rendezvous", "0:second"),
+                ("recv", "0:second"),
+            ],
+        )
+        self.assertEqual(sorted(results), [0, 1])
+
+    def test_recv_enqueue_failure_still_negotiates_the_rest_and_unpins(self):
+        """A failed enqueue isolates that pair; it must not leak its pin.
+
+        The ref is recorded for cleanup BEFORE its recv is attempted, so the
+        ``finally`` unpins the comm even when the enqueue raises.
+        """
+
+        class _UnpinRecordingCache:
+            def __init__(self):
+                self.unpinned = []
+
+            def unpin(self, pair):
+                self.unpinned.append(pair)
+
+        p = self._strategy()
+        p._comm_cache = _UnpinRecordingCache()
+        events, results = self._run(
+            p,
+            [(0, self._ref("0:first")), (1, self._ref("0:second"))],
+            failing_recv="0:first",
+        )
+        self.assertEqual(
+            events,
+            [
+                ("rendezvous", "0:first"),
+                ("recv", "0:first"),
+                ("rendezvous", "0:second"),
+                ("recv", "0:second"),
+            ],
+        )
+        # Only the ref whose enqueue succeeded resolves...
+        self.assertEqual(sorted(results), [1])
+        # ...but BOTH pins are released.
+        self.assertEqual(len(p._comm_cache.unpinned), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

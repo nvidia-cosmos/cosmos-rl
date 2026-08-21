@@ -325,25 +325,30 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
     # ------------------------------------------------------------------
 
     def _fetch_all(self, refs: List[Tuple[Any, dict]]) -> Tuple[dict, int, float]:
-        """Rendezvous + grouped ``nccl_recv`` for every ref.
+        """Rendezvous + ``nccl_recv``, interleaved per ref.
 
-        Returns ``(results_by_idx, total_bytes, transfer_ms)``.  Each ref
-        is negotiated over Redis first (so we know which recvs will
-        actually happen and on which comm), then each accepted recv is
-        issued as a STANDALONE ``nccl_recv`` on its own 2-rank pair comm
-        (deliberately NOT wrapped in a cross-communicator
-        ``ncclGroupStart/End``, which would couple independent producers
-        into one completion unit -- the N_POLICY>=2 wedge).  A per-ref
-        ``max_attempts`` fresh-call retry wraps the rendezvous; a ref that
-        still fails to resolve is dropped and re-attempted on the next
-        prefetch round (there is no in-batch multi-round layer above this).
+        Returns ``(results_by_idx, total_bytes, transfer_ms)``.  Each ref is
+        negotiated over Redis and then IMMEDIATELY has its matching recv
+        enqueued, before the next ref is negotiated -- a producer must never
+        be left holding an accepted send whose recv this consumer has not
+        posted yet (see the interleaving note below).  Each recv is issued as
+        a STANDALONE ``nccl_recv`` on its own 2-rank pair comm (deliberately
+        NOT wrapped in a cross-communicator ``ncclGroupStart/End``, which
+        would couple independent producers into one completion unit -- the
+        N_POLICY>=2 wedge).  Completion is synchronized once, after the whole
+        batch is enqueued, so transfers still overlap.
+
+        A per-ref ``max_attempts`` fresh-call retry wraps the rendezvous; a
+        ref that still fails to resolve is dropped and re-attempted on the
+        next prefetch round (there is no in-batch multi-round layer above
+        this).
         """
         from cosmos_rl.utils import pynccl
 
         rv = self._rendezvous
         cache = self._comm_cache
         device = self._device
-        if rv is None or cache is None:
+        if rv is None or cache is None or not refs:
             return {}, 0, 0.0
         # The prefetch worker runs off the main thread; bind it to our GPU so
         # comm creation + recvs target the right device (thread-local).
@@ -355,41 +360,25 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         # Pins taken during phase 1 must be released on EVERY exit path,
         # including the early returns and any raise below.
         try:
-            # Phase 1: rendezvous (control plane) — sequential Redis round-trips.
-            for idx, ref in refs:
-                prepared = self._rendezvous_one(ref, pynccl)
-                if prepared is None:
-                    continue
-                comm_idx, recv_buf = prepared
-                recvs.append((idx, ref, comm_idx, recv_buf))
-
-            if not recvs:
-                return {}, 0, get_trace_time() - t0
-
-            # A batch is "warming" until every pair in it has transferred at least
-            # once; give its recvs the long cold-start budget so a slow (storm-
-            # contended) send isn't cancelled -> comm torn down -> rebuilt into the
-            # same storm.
+            # A batch is "warming" until every pair in it has transferred at
+            # least once; give its recvs the long cold-start budget so a slow
+            # (storm-contended) send isn't cancelled -> comm torn down ->
+            # rebuilt into the same storm.  This is decided up front, from the
+            # INPUT refs, because the first recv is now enqueued before the rest
+            # of the batch has rendezvoused.  Deciding it from refs rather than
+            # from the resolved set is conservative in the safe direction: a ref
+            # that never resolves can only hold the batch on the LONGER
+            # cold-start budget, never select a too-short one.
             receiver_rank = self._receiver_rank
             warm = self._warm_pairs
             batch_warming = any(
-                _pair_key(ref, receiver_rank) not in warm for _i, ref, _c, _b in recvs
+                _pair_key(ref, receiver_rank) not in warm for _idx, ref in refs
             )
             recv_timeout_ms = int(
                 (self._first_transfer_timeout if batch_warming else self._recv_timeout)
                 * 1000
             )
 
-            # Phase 2: issue ONE STANDALONE recv per pair communicator -- NOT a
-            # cross-communicator NCCL group.  Each comm is a distinct 2-rank pair
-            # with a single send/recv, so grouping adds no overlap; it only turns
-            # independent producers into one completion unit whose native
-            # ncclGroupEnd blocks -- with NO pynccl watchdog (run_task arms its
-            # deadline only AFTER the native call returns) -- if any producer has
-            # not yet posted its matching send (its send lock is busy serving the
-            # other policy replica).  That coupling was the N_POLICY>=2 residual
-            # wedge.  Ungrouped, a slow/serialized producer only delays its own
-            # recv; the others complete independently.
             results: Dict[int, dict] = {}
             total_bytes = 0
             posted: List[Tuple[Any, dict, int, torch.Tensor]] = []
@@ -402,12 +391,51 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             # async ENQUEUE + event record run under the lock (every op is a stream
             # enqueue); the blocking synchronize() below stays lock-free so real
             # transfers still overlap across the two callers.
+            #
+            # The rendezvous round-trips now run INSIDE this lock, because each recv
+            # is enqueued as soon as its own rendezvous returns (see below) and the
+            # lock therefore spans them.  It has to: transfer streams are handed out
+            # round-robin rather than leased, so a concurrent caller can share our
+            # stream -- and the completion event recorded at the end of this block
+            # would then also cover ITS recvs, leaving our lock-free synchronize()
+            # waiting on a peer we never negotiated with (an unbounded wait: the
+            # stream sync takes no timeout).  Holding the lock across the whole
+            # enqueue sequence keeps `done` covering exactly our own recvs.
             recv_lock = self._recv_lock
             if recv_lock is None:  # bare test harness that skipped setup
                 recv_lock = self._recv_lock = threading.Lock()
             with recv_lock:
                 stream = self._streams.acquire() if self._streams else None
-                for idx, ref, comm_idx, recv_buf in recvs:
+                # Rendezvous (control plane) and recv enqueue (data plane) are
+                # INTERLEAVED per ref: every accepted transfer gets its matching
+                # recv posted BEFORE the next ref is negotiated.
+                #
+                # Negotiating the whole batch first (the previous structure)
+                # deadlocks whenever one producer accepts more refs in this batch
+                # than it has sender threads: those threads block in nccl_send
+                # waiting for recvs this consumer will not post until every
+                # remaining rendezvous has returned -- including the ones queued
+                # behind those very sends.  That is a circular wait, not slowness,
+                # and a bigger sender pool only moves the batch size that trips it.
+                # Posting recv(A) before negotiating B removes the cycle outright.
+                #
+                # Each recv is issued STANDALONE on its own 2-rank pair comm,
+                # deliberately NOT wrapped in a cross-communicator
+                # ncclGroupStart/End: each comm carries a single send/recv, so
+                # grouping adds no overlap and only fuses independent producers
+                # into one completion unit whose native ncclGroupEnd blocks -- with
+                # no pynccl watchdog, since run_task arms its deadline only after
+                # the native call returns -- if any one producer has not yet posted
+                # its send.  That coupling was the N_POLICY>=2 wedge.  Ungrouped, a
+                # slow producer delays only its own recv.
+                for idx, ref in refs:
+                    prepared = self._rendezvous_one(ref, pynccl)
+                    if prepared is None:
+                        continue
+                    comm_idx, recv_buf = prepared
+                    # Record the pin BEFORE attempting the recv so the finally
+                    # below unpins this comm even if the enqueue raises.
+                    recvs.append((idx, ref, comm_idx, recv_buf))
                     try:
                         pynccl.nccl_recv(
                             recv_buf,

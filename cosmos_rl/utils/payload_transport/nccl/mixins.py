@@ -333,18 +333,32 @@ class NCCLRolloutMixin:
     # ------------------------------------------------------------------
 
     def _dispatch_request(self, raw_message: Any) -> None:
-        """Parse a request and hand it to the bounded sender pool."""
+        """Parse a request and serve its CONTROL plane on this listener thread.
+
+        Only the send is handed to the bounded sender pool (see
+        :meth:`_handle_request`).  Submitting the whole handler here -- the
+        previous behaviour -- put the cheap Redis acknowledgement behind the
+        same workers that block in ``nccl_send``, so a producer serving more
+        concurrent transfers than it has sender threads could not answer the
+        very requests whose recvs would unblock those sends.
+        """
         msg = parse_request_message(raw_message)
         if msg is None:
             return
-        self._nccl_executor.submit(self._handle_request, msg)
+        self._handle_request(msg)
 
     def _handle_request(self, msg: Dict[str, Any]) -> None:
-        """Serve one transfer request: ack, build comm, ``nccl_send``.
+        """Serve one transfer request: ack on this thread, QUEUE the send.
 
-        The ACCEPTED reply is written **before** the (blocking) send so the
-        receiver can post its matching recv; a missing buffer replies
-        MISSING and returns without touching NCCL.
+        Runs on the pub/sub listener thread.  Everything here is bounded --
+        a registry lease, a cached-comm lookup, at most one Redis UID read,
+        and one Redis reply -- so the control plane answers at listener speed
+        no matter how backed up the sender pool is.  The comm BUILD and the
+        blocking ``nccl_send`` stay on the executor, where they belong.
+
+        The ACCEPTED reply is written **before** the send is queued so the
+        receiver can post its matching recv; a missing buffer replies MISSING
+        and returns without touching NCCL.
         """
         rv = self._nccl_rendezvous
         registry = self._nccl_registry
@@ -363,13 +377,14 @@ class NCCLRolloutMixin:
         uid_key = msg.get("uid_key")
 
         # Bilateral cancellation: drop a request whose receiver has already
-        # stopped waiting.  Under high policy-replica fan-out the request can sit
-        # in the bounded sender-pool queue past the receiver's deadline; serving
-        # it then sends a late ACCEPTED and launches an nccl_send with no
-        # matching recv, which pins the send lock + a sender thread until the
-        # send watchdog fires -> starves every other consumer (the N_POLICY>=4
-        # cascade).  Check the receiver's absolute wall-clock deadline before
-        # touching the registry or replying.
+        # stopped waiting.  Serving one sends a late ACCEPTED and launches an
+        # nccl_send with no matching recv, which pins the send lock + a sender
+        # thread until the send watchdog fires -> starves every other consumer
+        # (the N_POLICY>=4 cascade).  The dominant source of that lateness used
+        # to be this handler waiting its turn in the sender-pool queue; running
+        # the control plane on the listener removes that delay, but a backed-up
+        # listener can still arrive late, so keep checking the receiver's
+        # absolute wall-clock deadline before touching the registry or replying.
         req_deadline = msg.get("req_deadline")
         if req_deadline is not None and time.time() >= float(req_deadline):
             logger.debug(
@@ -428,11 +443,51 @@ class NCCLRolloutMixin:
         if resp_key:
             rv.respond(resp_key=resp_key, status=TransferStatus.ACCEPTED)
 
+        # Hand ONLY the blocking transfer to the bounded pool.  The lease taken
+        # by acquire() above now outlives this function, so every outcome of the
+        # submission has to balance it exactly once:
+        #   * submit raises (pool already shut down) -> the send never runs and
+        #     never takes ownership; release here;
+        #   * the queued future is cancelled before it runs (cleanup_nccl calls
+        #     shutdown(cancel_futures=True)) -> release from the done callback;
+        #   * the send starts -> _send owns the lease and balances it on every
+        #     exit path of its own finally.  Do NOT release it again here: a
+        #     double-decrement could steal a concurrent receiver's lease on the
+        #     same shared buffer.
+        try:
+            future = self._nccl_executor.submit(
+                self._send_and_quarantine_on_failure,
+                entry,
+                receiver_rank,
+                uid_key,
+                receiver_replica,
+                transfer_id,
+            )
+        except Exception as e:
+            registry.abandon_inflight(entry)
+            logger.warning(
+                "[NCCLRolloutMixin] could not queue send for %s: %s", transfer_id, e
+            )
+            return
+        future.add_done_callback(
+            lambda done: registry.abandon_inflight(entry) if done.cancelled() else None
+        )
+
+    def _send_and_quarantine_on_failure(
+        self,
+        entry: SendBufferEntry,
+        receiver_rank: int,
+        uid_key: Any,
+        receiver_replica: Any,
+        transfer_id: str,
+    ) -> None:
+        """Run one queued send, quarantining its pair if it fails."""
         try:
             self._send(entry, receiver_rank, uid_key, receiver_replica)
         except Exception as e:
             # _send already released the lease in its own finally -- do NOT
             # abandon here (would double-decrement).  Just quarantine the pair.
+            cache = self._nccl_comm_cache
             health_key = (self._nccl_rollout_idx, self._nccl_sender_rank)
             logger.warning(
                 "[NCCLRolloutMixin] send failed for %s: %s; quarantining %s",
@@ -440,11 +495,12 @@ class NCCLRolloutMixin:
                 e,
                 health_key,
             )
-            cache.quarantine(
-                _producer_pair_key(
-                    self._nccl_sender_rank, receiver_replica, receiver_rank
+            if cache is not None:
+                cache.quarantine(
+                    _producer_pair_key(
+                        self._nccl_sender_rank, receiver_replica, receiver_rank
+                    )
                 )
-            )
 
     def _send(
         self,

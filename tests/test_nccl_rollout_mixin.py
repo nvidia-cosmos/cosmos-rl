@@ -48,6 +48,32 @@ class _FakeRendezvous:
         return [1, 2, 3]
 
 
+class _InlineExecutor:
+    """Executor stub that runs each submission on the calling thread.
+
+    Only the SEND goes to the pool now -- the ack is written by the caller --
+    so the request tests below, which assert on ``sent`` as soon as
+    ``_handle_request`` returns, need the submission to have already run.
+    Returns a real ``Future`` so the lease-cleanup callback sees the same
+    ``cancelled()`` contract a ``ThreadPoolExecutor`` gives it.
+    """
+
+    def __init__(self):
+        self.submitted = 0
+
+    def submit(self, fn, *args, **kwargs):
+        from concurrent.futures import Future
+
+        self.submitted += 1
+        future = Future()
+        future.set_running_or_notify_cancel()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # mirror ThreadPoolExecutor semantics
+            future.set_exception(exc)
+        return future
+
+
 def _make_producer(capacity=8):
     p = NCCLRolloutMixin()
     p._nccl_enabled = True
@@ -68,6 +94,9 @@ def _make_producer(capacity=8):
     p._nccl_comm_cache = CommCache(build_fn=lambda u, r: 7, abort_fn=lambda i: None)
     p._nccl_streams = None
     p._nccl_send_lock = threading.Lock()
+    # _handle_request queues the send rather than running it inline; tests that
+    # need a real pool (concurrency / cancellation) override this.
+    p._nccl_executor = _InlineExecutor()
     return p
 
 
@@ -605,6 +634,135 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
         self.assertTrue(torch.allclose(out["actions"], actions))
         self.assertTrue(torch.allclose(out["rewards"], rewards))
         self.assertEqual(int(out["episode_length"][0].item()), ep_len)
+
+
+class TestControlPlaneNotBlockedBySends(unittest.TestCase):
+    """A blocked send must never delay ANOTHER request's acknowledgement.
+
+    ``_dispatch_request`` used to submit the whole handler to the bounded
+    sender pool, so the cheap Redis ack queued behind workers sitting in
+    ``nccl_send``.  With one sender thread and two refs from this producer in
+    one consumer batch that closes a circular wait: the consumer does not post
+    the recv that would release send #1 until rendezvous #2 is answered, and
+    rendezvous #2 cannot be answered until send #1 frees the worker.  Only the
+    send belongs on the pool; the control plane runs on the listener.
+    """
+
+    @staticmethod
+    def _request(transfer_id, resp_key):
+        from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
+            build_request_message,
+        )
+
+        return build_request_message(
+            transfer_id=transfer_id,
+            sender_rank=0,
+            receiver_replica="pol-A",
+            receiver_rank=1,
+            resp_key=resp_key,
+            uid_key="uk",
+            req_deadline=time.time() + 30.0,
+        )
+
+    @staticmethod
+    def _wait_for(predicate, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def _producer_with_blocking_send(self, blocked_id="0:first", workers=1):
+        """Producer whose send for ``blocked_id`` parks until released."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        p = _make_producer()
+        p._nccl_executor = ThreadPoolExecutor(max_workers=workers)
+        started = threading.Event()
+        release = threading.Event()
+        sent = []
+
+        def blocking_send(entry, *_args, **_kwargs):
+            sent.append(entry.transfer_id)
+            if entry.transfer_id == blocked_id:
+                started.set()
+                release.wait(timeout=10)
+
+        p._send = blocking_send
+        for tid in ("0:first", "0:second"):
+            p._nccl_registry.register(
+                tid, torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
+            )
+        return p, started, release, sent
+
+    def test_queued_send_does_not_delay_the_next_ack(self):
+        p, started, release, sent = self._producer_with_blocking_send()
+        try:
+            p._dispatch_request(self._request("0:first", "rk-first"))
+            self.assertTrue(started.wait(timeout=5), "send #1 never reached the pool")
+            # The only sender thread is now parked inside send #1.
+            p._dispatch_request(self._request("0:second", "rk-second"))
+            self.assertTrue(
+                self._wait_for(lambda: len(p._nccl_rendezvous.replies) >= 2),
+                "request #2 went unacknowledged while a send was blocked: "
+                f"replies={p._nccl_rendezvous.replies}",
+            )
+            self.assertEqual(
+                p._nccl_rendezvous.replies,
+                [
+                    ("rk-first", TransferStatus.ACCEPTED),
+                    ("rk-second", TransferStatus.ACCEPTED),
+                ],
+            )
+        finally:
+            # Release in a finally so a failed assertion cannot hang the suite.
+            release.set()
+            p._nccl_executor.shutdown(wait=True)
+        # Decoupling the ack must not drop the send: both still run, serialized.
+        self.assertEqual(sorted(sent), ["0:first", "0:second"])
+
+    def test_send_cancelled_at_shutdown_releases_its_lease(self):
+        """``cleanup_nccl`` cancels queued sends -- their leases must come back.
+
+        The lease is taken before the send is queued, so a future cancelled
+        before it ever runs would otherwise pin its buffer un-reapable.
+        """
+        p, started, release, _sent = self._producer_with_blocking_send()
+        try:
+            p._dispatch_request(self._request("0:first", "rk-first"))
+            self.assertTrue(started.wait(timeout=5), "send #1 never reached the pool")
+            p._dispatch_request(self._request("0:second", "rk-second"))
+            self.assertTrue(
+                self._wait_for(lambda: len(p._nccl_rendezvous.replies) >= 2)
+            )
+            # Send #2 is queued behind the parked worker, holding its lease.
+            self.assertEqual(p._nccl_registry.get("0:second").inflight, 1)
+            p._nccl_executor.shutdown(wait=False, cancel_futures=True)
+            self.assertEqual(
+                p._nccl_registry.get("0:second").inflight,
+                0,
+                "a send cancelled before it ran leaked its buffer lease",
+            )
+        finally:
+            release.set()
+            p._nccl_executor.shutdown(wait=True)
+
+    def test_send_submission_failure_releases_its_lease(self):
+        """A pool that rejects the submission never owns the lease."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        p = _make_producer()
+        p._nccl_executor = ThreadPoolExecutor(max_workers=1)
+        p._nccl_executor.shutdown(wait=True)  # submit() raises from here on
+        p._send = lambda *a, **k: None
+        p._nccl_registry.register(
+            "0:x", torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
+        )
+
+        p._dispatch_request(self._request("0:x", "rk"))
+
+        self.assertEqual(p._nccl_registry.get("0:x").inflight, 0)
 
 
 if __name__ == "__main__":
