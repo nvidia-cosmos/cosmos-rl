@@ -34,6 +34,7 @@ These tests validate:
    and skips transports with ``completion_prefix=None``.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -209,17 +210,32 @@ class TestNcclTransportPublishCleanup(unittest.TestCase):
             logging=SimpleNamespace(experiment_name="exp"),
             rollout=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=4)),
         )
-        n = transport.publish_cleanup_for_discarded(
-            transfer_ids=["2:abc", "3:def"],
-            config=config,
-            redis_client=redis,
-        )
-        self.assertEqual(n, 2)
-        # Two transfer ids → two messages, one per replica index.
-        self.assertEqual(len(redis.published), 2)
-        channels = {ch for ch, _ in redis.published}
-        self.assertIn("cosmos_rl:exp:test:rollout_comm:2:nccl_cleanup", channels)
-        self.assertIn("cosmos_rl:exp:test:rollout_comm:3:nccl_cleanup", channels)
+        # The key prefix embeds os.environ["SLURM_JOB_ID"], which scopes every
+        # key to one job so concurrent runs on a shared Redis cannot collide.
+        # Assert BOTH branches explicitly rather than inheriting whatever the
+        # runner happens to export: keyed off the job id when one is present,
+        # and off the "test" default when it is not.  Leaving it to the ambient
+        # environment makes the test pass on a laptop and fail on every Slurm
+        # runner -- and, worse, makes a pass mean nothing either way.
+        for job_id, expected in (("19899913", "19899913"), (None, "test")):
+            with self.subTest(slurm_job_id=job_id):
+                redis.published.clear()
+                env = {"SLURM_JOB_ID": job_id} if job_id else {}
+                with mock.patch.dict(os.environ, env, clear=not job_id):
+                    n = transport.publish_cleanup_for_discarded(
+                        transfer_ids=["2:abc", "3:def"],
+                        config=config,
+                        redis_client=redis,
+                    )
+                self.assertEqual(n, 2)
+                # Two transfer ids -> two messages, one per replica index.
+                self.assertEqual(len(redis.published), 2)
+                channels = {ch for ch, _ in redis.published}
+                for idx in (2, 3):
+                    self.assertIn(
+                        f"cosmos_rl:exp:{expected}:rollout_comm:{idx}:nccl_cleanup",
+                        channels,
+                    )
 
     def test_publish_cleanup_no_redis_is_safe(self):
         transport = NcclPayloadTransport()
