@@ -148,10 +148,10 @@
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">query_reference_answer</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">"""</span>
 <span class="sd">        Query the reference answer for reward computation.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">&quot;reference_answer&quot;</span><span class="p">]</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">"reference_answer"</span><span class="p">]</span>
 </pre></div>
 </div>
 <p>Here we attach the <a class="reference external" href="https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k">BytedTsinghua-SIA/DAPO-Math-17k</a> dataset as an example:</p>
@@ -165,41 +165,41 @@
 
 <span class="k">class</span><span class="w"> </span><span class="nc">MathDapoDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
 <span class="sd">        `tokenizer`: tokenizer;</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">config</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">util</span><span class="o">.</span><span class="n">setup_tokenizer</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">policy</span><span class="o">.</span><span class="n">model_name_or_path</span><span class="p">)</span>
 
         <span class="c1"># This demo is only for DAPO-Math-17k dataset</span>
-        <span class="k">assert</span> <span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">train_policy</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;BytedTsinghua-SIA/DAPO-Math-17k&quot;</span>
+        <span class="k">assert</span> <span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">train_policy</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">"BytedTsinghua-SIA/DAPO-Math-17k"</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">train_policy</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">train_policy</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">subset</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        For DecoderOnlyLLMDataPacker, it should either return:</span>
 <span class="sd">        - raw text prompt to be converted into input_ids by both rollout and policy models;</span>
 <span class="sd">        - conversation format:</span>
 <span class="sd">        ```</span>
 <span class="sd">        [</span>
 <span class="sd">            {</span>
-<span class="sd">                &quot;role&quot;: &quot;system&quot;,</span>
-<span class="sd">                &quot;content&quot;: &quot;You are an AI math expert, you will be given a question and required to answer. &quot;</span>
+<span class="sd">                "role": "system",</span>
+<span class="sd">                "content": "You are an AI math expert, you will be given a question and required to answer. "</span>
 <span class="sd">            }</span>
 <span class="sd">            ...</span>
 <span class="sd">        ]</span>
 <span class="sd">        ```</span>
-<span class="sd">        &#39;&#39;&#39;</span>
-        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;tokenizer&quot;</span><span class="p">),</span> <span class="s2">&quot;`self.tokenizer` should be set by the launcher&quot;</span>
-        <span class="n">conversation</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">&quot;prompt&quot;</span><span class="p">]</span>
+<span class="sd">        '''</span>
+        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"tokenizer"</span><span class="p">),</span> <span class="s2">"`self.tokenizer` should be set by the launcher"</span>
+        <span class="n">conversation</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">"prompt"</span><span class="p">]</span>
         <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span>
             <span class="n">conversation</span><span class="p">,</span> <span class="nb">list</span>
-        <span class="p">),</span> <span class="sa">f</span><span class="s2">&quot;Prompt should be a string, but got </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">conversation</span><span class="p">)</span><span class="si">}</span><span class="s2">， </span><span class="si">{</span><span class="n">conversation</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">),</span> <span class="sa">f</span><span class="s2">"Prompt should be a string, but got </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">conversation</span><span class="p">)</span><span class="si">}</span><span class="s2">， </span><span class="si">{</span><span class="n">conversation</span><span class="si">}</span><span class="s2">"</span>
 
         <span class="c1"># Apply chat-template to get the raw prompt in text</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">apply_chat_template</span><span class="p">(</span>
@@ -209,10 +209,10 @@
         <span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_reference_answer</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        This is mandatory for GRPO to get a reference answer for reward computation.</span>
-<span class="sd">        &#39;&#39;&#39;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">&quot;reward_model&quot;</span><span class="p">][</span><span class="s2">&quot;ground_truth&quot;</span><span class="p">]</span>
+<span class="sd">        '''</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">"reward_model"</span><span class="p">][</span><span class="s2">"ground_truth"</span><span class="p">]</span>
 </pre></div>
 </div>
 <p>In this example, the dataset fetch each row and return the raw text prompt by applying chat-template. This demonstrates how user can customize the dataset to fit their needs.</p>
@@ -235,7 +235,7 @@
    <span class="k">class</span><span class="w"> </span><span class="nc">MathDapoDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
        <span class="o">...</span>
 
-   <span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+   <span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
        <span class="c1"># `dataset` argument can be:</span>
        <span class="c1">#   - a dataset instance</span>
        <span class="c1">#   - a factory function that returns a dataset instance</span>
@@ -268,12 +268,12 @@
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="o">...</span>
 
 <span class="k">def</span><span class="w"> </span><span class="nf">custom_reward_fn</span><span class="p">(</span><span class="n">to_be_evaluated</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">reference</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
-    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">reference</span><span class="p">,</span> <span class="nb">str</span><span class="p">),</span> <span class="s2">&quot;Reference answer should be a string&quot;</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">reference</span><span class="p">,</span> <span class="nb">str</span><span class="p">),</span> <span class="s2">"Reference answer should be a string"</span>
     <span class="c1"># For demo purpose, we just return a random float</span>
     <span class="c1"># In practice, you should implement your own reward function</span>
     <span class="k">return</span> <span class="n">random</span><span class="o">.</span><span class="n">random</span><span class="p">()</span>
 
-<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
     <span class="n">launch_worker</span><span class="p">(</span>
         <span class="c1">#...</span>
         <span class="n">reward_fns</span><span class="o">=</span><span class="p">[</span><span class="n">custom_reward_fn</span><span class="p">],</span>
@@ -302,15 +302,15 @@
 
 <span class="k">class</span><span class="w"> </span><span class="nc">GSM8kDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">config</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">util</span><span class="o">.</span><span class="n">setup_tokenizer</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">policy</span><span class="o">.</span><span class="n">model_name_or_path</span><span class="p">)</span>
-        <span class="n">modelscope_dataset_if_enabled</span> <span class="o">=</span> <span class="n">modelscope_load_dataset</span><span class="p">(</span><span class="s1">&#39;AI-ModelScope/gsm8k&#39;</span><span class="p">,</span> <span class="n">subset_name</span><span class="o">=</span><span class="s1">&#39;main&#39;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s1">&#39;train&#39;</span><span class="p">)</span>
+        <span class="n">modelscope_dataset_if_enabled</span> <span class="o">=</span> <span class="n">modelscope_load_dataset</span><span class="p">(</span><span class="s1">'AI-ModelScope/gsm8k'</span><span class="p">,</span> <span class="n">subset_name</span><span class="o">=</span><span class="s1">'main'</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s1">'train'</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">modelscope_dataset_if_enabled</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="s2">&quot;openai/gsm8k&quot;</span><span class="p">,</span> <span class="s2">&quot;main&quot;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;train&quot;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="s2">"openai/gsm8k"</span><span class="p">,</span> <span class="s2">"main"</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">"train"</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">modelscope_dataset_if_enabled</span>
 
@@ -319,38 +319,38 @@
         <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        For DecoderOnlyLLMDataPacker, it should either return:</span>
 <span class="sd">        - raw text prompt to be converted into input_ids by both rollout and policy models;</span>
 <span class="sd">        - conversation format:</span>
 <span class="sd">        ```</span>
 <span class="sd">        [</span>
 <span class="sd">            {</span>
-<span class="sd">                &quot;role&quot;: &quot;system&quot;,</span>
-<span class="sd">                &quot;content&quot;: &quot;You are an AI math expert, you will be given a question and required to answer. &quot;</span>
+<span class="sd">                "role": "system",</span>
+<span class="sd">                "content": "You are an AI math expert, you will be given a question and required to answer. "</span>
 <span class="sd">            }</span>
 <span class="sd">            ...</span>
 <span class="sd">        ]</span>
 <span class="sd">        ```</span>
-<span class="sd">        &#39;&#39;&#39;</span>
-        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;tokenizer&quot;</span><span class="p">),</span> <span class="s2">&quot;`self.tokenizer` should be set by the launcher&quot;</span>
-        <span class="n">question</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">&quot;question&quot;</span><span class="p">]</span>
+<span class="sd">        '''</span>
+        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"tokenizer"</span><span class="p">),</span> <span class="s2">"`self.tokenizer` should be set by the launcher"</span>
+        <span class="n">question</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">"question"</span><span class="p">]</span>
         <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span>
             <span class="n">question</span><span class="p">,</span> <span class="nb">str</span>
-        <span class="p">),</span> <span class="sa">f</span><span class="s2">&quot;Prompt should be a string, but got </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">question</span><span class="p">)</span><span class="si">}</span><span class="s2">， </span><span class="si">{</span><span class="n">question</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">),</span> <span class="sa">f</span><span class="s2">"Prompt should be a string, but got </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">question</span><span class="p">)</span><span class="si">}</span><span class="s2">， </span><span class="si">{</span><span class="n">question</span><span class="si">}</span><span class="s2">"</span>
         <span class="c1"># Convert to templated prompt</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="p">[</span>
             <span class="p">{</span>
-                <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;system&quot;</span><span class="p">,</span>
-                <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;&quot;You are an AI math expert, you will be given a question and required to answer.</span>
+                <span class="s2">"role"</span><span class="p">:</span> <span class="s2">"system"</span><span class="p">,</span>
+                <span class="s2">"content"</span><span class="p">:</span> <span class="s2">"""You are an AI math expert, you will be given a question and required to answer.</span>
 <span class="s2">Final answer should be like</span>
 <span class="s2">```</span>
 <span class="s2">#### [ANS]</span>
-<span class="s2">``` where [ANS] is your answer&quot;&quot;&quot;</span>
+<span class="s2">``` where [ANS] is your answer"""</span>
             <span class="p">},</span>
             <span class="p">{</span>
-                <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span>
-                <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="n">question</span><span class="p">,</span>
+                <span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span>
+                <span class="s2">"content"</span><span class="p">:</span> <span class="n">question</span><span class="p">,</span>
             <span class="p">}</span>
         <span class="p">]</span>
         <span class="n">prompt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">apply_chat_template</span><span class="p">(</span>
@@ -361,62 +361,62 @@
         <span class="k">return</span> <span class="n">prompt</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_reference_answer</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        This is mandatory for GRPO to get a reference answer for reward computation.</span>
-<span class="sd">        &#39;&#39;&#39;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">&quot;answer&quot;</span><span class="p">]</span>
+<span class="sd">        '''</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">[</span><span class="n">idx</span><span class="p">][</span><span class="s2">"answer"</span><span class="p">]</span>
 
 <span class="k">class</span><span class="w"> </span><span class="nc">DemoDataPacker</span><span class="p">(</span><span class="n">DataPacker</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">    </span><span class="sd">'''</span>
 <span class="sd">    This is a demo data packer that wraps the underlying data packer of the selected model.</span>
 <span class="sd">    This is meaningless for this example, but useful for explaining:</span>
 <span class="sd">        - how dataset data is processed and collated into a mini-batch for rollout engine;</span>
 <span class="sd">        - how rollout output is processed and collated into a mini-batch for policy model;</span>
-<span class="sd">    &#39;&#39;&#39;</span>
+<span class="sd">    '''</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
-        <span class="c1"># Check source code of DecoderOnlyLLMDataPacker to see how it&#39;s implemented</span>
+        <span class="c1"># Check source code of DecoderOnlyLLMDataPacker to see how it's implemented</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span> <span class="o">=</span> <span class="n">DecoderOnlyLLMDataPacker</span><span class="p">()</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_rollout_input</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">item</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        Convert dataset item into what rollout engine (e.g. vllm) expects</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">get_rollout_input</span><span class="p">(</span><span class="n">item</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">rollout_collate_fn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">items</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        Collate the rollout inputs into a mini-batch for rollout engine</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">rollout_collate_fn</span><span class="p">(</span><span class="n">items</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_policy_input</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">item</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">rollout_output</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        Process samples &amp; rollout output before collating them into a mini-batch</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">get_policy_input</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">rollout_output</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">policy_compute_max_len</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">processed_samples</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        Compute the maximum sequence length of the mini-batch</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">policy_compute_max_len</span><span class="p">(</span><span class="n">processed_samples</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">policy_collate_fn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">processed_samples</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">computed_max_len</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
+<span class="w">        </span><span class="sd">'''</span>
 <span class="sd">        Collate the mini-batch into the kwargs required by the policy model</span>
-<span class="sd">        &#39;&#39;&#39;</span>
+<span class="sd">        '''</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">policy_collate_fn</span><span class="p">(</span><span class="n">processed_samples</span><span class="p">,</span> <span class="n">computed_max_len</span><span class="p">)</span>
 
-<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">get_dataset_factory</span><span class="p">(</span><span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dataset</span><span class="p">:</span>
         <span class="k">return</span> <span class="n">GSM8kDataset</span><span class="p">()</span>
 

@@ -201,15 +201,15 @@
 <p>The configuration file (TOML format) contains multiple sections. Here’s the example section in the toml config for distillation:</p>
 <div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[distillation]</span>
 <span class="n">enable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<span class="n">model_name_or_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Qwen/Qwen3-8B&quot;</span>
+<span class="n">model_name_or_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"Qwen/Qwen3-8B"</span>
 <span class="n">compile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <span class="n">mini_batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span>
-<span class="n">master_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
-<span class="n">param_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;bfloat16&quot;</span>
-<span class="n">logprob_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
-<span class="n">fsdp_reduce_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
+<span class="n">master_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"float32"</span>
+<span class="n">param_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"bfloat16"</span>
+<span class="n">logprob_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"float32"</span>
+<span class="n">fsdp_reduce_dtype</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"float32"</span>
 <span class="n">fsdp_offload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
-<span class="n">fsdp_reshard_after_forward</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;default&quot;</span>
+<span class="n">fsdp_reshard_after_forward</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"default"</span>
 <span class="n">batch_size_per_replica</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">16</span>
 <span class="n">top_k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
 <span class="n">jsd_beta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>

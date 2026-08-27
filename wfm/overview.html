@@ -238,7 +238,7 @@
 <section id="launch-training">
 <h2>Launch Training<a class="headerlink" href="#launch-training" title="Link to this heading"></a></h2>
 <p>Install the WFM dependencies first:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="s1">&#39;.[wfm]&#39;</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="s1">'.[wfm]'</span>
 </pre></div>
 </div>
 <p>If you are training Cosmos-Predict2.5, also install:</p>
@@ -257,9 +257,9 @@
 <section id="id4">
 <h3>RL<a class="headerlink" href="#id4" title="Link to this heading"></a></h3>
 <p>Launch a reward service first by following <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>. Then point the trainer to that service through environment variables:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">&quot;your_token&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/enqueue&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward-service-host:PORT/api/reward/pull&quot;</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">"your_token"</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">"https://reward-service-host:PORT/api/reward/enqueue"</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">"https://reward-service-host:PORT/api/reward/pull"</span>
 </pre></div>
 </div>
 <p>After that, launch DiffusionNFT training with <code class="docutils literal notranslate"><span class="pre">cosmos_rl.tools.dataset.diffusion_nft</span></code>. For example, SD3 RL:</p>
@@ -287,28 +287,28 @@ If its false, we will only export the final checkpoint to diffusers-compatible s
 <span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffusionPipeline</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">export_to_video</span>
 
-<span class="n">base_model</span> <span class="o">=</span> <span class="s2">&quot;stabilityai/stable-diffusion-3.5-medium&quot;</span>
-<span class="n">adapter_dir</span> <span class="o">=</span> <span class="s2">&quot;./outputs/stable-diffusion-3-5-image-sft-lora/safetensors/step_30/lora&quot;</span>
+<span class="n">base_model</span> <span class="o">=</span> <span class="s2">"stabilityai/stable-diffusion-3.5-medium"</span>
+<span class="n">adapter_dir</span> <span class="o">=</span> <span class="s2">"./outputs/stable-diffusion-3-5-image-sft-lora/safetensors/step_30/lora"</span>
 
 <span class="n">pipe</span> <span class="o">=</span> <span class="n">DiffusionPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">base_model</span><span class="p">,</span> <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">)</span>
 <span class="n">pipe</span><span class="o">.</span><span class="n">load_lora_weights</span><span class="p">(</span>
     <span class="n">adapter_dir</span><span class="p">,</span>
-    <span class="n">weight_name</span><span class="o">=</span><span class="s2">&quot;model.safetensors&quot;</span><span class="p">,</span>
-    <span class="n">adapter_name</span><span class="o">=</span><span class="s2">&quot;default&quot;</span><span class="p">,</span>
+    <span class="n">weight_name</span><span class="o">=</span><span class="s2">"model.safetensors"</span><span class="p">,</span>
+    <span class="n">adapter_name</span><span class="o">=</span><span class="s2">"default"</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="n">pipe</span><span class="o">.</span><span class="n">set_adapters</span><span class="p">(</span><span class="s2">&quot;default&quot;</span><span class="p">)</span>
-<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+<span class="n">pipe</span><span class="o">.</span><span class="n">set_adapters</span><span class="p">(</span><span class="s2">"default"</span><span class="p">)</span>
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">)</span>
 
 <span class="n">result</span> <span class="o">=</span> <span class="n">pipe</span><span class="p">(</span>
-    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cinematic photo of a corgi astronaut on the moon.&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">"A cinematic photo of a corgi astronaut on the moon."</span><span class="p">,</span>
     <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span>
     <span class="n">guidance_scale</span><span class="o">=</span><span class="mf">4.5</span><span class="p">,</span>
 <span class="p">)</span>
 
-<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">&quot;images&quot;</span><span class="p">):</span>
-    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;sample.png&quot;</span><span class="p">)</span>
+<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">"images"</span><span class="p">):</span>
+    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">"sample.png"</span><span class="p">)</span>
 <span class="k">else</span><span class="p">:</span>
-    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">&quot;sample.mp4&quot;</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
+    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">"sample.mp4"</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
 </pre></div>
 </div>
 </section>
@@ -322,24 +322,24 @@ If its false, we will only export the final checkpoint to diffusers-compatible s
 <span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">DiffusionPipeline</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">export_to_video</span>
 
-<span class="n">checkpoint_dir</span> <span class="o">=</span> <span class="s2">&quot;./outputs/stable-diffusion-3-5-image-sft/safetensors/step_30&quot;</span>
+<span class="n">checkpoint_dir</span> <span class="o">=</span> <span class="s2">"./outputs/stable-diffusion-3-5-image-sft/safetensors/step_30"</span>
 
 <span class="n">pipe</span> <span class="o">=</span> <span class="n">DiffusionPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
     <span class="n">checkpoint_dir</span><span class="p">,</span>
     <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">&quot;cuda&quot;</span><span class="p">)</span>
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">)</span>
 
 <span class="n">result</span> <span class="o">=</span> <span class="n">pipe</span><span class="p">(</span>
-    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cinematic photo of a corgi astronaut on the moon.&quot;</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">"A cinematic photo of a corgi astronaut on the moon."</span><span class="p">,</span>
     <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span>
     <span class="n">guidance_scale</span><span class="o">=</span><span class="mf">4.5</span><span class="p">,</span>
 <span class="p">)</span>
 
-<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">&quot;images&quot;</span><span class="p">):</span>
-    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;sample.png&quot;</span><span class="p">)</span>
+<span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="s2">"images"</span><span class="p">):</span>
+    <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">"sample.png"</span><span class="p">)</span>
 <span class="k">else</span><span class="p">:</span>
-    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">&quot;sample.mp4&quot;</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
+    <span class="n">export_to_video</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s2">"sample.mp4"</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
 </pre></div>
 </div>
 </section>
@@ -365,7 +365,7 @@ If its false, we will only export the final checkpoint to diffusers-compatible s
 <span class="k">class</span><span class="w"> </span><span class="nc">MyModel</span><span class="p">(</span><span class="n">DiffuserModel</span><span class="p">):</span>
     <span class="nd">@staticmethod</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">supported_model_types</span><span class="p">():</span>
-        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;MyPipeline&quot;</span><span class="p">]</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">"MyPipeline"</span><span class="p">]</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">DiffusersConfig</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
@@ -473,9 +473,9 @@ For Cosmos-Predict2.5, you can refer this repo: <a class="reference external" hr
 <ul>
 <li><p>You can launch a reward service by following the instructions here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.</p></li>
 <li><p>Configure the environment variable <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">REMOTE_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">&quot;your_token&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/enqueue&quot;</span>
-<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">&quot;https://reward_service_host:PORT/api/reward/pull&quot;</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">export</span> <span class="n">REMOTE_REWARD_TOKEN</span><span class="o">=</span><span class="s2">"your_token"</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_ENQUEUE_URL</span><span class="o">=</span><span class="s2">"https://reward_service_host:PORT/api/reward/enqueue"</span>
+<span class="n">export</span> <span class="n">REMOTE_REWARD_FETCH_URL</span><span class="o">=</span><span class="s2">"https://reward_service_host:PORT/api/reward/pull"</span>
 </pre></div>
 </div>
 </li>

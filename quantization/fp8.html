@@ -134,11 +134,11 @@
 <p>To enable FP8 quantization, you need to set the following configuration:</p>
 <div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train.fp8]</span>
 <span class="n">enable_fp8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<span class="n">fp8_recipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;dynamic_scaling&quot;</span>
-<span class="n">quant_recipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;rowwise&quot;</span>
+<span class="n">fp8_recipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"dynamic_scaling"</span>
+<span class="n">quant_recipe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"rowwise"</span>
 
 <span class="k">[rollout]</span>
-<span class="n">quantization</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;fp8&quot;</span>
+<span class="n">quantization</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"fp8"</span>
 </pre></div>
 </div>
 <p>For policy:</p>

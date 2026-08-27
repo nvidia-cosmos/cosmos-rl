@@ -132,12 +132,12 @@ analyzer can parse them.</p>
 <h2>Grammar<a class="headerlink" href="#grammar" title="Link to this heading"></a></h2>
 <p>Each trace line is a single newline-terminated string with the
 following grammar (EBNF-ish):</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">trace_line</span>     <span class="o">:=</span> <span class="s2">&quot;[Trace]&quot;</span> <span class="n">SP</span> <span class="n">fields</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">trace_line</span>     <span class="o">:=</span> <span class="s2">"[Trace]"</span> <span class="n">SP</span> <span class="n">fields</span>
 <span class="n">fields</span>         <span class="o">:=</span> <span class="n">field</span> <span class="p">(</span><span class="n">SP</span> <span class="n">field</span><span class="p">)</span><span class="o">*</span>
-<span class="n">field</span>          <span class="o">:=</span> <span class="n">key</span> <span class="s2">&quot;=&quot;</span> <span class="n">value</span>
+<span class="n">field</span>          <span class="o">:=</span> <span class="n">key</span> <span class="s2">"="</span> <span class="n">value</span>
 <span class="n">key</span>            <span class="o">:=</span> <span class="n">identifier</span>         <span class="p">;</span> <span class="n">ASCII</span> <span class="n">letters</span><span class="p">,</span> <span class="n">digits</span><span class="p">,</span> <span class="n">underscores</span>
 <span class="n">value</span>          <span class="o">:=</span> <span class="n">number</span> <span class="o">|</span> <span class="n">bare_value</span> <span class="o">|</span> <span class="n">quoted_string</span>
-<span class="n">bare_value</span>     <span class="o">:=</span> <span class="o">/</span><span class="p">[</span><span class="o">^</span>\<span class="n">s</span><span class="s2">&quot;=\[\]]+/     ; grammar-safe characters only</span>
+<span class="n">bare_value</span>     <span class="o">:=</span> <span class="o">/</span><span class="p">[</span><span class="o">^</span>\<span class="n">s</span><span class="s2">"=\[\]]+/     ; grammar-safe characters only</span>
 <span class="n">quoted_string</span>  <span class="o">:=</span> <span class="n">JSON</span> <span class="n">string</span> <span class="n">literal</span> <span class="p">(</span><span class="n">double</span><span class="o">-</span><span class="n">quoted</span><span class="p">,</span> <span class="n">backslash</span><span class="o">-</span><span class="n">escaped</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -193,22 +193,22 @@ context manager, which combines start/end timing, line formatting, and
 logger dispatch in a single <code class="docutils literal notranslate"><span class="pre">with</span></code> block:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.trace</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_worker_id</span><span class="p">,</span> <span class="n">trace_op</span>
 
-<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">&quot;policy_0&quot;</span><span class="p">)</span>
+<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">"policy_0"</span><span class="p">)</span>
 
 <span class="c1"># Basic block timing.</span>
-<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="s2">&quot;step_training&quot;</span><span class="p">,</span> <span class="nb">iter</span><span class="o">=</span><span class="n">current_iter</span><span class="p">):</span>
+<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">"trainer"</span><span class="p">,</span> <span class="s2">"step_training"</span><span class="p">,</span> <span class="nb">iter</span><span class="o">=</span><span class="n">current_iter</span><span class="p">):</span>
     <span class="n">run_training_step</span><span class="p">()</span>
 
 <span class="c1"># Attach fields discovered mid-block by mutating the yielded dict.</span>
-<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">&quot;ucxx_prefetch&quot;</span><span class="p">,</span> <span class="s2">&quot;ucxx_fetch&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">extras</span><span class="p">:</span>
+<span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span><span class="s2">"ucxx_prefetch"</span><span class="p">,</span> <span class="s2">"ucxx_fetch"</span><span class="p">)</span> <span class="k">as</span> <span class="n">extras</span><span class="p">:</span>
     <span class="n">n_bytes</span> <span class="o">=</span> <span class="n">do_fetch</span><span class="p">()</span>
-    <span class="n">extras</span><span class="p">[</span><span class="s2">&quot;bytes&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">n_bytes</span>
-    <span class="n">extras</span><span class="p">[</span><span class="s2">&quot;count&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">4</span>
+    <span class="n">extras</span><span class="p">[</span><span class="s2">"bytes"</span><span class="p">]</span> <span class="o">=</span> <span class="n">n_bytes</span>
+    <span class="n">extras</span><span class="p">[</span><span class="s2">"count"</span><span class="p">]</span> <span class="o">=</span> <span class="mi">4</span>
 
 <span class="c1"># Custom logger / level.</span>
 <span class="k">with</span> <span class="n">trace_op</span><span class="p">(</span>
-    <span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="s2">&quot;trainer_forward&quot;</span><span class="p">,</span>
-    <span class="n">logger</span><span class="o">=</span><span class="n">my_logger</span><span class="p">,</span> <span class="n">log_level</span><span class="o">=</span><span class="s2">&quot;info&quot;</span><span class="p">,</span>
+    <span class="s2">"trainer"</span><span class="p">,</span> <span class="s2">"trainer_forward"</span><span class="p">,</span>
+    <span class="n">logger</span><span class="o">=</span><span class="n">my_logger</span><span class="p">,</span> <span class="n">log_level</span><span class="o">=</span><span class="s2">"info"</span><span class="p">,</span>
 <span class="p">):</span>
     <span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
 </pre></div>
@@ -226,13 +226,13 @@ primitives remain available:</p>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.logging</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
 
-<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">&quot;policy_0&quot;</span><span class="p">)</span>
+<span class="n">set_worker_id</span><span class="p">(</span><span class="s2">"policy_0"</span><span class="p">)</span>
 
 <span class="n">start</span> <span class="o">=</span> <span class="n">get_trace_time</span><span class="p">()</span>
 <span class="c1"># ... do work, possibly across an async boundary ...</span>
 <span class="n">end</span> <span class="o">=</span> <span class="n">get_trace_time</span><span class="p">()</span>
 <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="n">format_trace</span><span class="p">(</span>
-    <span class="n">thread</span><span class="o">=</span><span class="s2">&quot;trainer&quot;</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="s2">&quot;step_training&quot;</span><span class="p">,</span>
+    <span class="n">thread</span><span class="o">=</span><span class="s2">"trainer"</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="s2">"step_training"</span><span class="p">,</span>
     <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="nb">iter</span><span class="o">=</span><span class="n">current_iter</span><span class="p">,</span>
 <span class="p">))</span>
 </pre></div>
