@@ -48,6 +48,7 @@ class LoraInjectedLinear(nn.Linear):
         lora_alpha: float = 1.0,
         lora_dropout: float = 0.0,
         use_rslora: bool = False,
+        adapter_dtype: torch.dtype | None = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -61,11 +62,12 @@ class LoraInjectedLinear(nn.Linear):
 
         assert self.r > 0, "LoRA rank must be greater than 0"
         # LoRA parameters
+        adapter_kwargs = {"device": device, "dtype": adapter_dtype or dtype}
         self.lora_A = WeightWrapper(
-            nn.Parameter(torch.empty(self.r, in_features, **factory_kwargs))
+            nn.Parameter(torch.empty(self.r, in_features, **adapter_kwargs))
         )
         self.lora_B = WeightWrapper(
-            nn.Parameter(torch.empty(out_features, self.r, **factory_kwargs))
+            nn.Parameter(torch.empty(out_features, self.r, **adapter_kwargs))
         )
         # Init as in the LoRA paper: A ~ N(0, 0.02), B = 0 so initial ΔW=0
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
@@ -93,6 +95,7 @@ class LoraInjectedLinear(nn.Linear):
         lora_alpha: float,
         lora_dropout: float,
         use_rslora: bool = False,
+        adapter_dtype: torch.dtype | None = None,
     ) -> "LoraInjectedLinear":
         # Create same-shaped Linear and copy weights/bias
         new = cls(
@@ -105,6 +108,7 @@ class LoraInjectedLinear(nn.Linear):
             device=base.weight.device,
             dtype=base.weight.dtype,
             use_rslora=use_rslora,
+            adapter_dtype=adapter_dtype,
         )
         with torch.no_grad():
             new.weight.copy_(base.weight)
@@ -116,9 +120,10 @@ class LoraInjectedLinear(nn.Linear):
         out = F.linear(x, self.weight, self.bias)
         if self.r > 0 and not self.merged:
             # (x A^T) B^T = x @ A^T @ B^T
-            after_A = self.lora_dropout(x) @ self.lora_A.weight.t()  # [*, r]
+            adapter_input = self.lora_dropout(x).to(dtype=self.lora_A.weight.dtype)
+            after_A = adapter_input @ self.lora_A.weight.t()  # [*, r]
             lora_out = after_A @ self.lora_B.weight.t()  # [*, out]
-            out = out + self.scaling * lora_out
+            out = out + self.scaling * lora_out.to(dtype=out.dtype)
         return out
 
     @torch.no_grad()
@@ -316,6 +321,7 @@ def inject_lora_adapters(
                     lora_alpha=effective_alpha,
                     lora_dropout=config.lora_dropout,
                     use_rslora=config.use_rslora,
+                    adapter_dtype=getattr(torch, config.adapter_dtype) if config.adapter_dtype else None,
                 )
                 setattr(parent, child_name, lora_linear)
                 replaced.append(module_name)
@@ -373,6 +379,15 @@ def mark_only_lora_as_trainable(model: nn.Module, config: LoraConfig) -> None:
         if isinstance(m, LoraInjectedLinear) and m.r > 0:
             m.lora_A.requires_grad_(True)
             m.lora_B.requires_grad_(True)
+
+    if config.bias == "all":
+        for name, parameter in model.named_parameters():
+            if name.endswith(".bias"):
+                parameter.requires_grad_(True)
+    elif config.bias == "lora_only":
+        for module in model.modules():
+            if isinstance(module, LoraInjectedLinear) and module.bias is not None:
+                module.bias.requires_grad_(True)
 
 
 def reinitialize_lora_params(model: nn.Module) -> None:

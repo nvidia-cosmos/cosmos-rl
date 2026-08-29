@@ -76,7 +76,26 @@ class LLMTrainer(Trainer):
         if config.train.deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(mode=True, warn_only=True)
+            # warn_only=True lets a nondeterministic kernel run with a warning,
+            # so train.deterministic does NOT actually give reproducible runs.
+            # TAO_DETERMINISM_STRICT=1 turns the warning into an error so the
+            # offending operator names itself.
+            strict = os.environ.get("TAO_DETERMINISM_STRICT", "0").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            torch.use_deterministic_algorithms(mode=True, warn_only=not strict)
+            # Hugging Face models reach FlashAttention through
+            # transformers.modeling_flash_attention_utils, which selects its
+            # deterministic backward from this environment variable and never
+            # sees init_flash_attn_meta below. Without it FA2's atomics make
+            # every run diverge within a few steps even with
+            # use_deterministic_algorithms enabled.
+            os.environ.setdefault("FLASH_ATTENTION_DETERMINISTIC", "1")
+            # Deterministic cuBLAS GEMMs additionally require a fixed workspace.
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
         init_flash_attn_meta(
             config.train.deterministic, config.train.compile, config.train.fa_version

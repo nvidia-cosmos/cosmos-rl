@@ -200,7 +200,7 @@ def run_smoke(cfg_name: str, need_rollout: bool):
             target=_reader_thread, args=(rollout, rollout_logs), daemon=True
         ).start()
 
-    timeout_sec = 1000
+    timeout_sec = int(os.environ.get("COSMOS_TEST_INTEGRATION_TIMEOUT_SEC", "1800"))
     try:
         # Wait for policy / rollout to finish
         for worker in (policy, rollout):

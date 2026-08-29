@@ -91,13 +91,16 @@ class MultiRankWeightLoader:
         rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
         weights_of_ckpt_names = set()
 
-        # If COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
-        # Otherwise, load tensors to the specified device
-        # Note: This may cause performance degradation due to CPU-GPU transfer overhead
-        COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU = (
-            os.getenv("COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU", "0") == "1"
-        )
-        loading_device = "cpu" if COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU else device
+        # Loading every shard onto a single GPU before copying into the model can
+        # temporarily double memory use for large single-rank models. Default the
+        # single-rank path to CPU staging, while preserving the old distributed
+        # default unless explicitly overridden.
+        load_on_cpu_env = os.getenv("COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU")
+        if load_on_cpu_env is None:
+            load_on_cpu = self.world_size == 1
+        else:
+            load_on_cpu = load_on_cpu_env == "1"
+        loading_device = "cpu" if load_on_cpu else device
 
         with torch.device(loading_device):
             for file_idx, f in enumerate(safetensors_files):

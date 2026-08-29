@@ -17,17 +17,17 @@
 #
 # Usage:
 #   # build the CI image from source and import to .sqsh:
-#   bash tools/slurm/build_ci_image.sh --sqsh-out /lustre/.../cosmos_rl_ci.sqsh
+#   bash tools/slurm/build_ci_image.sh --sqsh-out <SHARED_SQSH_PATH>
 #
 #   # reuse an already-built local docker image, only import to .sqsh:
 #   bash tools/slurm/build_ci_image.sh --no-build --image-tag cosmos_rl_ci:latest \
-#       --sqsh-out /lustre/.../cosmos_rl_ci.sqsh
+#       --sqsh-out <SHARED_SQSH_PATH>
 #
 #   # reuse an EXISTING published/registry image (no docker build needed; only
 #   # enroot is required). Provide tests at launch via --repo-root-path:
 #   bash tools/slurm/build_ci_image.sh \
 #       --from-uri docker://nvcr.io#nvidia/cosmos-rl:<tag> \
-#       --sqsh-out /lustre/.../cosmos_rl_ci.sqsh
+#       --sqsh-out <SHARED_SQSH_PATH>
 #
 # If you ALREADY have a .sqsh (e.g. the one your training jobs use), you don't
 # need this script at all -- just launch with:

@@ -458,6 +458,7 @@ class Block(nn.Module):
                 enable_router_bias=True,
                 moe_inter_dim=args.moe_inter_dim,
                 fake_balanced_gate=args.fake_balanced_gate,
+                moe_enable_deepep=args.enable_deepep,
             )
             self.mlp = MoE(moe_args)
         self.input_layernorm = RMSNorm(args.dim)

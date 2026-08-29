@@ -674,10 +674,22 @@ class ModelRegistry:
             if freeze_pattern is not None:
                 model.apply_freeze_pattern(freeze_pattern)
 
+            trainable_parameters = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+            total_parameters = sum(parameter.numel() for parameter in model.parameters())
+            model.parameter_summary = {
+                "training_mode": "peft" if config.policy.lora is not None else "dense_sft",
+                "trainable_parameters": trainable_parameters,
+                "total_parameters": total_parameters,
+                "frozen_parameters": total_parameters - trainable_parameters,
+                "trainable_parameter_tensors": sum(parameter.requires_grad for parameter in model.parameters()),
+            }
+            logger.info(f"Parameter summary: {model.parameter_summary}")
+
             return model
 
         def _load_model_with_config(model_cls, hf_config, model_name_or_path, config):
             """Load model and apply post-processing configurations."""
+            hf_config._cosmos_qwen3_vl_patch_embed = config.policy.qwen3_vl_patch_embed
             model = model_cls.from_pretrained(
                 hf_config,
                 model_name_or_path,

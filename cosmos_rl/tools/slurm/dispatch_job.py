@@ -259,13 +259,13 @@ def main():
         help="Number of reference replicas to launch, only used in on-policy distillation for teacher model (default: using config value)",
     )
     parser.add_argument(
-        "--slurm-partition", type=str, default="pool0_av", help="SLURM partition to use"
+        "--slurm-partition", type=str, required=True, help="SLURM partition supplied for this run"
     )
     parser.add_argument(
         "--slurm-account",
         type=str,
-        default="av_alpamayo_reasoning",
-        help="SLURM account to use",
+        required=True,
+        help="SLURM account supplied for this run",
     )
     parser.add_argument(
         "--config-path",
@@ -288,8 +288,8 @@ def main():
     parser.add_argument(
         "--mount-dirs",
         type=str,
-        default="/lustre:/lustre/",
-        help="Comma-separated container mount mappings to inject into the sbatch template.",
+        required=True,
+        help="Comma-separated SOURCE:TARGET container mounts supplied for this run.",
     )
     parser.add_argument(
         "--cosmos-container",
@@ -321,8 +321,8 @@ def main():
     parser.add_argument(
         "--retries",
         type=int,
-        default=3,
-        help="Number of retries on failure (default: 3)",
+        default=0,
+        help="Number of retries on failure (default: 0; enable only after validating exit-code propagation)",
     )
     parser.add_argument(
         "--pre-timeout-signal",

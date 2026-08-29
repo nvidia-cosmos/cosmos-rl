@@ -333,6 +333,17 @@ def parse_args():
         default=False,
         help="In World foundational model mode.",
     )
+    parser.add_argument(
+        "--script",
+        dest="script_option",
+        default=None,
+        metavar="SCRIPT",
+        help=(
+            "A user script which can be provided for custom dataset, reward "
+            "functions, and model registration. Equivalent to the positional "
+            "script argument."
+        ),
+    )
 
     # Positional arguments
     parser.add_argument(
@@ -344,7 +355,34 @@ def parse_args():
 
     parser.add_argument("script_args", nargs=REMAINDER)
 
-    args = parser.parse_args()
+    script_option = None
+    script_option_args = None
+    parse_argv = None
+    raw_argv = sys.argv[1:]
+    if not any(arg in ("-h", "--help") for arg in raw_argv):
+        for idx, arg in enumerate(raw_argv):
+            if arg == "--script":
+                if idx + 1 >= len(raw_argv):
+                    parser.error("--script requires a script path")
+                script_option = raw_argv[idx + 1]
+                script_option_args = raw_argv[idx + 2 :]
+                parse_argv = raw_argv[:idx]
+                break
+            if arg.startswith("--script="):
+                script_option = arg.split("=", 1)[1]
+                script_option_args = raw_argv[idx + 1 :]
+                parse_argv = raw_argv[:idx]
+                break
+
+    args = parser.parse_args(parse_argv)
+    if script_option is not None:
+        if not script_option:
+            parser.error("--script requires a script path")
+        if args.script and args.script != script_option:
+            parser.error("Use either --script or positional script, not both.")
+        args.script = script_option
+        args.script_args = script_option_args
+    delattr(args, "script_option")
 
     # Validate Lepton mode arguments
     if args.lepton_mode:
@@ -983,28 +1021,31 @@ cosmos-rl --config config.toml"""
                         logger.error(
                             f"Process {i} failed with return code {returncode}"
                         )
-                        # Terminate all remaining processes
-                        if controller_id == -1 or i == controller_id:
-                            for p in processes:
-                                try:
-                                    p.kill()
-                                except Exception as e:
-                                    logger.error(f"Error kill process {p}: {e}")
-                            logger.error("Terminated all processes due to failure")
-                            sys.exit(1)  # Exit with error code 1 if any process failed
+                        # This launcher has no worker-respawn path.  A failed
+                        # child can therefore never recover in-place, whether
+                        # it is the controller or a policy/rollout process.
+                        # Propagate every child failure immediately so the
+                        # platform contract cannot report a false success.
+                        for p in processes:
+                            try:
+                                p.kill()
+                            except Exception as e:
+                                logger.error(f"Error kill process {p}: {e}")
+                        logger.error("Terminated all processes due to failure")
+                        sys.exit(1)  # Exit with error code 1 if any process failed
                     # Remove completed process from list
                     processes.remove(process)
             except Exception as e:
                 logger.error(f"Error monitoring process {i}: {e}")
-                # Terminate all remaining processes
-                if controller_id == -1 or i == controller_id:
-                    for p in processes:
-                        try:
-                            p.kill()
-                        except Exception as e:
-                            logger.error(f"Error kill process {p}: {e}")
-                    logger.error("Terminated all processes due to error")
-                    sys.exit(1)
+                # A monitoring exception is just as terminal as a nonzero
+                # child return: there is no safe in-place recovery path.
+                for p in processes:
+                    try:
+                        p.kill()
+                    except Exception as kill_error:
+                        logger.error(f"Error kill process {p}: {kill_error}")
+                logger.error("Terminated all processes due to monitoring error")
+                sys.exit(1)
         # Small sleep to prevent busy waiting
         time.sleep(0.1)
 

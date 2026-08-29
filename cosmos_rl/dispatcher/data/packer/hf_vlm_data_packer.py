@@ -36,8 +36,9 @@ from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.utils.video_pixel_bounds import normalize_video_pixel_bounds
 
-from qwen_vl_utils import fetch_image, fetch_video
+from qwen_vl_utils import fetch_image
 import qwen_vl_utils.vision_process as vision_process
 
 IGNORE_LABEL_ID = -100
@@ -133,7 +134,18 @@ def qwen_vl_process_vision_info(
                 fetch_image(vision_info, image_patch_size=image_patch_size)
             )
         elif "video" in vision_info:
-            video_input, video_sample_fps = fetch_video(
+            normalize_video_pixel_bounds(
+                vision_info,
+                image_patch_size,
+                vision_process,
+            )
+            # Resolve fetch_video dynamically from vision_process.  Spawned
+            # DataLoader workers install the PyNv processed-video cache on
+            # this module before/while selecting the forced backend.  A
+            # function imported by value here would retain Qwen's original
+            # uncached function and silently bypass that lazy in-training
+            # cache for every sample.
+            video_input, video_sample_fps = vision_process.fetch_video(
                 vision_info,
                 return_video_sample_fps=True,
                 image_patch_size=image_patch_size,
@@ -681,6 +693,22 @@ class HFVLMDataPacker(DataPacker):
     def _collate_fn(
         self, processed_samples: List[Dict[str, Any]], computed_max_len: int
     ) -> Dict[str, Any]:
+        tao_video_cache_keys = []
+        tao_video_cache_keys_valid = True
+        for sample in processed_samples:
+            sample_grid = sample.get("video_grid_thw")
+            if sample_grid is None:
+                continue
+            sample_keys = sample.get("tao_video_cache_keys")
+            grid_rows = int(sample_grid.shape[0])
+            if (
+                not isinstance(sample_keys, (list, tuple))
+                or len(sample_keys) != grid_rows
+            ):
+                tao_video_cache_keys_valid = False
+                break
+            tao_video_cache_keys.extend(str(key) for key in sample_keys)
+
         pixel_values_videos = [x["pixel_values_videos"] for x in processed_samples]
         video_grid_thw = [x["video_grid_thw"] for x in processed_samples]
         second_per_grid_ts = [x["second_per_grid_ts"] for x in processed_samples]
@@ -746,6 +774,18 @@ class HFVLMDataPacker(DataPacker):
         if video_grid_thw is not None:
             batch["video_grid_thw"] = video_grid_thw
 
+        if (
+            tao_video_cache_keys_valid
+            and tao_video_cache_keys
+            and video_grid_thw is not None
+            and len(tao_video_cache_keys) == int(video_grid_thw.shape[0])
+        ):
+            # This metadata is consumed by HFModel before its kwargs are
+            # filtered against the Hugging Face forward signature.  Keeping it
+            # as Python strings avoids tensor transfers and keeps checkpoint
+            # state untouched.
+            batch["tao_video_cache_keys"] = tao_video_cache_keys
+
         if second_per_grid_ts is not None:
             batch["second_per_grid_ts"] = second_per_grid_ts
 
@@ -777,12 +817,26 @@ class HFVLMDataPacker(DataPacker):
         if batch_num_images is not None:
             batch["batch_num_images"] = batch_num_images
 
-        # Pad the input_ids, logprob_masks
+        # Pad input_ids and build the mask from the unpadded lengths.  Do not
+        # infer padding from the token value: some tokenizers reuse a regular
+        # vocabulary token as ``pad_token_id``.  An explicit attention mask is
+        # also required by recent Transformers releases for multimodal models
+        # whose MRoPE position ids are not monotonically increasing.  Without
+        # it, Transformers can mis-detect an ordinary padded batch as packed
+        # sequences and sever text-to-vision attention during SFT.
         batch["input_ids"] = torch.tensor(
             [
                 x["input_ids"][:computed_max_len]
                 + [self.tokenizer.pad_token_id]
                 * (max(0, computed_max_len - len(x["input_ids"])))
+                for x in processed_samples
+            ],
+            dtype=torch.long,
+        )
+        batch["attention_mask"] = torch.tensor(
+            [
+                [1] * min(len(x["input_ids"]), computed_max_len)
+                + [0] * max(0, computed_max_len - len(x["input_ids"]))
                 for x in processed_samples
             ],
             dtype=torch.long,
@@ -831,8 +885,13 @@ class HFVLMDataPacker(DataPacker):
             dtype=torch.bool,
         )
 
-        assert len(batch["input_ids"]) == len(batch["logprob_masks"]), (
-            "The length of input_ids, logprob_masks should be the same"
+        assert (
+            batch["input_ids"].shape
+            == batch["attention_mask"].shape
+            == batch["logprob_masks"].shape
+        ), (
+            "The shapes of input_ids, attention_mask, and logprob_masks "
+            "should be the same"
         )
 
         return batch
@@ -980,11 +1039,52 @@ class HFVLMDataPacker(DataPacker):
             return "mixed(" + "+".join(sorted(types_found)) + ")"
         return next(iter(types_found))
 
+    @staticmethod
+    def _extract_video_cache_keys(sample: "HFVLMDataPacker.Payload"):
+        """Return stable video identities in processor traversal order.
+
+        Only ordinary string paths are cacheable.  URLs, in-memory videos,
+        frame lists, or malformed conversations deliberately return ``None``
+        so the model takes its native uncached path.
+        """
+        messages = sample.get("messages") if isinstance(sample, dict) else sample
+        if not isinstance(messages, list):
+            return None
+
+        keys = []
+        for message in messages:
+            if not isinstance(message, dict) and hasattr(message, "model_dump"):
+                message = message.model_dump()
+            if not isinstance(message, dict):
+                return None
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if "video" not in item and item.get("type") != "video":
+                    continue
+                value = item.get("video")
+                if not isinstance(value, str) or "://" in value:
+                    return None
+                keys.append(os.path.realpath(os.path.expanduser(value)))
+        return keys or None
+
     def sft_process_sample(self, sample: "HFVLMDataPacker.Payload") -> Dict[str, Any]:
         """
         Accepts either raw text or conversation format.
         """
+        tao_video_cache_keys = self._extract_video_cache_keys(sample)
         result = self.get_policy_input(sample, add_generation_prompt=False)
+
+        video_grid_thw = result.get("video_grid_thw")
+        if (
+            tao_video_cache_keys is not None
+            and video_grid_thw is not None
+            and len(tao_video_cache_keys) == int(video_grid_thw.shape[0])
+        ):
+            result["tao_video_cache_keys"] = tao_video_cache_keys
 
         max_len = getattr(self.config.policy, "model_max_length", None)
         if max_len is not None and len(result["input_ids"]) > max_len:

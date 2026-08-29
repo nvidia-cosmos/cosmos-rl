@@ -46,6 +46,23 @@ class TinyBlock(nn.Module):
 
 
 class LoRATest(unittest.TestCase):
+    def test_bias_and_adapter_dtype_semantics(self):
+        model = TinyBlock()
+        cfg = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj"],
+            bias="lora_only",
+            adapter_dtype="float32",
+            modules_to_save=["v_proj"],
+        )
+        model, _ = inject_lora_adapters(model, cfg)
+        mark_only_lora_as_trainable(model, cfg)
+        assert model.q_proj.bias.requires_grad
+        assert not model.q_proj.weight.requires_grad
+        assert model.q_proj.lora_A.weight.dtype == torch.float32
+        assert model.v_proj.weight.requires_grad
+
     def test_injection_and_freeze(self):
         model = TinyBlock()
         cfg = LoraConfig(

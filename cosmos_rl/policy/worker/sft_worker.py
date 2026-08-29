@@ -15,9 +15,12 @@
 
 
 import inspect
+import json
 import os
 import atexit
 import traceback as _tb
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
@@ -53,6 +56,58 @@ from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.dispatcher.data.load_balanced_dataset import LoadBalancedDataset
 
 
+def _is_pp_enabled(parallel_dims) -> bool:
+    return bool(getattr(parallel_dims, "pp_enabled", False))
+
+
+def _initialize_dataloader_worker(worker_id: int) -> None:
+    """Restore process-local video hooks after a spawn-based worker start.
+
+    The DAFT ``cpu``/``torchvision`` contract uses the official PyAV wheel's
+    software H.264/H.265 decoders.  No CUDA context may be created in these
+    workers; the reader enforces that contract again during registration.
+    """
+    video_decoder = os.environ.get("COSMOS_DATALOADER_VIDEO_DECODER")
+    if video_decoder is None:
+        return
+    if video_decoder != "system_pyav":
+        raise RuntimeError(
+            "unsupported COSMOS_DATALOADER_VIDEO_DECODER value: "
+            f"{video_decoder}"
+        )
+
+    from cosmos_rl.utils.system_pyav_video_reader import (
+        register_system_pyav_video_reader,
+    )
+
+    register_system_pyav_video_reader()
+    logger.info(
+        "DataLoader worker %s registered software System PyAV video decoder",
+        worker_id,
+    )
+
+
+def _dataloader_worker_kwargs(
+    num_workers: int, prefetch_factor: Optional[int]
+) -> Dict[str, Any]:
+    """Build CUDA-safe DataLoader worker options.
+
+    Forking after the policy process initializes CUDA/NCCL leaves the child
+    unable to create the FFmpeg NVDEC context. Spawn gives video workers a
+    clean CUDA runtime. PyTorch also rejects prefetch_factor when workers are
+    disabled, so only forward it for a positive worker count.
+    """
+    kwargs: Dict[str, Any] = {"num_workers": num_workers}
+    if num_workers > 0:
+        kwargs["multiprocessing_context"] = "spawn"
+        kwargs["persistent_workers"] = True
+        if os.environ.get("COSMOS_DATALOADER_VIDEO_DECODER") is not None:
+            kwargs["worker_init_fn"] = _initialize_dataloader_worker
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = prefetch_factor
+    return kwargs
+
+
 class SFTDataset(Dataset):
     def __init__(
         self,
@@ -60,30 +115,120 @@ class SFTDataset(Dataset):
         dataset: Dataset,
         data_packer: BaseDataPacker,
         is_user_dataset: bool = False,
+        enable_cache: Optional[bool] = None,
+        cache_prefix: str = "train",
     ):
+        """
+        Initialize SFTDataset.
+
+        Args:
+            config: Dataset configuration
+            dataset: The underlying dataset
+            data_packer: Data packer for processing samples
+            is_user_dataset: Whether this is a user-provided dataset
+            enable_cache: Override cache setting. If None, uses config.enable_dataset_cache.
+                         Set to False to disable caching (useful for validation if experiencing segfaults).
+            cache_prefix: Prefix for cache folder to differentiate train/val caches ("train" or "val")
+        """
         self.config = config
         self.column_name = config.conversation_column_name
         self.dataset = dataset
         self.data_packer = data_packer
         self.is_user_dataset = is_user_dataset
         self.cache = None
-        if self.config.enable_dataset_cache:
+        self.batch_threads = int(os.environ.get("TAO_SFT_BATCH_THREADS", "1"))
+        if self.batch_threads < 1:
+            raise ValueError("TAO_SFT_BATCH_THREADS must be a positive integer")
+        self._batch_executor: Optional[ThreadPoolExecutor] = None
+
+        # Determine if cache should be enabled
+        should_enable_cache = (
+            enable_cache
+            if enable_cache is not None
+            else self.config.enable_dataset_cache
+        )
+
+        if should_enable_cache:
             # TODO(zjx): can we reuse the cache between different training jobs?
             # It's not stable yet, we only checked if the config is the same
             # If there are any problems, it is recommended that the user clears the cache folder
-            cache_folder = os.path.join(
-                os.environ.get(
-                    "COSMOS_CACHE",
-                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
-                ),
-                "datasets_cache",
-                f"{self.config.dataset.name}-{config_hash(config)}",
+            # Use cache_prefix to ensure train and val have separate cache folders
+            explicit_root = getattr(self.config, "dataset_cache_dir", None)
+            fingerprint = (
+                getattr(self.config, "validation_dataset_cache_fingerprint", None)
+                if cache_prefix == "val"
+                else getattr(self.config, "dataset_cache_fingerprint", None)
             )
-            logger.info(f"SFTDataset Cache folder: {cache_folder}")
+            if cache_prefix == "val" and fingerprint is None:
+                fingerprint = getattr(self.config, "dataset_cache_fingerprint", None)
+            if explicit_root:
+                if not fingerprint:
+                    raise ValueError(
+                        "dataset_cache_fingerprint is required with dataset_cache_dir"
+                    )
+                cache_folder = os.path.join(
+                    os.path.realpath(os.path.expanduser(explicit_root)),
+                    f"{cache_prefix}-{fingerprint}",
+                )
+            else:
+                cache_folder = os.path.join(
+                    os.environ.get(
+                        "COSMOS_CACHE",
+                        os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
+                    ),
+                    "datasets_cache",
+                    f"{cache_prefix}-{self.config.dataset.name}-{config_hash(config)}",
+                )
+            logger.info(f"SFTDataset Cache folder ({cache_prefix}): {cache_folder}")
             self.cache = cache.DiskCache(cache_folder)
+            if getattr(self.config, "require_complete_dataset_cache", False):
+                manifest_path = os.path.join(cache_folder, "cache_provenance.json")
+                if not os.path.isfile(manifest_path):
+                    raise RuntimeError(
+                        f"Required cache provenance is missing: {manifest_path}"
+                    )
+                with open(manifest_path, encoding="utf-8") as manifest_file:
+                    manifest = json.load(manifest_file)
+                expected = {
+                    "split": cache_prefix,
+                    "cache_fingerprint": fingerprint,
+                    "record_count": len(self.dataset),
+                    "complete": True,
+                }
+                mismatches = {
+                    key: {"expected": value, "actual": manifest.get(key)}
+                    for key, value in expected.items()
+                    if manifest.get(key) != value
+                }
+                if mismatches:
+                    raise RuntimeError(
+                        f"Dataset cache provenance mismatch: {mismatches}"
+                    )
+                missing = [
+                    idx
+                    for idx in range(len(self.dataset))
+                    if not os.path.isfile(self.cache.path_for(idx))
+                ]
+                if missing:
+                    raise RuntimeError(
+                        f"Dataset cache is incomplete: {len(missing)} missing entries; first={missing[:10]}"
+                    )
+        else:
+            logger.info(f"SFTDataset cache disabled for {cache_prefix}")
 
     def __len__(self):
         return len(self.dataset)
+
+    def __getitems__(self, indices):
+        """Process one logical batch concurrently while preserving its order."""
+        if self.batch_threads == 1 or len(indices) < 2:
+            return [self[index] for index in indices]
+        if self._batch_executor is None:
+            self._batch_executor = ThreadPoolExecutor(
+                max_workers=min(self.batch_threads, len(indices)),
+                thread_name_prefix="tao-sft-batch",
+            )
+        return list(self._batch_executor.map(self.__getitem__, indices))
 
     def __getitem__(self, idx):
         # we only cache on_the_fly result
@@ -227,6 +372,8 @@ def construct_dataset(
     user_provided_val_dataset: Optional[Dataset] = None,
 ):
     config = cosmos_config.train.train_policy
+    train_is_user_dataset = user_provided_dataset is not None
+    val_is_user_dataset = False
     if user_provided_dataset is not None:
         dataset = None
         train_dataset = user_provided_dataset
@@ -249,6 +396,7 @@ def construct_dataset(
     if cosmos_config.validation.enable:
         if user_provided_val_dataset is not None:
             test_dataset = user_provided_val_dataset
+            val_is_user_dataset = True
             logger.info(
                 "Using user-provided validation dataset, which will skip split processing."
             )
@@ -270,6 +418,7 @@ def construct_dataset(
             train_dataset, test_dataset = util.split_train_n_val_dataset(
                 train_dataset, cosmos_config
             )
+            val_is_user_dataset = train_is_user_dataset
     else:
 
         class EmptyDataset(Dataset):
@@ -281,19 +430,39 @@ def construct_dataset(
 
         test_dataset = EmptyDataset()
 
+    # Determine cache settings for train and val separately
+    train_enable_cache = config.enable_dataset_cache
+    # For validation: use validation.enable_dataset_cache if set, otherwise fallback to train setting
+    validation_enable_cache = getattr(
+        cosmos_config.validation, "enable_dataset_cache", None
+    )
+    val_enable_cache = (
+        validation_enable_cache
+        if validation_enable_cache is not None
+        else config.enable_dataset_cache
+    )
+
+    logger.info(
+        f"Dataset cache settings - train: {train_enable_cache}, val: {val_enable_cache}"
+    )
+
     trainer_type = cosmos_config.train.train_policy.trainer_type
     DatasetCls = DPODataset if trainer_type == "dpo" else SFTDataset
     train_sft_dataset = DatasetCls(
         config,
         dataset=train_dataset,
         data_packer=data_packer,
-        is_user_dataset=user_provided_dataset is not None,
+        is_user_dataset=train_is_user_dataset,
+        enable_cache=train_enable_cache,
+        cache_prefix="train",
     )
     test_sft_dataset = DatasetCls(
         config,
         dataset=test_dataset,
         data_packer=val_data_packer,
-        is_user_dataset=user_provided_dataset is not None,
+        is_user_dataset=val_is_user_dataset,
+        enable_cache=val_enable_cache,
+        cache_prefix="val",
     )
 
     return train_sft_dataset, test_sft_dataset
@@ -349,6 +518,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             self.config.train.train_policy.enable_dp_load_balancing
         )
 
+        # Track the last step where validation was performed to avoid duplicates
+        self._last_validation_step = -1
+
         self.build_runner(
             data_packer=data_packer,
             val_data_packer=val_data_packer,
@@ -376,29 +548,49 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.setup_hooks()
 
     def setup_hooks(self):
-        if "pre_validation_hook" in self.hook_fns:
-            self.pre_validation_hook = self.hook_fns["pre_validation_hook"]
-        else:
-            self.pre_validation_hook = None
+        """Setup hook functions for training and validation lifecycle.
 
-        if "pre_per_step_validation_hook" in self.hook_fns:
-            self.pre_per_step_validation_hook = self.hook_fns[
-                "pre_per_step_validation_hook"
-            ]
-        else:
-            self.pre_per_step_validation_hook = None
+        Supported hooks:
+            Training hooks:
+                - pre_training_hook: Called before training loop starts.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - pre_training_step_hook: Called before each training step.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_training_step_hook: Called after each training step.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_training_hook: Called after training loop completes.
+                    Signature: fn(worker, report_data: Dict[str, Any])
 
-        if "post_per_step_validation_hook" in self.hook_fns:
-            self.post_per_step_validation_hook = self.hook_fns[
-                "post_per_step_validation_hook"
-            ]
-        else:
-            self.post_per_step_validation_hook = None
+            Validation hooks:
+                - pre_validation_hook: Called before validation starts.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - pre_per_step_validation_hook: Called before each validation batch.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_per_step_validation_hook: Called after each validation batch.
+                    Signature: fn(worker, report_data: Dict[str, Any])
+                - post_validation_hook: Called after validation completes.
+                    Signature: fn(worker, report_data: Dict[str, Any])
 
-        if "post_validation_hook" in self.hook_fns:
-            self.post_validation_hook = self.hook_fns["post_validation_hook"]
-        else:
-            self.post_validation_hook = None
+        These hooks can be used for custom logging (e.g., TAO status logging),
+        monitoring, or any custom behavior during the training lifecycle.
+        """
+        # Training hooks
+        self.pre_training_hook = self.hook_fns.get("pre_training_hook", None)
+        self.pre_training_step_hook = self.hook_fns.get("pre_training_step_hook", None)
+        self.post_training_step_hook = self.hook_fns.get(
+            "post_training_step_hook", None
+        )
+        self.post_training_hook = self.hook_fns.get("post_training_hook", None)
+
+        # Validation hooks
+        self.pre_validation_hook = self.hook_fns.get("pre_validation_hook", None)
+        self.pre_per_step_validation_hook = self.hook_fns.get(
+            "pre_per_step_validation_hook", None
+        )
+        self.post_per_step_validation_hook = self.hook_fns.get(
+            "post_per_step_validation_hook", None
+        )
+        self.post_validation_hook = self.hook_fns.get("post_validation_hook", None)
 
     def build_runner(
         self,
@@ -504,7 +696,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     num_replicas=self.dp_world_size,
                     rank=self.dp_rank,
                     shuffle=self.config.train.train_policy.dataloader_shuffle,
-                    drop_last=self.parallel_dims.pp_enabled,
+                    drop_last=_is_pp_enabled(self.parallel_dims),
                 )
             else:
                 train_sampler = sampler
@@ -515,7 +707,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 num_replicas=self.dp_world_size,
                 rank=self.dp_rank,
                 shuffle=self.config.train.train_policy.dataloader_shuffle,
-                drop_last=self.parallel_dims.pp_enabled,
+                drop_last=_is_pp_enabled(self.parallel_dims),
                 seed=self.config.train.train_policy.dataloader_seed,
             )
         self.train_sampler = train_sampler
@@ -531,7 +723,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "config": self.config,
                 "sampler": self.train_sampler,
                 "batch_size": self.config.train.train_batch_per_replica,
-                "drop_last": self.parallel_dims.pp_enabled,
+                "drop_last": _is_pp_enabled(self.parallel_dims),
             }
             # Filter kwargs to only those the function accepts
             filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
@@ -548,9 +740,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 data_loader = DataLoader(
                     train_dataset,
                     batch_size=None,  # Batches are already formed by IterableDataset
-                    num_workers=self.config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=collate_fn,  # Still need collate_fn for final batch formatting
+                    **_dataloader_worker_kwargs(
+                        self.config.train.train_policy.dataloader_num_workers,
+                        self.config.train.train_policy.dataloader_prefetch_factor,
+                    ),
                 )
             elif sampler_in_batch is not None:
                 logger.info(
@@ -558,10 +752,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
                 data_loader = DataLoader(
                     train_dataset,
-                    num_workers=self.config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
+                    **_dataloader_worker_kwargs(
+                        self.config.train.train_policy.dataloader_num_workers,
+                        self.config.train.train_policy.dataloader_prefetch_factor,
+                    ),
                 )
             else:
                 # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
@@ -569,12 +765,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     train_dataset,
                     batch_size=self.config.train.train_batch_per_replica,
                     shuffle=False,
-                    num_workers=self.config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
                     drop_last=self.config.train.train_policy.dataloader_drop_last
-                    or self.parallel_dims.pp_enabled,
+                    or _is_pp_enabled(self.parallel_dims),
+                    **_dataloader_worker_kwargs(
+                        self.config.train.train_policy.dataloader_num_workers,
+                        self.config.train.train_policy.dataloader_prefetch_factor,
+                    ),
                 )
             return data_loader
 
@@ -677,6 +875,22 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.train_sampler, self.train_batch_sampler
             )
 
+        validation_num_workers = getattr(
+            self.config.validation,
+            "dataloader_num_workers",
+            self.config.train.train_policy.dataloader_num_workers,
+        )
+        val_num_workers = (
+            validation_num_workers
+            if validation_num_workers > 0
+            else self.config.train.train_policy.dataloader_num_workers
+        )
+        val_prefetch_factor = (
+            getattr(self.config.validation, "dataloader_prefetch_factor", None)
+            if getattr(self.config.validation, "dataloader_prefetch_factor", None)
+            is not None
+            else self.config.train.train_policy.dataloader_prefetch_factor
+        )
         if hasattr(val_dataset.dataset, "data_loader"):
             # Use custom data loader if provided by dataset
             self.val_data_loader = val_dataset.dataset.data_loader
@@ -702,21 +916,25 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 val_batch_sampler = val_batch_sampler(**filtered)
             self.val_data_loader = DataLoader(
                 val_dataset,
-                num_workers=self.config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 batch_sampler=val_batch_sampler,
                 collate_fn=collate_fn,
+                **_dataloader_worker_kwargs(
+                    val_num_workers,
+                    val_prefetch_factor,
+                ),
             )
         else:
             self.val_data_loader = DataLoader(
                 val_dataset,
                 batch_size=self.config.validation.batch_size
                 or self.config.train.train_batch_per_replica,
-                num_workers=self.config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=self.config.train.train_policy.dataloader_drop_last,
+                **_dataloader_worker_kwargs(
+                    val_num_workers,
+                    val_prefetch_factor,
+                ),
             )
 
         steps_by_dataset = (
@@ -738,11 +956,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
             # Use save_freq_in_epoch to calculate the save frequency in priority
-            self._save_freq = (
-                self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
-            ) // self.dp_world_size
+            # For epoch-based saving, don't divide by dp_world_size as we want to save at epoch boundaries
+            self._save_freq = self.config.train.ckpt.save_freq_in_epoch * len(
+                self.train_data_loader
+            )
             logger.info(
-                f"Checkpoint will be saved every {self._save_freq} steps, which is approximately every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
+                f"Checkpoint will be saved every {self._save_freq} steps, which is every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
             )
         else:
             self._save_freq = self.config.train.ckpt.save_freq
@@ -751,16 +970,36 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if not self.config.validation.enable:
             return None
 
-        if (
-            (self.train_step == 0 and self.config.validation.val_before_train)
-            or (
-                self.train_step != 0
-                and self.train_step % self.config.validation.freq == 0
-            )
-            or is_last_step
-        ):
-            pass
-        else:
+        # Determine if we should validate based on epoch or step frequency
+        should_validate = False
+
+        if is_last_step:
+            should_validate = True
+        elif self.train_step == 0 and self.config.validation.val_before_train:
+            should_validate = True
+        elif self.train_step != 0:
+            # Check for epoch-based validation (takes priority if configured)
+            freq_in_epoch = getattr(self.config.validation, "freq_in_epoch", 0)
+            if freq_in_epoch > 0:
+                steps_per_epoch = len(self.train_data_loader)
+                # Calculate validation steps: end of each freq_in_epoch epochs
+                validation_steps = []
+                for epoch_num in range(1, self.epoch + 1):
+                    if epoch_num % freq_in_epoch == 0:
+                        validation_steps.append(epoch_num * steps_per_epoch)
+
+                if self.train_step in validation_steps:
+                    should_validate = True
+                    logger.info(
+                        f"[SFT] Triggering epoch-based validation at step "
+                        f"{self.train_step} (end of epoch {current_epoch})"
+                    )
+            elif self.config.validation.freq > 0:
+                # Fall back to step-based validation
+                if self.train_step % self.config.validation.freq == 0:
+                    should_validate = True
+
+        if not should_validate:
             return None
 
         # Call pre_validation_hook
@@ -773,7 +1012,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         # validation
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
-        val_total_loss = 0.0
+        val_loss_numerator = 0.0
+        val_loss_denominator = 0
 
         for batch_index, val_global_batch in enumerate(
             tqdm(
@@ -788,8 +1028,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 }
                 self.pre_per_step_validation_hook(self, report_data=report_data)
 
-            val_score = self.trainer.step_validation(
+            val_stats = self.trainer.step_validation(
                 val_global_batch, self.train_step, self.total_steps
+            )
+
+            avg_batch_loss = val_stats["avg_loss"]
+
+            logger.debug(
+                f"[SFT] Validation batch {batch_index}: rank={self.global_rank}, "
+                f"loss={avg_batch_loss:.6f}, valid_tokens={val_stats['loss_denominator']}"
             )
 
             # Call post_per_step_validation_hook
@@ -797,35 +1044,52 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 report_data = {
                     "current_epoch": current_epoch,
                     "batch_index": batch_index,
-                    "val_score": val_score,
+                    "val_score": avg_batch_loss,
+                    "loss_numerator": val_stats["loss_numerator"],
+                    "loss_denominator": val_stats["loss_denominator"],
                 }
                 self.post_per_step_validation_hook(self, report_data=report_data)
 
-            val_total_loss += val_score
+            val_loss_numerator += val_stats["loss_numerator"]
+            val_loss_denominator += val_stats["loss_denominator"]
 
-        val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
-        logger.info(
-            f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
-        )
+        if val_loss_denominator <= 0:
+            raise RuntimeError(
+                "Validation produced zero valid labels; refusing to report a loss"
+            )
+        val_avg_loss = val_loss_numerator / val_loss_denominator
 
         # Call post_validation_hook
         if self.post_validation_hook is not None:
             report_data = {
                 "current_epoch": current_epoch,
                 "val_avg_loss": val_avg_loss,
+                "val_loss_numerator": val_loss_numerator,
+                "val_loss_denominator": val_loss_denominator,
             }
             self.post_validation_hook(self, report_data=report_data)
 
-        # Call custom logger functions
+        # Call custom logger functions (1-indexed epochs for display)
         report_data = {
-            "val/cur_epoch": current_epoch,
+            "val/cur_epoch": current_epoch + 1,  # 1-indexed
             "val/avg_loss": val_avg_loss,
+            "val/loss_numerator": val_loss_numerator,
+            "val/loss_denominator": val_loss_denominator,
+            "val/valid_label_count": val_loss_denominator,
             "val/train_epochs": self.epoch,
             "val/total_steps": self.total_steps,  # This total_steps is for training
             "val/train_step": self.train_step,
         }
 
         if util.is_master_rank(self.parallel_dims, self.global_rank):
+            logger.info(
+                f"[SFT] Validation rank {self.global_rank}: avg_loss={val_avg_loss:.6f}, "
+                f"valid_tokens={val_loss_denominator}"
+            )
+
+            logger.info(
+                f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
+            )
             if "wandb" in self.config.logging.logger and is_wandb_available():
                 log_wandb(
                     data=report_data,
@@ -836,6 +1100,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     custom_logger_fn(report_data, self.train_step)
                 except Exception as e:
                     logger.warning(f"[SFT] Error calling custom logger function: {e}")
+
+        # Track when we last validated to avoid duplicates
+        self._last_validation_step = self.train_step
+        self._last_validation_loss = val_avg_loss
 
         return val_avg_loss
 
@@ -905,7 +1173,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def get_batch_from_dataloader(self, data_loader):
         # self.iter = iter(self.train_data_loader)
         if self.config.train.train_policy.dataloader_broadcast and (
-            self.parallel_dims.pp_enabled
+            _is_pp_enabled(self.parallel_dims)
             or self.parallel_dims.cp_enabled
             or self.parallel_dims.tp_enabled
         ):
@@ -950,18 +1218,34 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.profiler.start()
         pp_last_stage = False
 
-        if self.parallel_dims.pp_enabled:
+        if _is_pp_enabled(self.parallel_dims):
             pp_last_stage = (
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
 
         cur_epoch = self.start_epoch
+        train_loss_numerator = 0.0
+        train_loss_denominator = 0
+        # Call pre_training_hook before training starts
+        if self.pre_training_hook is not None:
+            pre_training_data = {
+                "total_epochs": self.epoch,
+                "total_steps": self.total_steps,
+                "start_epoch": self.start_epoch,
+                "start_step": self.train_step,
+                "parameter_summary": getattr(
+                    getattr(self.trainer, "model", None), "parameter_summary", None
+                ),
+            }
+            self.pre_training_hook(self, report_data=pre_training_data)
+
         if self.enable_dp_load_balancing:
             logger.info(
                 f"Epoch set to {cur_epoch + 1} for load-balanced dynamic batching"
             )
             self.epoch = cur_epoch + 1
         stop_training = False
+
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
@@ -998,6 +1282,15 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     ):
                         torch.cuda.cudart().cudaProfilerStop()
 
+                # Call pre_training_step_hook before each training step
+                if self.pre_training_step_hook is not None:
+                    pre_step_data = {
+                        "current_epoch": cur_epoch,
+                        "current_step": self.train_step,
+                        "total_steps": self.total_steps,
+                    }
+                    self.pre_training_step_hook(self, report_data=pre_step_data)
+
                 report_data = self.trainer.step_training(
                     global_batch=global_batch,
                     total_steps=self.total_steps,
@@ -1006,8 +1299,20 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     data_arrival_event=data_arrival_event,
                 )
                 report_data["train/epoch"] = cur_epoch
+                train_loss_numerator += float(report_data["train/loss_numerator"])
+                train_loss_denominator += int(report_data["train/loss_denominator"])
 
                 self.train_step += 1
+
+                # Call post_training_step_hook after each training step
+                if self.post_training_step_hook is not None:
+                    post_step_data = {
+                        "current_epoch": cur_epoch,
+                        "current_step": self.train_step,
+                        "total_steps": self.total_steps,
+                        **report_data,
+                    }
+                    self.post_training_step_hook(self, report_data=post_step_data)
 
                 if report_data and util.is_master_rank(
                     self.parallel_dims, self.global_rank
@@ -1026,6 +1331,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
                         logger.info(log_info)
 
+                    # Add total_steps and epoch info for custom loggers (1-indexed epochs)
+                    report_data["train/total_steps"] = self.total_steps
+                    report_data["train/cur_epoch"] = cur_epoch + 1  # 1-indexed
+                    report_data["train/total_epochs"] = self.epoch
+                    report_data["steps_per_epoch"] = len(self.train_data_loader)
+
                     for custom_logger_fn in self.custom_logger_fns:
                         try:
                             custom_logger_fn(report_data, self.train_step)
@@ -1034,22 +1345,24 @@ class SFTPolicyWorker(PolicyWorkerBase):
                                 f"[SFT] Error calling custom logger function: {e}"
                             )
 
-                if self.train_step >= self.total_steps:
-                    stop_training = True
-                    break  # break outer epoch loop
-
                 val_avg_loss = self.validate(
                     current_epoch=cur_epoch, is_last_step=False
                 )
 
-                self.trainer.checkpointing(
+                checkpoint_event = self.trainer.checkpointing(
                     total_steps=self.total_steps,
                     train_step=self.train_step,
                     save_freq=self._save_freq,
                     pp_last_stage=False,
                     is_last_step=False,
                     val_score=val_avg_loss,
+                    steps_per_epoch=len(self.train_data_loader),
                 )
+                if checkpoint_event and util.is_master_rank(
+                    self.parallel_dims, self.global_rank
+                ):
+                    for custom_logger_fn in self.custom_logger_fns:
+                        custom_logger_fn(checkpoint_event, self.train_step)
 
                 self.profiler.step()
                 data_arrival_event = torch.cuda.Event(enable_timing=True)
@@ -1063,20 +1376,86 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     self.signal_handler.release()
                     break
 
+                if self.train_step >= self.total_steps:
+                    stop_training = True
+                    break  # break outer epoch loop
+
             if stop_training:
                 break
             cur_epoch += 1
 
         # Finally: validation and save checkpoint
-        val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
-        self.trainer.checkpointing(
-            total_steps=self.total_steps,
-            train_step=self.train_step,
-            save_freq=self._save_freq,
-            is_last_step=True,
-            pp_last_stage=pp_last_stage,
-            val_score=val_avg_loss,
+        # Only run final validation if we haven't just validated at the last step
+        if self._last_validation_step != self.train_step:
+            val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
+        else:
+            logger.info(
+                f"Skipping final validation - already validated at step {self.train_step}"
+            )
+            val_avg_loss = getattr(self, "_last_validation_loss", None)
+
+        # Check if we already saved at this step during regular checkpointing
+        already_saved_at_final_step = (
+            self.config.train.ckpt.enable_checkpoint
+            and self._save_freq > 0
+            and self.train_step % self._save_freq == 0
+            and self.train_step > 0
         )
+
+        if not already_saved_at_final_step:
+            checkpoint_event = self.trainer.checkpointing(
+                total_steps=self.total_steps,
+                train_step=self.train_step,
+                save_freq=self._save_freq,
+                is_last_step=True,
+                pp_last_stage=pp_last_stage,
+                val_score=val_avg_loss,
+                steps_per_epoch=len(self.train_data_loader),
+            )
+            if checkpoint_event and util.is_master_rank(
+                self.parallel_dims, self.global_rank
+            ):
+                for custom_logger_fn in self.custom_logger_fns:
+                    custom_logger_fn(checkpoint_event, self.train_step)
+        else:
+            logger.info(
+                f"Skipping final checkpoint - already saved at step {self.train_step}"
+            )
+
+        # Call post_training_hook after training completes
+        if self.post_training_hook is not None:
+            if train_loss_denominator <= 0:
+                raise RuntimeError(
+                    "Training produced zero valid labels; refusing to report a loss"
+                )
+            post_training_data = {
+                "final_epoch": cur_epoch,
+                "final_step": self.train_step,
+                "total_steps": self.total_steps,
+                "final_val_loss": val_avg_loss,
+                "train_avg_loss": train_loss_numerator / train_loss_denominator,
+                "train_loss_numerator": train_loss_numerator,
+                "train_loss_denominator": train_loss_denominator,
+            }
+            self.post_training_hook(self, report_data=post_training_data)
+
+        if train_loss_denominator <= 0:
+            raise RuntimeError(
+                "Training produced zero valid labels; refusing to report a loss"
+            )
+        complete_metrics = {
+            "train/avg_loss": train_loss_numerator / train_loss_denominator,
+            "train/loss_numerator": train_loss_numerator,
+            "train/loss_denominator": train_loss_denominator,
+            "train/valid_label_count": train_loss_denominator,
+            "train/total_steps": self.total_steps,
+            "train/total_epochs": self.epoch,
+        }
+        if val_avg_loss is not None:
+            complete_metrics["val/avg_loss"] = val_avg_loss
+        if util.is_master_rank(self.parallel_dims, self.global_rank):
+            for custom_logger_fn in self.custom_logger_fns:
+                custom_logger_fn(complete_metrics, self.train_step)
 
     def handle_shutdown(self):
         # handle the ckpt saving

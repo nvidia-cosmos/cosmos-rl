@@ -15,6 +15,7 @@
 
 import importlib
 import threading
+import types
 
 import torch
 import transformers
@@ -70,6 +71,9 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
     elif hf_config.model_type == "qwen3_vl":
+        patch_mode = getattr(hf_config, "_cosmos_qwen3_vl_patch_embed", "auto")
+        if apply_qwen3_vl_patch_embed_compat(model, patch_mode):
+            logger.info("Using repository-owned linear Qwen3-VL PatchEmbed compatibility path")
         if hasattr(model, "model") and hasattr(
             getattr(model.model, "visual", None), "config"
         ):
@@ -126,6 +130,57 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
             return outputs
 
         model.forward = patch_forward.__get__(model, type(model))
+
+
+def _linear_qwen3_vl_patch_embed_forward(self, hidden_states):
+    import torch.nn.functional as F
+
+    patch_elements = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
+    flat_input = hidden_states.reshape(-1, patch_elements).to(dtype=self.proj.weight.dtype)
+    flat_weight = self.proj.weight.reshape(self.embed_dim, patch_elements)
+    return F.linear(flat_input, flat_weight, self.proj.bias)
+
+
+_linear_qwen3_vl_patch_embed_forward._tao_channels_last_3d = True
+
+
+# Compute capabilities whose shipped cuDNN has no usable Conv3d engine for the
+# Qwen3-VL vision PatchEmbed, so ``auto`` selects the linear-equivalent path.
+#   (8, 0)  -- A100
+#   >= (10, 0) -- Blackwell datacenter parts (GB200/GB300); without this a plain
+#                 forward dies with "GET was unable to find an engine to execute
+#                 this computation".
+_AUTO_LINEAR_PATCH_EMBED_CAPABILITIES = frozenset({(8, 0)})
+_AUTO_LINEAR_PATCH_EMBED_MIN_MAJOR = 10
+
+
+def _auto_prefers_linear_patch_embed(device_capability) -> bool:
+    if device_capability is None:
+        return False
+    if tuple(device_capability) in _AUTO_LINEAR_PATCH_EMBED_CAPABILITIES:
+        return True
+    return int(device_capability[0]) >= _AUTO_LINEAR_PATCH_EMBED_MIN_MAJOR
+
+
+def apply_qwen3_vl_patch_embed_compat(model: Any, mode: str, device_capability=None) -> bool:
+    if mode not in {"auto", "linear", "conv3d"}:
+        raise ValueError(f"Unsupported Qwen3-VL patch-embed mode: {mode!r}")
+    if device_capability is None and torch.cuda.is_available():
+        device_capability = torch.cuda.get_device_capability()
+    enabled = mode == "linear" or (
+        mode == "auto" and _auto_prefers_linear_patch_embed(device_capability)
+    )
+    if not enabled:
+        return False
+    patched = 0
+    for module in model.modules():
+        required = ("in_channels", "temporal_patch_size", "patch_size", "embed_dim", "proj")
+        if all(hasattr(module, name) for name in required) and isinstance(module.proj, torch.nn.Conv3d):
+            module.forward = types.MethodType(_linear_qwen3_vl_patch_embed_forward, module)
+            patched += 1
+    if patched != 1:
+        raise RuntimeError(f"Expected one Qwen3-VL PatchEmbed module, found {patched}")
+    return True
 
 
 # Get packed attention mask

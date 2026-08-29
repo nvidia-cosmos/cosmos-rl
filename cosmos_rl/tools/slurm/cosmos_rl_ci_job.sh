@@ -6,9 +6,9 @@
 #
 #   * Run it directly on a login node to submit the job:
 #       ./cosmos_rl_ci_job.sh \
-#           --container /lustre/.../cosmos_rl_ci.sqsh \
-#           --repo-root-path /lustre/.../cosmos-rl \
-#           --output-root-path /lustre/.../ci-runs
+#           --container <SHARED_SQSH_PATH> \
+#           --repo-root-path <SHARED_REPOSITORY_PATH> \
+#           --output-root-path <SHARED_RESULTS_PATH>
 #
 #   * Slurm re-invokes this same file on the compute node (SLURM_JOB_ID set),
 #     where it runs `bash tests/run_test.sh` inside the container with all GPUs.
