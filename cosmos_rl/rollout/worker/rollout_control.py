@@ -1508,6 +1508,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                     src_rank = self.replica_name_to_rank[src_replica_name]
                     with torch.inference_mode():
+                        # One collective for the whole subset: a handshake per
+                        # parameter across every replica costs far more than the
+                        # traffic for a model of many small tensors.
+                        non_contig: list[tuple[torch.Tensor, torch.Tensor]] = []
+                        nccl_group_start(self.global_commnicator_idex)
                         for name, parameter in self.rollout.model_param_map(
                             self.weight_mapper
                         ).items():
@@ -1522,13 +1527,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             recv_tensor = parameter
                             if not parameter.is_contiguous():
                                 recv_tensor = parameter.contiguous()
+                                non_contig.append((parameter, recv_tensor))
 
                             nccl_broadcast(
                                 recv_tensor, src_rank, self.global_commnicator_idex
                             )
 
-                            if not parameter.is_contiguous():
-                                parameter.copy_(recv_tensor)
+                        nccl_group_end(self.global_commnicator_idex)
+                        # Only now do the receives hold their data, so a copy
+                        # back into a non-contiguous parameter has to wait for
+                        # the group to close.
+                        for parameter, recv_tensor in non_contig:
+                            parameter.copy_(recv_tensor)
 
                     if not self.state.weight_synced():
                         assert not trainable_only, (
