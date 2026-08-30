@@ -51,12 +51,15 @@ to ``true`` for models with non-trainable params that must be synced
 
 from __future__ import annotations
 
+import functools
 import os
 import queue
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -123,6 +126,53 @@ def get_async_r2r_sync_mode(worker) -> AsyncR2RSyncMode:
 def get_broadcast_all_params(worker) -> bool:
     """Read ``broadcast_all_params`` from ``[rollout]`` in worker config."""
     return worker.config.rollout.broadcast_all_params
+
+
+# ---------------------------------------------------------------------------
+# Payload egress
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def payload_egress_held(worker) -> Iterator[None]:
+    """Keep a data packer's payload egress off this device's NCCL for a sync.
+
+    NCCL gives no guarantee for two communicators at once on one device, so a
+    packer that ships payloads over NCCL must have no send in flight while
+    weight sync uses the device.  ``flush_pending_sends`` drains what is
+    already in flight, but nothing stops the packer claiming the next payload
+    the moment it returns, and a sync spends most of its wall time between that
+    drain and its transfer, waiting on a barrier for its peers.  A packer that
+    implements ``hold_sends`` gets the guarantee for the whole sync instead:
+    egress resumes when it is over.
+
+    Both are optional, so a packer that ships nothing over this device's NCCL
+    needs neither.
+
+    Yields:
+        Control, with payload egress held for as long as the block runs.
+    """
+    packer = getattr(worker, "data_packer", None)
+    hold_sends = getattr(packer, "hold_sends", None)
+    if hold_sends is not None:
+        with hold_sends():
+            yield
+        return
+    flush_pending_sends = getattr(packer, "flush_pending_sends", None)
+    if flush_pending_sends is not None:
+        flush_pending_sends()
+    yield
+
+
+def holds_payload_egress(handler: Callable) -> Callable:
+    """Run a weight-sync command handler with payload egress held."""
+
+    @functools.wraps(handler)
+    def handler_with_egress_held(self, command: Any, *args, **kwargs):
+        with payload_egress_held(self):
+            return handler(self, command, *args, **kwargs)
+
+    return handler_with_egress_held
 
 
 # ---------------------------------------------------------------------------
@@ -558,10 +608,11 @@ class WeightSyncThread:
                 self._idle.set()
                 continue
             try:
-                if cmd_type == "p2r":
-                    self._execute_p2r(command)
-                elif cmd_type == "r2r":
-                    self._execute_r2r(command)
+                with payload_egress_held(self._worker):
+                    if cmd_type == "p2r":
+                        self._execute_p2r(command)
+                    elif cmd_type == "r2r":
+                        self._execute_r2r(command)
             except Exception:
                 self._task_failed = True
                 logger.exception(
@@ -599,15 +650,10 @@ class WeightSyncThread:
         When commands are routed directly from the background command
         thread (bypassing the main-thread handler), the WST is
         responsible for bookkeeping that would normally be done in the
-        handler: ``flush_pending_sends``, ``set_weight_synced``.
+        handler: ``set_weight_synced``.  Payload egress is held for it by
+        the run loop, around this whole command.
         """
         worker = self._worker
-
-        # Flush any pending async NCCL sends before reusing the communicator.
-        if hasattr(worker, "data_packer") and hasattr(
-            worker.data_packer, "flush_pending_sends"
-        ):
-            worker.data_packer.flush_pending_sends()
 
         weight_step = command.weight_step
         # Use the controller's authoritative recipient set for this round as the
