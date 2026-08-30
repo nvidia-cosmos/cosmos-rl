@@ -14,6 +14,8 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import List, Callable, Dict, Tuple, Type
 from cosmos_rl.dispatcher.data.schema import RLPayload
 
@@ -134,6 +136,23 @@ class RolloutBase(ABC):
         """
         # In some case, the engine may create a child thread to run the generation, Rollout should release the resources before shutting down.
         pass
+
+    @contextmanager
+    def paused(self) -> Iterator[None]:
+        """
+        Quiesce generation for the duration of the block.
+
+        Weight sync overwrites the served model's tensors in place, which is
+        only safe while no forward is running. An engine whose generation call
+        blocks the caller is already quiesced whenever a weight sync can run, so
+        the default does nothing. An engine that keeps serving on its own thread
+        has to park here, and may only return once no forward is running and
+        none can start.
+
+        Yields:
+            Control, with generation quiesced.
+        """
+        yield
 
     def pre_get_params_for_sync_hook(
         self,
