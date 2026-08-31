@@ -35,8 +35,8 @@ from cosmos_rl.policy.worker import SFTPolicyWorker, RLPolicyWorker
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 from cosmos_rl.rollout import State
+
 import types
 from cosmos_rl.dispatcher.command import (
     PolicyToRolloutUnicastCommand,
@@ -433,6 +433,12 @@ class TestRollout:
         self.consume_command = types.MethodType(
             DisaggregatedRolloutControlWorker.consume_command, self
         )
+
+        # Imported here, not at module scope: this helper serves 13 modes and
+        # only the rollout ones need vLLM.  A top-level import made every mode
+        # -- including pure policy/SFT ones that never construct a rollout --
+        # hard-require it, so an image built without vLLM could not run them.
+        from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 
         self.rollout = vLLMRollout(self.config, None, torch.cuda.current_device())
 
@@ -1135,6 +1141,8 @@ def run_dummy_rollout(args: argparse.Namespace):
 
         self.rollout_generation = types.MethodType(rollout_generation, self)
 
+    from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
+
     vLLMRollout.__init__ = dummy_init
     assert args is not None
     run_rollout(args=args)
@@ -1214,6 +1222,8 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
         config.policy.model_name_or_path,
         trust_remote_code=True,
     )
+    from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
+
     rollout = vLLMRollout(config, None, torch.cuda.current_device())
 
     rollout.init_engine(seed=config.rollout.seed, load_format="dummy")

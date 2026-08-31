@@ -77,6 +77,19 @@ class TestPolicyOverfit(unittest.TestCase):
         ]
         policy_env = dict(os.environ)
         policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+        # NCCL allocates its buffers with raw cudaMalloc, outside torch's
+        # caching allocator.  With the default allocator this model fills the
+        # card with retained, fragmented segments (~99% of an 80GB H100), and
+        # the next NCCL collective fails in include/alloc.h with
+        # "Cuda failure 2 'out of memory'" -- never a torch "Tried to allocate",
+        # because torch is the one holding it.  Expandable segments release
+        # physical pages back, so NCCL can allocate.
+        #
+        # cosmos_rl/launcher/utility.py sets this for every replica it starts,
+        # which is why real runs are unaffected; this test spawns torchrun
+        # directly and so is the one path that misses it.  Set it here rather
+        # than in the CI harness so the test carries its own requirement.
+        policy_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         # Start the process
         policy_process = subprocess.Popen(
             policy_cmd,
