@@ -24,11 +24,23 @@ UCXX/SHM.  Responsibilities:
 * :meth:`write_to_buffer` — pack a trajectory into a fixed-schema GPU
   buffer, record a compute-stream ready-event, register the buffer, and
   return dict metadata (plus the ``nccl:<id>`` completion string).
-* the serve loop — a **bounded sender-thread pool** answers ``:nccl_req``
-  requests with ``nccl_send`` on a per-process transfer stream, so a slow
-  peer head-of-line-blocks only its own request, not all pairs.
+* the serve loop — a **bounded sender-thread pool** drains a per-pair FIFO
+  of accepted requests with ``nccl_send`` on a per-process transfer stream,
+  so a slow peer head-of-line-blocks only its own pair, not all pairs.
 * the cleanup subscriber — frees GPU buffers when the controller discards
   the rollout (``nccl_cleanup`` channel).
+
+Per-pair send ordering
+----------------------
+A cached 2-rank comm is an ORDERED stream with no tags: the receiver's k-th
+``nccl_recv`` takes the k-th ``nccl_send``.  The receiver posts its recvs in
+the order it observes ``ACCEPTED``, and this producer accepts on a single
+pub/sub listener thread, so accept order IS the order the receiver expects.
+Handing each accepted send straight to a thread pool broke that -- two pool
+threads racing for the launch lock can launch pair-mates in either order, and
+the receiver then unpacks one payload with the other's schema.  So sends are
+queued **per pair** and drained by at most one pool task per pair, in accept
+order.  See :mod:`.header` for the check that catches any residual desync.
 
 Concurrency model (from the pynccl review)
 ------------------------------------------
@@ -46,8 +58,10 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Deque, Dict, List, Optional, Set
 
 import numpy as np
 import torch
@@ -61,6 +75,11 @@ from cosmos_rl.utils.payload_transport.nccl.comm_cache import (
     CommCache,
     RECEIVER_LOCAL_RANK,
     SENDER_LOCAL_RANK,
+)
+from cosmos_rl.utils.payload_transport.nccl.header import (
+    HEADER_NBYTES,
+    HEADER_VERSION,
+    build_header,
 )
 from cosmos_rl.utils.payload_transport.nccl.context import (
     resolve_custom_int as _resolve_custom_int,
@@ -109,6 +128,44 @@ def _producer_pair_key(sender_rank: int, receiver_replica: Any, receiver_rank: i
     return (sender_rank, receiver_replica, receiver_rank)
 
 
+#: Safety margin (seconds) subtracted from a request's ``req_deadline`` before
+#: this producer commits to serving it.  Replying ACCEPTED is a promise to send
+#: exactly once, and the receiver posts its matching recv only if it sees that
+#: reply before its own deadline.  Accepting a request that is *about* to
+#: expire races the receiver's give-up: it may never post the recv, leaving our
+#: send to be taken by the NEXT recv on that pair -- an off-by-one that
+#: mispairs every later payload.  The margin also absorbs the small clock skew
+#: between the two hosts (the deadline is wall-clock).  Cheap: the cold-start
+#: budget is tens of seconds, so this only ever drops requests that were about
+#: to be wasted anyway.
+_ACCEPT_MARGIN_S = 0.25
+
+#: Ceiling on the margin as a fraction of the receiver's own budget, so a
+#: deployment running very short rendezvous timeouts is not left with every
+#: request landing inside the margin and nothing ever served.
+_ACCEPT_MARGIN_FRACTION = 0.1
+
+
+def _accept_margin(req_timeout: Any) -> float:
+    """How early to stop accepting, given the receiver's budget for this try."""
+    try:
+        budget = float(req_timeout)
+    except (TypeError, ValueError):
+        return _ACCEPT_MARGIN_S  # older receiver: no budget in the request
+    return min(_ACCEPT_MARGIN_S, max(0.0, budget) * _ACCEPT_MARGIN_FRACTION)
+
+
+@dataclass
+class _PendingSend:
+    """One ACCEPTED transfer awaiting its turn on a pair's ordered stream."""
+
+    entry: SendBufferEntry
+    receiver_rank: int
+    uid_key: Any
+    receiver_replica: Any
+    transfer_id: str
+
+
 class NCCLRolloutMixin:
     """Mixin for rollout workers to serve trajectory payloads over NCCL.
 
@@ -146,9 +203,18 @@ class NCCLRolloutMixin:
     _nccl_entry_size: int = 0
     _nccl_device: Any = None
     _nccl_send_timeout_ms: int = 30000
+    # Set by ``setup_nccl``; ``None`` on a bare harness that never started the
+    # listener threads, which the drain loop below must tolerate.
+    _nccl_shutdown: Any = None
     # Serializes the NCCL launch sequence across the sender-thread pool so
     # concurrent multi-comm launches on one GPU can't deadlock (set in setup).
     _nccl_send_lock: Any = None
+    # Per-pair FIFO of accepted-but-unsent transfers + the set of pairs a pool
+    # task is currently draining.  Guarded by ``_nccl_pair_lock``.  This is what
+    # keeps each pair's sends in accept order (see the module docstring).
+    _nccl_pair_lock: Any = None
+    _nccl_pair_queues: Optional[Dict[Any, Deque[_PendingSend]]] = None
+    _nccl_pair_draining: Optional[Set[Any]] = None
 
     def setup_nccl(
         self,
@@ -189,6 +255,9 @@ class NCCLRolloutMixin:
         self._nccl_replica_id = replica_id
         self._nccl_send_timeout_ms = send_timeout_ms
         self._nccl_send_lock = threading.Lock()
+        self._nccl_pair_lock = threading.Lock()
+        self._nccl_pair_queues = {}
+        self._nccl_pair_draining = set()
         self._nccl_rollout_idx = rollout_idx
         self._nccl_redis = redis_client
         self._nccl_device = device
@@ -242,15 +311,19 @@ class NCCLRolloutMixin:
         )
 
         self._nccl_enabled = True
+        # ``payload_header`` is the on-wire framing version.  Both ends must
+        # agree on it, so log it where an operator comparing a rollout and a
+        # policy log can see at a glance whether they are running one build.
         logger.info(
             "[NCCLRolloutMixin] Worker '%s' ready (rollout_idx=%d, sender_rank=%d, "
-            "entry_size=%.1f MB, sender_threads=%d, capacity=%d)",
+            "entry_size=%.1f MB, sender_threads=%d, capacity=%d, payload_header=v%d)",
             replica_id,
             rollout_idx,
             self._nccl_sender_rank,
             self._nccl_entry_size / 1e6,
             num_sender_threads,
             registry_capacity,
+            HEADER_VERSION,
         )
 
     # ------------------------------------------------------------------
@@ -271,13 +344,16 @@ class NCCLRolloutMixin:
         try:
             t0 = _trace_time()
             ep_len = _episode_length(trajectory, self._nccl_schema)
-            gpu_buf, ready_event = self._pack(trajectory, ep_len)
+            # The transfer id is minted BEFORE packing: it is stamped into the
+            # payload header so the receiver can prove the bytes it got belong
+            # to the transfer it asked for.
             transfer_id = f"{self._nccl_rollout_idx}:{uuid.uuid4().hex}"
+            gpu_buf, ready_event = self._pack(trajectory, ep_len, transfer_id)
             self._nccl_registry.register(
                 transfer_id,
                 gpu_buf,
                 ready_event=ready_event,
-                nbytes=self._nccl_entry_size,
+                nbytes=HEADER_NBYTES + self._nccl_entry_size,
             )
             # Producer-side trace, mirroring UCXX's op=ucxx_write, so the
             # rl-gym log_analyzer can attribute per-rollout payload bytes.
@@ -306,19 +382,33 @@ class NCCLRolloutMixin:
             logger.error("[NCCLRolloutMixin] write_to_buffer failed: %s", e)
             return None
 
-    def _pack(self, trajectory: Dict[str, Any], ep_len: int):
+    def _pack(self, trajectory: Dict[str, Any], ep_len: int, transfer_id: str):
         """Coalesce the schema tensors into one contiguous GPU uint8 buffer.
+
+        The buffer is ``HEADER_NBYTES + entry_size`` long: a self-describing
+        header (transfer id digest + payload size, see :mod:`.header`) followed
+        by the schema-defined region the consumer slices.  The header costs 32
+        bytes on a payload measured in hundreds of MB and is what lets the
+        receiver reject a buffer that belongs to a different transfer instead
+        of decoding it as garbage.
 
         Returns ``(gpu_buffer, ready_event)`` where ``ready_event`` is
         recorded on the compute stream once packing enqueues, so the
         transfer stream can wait on it before ``nccl_send``.
         """
         device = self._nccl_device
+        entry_size = self._nccl_entry_size
         gpu_packed = torch.zeros(
-            self._nccl_entry_size, dtype=torch.uint8, device=device
+            HEADER_NBYTES + entry_size, dtype=torch.uint8, device=device
         )
+        header = build_header(transfer_id=transfer_id, payload_nbytes=entry_size)
+        gpu_packed[:HEADER_NBYTES] = torch.frombuffer(
+            bytearray(header), dtype=torch.uint8
+        ).to(device)
+        # A slice is a VIEW, so the packer writes straight into the payload
+        # region and its schema offsets stay header-relative on both ends.
         pack_trajectory_into(
-            gpu_packed,
+            gpu_packed[HEADER_NBYTES:],
             trajectory,
             self._nccl_schema,
             self._nccl_offsets,
@@ -385,8 +475,16 @@ class NCCLRolloutMixin:
         # the control plane on the listener removes that delay, but a backed-up
         # listener can still arrive late, so keep checking the receiver's
         # absolute wall-clock deadline before touching the registry or replying.
+        #
+        # The check carries ``_ACCEPT_MARGIN_S`` of slack so a request that is
+        # merely ABOUT to expire is dropped too: accepting one races the
+        # receiver's give-up, and a receiver that never posts the matching recv
+        # leaves our send to be taken by its NEXT recv on this pair -- an
+        # off-by-one that mispairs every payload after it.
         req_deadline = msg.get("req_deadline")
-        if req_deadline is not None and time.time() >= float(req_deadline):
+        if req_deadline is not None and time.time() >= (
+            float(req_deadline) - _accept_margin(msg.get("req_timeout"))
+        ):
             logger.debug(
                 "[NCCLRolloutMixin] dropping expired request %s (receiver "
                 "deadline passed; not sending a late unmatched ACCEPTED)",
@@ -440,38 +538,202 @@ class NCCLRolloutMixin:
             if resp_key:
                 rv.respond(resp_key=resp_key, status=TransferStatus.NEED_UID)
             return
+        # ACCEPTED is a promise to send exactly once, in this order: from here
+        # on the receiver will post a matching recv, and the pair's stream is
+        # only correct if our sends leave in the same order we accepted them.
+        # This handler runs on the single pub/sub listener thread, so appending
+        # to the pair's FIFO here fixes that order; a pool task drains it.
         if resp_key:
             rv.respond(resp_key=resp_key, status=TransferStatus.ACCEPTED)
 
         # Hand ONLY the blocking transfer to the bounded pool.  The lease taken
-        # by acquire() above now outlives this function, so every outcome of the
-        # submission has to balance it exactly once:
-        #   * submit raises (pool already shut down) -> the send never runs and
-        #     never takes ownership; release here;
-        #   * the queued future is cancelled before it runs (cleanup_nccl calls
-        #     shutdown(cancel_futures=True)) -> release from the done callback;
+        # by acquire() above now outlives this function, so every outcome has to
+        # balance it exactly once:
+        #   * the queue/submit fails -> the send never runs and never takes
+        #     ownership; _drop_pending releases it (and resyncs the pair, since
+        #     we already promised a send that will not arrive);
+        #   * the pending item is still queued at shutdown -> released by
+        #     _abandon_queued_sends;
         #   * the send starts -> _send owns the lease and balances it on every
         #     exit path of its own finally.  Do NOT release it again here: a
         #     double-decrement could steal a concurrent receiver's lease on the
         #     same shared buffer.
-        try:
-            future = self._nccl_executor.submit(
-                self._send_and_quarantine_on_failure,
-                entry,
-                receiver_rank,
-                uid_key,
-                receiver_replica,
-                transfer_id,
-            )
-        except Exception as e:
-            registry.abandon_inflight(entry)
-            logger.warning(
-                "[NCCLRolloutMixin] could not queue send for %s: %s", transfer_id, e
-            )
-            return
-        future.add_done_callback(
-            lambda done: registry.abandon_inflight(entry) if done.cancelled() else None
+        self._enqueue_send(
+            pair,
+            _PendingSend(
+                entry=entry,
+                receiver_rank=receiver_rank,
+                uid_key=uid_key,
+                receiver_replica=receiver_replica,
+                transfer_id=transfer_id,
+            ),
         )
+
+    # ------------------------------------------------------------------
+    # Per-pair send ordering
+    # ------------------------------------------------------------------
+
+    #: Guards the lazy init below.  Shared by every instance, held only while
+    #: a producer first materialises its per-pair state, never during a send.
+    _nccl_pair_state_init_lock = threading.Lock()
+
+    def _ensure_pair_state(self) -> Any:
+        """Return the per-pair queue lock, materialising it if setup was skipped.
+
+        ``setup_nccl`` builds this state; bare harnesses that assemble a
+        producer attribute-by-attribute do not, and the queue must not be the
+        thing that breaks them.
+        """
+        if self._nccl_pair_lock is None:
+            with NCCLRolloutMixin._nccl_pair_state_init_lock:
+                if self._nccl_pair_lock is None:
+                    self._nccl_pair_queues = {}
+                    self._nccl_pair_draining = set()
+                    # Assigned LAST: it is the sentinel the check above reads.
+                    self._nccl_pair_lock = threading.Lock()
+        return self._nccl_pair_lock
+
+    def _enqueue_send(self, pair: Any, pending: _PendingSend) -> None:
+        """Append an accepted send to ``pair``'s FIFO, draining it if idle.
+
+        At most ONE pool task drains a given pair, so the pair's sends leave in
+        accept order no matter how many workers the pool has.  Pool width still
+        bounds how many *pairs* transfer concurrently, which is what it was
+        always for (a slow peer must not head-of-line-block the others).
+
+        Submitting each send independently -- the previous behaviour -- let two
+        workers race for the launch lock and reverse two sends on one comm.
+        Because a comm carries no tags, the receiver then took the wrong
+        payload into the buffer it had sized and unpacked it with the other
+        transfer's schema.
+        """
+        pair_lock = self._ensure_pair_state()
+        with pair_lock:
+            queue = self._nccl_pair_queues.setdefault(pair, deque())
+            queue.append(pending)
+            if pair in self._nccl_pair_draining:
+                # A drain task is already running for this pair and will pick
+                # this item up; submitting another would reorder them.
+                return
+            self._nccl_pair_draining.add(pair)
+        try:
+            self._nccl_executor.submit(self._drain_pair_sends, pair)
+        except Exception as e:
+            # Pool already shut down: nothing will drain this pair.  Release
+            # every lease we are holding for it and tear the comm down -- we
+            # promised sends that will never arrive.
+            with pair_lock:
+                self._nccl_pair_draining.discard(pair)
+                orphans = list(self._nccl_pair_queues.pop(pair, ()))
+            for orphan in orphans:
+                self._drop_pending(orphan, pair, reason=f"send pool unavailable: {e}")
+
+    def _drain_pair_sends(self, pair: Any) -> None:
+        """Send every queued transfer for ``pair``, oldest first.
+
+        Runs on one pool thread.  Exits only when the pair's queue is empty
+        *and* the empty check and the de-registration happen under the same
+        lock acquisition, so an item appended concurrently either lands before
+        the check (this task sends it) or after the de-registration (the
+        appender starts a fresh task) -- never in a gap where both sides think
+        the other owns it.
+
+        Nothing may escape this loop while the pair is still marked as being
+        drained: the mark is what stops a second task from starting, so leaving
+        it set would silently strand every later send for that pair.
+        """
+        pair_lock = self._ensure_pair_state()
+        try:
+            while True:
+                with pair_lock:
+                    queue = self._nccl_pair_queues.get(pair)
+                    if not queue:
+                        self._nccl_pair_queues.pop(pair, None)
+                        self._nccl_pair_draining.discard(pair)
+                        return
+                    pending = queue.popleft()
+                if self._nccl_shutdown is not None and self._nccl_shutdown.is_set():
+                    self._drop_pending(pending, pair, reason="producer shutting down")
+                    continue
+                try:
+                    self._send_and_quarantine_on_failure(
+                        pending.entry,
+                        pending.receiver_rank,
+                        pending.uid_key,
+                        pending.receiver_replica,
+                        pending.transfer_id,
+                    )
+                except Exception as e:  # pragma: no cover - defensive
+                    # _send already balanced this entry's lease, so do NOT
+                    # abandon it again (a double-decrement could steal another
+                    # receiver's lease on the same buffer).  Just end the pair's
+                    # stream: we cannot tell whether the send launched.
+                    logger.error(
+                        "[NCCLRolloutMixin] send handler for %s raised %s; "
+                        "aborting pair %s",
+                        pending.transfer_id,
+                        e,
+                        pair,
+                    )
+                    cache = self._nccl_comm_cache
+                    if cache is not None:
+                        cache.abort(pair)
+        except BaseException:
+            # Abnormal exit only -- the normal return above has already cleared
+            # the mark, and clearing it again here could release a mark a
+            # freshly-started successor task now owns (two concurrent drains =
+            # the reordering this whole queue exists to prevent).
+            with pair_lock:
+                self._nccl_pair_draining.discard(pair)
+            raise
+
+    def _drop_pending(self, pending: _PendingSend, pair: Any, *, reason: str) -> None:
+        """Release an accepted send that will never be launched, and resync.
+
+        We already replied ACCEPTED, so the receiver may have posted a recv
+        that nothing will satisfy -- and, worse, the *next* send on this pair
+        would be taken by that orphaned recv.  Aborting the comm ends the
+        ordered stream on our side; the receiver's next request finds our half
+        gone, gets NEED_UID, and both halves rebuild from a fresh unique-ID
+        with empty queues.
+        """
+        registry = self._nccl_registry
+        if registry is not None:
+            registry.abandon_inflight(pending.entry)
+        logger.warning(
+            "[NCCLRolloutMixin] dropping accepted send %s (%s); aborting pair %s "
+            "so both halves rebuild rather than run one transfer out of step",
+            pending.transfer_id,
+            reason,
+            pair,
+        )
+        cache = self._nccl_comm_cache
+        if cache is not None:
+            cache.abort(pair)
+
+    def _abandon_queued_sends(self) -> None:
+        """Release every still-queued send (teardown).
+
+        ``cleanup_nccl`` shuts the pool down with ``cancel_futures=True``, so a
+        drain task that never started leaves its pair's queue populated and its
+        leases held.  Comms are aborted separately by ``cleanup_nccl``.
+        """
+        with self._ensure_pair_state():
+            queues = self._nccl_pair_queues or {}
+            orphans = [item for queue in queues.values() for item in queue]
+            if self._nccl_pair_queues is not None:
+                self._nccl_pair_queues.clear()
+            if self._nccl_pair_draining is not None:
+                self._nccl_pair_draining.clear()
+        registry = self._nccl_registry
+        for pending in orphans:
+            if registry is not None:
+                registry.abandon_inflight(pending.entry)
+        if orphans:
+            logger.debug(
+                "[NCCLRolloutMixin] released %d queued send(s) at teardown",
+                len(orphans),
+            )
 
     def _send_and_quarantine_on_failure(
         self,
@@ -729,6 +991,9 @@ class NCCLRolloutMixin:
         executor = getattr(self, "_nccl_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        # 4. A cancelled drain task leaves its pair's queue populated and those
+        #    entries leased; release them before clearing the registry.
+        self._abandon_queued_sends()
         if self._nccl_registry is not None:
             self._nccl_registry.clear()
         self._nccl_enabled = False

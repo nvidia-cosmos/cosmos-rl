@@ -104,10 +104,16 @@ class RendezvousResult:
         uid_chars: The NCCL unique-ID bytes to build the pair comm with,
             when the receiver had to mint one (``None`` when the comm was
             already cached and no exchange happened).
+        late_accept: Set with ``CANCELLED`` when the sender's ``ACCEPTED``
+            landed after the deadline had already passed.  The transfer is
+            still abandoned -- but the sender believes it owes us a send, so
+            the caller must tear the pair's communicator down instead of
+            letting that send be taken by the next transfer's recv.
     """
 
     status: TransferStatus
     uid_chars: Optional[List[int]] = None
+    late_accept: bool = False
 
     @property
     def accepted(self) -> bool:
@@ -123,6 +129,7 @@ def build_request_message(
     resp_key: str,
     uid_key: Optional[str],
     req_deadline: Optional[float] = None,
+    req_timeout: Optional[float] = None,
 ) -> str:
     """Serialize a transfer request published on the ``:nccl_req`` channel.
 
@@ -135,6 +142,11 @@ def build_request_message(
     deadline instead of sending a late ACCEPTED + launching an unmatched send
     (bilateral cancellation -- prevents the executor-queue backlog from
     starving the sender pool under high policy-replica fan-out).
+
+    ``req_timeout`` is the receiver's whole budget for this attempt.  It lets
+    the producer scale its accept-margin to the budget rather than apply a flat
+    one, so a deployment running very short timeouts is not left with every
+    request landing inside the margin and nothing ever served.
     """
     return json.dumps(
         {
@@ -145,6 +157,7 @@ def build_request_message(
             "resp_key": resp_key,
             "uid_key": uid_key,
             "req_deadline": req_deadline,
+            "req_timeout": req_timeout,
         }
     )
 
@@ -285,6 +298,7 @@ class NcclRendezvous:
             resp_key=resp_key,
             uid_key=uid_key,
             req_deadline=self._wall_clock() + max(0.0, timeout),
+            req_timeout=max(0.0, timeout),
         )
         try:
             self._redis.publish(request_channel, message)
@@ -302,14 +316,27 @@ class NcclRendezvous:
             if reply is not None:
                 return RendezvousResult(reply, uid_chars)
             if self._clock() >= deadline:
+                # One last look before giving up.  A reply that landed between
+                # the poll above and this check would otherwise be left in
+                # Redis while the sender goes on to launch its send -- and an
+                # unmatched send desynchronises the pair's ordered stream for
+                # every transfer after it.  Report it so the caller can abort
+                # the pair rather than silently mispair the next payload.
+                late = self._consume_reply(resp_key)
                 logger.debug(
-                    "[NcclRendezvous] transfer %s timed out after %.3fs; cancelling",
+                    "[NcclRendezvous] transfer %s timed out after %.3fs; "
+                    "cancelling (late reply: %s)",
                     transfer_id,
                     timeout,
+                    late.value if late is not None else "none",
                 )
                 # The published UID key is left to expire via ``uid_ttl_s``
                 # (no explicit delete); a racing sender read is harmless.
-                return RendezvousResult(TransferStatus.CANCELLED, uid_chars)
+                return RendezvousResult(
+                    TransferStatus.CANCELLED,
+                    uid_chars,
+                    late_accept=late is TransferStatus.ACCEPTED,
+                )
             self._sleep(self._poll_interval)
 
     def _consume_reply(self, resp_key: str) -> Optional[TransferStatus]:

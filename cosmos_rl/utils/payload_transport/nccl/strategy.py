@@ -44,6 +44,12 @@ from cosmos_rl.utils.payload_transport.nccl.context import (
     resolve_max_live_comms as _resolve_max_live_comms,
     resolve_prefix as _resolve_prefix,
 )
+from cosmos_rl.utils.payload_transport.nccl.header import (
+    HEADER_NBYTES,
+    HEADER_VERSION,
+    PayloadHeaderMismatch,
+    verify_header,
+)
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     NCCL_COMPLETION_PREFIX,
     build_sender_request_channel,
@@ -186,13 +192,17 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         )
         self._streams = get_transfer_stream_pool(size=1, device=device)
 
+        # ``payload_header`` is the on-wire framing version; see the producer's
+        # matching line.  A rollout and a policy reporting different versions
+        # cannot exchange payloads (the header check rejects every transfer).
         logger.info(
             "[NCCLTransportStrategy] Initialised: device=%s, rank=%d, "
-            "max_attempts=%d, recv_timeout=%ss",
+            "max_attempts=%d, recv_timeout=%ss, payload_header=v%d",
             device,
             self._receiver_rank,
             self._max_attempts,
             recv_timeout,
+            HEADER_VERSION,
         )
 
     def before_join(self) -> None:
@@ -250,7 +260,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         refs: List[Tuple[Any, dict]] = []
         for idx, ro in tasks:
             ref = _parse_ref(ro, default_schema=self._schema)
-            if ref is not None:
+            if ref is not None and _has_schema(ref):
                 refs.append((idx, ref))
 
         results, total_bytes, transfer_ms = self._fetch_all(refs)
@@ -286,7 +296,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             # ``_schema``) raises from deserialize_schema, and this path has no
             # containment above it in the base get_policy_input.
             ref = _parse_ref(rollout_output, default_schema=self._schema)
-            if ref is None:
+            if ref is None or not _has_schema(ref):
                 return None
             results, _, _ = self._fetch_all([(0, ref)])
         except Exception as e:
@@ -450,10 +460,16 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                             ref["transfer_id"],
                             exc,
                         )
-                        # Isolate the failure to this pair (quarantine only if warm).
+                        # Isolate the failure to this pair (quarantine only if
+                        # warm) BEFORE the resync, which clears the warm marker
+                        # quarantine keys off.  Then resync unconditionally: the
+                        # sender ACCEPTED this transfer, so its send is coming
+                        # and we have no recv to take it -- left cached, this
+                        # pair's next recv would take that orphaned send.
                         self._quarantine_recv_failures(
                             [(idx, ref, comm_idx, recv_buf)], cache
                         )
+                        self._resync_pair(cache, ref, reason="recv enqueue failed")
                         continue
                     posted.append((idx, ref, comm_idx, recv_buf))
 
@@ -485,10 +501,31 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         exc,
                     )
                     self._quarantine_recv_failures(posted, cache)
+                    # A recv that never completed leaves its sender's send
+                    # outstanding, so every posted pair may now be off by one.
+                    # Resync them ALL (not just the warm ones quarantine covers)
+                    # before any later transfer can be taken by an orphaned recv.
+                    for _idx, ref, _comm_idx, _buf in posted:
+                        self._resync_pair(
+                            cache, ref, reason="recv completion sync failed"
+                        )
                     return {}, 0, get_trace_time() - t0
 
             for idx, ref, _comm_idx, recv_buf in posted:
-                gpu_data = _unpack(recv_buf, ref["schema"], device)
+                try:
+                    gpu_data = _verify_and_unpack(recv_buf, ref, device)
+                except PayloadHeaderMismatch as exc:
+                    # The bytes we got belong to some OTHER transfer: this pair's
+                    # send/recv stream is out of step.  Everything still queued on
+                    # it is wrong too, so drop this episode to fallback and tear
+                    # the comm down rather than unpack a foreign payload.
+                    logger.error(
+                        "[NCCLTransportStrategy] %s; dropping the episode and "
+                        "resyncing the pair",
+                        exc,
+                    )
+                    self._resync_pair(cache, ref, reason="payload header mismatch")
+                    continue
                 results[idx] = gpu_data
                 total_bytes += recv_buf.numel() * recv_buf.element_size()
                 # First successful transfer -> this pair is warm (tight timeouts +
@@ -504,6 +541,39 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             receiver_rank = self._receiver_rank
             for _i, _ref, _c, _b in recvs:
                 cache.unpin(_pair_key(_ref, receiver_rank))
+
+    def _resync_pair(self, cache: Any, ref: dict, *, reason: str) -> None:
+        """Tear down a pair whose ordered send/recv stream may be out of step.
+
+        A cached 2-rank comm matches the k-th send to the k-th recv and carries
+        no tag to check that with, so ANY transfer that is accepted but not
+        completed end-to-end -- a recv we could not post, a recv that never
+        landed, a payload whose header names a different transfer -- shifts
+        every later transfer on that pair by one.  Aborting our half is the
+        resync: the pair leaves the cache, so the next request mints a fresh
+        unique-ID, the sender sees a UID it did not build with (or replies
+        NEED_UID), and both halves rebuild with empty queues.
+
+        Cheap and safe to over-apply: the cost is one comm rebuild, versus
+        silently decoding another episode's bytes.  Also demotes the pair to
+        "warming" so the rebuild gets the cold-start budget.
+        """
+        pair = _pair_key(ref, self._receiver_rank)
+        logger.warning(
+            "[NCCLTransportStrategy] resyncing pair %s (%s): aborting our comm "
+            "half so both sides rebuild",
+            pair,
+            reason,
+        )
+        try:
+            cache.abort(pair)
+        except Exception as exc:  # pragma: no cover - best-effort teardown
+            logger.debug(
+                "[NCCLTransportStrategy] abort %s raised %s; continuing",
+                pair,
+                type(exc).__name__,
+            )
+        self._warm_pairs.discard(pair)
 
     def _quarantine_endpoint(self, cache: Any, health_key: Any, pair: Any) -> None:
         """Quarantine a warm endpoint AND demote its pair back to 'warming'.
@@ -620,10 +690,21 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                     return None
                 try:
                     recv_buf = _alloc_recv_buffer(ref["schema"], self._device)
-                except Exception:
+                except Exception as e:
                     # Never returned to the caller -> nothing will unpin it here.
                     cache.unpin(pair)
-                    raise
+                    # We are past ACCEPTED: the sender is going to send this
+                    # payload and we have no buffer to receive it into.  Resync
+                    # the pair rather than raise -- raising would fail the whole
+                    # batch AND leave the orphaned send to be taken by the next
+                    # transfer's recv.
+                    logger.warning(
+                        "[NCCLTransportStrategy] recv buffer alloc failed for %s: %s",
+                        transfer_id,
+                        e,
+                    )
+                    self._resync_pair(cache, ref, reason="recv buffer alloc failed")
+                    return None
                 return comm_idx, recv_buf
             if result.status is TransferStatus.MISSING:
                 # Producer recycled the buffer — non-retryable, drop now.
@@ -644,6 +725,16 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 cache.abort(pair)
                 continue
             # CANCELLED (timeout).
+            if result.late_accept:
+                # The sender's ACCEPTED arrived after we stopped waiting: it
+                # believes it owes us a send that no recv will take.  Abort the
+                # pair so that send dies with the old comm instead of being
+                # matched to the next transfer's recv.  Retrying on this attempt
+                # would just race the same orphaned send.
+                self._resync_pair(
+                    cache, ref, reason="sender accepted after our deadline"
+                )
+                return None
             if attempt == self._max_attempts:
                 if not warming:
                     # A WARM pair (has transferred before) that stops
@@ -718,10 +809,16 @@ def _parse_ref(
         rollout_idx = rollout_output.get(
             "_rollout_idx", parse_transfer_rollout_idx(transfer_id)
         )
-        schema = default_schema
         raw_schema = rollout_output.get("_schema")
-        if raw_schema:
-            schema = deserialize_schema(raw_schema)
+        # Dict metadata is what a producer with a PER-PAYLOAD schema emits, and
+        # it always carries ``_schema``.  Do NOT fall back to the static default
+        # when it is absent: that would unpack the payload at another layout's
+        # offsets and hand the caller decoded garbage -- the same class of
+        # failure as a mispaired buffer, minus any way to notice.  Leaving the
+        # schema None makes the fetch paths drop the reference instead, so the
+        # episode degrades to the Redis path.  (The bare ``nccl:<id>`` string
+        # form above has no metadata channel at all and keeps the default.)
+        schema = deserialize_schema(raw_schema) if raw_schema else None
         sender_rank = rollout_output.get(
             "_sender_rank", rollout_idx if rollout_idx >= 0 else 0
         )
@@ -738,6 +835,23 @@ def _parse_ref(
             "schema": schema,
         }
     return None
+
+
+def _has_schema(ref: dict) -> bool:
+    """True if ``ref`` can be decoded; logs (and rejects) it if it cannot.
+
+    A dict reference with no ``_schema`` reaches here only when the producer
+    lost that metadata.  There is no safe way to decode the payload, so the
+    fetch paths skip it and the episode falls back to the Redis transport.
+    """
+    if ref.get("schema") is not None:
+        return True
+    logger.error(
+        "[NCCLTransportStrategy] NCCL reference %s carries no schema; refusing "
+        "to decode its payload (episode falls back to the Redis path)",
+        ref.get("transfer_id", "<unknown>"),
+    )
+    return False
 
 
 def _pair_key(ref: dict, receiver_rank: int):
@@ -758,15 +872,41 @@ def _cache_key_from_task(tasks: List[Any], idx: int) -> str:
 
 
 def _alloc_recv_buffer(schema: Optional[list], device: Any) -> torch.Tensor:
-    """Allocate a flat uint8 GPU buffer sized for ``schema``."""
+    """Allocate a flat uint8 GPU buffer sized for ``schema`` plus its header.
+
+    The producer prefixes :data:`HEADER_NBYTES` of self-describing header to
+    every payload, so the wire size is header + entry size on both ends.
+    """
     if schema is None:
         raise ValueError("cannot allocate NCCL recv buffer without a schema")
     _, entry_size = schema_layout(schema)
-    return torch.empty(entry_size, dtype=torch.uint8, device=device)
+    return torch.empty(HEADER_NBYTES + entry_size, dtype=torch.uint8, device=device)
+
+
+def _verify_and_unpack(recv_buf: torch.Tensor, ref: dict, device: Any) -> dict:
+    """Check the payload header, then slice the payload region by schema.
+
+    The header is the only thing that ties the bytes in ``recv_buf`` to the
+    transfer they were requested for: a 2-rank comm carries no tags, so a
+    receiver that has fallen out of step with its sender would otherwise unpack
+    a foreign payload with its own schema and return plausible-looking garbage.
+
+    Raises:
+        PayloadHeaderMismatch: if the buffer does not belong to ``ref``.  The
+            caller must resync the pair -- once the stream is off by one every
+            subsequent transfer on it is wrong too.
+    """
+    schema = ref.get("schema")
+    if schema is None:
+        return {}
+    _, entry_size = schema_layout(schema)
+    header = bytes(recv_buf[:HEADER_NBYTES].cpu().numpy())
+    verify_header(header, transfer_id=ref["transfer_id"], payload_nbytes=entry_size)
+    return _unpack(recv_buf[HEADER_NBYTES:], schema, device)
 
 
 def _unpack(recv_buf: torch.Tensor, schema: Optional[list], device: Any) -> dict:
-    """Slice a flat recv buffer back into the named schema tensors."""
+    """Slice a payload region (header already stripped) into schema tensors."""
     if schema is None:
         return {}
     offsets, _ = schema_layout(schema)

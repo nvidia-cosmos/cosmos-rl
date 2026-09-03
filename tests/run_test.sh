@@ -118,6 +118,7 @@ run python tests/test_nccl_addressing.py
 run python tests/test_nccl_buffer_registry.py
 run python tests/test_nccl_comm_cache.py
 run python tests/test_nccl_data_packer_mixin.py
+run python tests/test_nccl_payload_pairing.py
 run python tests/test_nccl_rendezvous.py
 run python tests/test_nccl_rollout_mixin.py
 run python tests/test_nccl_streams.py

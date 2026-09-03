@@ -483,8 +483,13 @@ class TestColdStartTolerance(unittest.TestCase):
 
 class TestRecvFailureIsolation(unittest.TestCase):
     """Recvs are issued standalone (no cross-comm group).  A failed recv is
-    isolated to its pair: a WARM pair is quarantined+aborted (genuine); a
-    WARMING pair is kept (retry)."""
+    isolated to its pair: a WARM pair is additionally quarantined (a genuine
+    endpoint problem), a WARMING one is not (it is merely storm-contended).
+
+    Either way the comm is ABORTED.  The sender already replied ACCEPTED, so
+    its send is on its way with no recv to take it; keeping the comm would
+    leave that orphaned send to be matched to the NEXT transfer's recv, which
+    mispairs every payload on the pair from then on."""
 
     def _run(self, *, warm):
         import torch
@@ -523,12 +528,14 @@ class TestRecvFailureIsolation(unittest.TestCase):
         self.assertTrue(cache.is_quarantined(("rA", 0)))  # warm -> quarantined
         self.assertEqual(aborted, [55])  # its comm aborted
 
-    def test_warming_pair_failure_keeps_comm(self):
+    def test_warming_pair_failure_not_quarantined_but_resynced(self):
         results, cache, aborted = self._run(warm=False)
         self.assertEqual(results, {})
-        self.assertFalse(cache.is_quarantined(("rA", 0)))  # warming -> kept
-        self.assertIn(("rA", 0, 0), cache)  # comm NOT aborted
-        self.assertEqual(aborted, [])
+        self.assertFalse(cache.is_quarantined(("rA", 0)))  # warming -> no cooldown
+        # ...but the comm still goes, so the accepted-yet-unreceived send
+        # cannot be taken by the next recv on this pair.
+        self.assertNotIn(("rA", 0, 0), cache)
+        self.assertEqual(aborted, [55])
 
 
 class TestRecvLaunchSerialized(unittest.TestCase):

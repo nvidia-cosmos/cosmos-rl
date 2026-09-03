@@ -29,6 +29,10 @@ from unittest import mock
 import torch
 
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import SendBufferRegistry
+from cosmos_rl.utils.payload_transport.nccl.header import (
+    HEADER_NBYTES,
+    verify_header,
+)
 from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import TransferStatus
 from cosmos_rl.utils.trajectory import (
@@ -290,12 +294,19 @@ class TestHandleCleanup(unittest.TestCase):
             "rewards": torch.zeros(10),
             "episode_length": 10,
         }
-        buf, _ = p._pack(traj, 10)
-        self.assertEqual(buf.numel(), p._nccl_entry_size)
-        # Slice observations back out and compare.
+        buf, _ = p._pack(traj, 10, "0:pack-roundtrip")
+        # Wire size is the self-describing header plus the schema region.
+        self.assertEqual(buf.numel(), HEADER_NBYTES + p._nccl_entry_size)
+        verify_header(
+            bytes(buf[:HEADER_NBYTES].numpy()),
+            transfer_id="0:pack-roundtrip",
+            payload_nbytes=p._nccl_entry_size,
+        )
+        # Slice observations back out of the payload region and compare.
+        payload = buf[HEADER_NBYTES:]
         off = p._nccl_offsets["observations"]
         nbytes = p._nccl_schema[0].nbytes
-        recovered = buf[off : off + nbytes].view(torch.float32).reshape(10, 4)
+        recovered = payload[off : off + nbytes].view(torch.float32).reshape(10, 4)
         self.assertTrue(torch.equal(recovered, obs))
 
 
@@ -605,7 +616,10 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
     """
 
     def test_pack_then_unpack_on_device(self):
-        from cosmos_rl.utils.payload_transport.nccl.strategy import _unpack
+        from cosmos_rl.utils.payload_transport.nccl.strategy import (
+            _unpack,
+            _verify_and_unpack,
+        )
 
         device = torch.device("cuda:0")
         p = _make_producer()
@@ -622,11 +636,33 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
             "episode_length": ep_len,
         }
 
-        buf, ready_event = p._pack(traj, ep_len)
+        buf, ready_event = p._pack(traj, ep_len, "0:gpu-roundtrip")
         self.assertEqual(buf.device.type, "cuda")
-        self.assertEqual(buf.numel(), p._nccl_entry_size)
+        self.assertEqual(buf.numel(), HEADER_NBYTES + p._nccl_entry_size)
 
-        out = _unpack(buf, p._nccl_schema, device)
+        # The consumer's real entry point: header check (a device->host read
+        # of the first 32 bytes) followed by the schema slice.
+        out = _verify_and_unpack(
+            buf,
+            {"transfer_id": "0:gpu-roundtrip", "schema": p._nccl_schema},
+            device,
+        )
+        # A buffer stamped for another transfer must not decode, even though
+        # its schema and size match exactly.
+        from cosmos_rl.utils.payload_transport.nccl.header import (
+            PayloadHeaderMismatch,
+        )
+
+        with self.assertRaises(PayloadHeaderMismatch):
+            _verify_and_unpack(
+                buf,
+                {"transfer_id": "0:some-other-episode", "schema": p._nccl_schema},
+                device,
+            )
+        self.assertEqual(
+            _unpack(buf[HEADER_NBYTES:], p._nccl_schema, device)["observations"].shape,
+            out["observations"].shape,
+        )
         # Unpacked tensors live on the GPU and are truncated to the episode.
         self.assertEqual(out["observations"].device.type, "cuda")
         self.assertEqual(out["observations"].shape, (ep_len, 4))
@@ -722,11 +758,13 @@ class TestControlPlaneNotBlockedBySends(unittest.TestCase):
         # Decoupling the ack must not drop the send: both still run, serialized.
         self.assertEqual(sorted(sent), ["0:first", "0:second"])
 
-    def test_send_cancelled_at_shutdown_releases_its_lease(self):
-        """``cleanup_nccl`` cancels queued sends -- their leases must come back.
+    def test_queued_send_at_shutdown_releases_its_lease(self):
+        """Teardown must return the lease of a send that never ran.
 
-        The lease is taken before the send is queued, so a future cancelled
-        before it ever runs would otherwise pin its buffer un-reapable.
+        The lease is taken before the send is queued on its pair, so a transfer
+        still sitting in that queue when the producer tears down would
+        otherwise pin its buffer un-reapable.  ``cleanup_nccl`` drains the
+        queues for exactly this reason.
         """
         p, started, release, _sent = self._producer_with_blocking_send()
         try:
@@ -736,14 +774,41 @@ class TestControlPlaneNotBlockedBySends(unittest.TestCase):
             self.assertTrue(
                 self._wait_for(lambda: len(p._nccl_rendezvous.replies) >= 2)
             )
-            # Send #2 is queued behind the parked worker, holding its lease.
+            # Send #2 is queued behind the parked send on the same pair,
+            # holding its lease.
             self.assertEqual(p._nccl_registry.get("0:second").inflight, 1)
-            p._nccl_executor.shutdown(wait=False, cancel_futures=True)
+            p._abandon_queued_sends()
             self.assertEqual(
                 p._nccl_registry.get("0:second").inflight,
                 0,
-                "a send cancelled before it ran leaked its buffer lease",
+                "a queued send that never ran leaked its buffer lease",
             )
+        finally:
+            release.set()
+            p._nccl_executor.shutdown(wait=True)
+
+    def test_cleanup_releases_queued_send_leases(self):
+        """``cleanup_nccl`` drains the pair queues before clearing the registry."""
+        p, started, release, _sent = self._producer_with_blocking_send()
+        p._nccl_shutdown = threading.Event()
+        p._nccl_threads = []
+        released = []
+        p._nccl_registry._on_free = lambda entry: released.append(entry.transfer_id)
+        try:
+            p._dispatch_request(self._request("0:first", "rk-first"))
+            self.assertTrue(started.wait(timeout=5), "send #1 never reached the pool")
+            p._dispatch_request(self._request("0:second", "rk-second"))
+            self.assertTrue(
+                self._wait_for(lambda: len(p._nccl_rendezvous.replies) >= 2)
+            )
+            entry = p._nccl_registry.get("0:second")
+            self.assertEqual(entry.inflight, 1)
+            release.set()  # let the parked send finish so cleanup is not slow
+            p.cleanup_nccl()
+            # The lease came back (so the registry could reap it) and the
+            # buffer was actually freed rather than pinned forever.
+            self.assertEqual(entry.inflight, 0)
+            self.assertIn("0:second", released)
         finally:
             release.set()
             p._nccl_executor.shutdown(wait=True)

@@ -36,8 +36,10 @@ to `"nccl"` (deprecated alias).
 | `nccl/comm_cache.py` | Lazy 2-rank communicator cache: LRU cap, bounded concurrent init, health quarantine. |
 | `nccl/buffer_registry.py` | Producer GPU send-buffer registry with bounded backpressure + idempotent free. |
 | `nccl/streams.py` | Per-process transfer-stream pool + CUDA event helpers. |
-| `nccl/schema.py` | Flat trajectory schema (reuses `TensorSpec`) shared by sender + receiver. |
+| `nccl/header.py` | Self-describing payload header stamped on every transfer, and the receiver's check of it. |
+| `utils/trajectory.py` | Flat trajectory schema (`TensorSpec`) shared by sender + receiver. |
 | `nccl/mixins.py` | `NCCLRolloutMixin` — producer. |
+| `nccl/strategy.py` | `NCCLTransportStrategy` — the consumer's rendezvous + recv engine. |
 | `nccl/data_packer_mixin.py` | `NCCLDataPackerMixin` — trainer-side consumer (subclass of `PrefetchDataPackerMixin`). |
 
 ## Per-transfer flow
@@ -56,8 +58,9 @@ NCCLRolloutMixin                          NCCLDataPackerMixin (PrefetchDataPacke
       entry = registry.get(transfer_id)         MISSING  -> drop episode (buffer recycled)
       if missing: SET resp_key=MISSING          timeout  -> CANCELLED: retry, then quarantine
       else: SET resp_key=ACCEPTED
-        transfer_stream.wait_event(ready)     grouped recvs issued in one ncclGroupStart/End
+        transfer_stream.wait_event(ready)     each recv issued standalone on its pair comm
         nccl_send(buf) on transfer stream     record recv-complete event -> gates training read
+                                            verify payload header, then unpack by schema
   cleanup subscriber:
     on :nccl_cleanup {transfer_id}:
       registry.free(transfer_id)
@@ -65,6 +68,42 @@ NCCLRolloutMixin                          NCCLDataPackerMixin (PrefetchDataPacke
 
 `TensorSpec` describes the flat schema; the same layout is used to pack
 (producer) and unpack (consumer).
+
+## Payload framing and per-pair ordering
+
+A payload on the wire is a header followed by the schema region:
+
+```
+[ 32-byte header ][ schema entry_size bytes ]
+  magic | version | payload_nbytes | transfer_key
+```
+
+`transfer_key` is a 64-bit digest of the `transfer_id`.  The receiver checks
+both it and `payload_nbytes` before unpacking, and drops the episode if either
+disagrees (`nccl/header.py`).
+
+The check exists because a cached 2-rank communicator is an **ordered stream
+with no tags**: its k-th `nccl_send` is taken by the k-th `nccl_recv`, and
+nothing in the data plane says which transfer a buffer holds.  If the two ends
+ever disagree about how many transfers have crossed a pair, every payload after
+that point lands in the previous one's buffer.  With one fixed schema that is
+invisible; with a per-payload schema the receiver slices a foreign buffer at
+its own offsets and returns decoded garbage.
+
+Two rules keep the two ends in step, and the header catches anything that
+still slips through:
+
+- **Sends leave in accept order.** The producer accepts on its single pub/sub
+  listener thread and queues each accepted send on a *per-pair* FIFO drained by
+  at most one pool task, so pool workers can never launch two of a pair's sends
+  out of order.  Pool width still bounds how many *pairs* transfer at once.
+- **An accepted transfer either completes or resyncs the pair.** Whenever one
+  side cannot honour an `ACCEPTED` — the producer cannot queue or launch the
+  send, the receiver cannot post or complete the recv, the sender's reply lands
+  after the receiver's deadline — that side aborts the pair's communicator.
+  The next request mints a fresh unique-ID, both halves rebuild, and the stream
+  restarts empty.  The cost is one comm rebuild; the alternative is an
+  off-by-one that mispairs every later payload on the pair.
 
 ## Rendezvous state machine
 
@@ -98,6 +137,9 @@ from an abandoned attempt is discarded.
 - **Defensive state** — buffer-registry register/free and the rendezvous
   three-state are idempotent; a stale cleanup or duplicate request cannot
   double-free or orphan a buffer.
+- **Payload identity** — every transfer carries the id it belongs to, so a
+  mispaired buffer is rejected at the receiver instead of decoded (see
+  *Payload framing* above).
 - **Producer backpressure** — the send-buffer registry has bounded
   capacity: when full it blocks, then evicts the oldest un-sent buffer, so
   rollout-generation prefetch cannot outrun demand-driven sends and OOM the
