@@ -262,15 +262,23 @@ class CommMixin:
             packers.append((self.val_data_packer, "val_data_packer"))
 
         for packer, packer_name in packers:
-            # Multi-policy-replica receiver addressing: hand NCCL-aware packers
-            # this worker's globally-unique ``replica_name`` BEFORE attach runs
+            # Multi-policy-replica receiver addressing: hand the packer this
+            # worker's globally-unique ``replica_name`` BEFORE attach runs
             # setup, so the producer keys its comm cache by
             # (sender_rank, receiver_replica, receiver_rank) -- otherwise two
-            # policy replicas sharing ``receiver_rank`` cross-wire.  Set the
-            # attribute directly (mirrors attach_data_packer's redis_client
-            # assignment); non-NCCL packers simply lack the attribute.
-            if hasattr(packer, "_nccl_dp_receiver_replica"):
-                packer._nccl_dp_receiver_replica = getattr(self, "replica_name", None)
+            # policy replicas sharing ``receiver_rank`` cross-wire and each
+            # takes payloads meant for the other.
+            #
+            # Set UNCONDITIONALLY.  This used to be guarded on
+            # ``hasattr(packer, "_nccl_dp_receiver_replica")``, which only
+            # holds for packers that SUBCLASS NCCLDataPackerMixin -- a packer
+            # that instead COMPOSES a transport (PrefetchDataPackerMixin +
+            # set_transport_strategy, which is how a transport gets chosen from
+            # config at runtime) does not declare the attribute, silently got
+            # no identity, and fell back to a rank-derived one that is
+            # identical for every single-GPU policy replica.  The attribute is
+            # namespaced, so setting it on a packer that ignores it is inert.
+            packer._nccl_dp_receiver_replica = getattr(self, "replica_name", None)
             if transport is not None:
                 try:
                     transport.attach_data_packer(

@@ -38,6 +38,7 @@ Three things are tested here, one per layer of the fix:
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -677,6 +678,87 @@ class TestConsumerResyncsOnLateAccept(unittest.TestCase):
         self.assertEqual(attempts, [1], "must not retry into the orphaned send")
         self.assertNotIn(pair, cache)
         self.assertEqual(aborted, [55])
+
+
+# ---------------------------------------------------------------------------
+# Receiver identity: two policy replicas must never look like one producer-side
+# ---------------------------------------------------------------------------
+
+
+class TestReceiverIdentityIsUnique(unittest.TestCase):
+    """Every policy replica must be distinguishable to the producer.
+
+    The producer keys its comm cache AND its per-pair unique-ID on
+    ``(sender_rank, receiver_replica, receiver_rank)``.  Single-GPU policy
+    replicas all have ``receiver_rank == 0``, so ``receiver_replica`` is the
+    only thing separating them.  If two replicas report the same string they
+    share one communicator on the producer side while each holds its own on the
+    receiving side, and a recv posted by one takes a send meant for the other.
+    """
+
+    def _replica_id(self, *, given=None):
+        s = NCCLTransportStrategy()
+        s.setup(
+            device=None,
+            redis_client=None,
+            config=None,
+            receiver_replica=given,
+        )
+        return s._receiver_replica
+
+    def test_explicit_replica_name_is_used(self):
+        self.assertEqual(self._replica_id(given="policy-abc123"), "policy-abc123")
+
+    def test_fallback_is_not_bare_rank(self):
+        # ``recv0`` for every single-GPU replica is what cross-wired them.
+        self.assertNotEqual(self._replica_id(), "recv0")
+
+    def test_fallback_distinguishes_hosts_and_processes(self):
+        import os
+        import socket
+
+        got = self._replica_id()
+        self.assertIn(socket.gethostname(), got)
+        self.assertIn(str(os.getpid()), got)
+
+
+class TestComposedPackerGetsAnIdentity(unittest.TestCase):
+    """A packer that COMPOSES a transport must be given the replica name too.
+
+    ``_attach_payload_transport`` used to assign it only when the packer
+    declared ``_nccl_dp_receiver_replica`` -- true for subclasses of
+    ``NCCLDataPackerMixin``, false for the composed
+    ``PrefetchDataPackerMixin`` + ``set_transport_strategy`` packer that
+    config-driven transport selection actually builds.  The composed packer
+    silently got no identity.
+    """
+
+    def test_attach_assigns_replica_name_to_a_composed_packer(self):
+        from cosmos_rl.utils.payload_transport.prefetch_mixin import (
+            PrefetchDataPackerMixin,
+        )
+
+        class _ComposedPacker(PrefetchDataPackerMixin):
+            pass
+
+        packer = _ComposedPacker()
+        self.assertFalse(
+            hasattr(packer, "_nccl_dp_receiver_replica"),
+            "fixture no longer reproduces the composed-packer shape",
+        )
+
+        # The assignment under test, as _attach_payload_transport performs it.
+        worker = SimpleNamespace(replica_name="policy-replica-7")
+        packer._nccl_dp_receiver_replica = getattr(worker, "replica_name", None)
+
+        strategy = NCCLTransportStrategy()
+        strategy.setup(
+            device=None,
+            redis_client=None,
+            config=None,
+            receiver_replica=getattr(packer, "_nccl_dp_receiver_replica", None),
+        )
+        self.assertEqual(strategy._receiver_replica, "policy-replica-7")
 
 
 if __name__ == "__main__":

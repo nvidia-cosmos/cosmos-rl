@@ -146,15 +146,22 @@ class TestAttachPayloadTransportContract(unittest.TestCase):
             harness._attach_payload_transport()
         self.assertEqual(packer._nccl_dp_receiver_replica, "policy-XYZ")
 
-    def test_receiver_replica_plumbing_skips_packer_without_attr(self):
-        # A packer that does not expose the attribute must not gain one.
-        packer = _NcclAwarePacker()  # no _nccl_dp_receiver_replica
+    def test_receiver_replica_plumbing_reaches_a_packer_without_attr(self):
+        # A packer that does not DECLARE the attribute still needs the identity.
+        # Only subclasses of NCCLDataPackerMixin declare it; a packer that
+        # COMPOSES a transport (PrefetchDataPackerMixin + set_transport_strategy
+        # -- how a transport gets chosen from config at runtime) does not, and
+        # skipping it left every single-GPU policy replica falling back to the
+        # same rank-derived id.  The producer keys its comm cache on that
+        # string, so the replicas shared one communicator and took each other's
+        # payloads.
+        packer = _NcclAwarePacker()  # no _nccl_dp_receiver_replica declared
         factory = _FakeRedisFactory(_FakeRedis())
         harness = _CommHarness(mode="nccl", data_packer=packer)
         harness.replica_name = "policy-XYZ"
         with self._patch_nccl_redis(factory):
             harness._attach_payload_transport()
-        self.assertFalse(hasattr(packer, "_nccl_dp_receiver_replica"))
+        self.assertEqual(packer._nccl_dp_receiver_replica, "policy-XYZ")
 
 
 class TestSingleReceiverTopologyGuard(unittest.TestCase):

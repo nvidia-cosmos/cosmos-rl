@@ -27,6 +27,8 @@ iteration counter as an argument instead of reading it off one.
 
 from __future__ import annotations
 
+import os
+import socket
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -164,11 +166,21 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         if receiver_replica:
             self._receiver_replica = receiver_replica
         # ``_attach_payload_transport`` sets ``_nccl_dp_receiver_replica`` to
-        # this worker's ``replica_name`` before setup.  Fall back to a
-        # rank-derived id for standalone/test setups (unique within a single
-        # replica, which is all such setups have).
+        # this worker's ``replica_name`` before setup.  The fallback below is
+        # for standalone/test setups that never went through it.
+        #
+        # It MUST be globally unique, not just rank-derived.  Every policy
+        # replica in a single-GPU deployment has ``receiver_rank == 0``, so a
+        # bare ``recv0`` makes N replicas indistinguishable to the producer --
+        # which keys its comm cache and its per-pair unique-ID on exactly this
+        # string.  They then share one communicator, and a recv posted by one
+        # replica takes a send meant for another: the payload arrives intact
+        # but belongs to a different transfer.  Host and PID make it unique
+        # without needing any cluster-wide coordination.
         if not self._receiver_replica:
-            self._receiver_replica = f"recv{self._receiver_rank}"
+            self._receiver_replica = (
+                f"recv{self._receiver_rank}-{socket.gethostname()}-{os.getpid()}"
+            )
         self._prefix = _resolve_prefix(config)
         self._schema = build_trajectory_schema(_resolve_schema_dims(config))
 
