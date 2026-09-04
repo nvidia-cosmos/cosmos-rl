@@ -41,7 +41,11 @@ def _run(body: str, env_level: str = "DEBUG") -> str:
     """Run ``body`` in a fresh interpreter with COSMOS_LOG_LEVEL set."""
     script = textwrap.dedent(f"""
         import io, logging, os
-        os.environ["COSMOS_LOG_LEVEL"] = {env_level!r}
+        _lvl = {env_level!r}
+        if _lvl:
+            os.environ["COSMOS_LOG_LEVEL"] = _lvl
+        else:
+            os.environ.pop("COSMOS_LOG_LEVEL", None)
         {textwrap.indent(textwrap.dedent(body), " " * 8).strip()}
     """)
     proc = subprocess.run(
@@ -121,6 +125,139 @@ class TestLogLevelFallback(unittest.TestCase):
         )
         probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
         self.assertEqual(probe, "PROBE INFO")
+
+
+class TestConfigDrivenLevel(unittest.TestCase):
+    """[logging].level must reach every component that loads the config.
+
+    Workers on other machines never see the submitting shell's environment
+    unless the batch template happens to forward it, so the config -- which is
+    distributed to all of them -- is the reliable channel.  It can only be
+    applied after parse, because logging is configured at import time.
+    """
+
+    def test_config_level_is_applied(self):
+        out = _run(
+            """
+            from cosmos_rl.utils.logging import logger, configure_logging
+            print("PROBE-BEFORE", logging.getLevelName(logger.level))
+            configure_logging("DEBUG")
+            print("PROBE-AFTER", logging.getLevelName(logger.level),
+                  logger.isEnabledFor(logging.DEBUG))
+            """,
+            env_level="",
+        )
+        before = [ln for ln in out.splitlines() if ln.startswith("PROBE-BEFORE")][-1]
+        after = [ln for ln in out.splitlines() if ln.startswith("PROBE-AFTER")][-1]
+        self.assertEqual(before, "PROBE-BEFORE INFO")
+        self.assertEqual(after, "PROBE-AFTER DEBUG True")
+
+    def test_env_overrides_config(self):
+        # The operator's override must win: raising verbosity for one run
+        # cannot require editing a config shared by every component.
+        out = _run("""
+            from cosmos_rl.utils.logging import logger, configure_logging
+            configure_logging("WARNING")
+            print("PROBE", logging.getLevelName(logger.level))
+        """)  # env_level defaults to DEBUG
+        probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
+        self.assertEqual(probe, "PROBE DEBUG")
+
+    def test_none_leaves_level_untouched(self):
+        out = _run(
+            """
+            from cosmos_rl.utils.logging import logger, configure_logging
+            configure_logging(None)
+            print("PROBE", logging.getLevelName(logger.level))
+            """,
+            env_level="",
+        )
+        probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
+        self.assertEqual(probe, "PROBE INFO")
+
+    def test_own_handler_level_follows(self):
+        # Raising the logger's level is useless if the handler we installed
+        # still filters the records out.
+        out = _run(
+            """
+            from cosmos_rl.utils.logging import logger, configure_logging
+            configure_logging("DEBUG")
+            print("PROBE", [logging.getLevelName(h.level) for h in logger.handlers])
+            """,
+            env_level="",
+        )
+        probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
+        self.assertEqual(probe, "PROBE ['DEBUG']")
+
+
+class TestConfigFileEndToEnd(unittest.TestCase):
+    """The whole path: a real job config on disk -> the cosmos logger.
+
+    Exercises the actual choke point (``Config.from_dict``) rather than the
+    helper in isolation, because that call is what every component -- including
+    workers on other nodes -- goes through.
+    """
+
+    def test_level_from_a_real_config_file(self):
+        out = _run(
+            """
+            import glob, toml
+            from cosmos_rl.policy.config import Config
+            from cosmos_rl.utils.logging import logger
+            data = toml.load(sorted(glob.glob("tests/configs/*.toml"))[0])
+            data.setdefault("logging", {})["level"] = "DEBUG"
+            print("PROBE-BEFORE", logging.getLevelName(logger.level))
+            Config.from_dict(data)
+            print("PROBE-AFTER", logging.getLevelName(logger.level))
+            """,
+            env_level="",
+        )
+        before = [ln for ln in out.splitlines() if ln.startswith("PROBE-BEFORE")][-1]
+        after = [ln for ln in out.splitlines() if ln.startswith("PROBE-AFTER")][-1]
+        self.assertEqual(before, "PROBE-BEFORE INFO")
+        self.assertEqual(after, "PROBE-AFTER DEBUG")
+
+    def test_config_without_level_leaves_logging_alone(self):
+        # The field is opt-in: loading a config that does not set it must not
+        # touch a level the host or the environment already chose.
+        out = _run(
+            """
+            import glob, toml
+            from cosmos_rl.policy.config import Config
+            from cosmos_rl.utils.logging import logger
+            logger.setLevel(logging.WARNING)
+            data = toml.load(sorted(glob.glob("tests/configs/*.toml"))[0])
+            data.pop("logging", None)
+            Config.from_dict(data)
+            print("PROBE", logging.getLevelName(logger.level))
+            """,
+            env_level="",
+        )
+        probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
+        self.assertEqual(probe, "PROBE WARNING")
+
+
+class TestSlurmTemplateDoesNotForceDebug(unittest.TestCase):
+    """The controller block must not pin its own verbosity.
+
+    It used to ``export COSMOS_LOG_LEVEL=DEBUG`` unconditionally, making the
+    controller the only component whose level could not be lowered and leaving
+    it inconsistent with the policy/rollout/reference blocks in the same file.
+    """
+
+    def test_no_hardcoded_level_in_multi_node_template(self):
+        import pathlib
+
+        template = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "cosmos_rl/tools/slurm/cosmos_rl_job_multi_node.sh"
+        )
+        body = template.read_text()
+        self.assertNotIn(
+            "export COSMOS_LOG_LEVEL=DEBUG",
+            body,
+            "the controller block pins COSMOS_LOG_LEVEL again",
+        )
 
 
 if __name__ == "__main__":

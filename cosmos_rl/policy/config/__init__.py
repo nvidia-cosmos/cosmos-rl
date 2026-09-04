@@ -26,7 +26,7 @@ import hashlib
 # so we need to import the utils.modelscope and utils.logging from the cosmos_rl package.
 try:
     from cosmos_rl.utils.modelscope import update_config_if_modelscope
-    from cosmos_rl.utils.logging import logger
+    from cosmos_rl.utils.logging import configure_logging, logger
 except ImportError:
     pass
 
@@ -1626,6 +1626,18 @@ class LoggingConfig(BaseModel):
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
     )
+    level: Optional[str] = Field(
+        default=None,
+        description=(
+            "Log level for the 'cosmos' logger (DEBUG, INFO, WARNING, ...), "
+            "applied to every component that loads this config -- including "
+            "workers on other nodes, which is what makes it usable where an "
+            "environment variable would have to be plumbed through the batch "
+            "template. COSMOS_LOG_LEVEL overrides it, so an operator can raise "
+            "verbosity for a single run without editing a shared config. "
+            "Unset leaves the import-time level untouched."
+        ),
+    )
     log_interval: int = Field(
         default=100,
         description="Log interval (in steps) for loss averaging.",
@@ -1896,6 +1908,12 @@ class Config(BaseModel):
                 )
         config = cls.model_validate(config_data)
         config = update_config_if_modelscope(config)
+        # Apply the configured log level here rather than at each entry point:
+        # every component -- controller, policy, rollout, reference, and any
+        # embedder -- materialises its config through this one call, and there
+        # is no earlier hook, since logging is configured at import time.
+        # No-ops unless [logging].level is set or COSMOS_LOG_LEVEL is exported.
+        configure_logging(config.logging.level)
         return config
 
     @model_validator(mode="before")

@@ -417,7 +417,12 @@ srun \
     -o ${new_run_dir}/controller.out \
     -e ${new_run_dir}/controller.err \
     bash -c '
-    export COSMOS_LOG_LEVEL=DEBUG
+    # No COSMOS_LOG_LEVEL override here.  This block used to force DEBUG
+    # unconditionally, which made the controller the one component whose
+    # verbosity could not be lowered, and left it inconsistent with the policy,
+    # rollout and reference blocks below.  --export=ALL above already carries an
+    # operator-set COSMOS_LOG_LEVEL into this srun, and [logging].level in the
+    # job config reaches every component through Config.from_dict.
     python -c "import cosmos_rl; print(f\"cosmos_rl location: {cosmos_rl.__file__}\"); print(f\"cosmos_rl version: {cosmos_rl.__version__}\")" 2>/dev/null || true
     cosmos_dir=$(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))" 2>/dev/null | tail -1)
     if [[ -z "${cosmos_dir}" ]] || [[ ! -d "${cosmos_dir}" ]]; then

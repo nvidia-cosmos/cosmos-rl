@@ -47,3 +47,49 @@ if not logger.hasHandlers():
     ch.setFormatter(formatter)
     logger.addHandler(ch)
     logger.propagate = False
+
+
+def configure_logging(level=None) -> int:
+    """Apply a logging level after configuration is known; return what was set.
+
+    The module-level setup above runs at IMPORT time -- ``policy/config`` itself
+    imports this logger -- so it necessarily happens before any ``Config``
+    object exists.  A level carried in the job config can therefore only take
+    effect through an explicit call, which is what this is.
+
+    Precedence is ``COSMOS_LOG_LEVEL`` first, then ``level``.  The environment
+    wins because it is the operator's override: raising verbosity for one run
+    must not require editing a config that is shared across a job's components.
+    ``level=None`` with no environment variable leaves the current level alone.
+
+    Args:
+        level: Level name (e.g. ``"DEBUG"``) or numeric level.  ``None`` means
+            "no config-supplied preference".
+
+    Returns:
+        The level now in effect on the ``cosmos`` logger.
+    """
+    env_name = os.getenv("COSMOS_LOG_LEVEL")
+    chosen = env_name if env_name else level
+    if chosen is None:
+        return logger.level
+
+    if isinstance(chosen, str):
+        resolved = getattr(logging, chosen.upper(), None)
+    else:
+        resolved = chosen
+    if not isinstance(resolved, int):
+        logger.warning(
+            "[logging] ignoring unrecognised log level %r; keeping %s",
+            chosen,
+            logging.getLevelName(logger.level),
+        )
+        return logger.level
+
+    logger.setLevel(resolved)
+    # Our own handler, if we installed one, must not filter out what the
+    # logger now admits.  Handlers belonging to a host application are left
+    # alone -- their levels are the host's business.
+    for handler in logger.handlers:
+        handler.setLevel(resolved)
+    return resolved
