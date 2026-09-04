@@ -114,6 +114,7 @@ run python tests/test_nccl_e2e.py
 # alongside the transport itself.  They are fast and CPU-only; the cost of
 # listing them is far below the cost of a silent gap this size.
 run python tests/test_comm_base_attach.py
+run python tests/test_logging_level.py
 run python tests/test_nccl_addressing.py
 run python tests/test_nccl_buffer_registry.py
 run python tests/test_nccl_comm_cache.py
