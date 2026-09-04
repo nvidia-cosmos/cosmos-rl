@@ -31,6 +31,8 @@ import time, and a reload in-process would inherit the singleton "cosmos"
 logger's existing state and the ambient handlers of the test runner.
 """
 
+import importlib.util
+import pathlib
 import subprocess
 import sys
 import textwrap
@@ -243,16 +245,35 @@ class TestSlurmTemplateDoesNotForceDebug(unittest.TestCase):
     It used to ``export COSMOS_LOG_LEVEL=DEBUG`` unconditionally, making the
     controller the only component whose level could not be lowered and leaving
     it inconsistent with the policy/rollout/reference blocks in the same file.
+
+    Read out of the INSTALLED package, not the checkout: the CI container
+    mounts only ``tests/`` and ``configs/``, and the image deletes the source
+    tree once it has pip-installed it, so ``parents[1]`` has no ``cosmos_rl/``.
+    ``dispatch_job.py`` reads the template the same way -- from its own
+    directory -- so the installed copy is also the one that actually runs.
     """
 
-    def test_no_hardcoded_level_in_multi_node_template(self):
-        import pathlib
-
-        template = (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "cosmos_rl/tools/slurm/cosmos_rl_job_multi_node.sh"
+    def _template_path(self):
+        relative = "tools/slurm/cosmos_rl_job_multi_node.sh"
+        candidates = []
+        # find_spec LOCATES the package without executing it, so this file
+        # stays importable without torch installed.
+        spec = importlib.util.find_spec("cosmos_rl")
+        if spec is not None and spec.origin:
+            candidates.append(pathlib.Path(spec.origin).resolve().parent / relative)
+        candidates.append(
+            pathlib.Path(__file__).resolve().parents[1] / "cosmos_rl" / relative
         )
-        body = template.read_text()
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        self.skipTest(
+            "slurm template not found in the installed package or the source "
+            f"tree; looked in {[str(c) for c in candidates]}"
+        )
+
+    def test_no_hardcoded_level_in_multi_node_template(self):
+        body = self._template_path().read_text()
         self.assertNotIn(
             "export COSMOS_LOG_LEVEL=DEBUG",
             body,
