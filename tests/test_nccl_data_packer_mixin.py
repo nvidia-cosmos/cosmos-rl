@@ -930,6 +930,7 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         p = NCCLTransportStrategy()
         p._rendezvous = object()  # never called: _rendezvous_one is stubbed
         p._comm_cache = CommCache(build_fn=lambda u, r: 55, abort_fn=lambda i: None)
+        p._comm_cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
         p._device = None
         p._streams = None
         p._recv_lock = threading.Lock()
@@ -947,15 +948,20 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         from cosmos_rl.utils.payload_transport.nccl import strategy as dpm
 
         events = []
-        comm_of = {ref["transfer_id"]: i for i, (_idx, ref) in enumerate(refs)}
-        id_of = {i: tid for tid, i in comm_of.items()}
+        # These refs all name one producer, so they share ONE pair comm --
+        # _rendezvous_one hands back the same comm_idx every time, and the
+        # transfer is identified by its own buffer.
+        pair_comm = 55
+        id_of = {}
 
         def fake_rendezvous(ref, _pynccl):
             events.append(("rendezvous", ref["transfer_id"]))
-            return comm_of[ref["transfer_id"]], torch.zeros(4, dtype=torch.uint8)
+            buf = torch.zeros(4, dtype=torch.uint8)
+            id_of[id(buf)] = ref["transfer_id"]
+            return pair_comm, buf
 
         def fake_recv(buf, peer, comm_idx, **kwargs):
-            transfer_id = id_of[comm_idx]
+            transfer_id = id_of[id(buf)]
             events.append(("recv", transfer_id))
             if transfer_id == failing_recv:
                 raise RuntimeError("enqueue failed")
@@ -997,11 +1003,21 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         """
 
         class _UnpinRecordingCache:
+            """Enough of CommCache to be a fair stand-in: a comm can be looked
+            up and aborted, which is what the post-sync liveness filter reads."""
+
             def __init__(self):
                 self.unpinned = []
+                self.comms = {("rA", 0, 0): 55}
 
             def unpin(self, pair):
                 self.unpinned.append(pair)
+
+            def get(self, pair):
+                return self.comms.get(pair)
+
+            def abort(self, pair):
+                return self.comms.pop(pair, None) is not None
 
         p = self._strategy()
         p._comm_cache = _UnpinRecordingCache()
@@ -1019,9 +1035,14 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
                 ("recv", "0:second"),
             ],
         )
-        # Only the ref whose enqueue succeeded resolves...
-        self.assertEqual(sorted(results), [1])
-        # ...but BOTH pins are released.
+        # NEITHER resolves.  Both refs are on the same pair, so the abort that
+        # isolates the first ref's failure also kills the comm the second was
+        # already posted on -- its enqueue succeeded, so nothing raised for it,
+        # but NCCL will never write its buffer.  It is dropped rather than
+        # unpacked as uninitialised memory.  Both fall through to the
+        # synchronous per-ref retry.
+        self.assertEqual(sorted(results), [])
+        # ...and BOTH pins are still released.
         self.assertEqual(len(p._comm_cache.unpinned), 2)
 
 

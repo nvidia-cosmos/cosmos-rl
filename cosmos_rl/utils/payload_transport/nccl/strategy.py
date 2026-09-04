@@ -523,6 +523,32 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         )
                     return {}, 0, get_trace_time() - t0
 
+            # A pair aborted DURING this batch takes its already-posted recvs
+            # down with it.  Their own enqueue succeeded, so nothing raised for
+            # them -- but the communicator they were posted on is gone, and NCCL
+            # will never write their buffers.  Unpacking one reads uninitialised
+            # memory, which the header check then reports as a desynced stream:
+            # an abort we performed ourselves, blamed on the peer.
+            #
+            # Detect it by identity rather than by tracking abort sites: the
+            # comm is PINNED for the whole batch, so eviction cannot move it and
+            # the cached comm_idx changes only if someone explicitly aborted the
+            # pair (recv enqueue failure, recv-buffer alloc failure, quarantine
+            # from any path).  Anything that no longer maps to the comm_idx we
+            # posted on is dead.
+            live: List[Tuple[Any, dict, int, torch.Tensor]] = []
+            for entry in posted:
+                if cache.get(_pair_key(entry[1], receiver_rank)) == entry[2]:
+                    live.append(entry)
+                else:
+                    logger.warning(
+                        "[NCCLTransportStrategy] dropping %s: its pair's comm was "
+                        "aborted after the recv was posted, so the buffer was "
+                        "never written (not a desync)",
+                        entry[1]["transfer_id"],
+                    )
+            posted = live
+
             for idx, ref, _comm_idx, recv_buf in posted:
                 try:
                     gpu_data = _verify_and_unpack(recv_buf, ref, device)

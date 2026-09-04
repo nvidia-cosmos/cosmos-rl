@@ -61,6 +61,7 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
 )
 from cosmos_rl.utils.payload_transport.nccl.strategy import (
     NCCLTransportStrategy,
+    _pair_key,
     _parse_ref,
 )
 from cosmos_rl.utils.trajectory import build_trajectory_schema, schema_layout
@@ -250,7 +251,7 @@ class TestConsumerRejectsMispairedPayload(unittest.TestCase):
         recv_buf[:HEADER_NBYTES] = torch.frombuffer(
             bytearray(header), dtype=torch.uint8
         )
-        s._rendezvous_one = lambda ref, pynccl: (0, recv_buf)
+        s._rendezvous_one = lambda ref, pynccl: (55, recv_buf)
 
         ref = _consumer_ref(ref_transfer_id, schema)
         with mock.patch.object(pynccl_mod, "nccl_recv", mock.Mock()):
@@ -277,6 +278,76 @@ class TestConsumerRejectsMispairedPayload(unittest.TestCase):
         self.assertIn(pair, s._warm_pairs)
 
 
+class TestAbortedPairDropsItsPostedRecvs(unittest.TestCase):
+    """A recv posted on a comm that is then aborted must not be unpacked.
+
+    When one ref's recv fails, the pair is quarantined and its communicator
+    aborted -- but a sibling ref already posted on that same comm raised
+    nothing, because its own enqueue succeeded. NCCL will never write its
+    buffer. Unpacking it reads uninitialised memory, which the header check
+    then reports as "no valid header ... stream is desynced": an abort we
+    performed ourselves, reported as a peer problem.
+    """
+
+    def _fetch_two_refs_on_one_pair(self, *, second_recv_raises):
+        schema = _schema()
+        _, entry_size = schema_layout(schema)
+        pair = ("rA", 0, 0)
+
+        aborted = []
+        cache = CommCache(build_fn=lambda u, r: 55, abort_fn=aborted.append)
+        cache.get_or_create(pair, uid_chars=[1], local_rank=1)
+        s = _consumer(cache, warm_pairs={pair})
+
+        # Both refs name the SAME producer, so they share one pair comm.
+        refs = [
+            _consumer_ref("0:first", schema),
+            _consumer_ref("0:second", schema),
+        ]
+        # Correctly headered, so the control case unpacks and the failure case
+        # is attributable to the abort rather than to a bad header.
+        bufs = []
+        for r in refs:
+            b = torch.zeros(HEADER_NBYTES + entry_size, dtype=torch.uint8)
+            hdr = build_header(transfer_id=r["transfer_id"], payload_nbytes=entry_size)
+            b[:HEADER_NBYTES] = torch.frombuffer(bytearray(hdr), dtype=torch.uint8)
+            bufs.append(b)
+        it = iter(range(len(refs)))
+        s._rendezvous_one = lambda ref, pynccl: (55, bufs[next(it)])
+
+        calls = {"n": 0}
+
+        def _recv(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2 and second_recv_raises:
+                raise RuntimeError("enqueue timed out")
+
+        with mock.patch.object(pynccl_mod, "nccl_recv", _recv):
+            results, _, _ = s._fetch_all(list(enumerate(refs)))
+        return results, cache, aborted, pair
+
+    def test_sibling_of_a_failed_recv_is_dropped_not_unpacked(self):
+        results, cache, aborted, pair = self._fetch_two_refs_on_one_pair(
+            second_recv_raises=True
+        )
+        # Ref 2 failed outright; ref 1 was posted on the comm that its failure
+        # aborted. Neither may be returned -- and critically, ref 1 must not
+        # reach the header check, which would call it a desync.
+        self.assertEqual(results, {})
+        self.assertNotIn(pair, cache)
+        self.assertEqual(aborted, [55])
+
+    def test_unaffected_pair_still_unpacks(self):
+        # Control: with no failure, both refs unpack normally, so the filter is
+        # not simply discarding everything.
+        results, cache, aborted, pair = self._fetch_two_refs_on_one_pair(
+            second_recv_raises=False
+        )
+        self.assertEqual(sorted(results), [0, 1])
+        self.assertIn(pair, cache)
+        self.assertEqual(aborted, [])
+
+
 class TestProducerConsumerRoundtrip(unittest.TestCase):
     """The two ends still agree on the wire format, header included."""
 
@@ -288,12 +359,14 @@ class TestProducerConsumerRoundtrip(unittest.TestCase):
         p._nccl_executor.shutdown(wait=True)
 
         cache = CommCache(build_fn=lambda u, r: 55, abort_fn=lambda i: None)
-        pair = ("rA", 0, 0)
-        cache.get_or_create(pair, uid_chars=[1], local_rank=1)
         s = _consumer(cache)
         # The consumer's schema comes off the reference, exactly as in the run.
         ref = _parse_ref(meta | {"_nccl": True})
-        s._rendezvous_one = lambda r, pynccl: (0, wire.clone())
+        # Prime the cache under the REF's own pair key -- the producer names
+        # itself in the metadata, so it is not the "rA" the other fixtures use.
+        pair = _pair_key(ref, s._receiver_rank)
+        cache.get_or_create(pair, uid_chars=[1], local_rank=1)
+        s._rendezvous_one = lambda r, pynccl: (55, wire.clone())
 
         with mock.patch.object(pynccl_mod, "nccl_recv", mock.Mock()):
             results, _, _ = s._fetch_all([(0, ref)])
