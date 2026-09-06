@@ -279,6 +279,14 @@ class _Task:
     phase_observer: Optional[_P2PPhaseObserver] = None
     done: threading.Event = field(default_factory=threading.Event)
     timed_out: threading.Event = field(default_factory=threading.Event)
+    # The exception that actually ended this task, when one did.
+    #
+    # ``timed_out`` alone cannot distinguish "the deadline expired" from "the
+    # NCCL call raised": the worker sets it for both. Reporting every failure
+    # as a timeout sends the reader hunting for a slow or departed peer when
+    # the real cause was a bad argument or a fabric error, and discards the
+    # only message that said so.
+    error: Optional[BaseException] = None
 
     def __repr__(self):  # pragma: no cover
         return f"<_Task id={id(self)} timeout_ms={self.timeout_ms}>"
@@ -378,6 +386,10 @@ def run_task(task: _Task):
                 _notify_p2p_phase(task.phase_observer, "abort_enter")
                 _safe_abort(task.comm_idx, comm)
                 _notify_p2p_phase(task.phase_observer, "abort_return")
+                task.error = RuntimeError(
+                    f"NCCL: asynchronous error {err} reported while completing "
+                    f"task {task}"
+                )
                 task.timed_out.set()
                 break
             time.sleep(0.001)
@@ -391,6 +403,13 @@ def run_task(task: _Task):
             task.timed_out.set()
     except Exception as e:
         logger.error(f"[Worker] Exception during task {task}: {e}")
+        if not task.timed_out.is_set():
+            # Only an INDEPENDENT failure becomes the reported cause. If the
+            # deadline already fired, this exception is the consequence of the
+            # abort we ourselves issued -- the aborted call returns an error
+            # code and NCCL_CHECK raises -- and reporting that instead of the
+            # timeout would hide the fact that a peer never arrived.
+            task.error = e
         task.timed_out.set()
     finally:
         task.done.set()
@@ -460,6 +479,11 @@ def _submit_nccl(
         cur = _current_ctx()
         if cur is not None:
             cur.abort = True
+        if task.error is not None:
+            # A genuine failure, not a deadline. Callers distinguish the two --
+            # a timeout means a peer never arrived, anything else does not --
+            # so hand back what actually happened.
+            raise task.error
         raise TimeoutError("NCCL: non-blocking enqueue timed out")
 
     # Register communicator with current watchdog context so that any timeout

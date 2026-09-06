@@ -126,16 +126,59 @@ class WeightResumeCommand(Command):
 
 
 class BuildMeshCommand(Command):
-    def __init__(self, replica_name_to_rank: Dict[str, int], **kwargs):
+    def __init__(
+        self,
+        replica_name_to_rank: Dict[str, int],
+        mesh_is_used: bool = True,
+        **kwargs,
+    ):
         kwargs["scope"] = CommandScope.GLOBAL
         kwargs["command_type"] = CommandType.BUILD_MESH
         super().__init__(**kwargs)
         self.replica_name_to_rank = replica_name_to_rank
+        self.mesh_is_used = mesh_is_used
 
     replica_name_to_rank: Dict[str, int]
+    # Whether the mesh communicator this rebuild creates can ever be used.
+    #
+    # Decided by the CONTROLLER, once per rebuild, and carried to every
+    # recipient. That is the whole point: ncclCommInitRank is a collective, so
+    # a decision made independently by each worker can diverge -- two replicas
+    # disagreeing about whether to enter it is itself a hang. One value, one
+    # rebuild, every member.
+    #
+    # Defaults to True so that a command from an older controller, which does
+    # not send the field, still builds the mesh. Building one nobody uses costs
+    # a communicator; skipping one somebody needs wedges the job.
+    mesh_is_used: bool
+
+    def pack(self):
+        """Serialize, omitting ``mesh_is_used`` when it holds its default.
+
+        Any new key is a hard break for an older worker: ``from_dict`` does
+        ``cls(**dict_v)`` and the surplus kwarg reaches ``Command.__init__`` as
+        a TypeError. That is raised by ``Command.depack`` OUTSIDE the command
+        loop's try, so the worker's command thread dies and the replica stops
+        receiving everything, STOP included -- a silent hang, the very failure
+        this field exists to prevent.
+
+        Omitting the default keeps the wire byte-identical for every job that
+        has policy replicas, which is all of them bar the rollout-only case the
+        field was added for. Mixed builds still need care there, but they no
+        longer risk the common path.
+        """
+        payload = dict(self.__dict__)
+        if payload.get("mesh_is_used", True):
+            payload.pop("mesh_is_used", None)
+        return msgpack.packb(payload)
 
     @classmethod
-    def trigger(cls, replicas: List[Replica], redis_handler: RedisStreamHandler):
+    def trigger(
+        cls,
+        replicas: List[Replica],
+        redis_handler: RedisStreamHandler,
+        mesh_is_used: bool = True,
+    ):
         index = 0
         assert all(replica.all_atoms_arrived for replica in replicas), (
             "All replicas must have arrived"
@@ -145,7 +188,7 @@ class BuildMeshCommand(Command):
             replica.status.mesh_rank = index
             replicas_to_rank[replica.name] = index
             index += 1
-        cmd = cls(replicas_to_rank)
+        cmd = cls(replicas_to_rank, mesh_is_used=mesh_is_used)
         for replica in replicas:
             redis_handler.publish_command(cmd.pack(), replica.name)
 

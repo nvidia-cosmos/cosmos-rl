@@ -574,9 +574,26 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         wst = getattr(self, "_weight_sync_thread", None)
         if wst is not None and not wst.fence():
-            raise RuntimeError(
-                "Weight-sync work did not drain before rollout mesh rebuild"
+            # Do NOT treat this as fatal. The rebuild exists BECAUSE a replica
+            # departed, and that departure is the most likely reason the fence
+            # failed: an in-flight rollout-to-rollout broadcast aimed at the
+            # replica that just died can never complete. Raising here killed
+            # every survivor that received the rebuild, so losing one replica
+            # removed the rest -- measured at six replicas lost from a single
+            # departure.
+            #
+            # The pending work is known to be worthless in exactly this case:
+            # the rebuild replaces the communicator it was issued against.
+            # Discard it and carry on; reset_for_rebuild aborts NCCL if the
+            # work will not drain, which leaves the old communicator dead --
+            # the state a rebuild wants anyway.
+            logger.warning(
+                "[Rollout] %s: weight-sync work did not drain before the mesh "
+                "rebuild; discarding it and rebuilding. This is expected when "
+                "the departing replica was a broadcast peer.",
+                self.replica_name,
             )
+            wst.reset_for_rebuild()
         logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
 
         replica_name_to_rank = build_mesh_command.replica_name_to_rank
@@ -594,6 +611,26 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if mesh_ready is not None:
                 mesh_ready.set()
             return
+
+        # The CONTROLLER decides this, once per rebuild, and every recipient of
+        # this command gets the same answer. Evaluating it per-worker would let
+        # two replicas disagree about entering a collective, which is itself a
+        # hang. getattr keeps an older controller, which does not send the
+        # field, on the mesh-building path.
+        if not getattr(build_mesh_command, "mesh_is_used", True):
+            logger.info(
+                "[Rollout] Skipping global mesh communicator for %s: the "
+                "controller reports no policy replicas, so no "
+                "rollout-to-rollout weight broadcast can follow and the "
+                "communicator would never be used. Mesh ranks are still "
+                "assigned, so data dispatch is unaffected.",
+                self.replica_name,
+            )
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
+            return
+
         # generate key for storing the NCCL group id.
         # group_0: [rank 0 in replica 0, rank 0 in replica 1, ..., rank 0 in replica n-1]
         # group_1: [rank 1 in replica 0, rank 1 in replica 1, ..., rank 1 in replica n-1]
@@ -625,9 +662,59 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         logger.debug(
             f"[Rollout] Creating nccl communicator for global mesh: {unique_rollout_group_key}"
         )
-        self.global_commnicator_idex = create_nccl_comm(
-            nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
-        )
+        # ncclCommInitRank only returns once EVERY rank in this snapshot has
+        # called it, and the snapshot was taken by the controller as some other
+        # replica departed.  If a member leaves before reaching its own call,
+        # this blocks.  The default budget is COSMOS_NCCL_TIMEOUT_MS (10
+        # minutes), which is long enough that the stall is indistinguishable
+        # from a hung job; a mesh handshake takes seconds, so bound it much
+        # more tightly and say what the deadline means when it expires.
+        try:
+            self.global_commnicator_idex = create_nccl_comm(
+                nccl_group_id,
+                self.rank_in_rollout_repicas,
+                len(replica_name_to_rank),
+                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
+            )
+        except TimeoutError as e:
+            # NOT fatal. The deadline expiring means a member of this snapshot
+            # never arrived, which is a topology problem the CONTROLLER fixes by
+            # issuing another rebuild -- so killing the replica here throws away
+            # the thing that would have recovered it, and each death is another
+            # departure that triggers another rebuild that kills the next
+            # survivor. That cascade is precisely what the weight-sync fence
+            # used to do one line above.
+            #
+            # This mirrors the policy side, whose __execute_build_mesh reports
+            # the failure and returns; that is why the policy mesh does not
+            # cascade. global_commnicator_idex stays -1, so a broadcast issued
+            # before the next rebuild is refused loudly rather than handed a
+            # bogus handle.
+            error = RuntimeError(
+                f"[Rollout] Timed out building the global mesh communicator "
+                f"for {self.replica_name} (key={unique_rollout_group_key}, "
+                f"rank={self.rank_in_rollout_repicas}, "
+                f"world_size={len(replica_name_to_rank)}) after "
+                f"{constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS} ms. The "
+                f"mesh membership this rebuild was committed to is "
+                f"{sorted(replica_name_to_rank)}; a member that departed "
+                f"before reaching its own ncclCommInitRank leaves every "
+                f"survivor waiting here."
+            )
+            error.__cause__ = e
+            logger.error("%s", error)
+            try:
+                self.api_client.post_nccl_comm_error(self.replica_name, error)
+            except Exception:
+                logger.exception(
+                    "[Rollout] failed to report the mesh build timeout to the "
+                    "controller"
+                )
+            self.global_commnicator_idex = -1
+            mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
+            if mesh_ready is not None:
+                mesh_ready.set()
+            return
         mesh_ready = getattr(self, "_mesh_rebuild_ready", None)
         if mesh_ready is not None:
             mesh_ready.set()
@@ -1501,6 +1588,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 with torch.cuda.stream(self.inference_stream):
                     assert self.rank_in_rollout_repicas >= 0, (
                         "[Rollout] rank in rollout replicas should be set before broadcast."
+                    )
+                    # The mesh communicator is skipped when the job has no
+                    # policy replicas. Reaching a broadcast anyway means that
+                    # assumption was wrong; fail here rather than hand -1 to
+                    # NCCL.
+                    assert self.global_commnicator_idex >= 0, (
+                        "[Rollout] global mesh communicator was never built, "
+                        "but a rollout-to-rollout broadcast was requested."
                     )
                     assert len(dst_replica_names) == len(self.replica_name_to_rank), (
                         "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."

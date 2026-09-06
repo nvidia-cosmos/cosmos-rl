@@ -15,6 +15,11 @@
 
 import os
 from enum import IntEnum
+from typing import Optional
+
+# Leaf import: cosmos_rl.utils.logging pulls in nothing from this module, so
+# there is no cycle.
+from cosmos_rl.utils.logging import logger
 from pathlib import Path
 
 CACHE_DIR = Path(
@@ -58,6 +63,69 @@ COSMOS_ROLLOUT_STEP_INTERVAL = int(
 COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = int(
     os.environ.get("COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY", "10")
 )
+
+
+def _resolve_rollout_mesh_build_timeout_ms() -> int:
+    """Budget for the rollout global-mesh communicator handshake.
+
+    Tighter than the 10-minute COSMOS_NCCL_TIMEOUT_MS default, because the only
+    signal that a member departed mid-rebuild is the deadline expiring, and ten
+    minutes of silence per rebuild cannot be told apart from a wedged job.
+
+    But NOT unconditionally tighter. ``_get_timeout_ms`` returns an explicit
+    caller value verbatim, so passing one at the call site OVERRIDES
+    COSMOS_NCCL_TIMEOUT_MS -- an operator who raised that variable to survive
+    slow cold starts would silently lose the knob. If they set it, it wins.
+
+    One minute, from measurement rather than caution. 44 mesh builds across two
+    shapes on a single node: 5 rollout replicas worst case 9s, 7 replicas worst
+    case 10s. Rank count barely moves it -- the cost is dominated by bootstrap
+    and by the concurrent P2R pair-comm storm, not by N -- so this is roughly a
+    6x margin, and it detects a departed member five times sooner than the
+    10-minute default it replaces.
+
+    Cutting this close is only safe because the deadline is NOT fatal: the
+    caller reports the failure to the controller and waits for the next
+    rebuild, so a false positive costs a rebuild cycle rather than a replica.
+    If that ever becomes fatal again, this number has to go back up.
+
+    Multi-node bootstrap is unmeasured; it goes over TCP rather than shared
+    memory and will be slower. The flat scaling in rank count suggests a fixed
+    multiplier rather than growth, but a site that finds otherwise raises
+    COSMOS_NCCL_TIMEOUT_MS and this defers to it.
+    """
+
+    def _as_int(name: str) -> Optional[int]:
+        # Parsed at IMPORT time, so a malformed value must not be fatal.
+        # ``COSMOS_NCCL_TIMEOUT_MS=`` (exported empty, a common shell habit)
+        # would otherwise raise ValueError out of ``import cosmos_rl``, taking
+        # down every process before any NCCL work exists. pynccl parses the
+        # same variable lazily and tolerates it, so crashing here would be a
+        # regression introduced by reading it earlier.
+        raw = os.environ.get(name)
+        if raw is None or raw.strip() == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning(
+                "%s is not an integer (%r); ignoring it for the rollout mesh "
+                "build budget.",
+                name,
+                raw,
+            )
+            return None
+
+    explicit = _as_int("COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS")
+    if explicit is not None:
+        return explicit
+    operator_nccl_timeout = _as_int("COSMOS_NCCL_TIMEOUT_MS")
+    if operator_nccl_timeout is not None:
+        return operator_nccl_timeout
+    return 60000
+
+
+COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS = _resolve_rollout_mesh_build_timeout_ms()
 # FIXME: (lms) Setting this greater than 1 could cause P2R NCCL hang when PP and FSDP are both enabled.
 COSMOS_P2R_NCCL_GROUP_SIZE = int(os.environ.get("COSMOS_P2R_NCCL_GROUP_SIZE", "0"))
 COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT = int(

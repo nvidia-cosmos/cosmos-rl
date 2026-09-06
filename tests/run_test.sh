@@ -95,6 +95,7 @@ run python tests/test_high_availability_nccl.py
 run python tests/test_nccl_collectives.py
 run python tests/test_nccl_timeout.py
 run python tests/test_pynccl_phase_observer.py
+run python tests/test_pynccl_raw_call_timeout.py
 run python tests/test_pynccl_dtype_agnostic.py
 run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
@@ -154,7 +155,7 @@ run python tests/test_put_rollouts.py
 run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
 # Pytest-style CPU suites; install pytest in case the image lacks it.
-run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py"
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract

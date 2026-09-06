@@ -22,6 +22,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils import constant
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -130,10 +131,14 @@ class P2RCollectiveManager:
             rank_in_group = self.global_rank
         # create the nccl communicator
         if mesh_key not in self.nccl_comm_cache:
+            # Multi-party collective sized from the command, so a participant
+            # that dies before reaching its own call blocks the rest. An unset
+            # budget resolves to the 10-minute COSMOS_NCCL_TIMEOUT_MS.
             nccl_comm_index = create_nccl_comm(
                 nccl_unique_id,
                 rank_in_group,
                 group_size,
+                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
             )
             self.nccl_comm_cache[mesh_key] = nccl_comm_index
             logger.info(
@@ -169,6 +174,7 @@ class P2RCollectiveManager:
                             p2p_unique_id,
                             0,  # policy rank is always 0
                             2,  # group size of two devices is always 2
+                            timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
                         )
                         self.nccl_comm_cache[mesh_key] = nccl_comm_index
                         logger.debug(
@@ -203,6 +209,7 @@ class P2RCollectiveManager:
                             nccl_unique_id,
                             1,  # rollout rank is always 1
                             2,  # group size of two devices is always 2
+                            timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
                         )
                         self.nccl_comm_cache[mesh_key] = nccl_comm_index
                         logger.debug(

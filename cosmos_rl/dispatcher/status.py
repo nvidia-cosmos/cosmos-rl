@@ -2415,13 +2415,50 @@ class RolloutStatusManager:
             [replica.status.ended for replica in self.rollout_replicas.values()]
         )
 
+    def _rollout_mesh_is_used(self) -> bool:
+        """Whether the mesh this rebuild creates can ever carry a broadcast.
+
+        The rollout mesh communicator has exactly one consumer,
+        ``RolloutToRolloutBroadcastCommand``, whose source must be a rollout
+        replica that received weights from a policy replica. With no policy
+        replicas -- none configured and none registered -- no weight update is
+        ever produced, so every mesh built is unused.
+
+        That is not merely wasteful. ``ncclCommInitRank`` is a collective over
+        a fixed membership snapshot and the rebuild is triggered BY membership
+        changing, so a member departing before it reaches its own call blocks
+        every survivor. Not building a communicator the job cannot use removes
+        that exposure rather than narrowing it.
+
+        Deciding this HERE, rather than in each worker, is what makes it safe.
+        The configured count is mutated in place as policy replicas register
+        (see ``register`` below), and workers read the config independently at
+        startup, so the same predicate evaluated per-worker can disagree --
+        and a collective that only some ranks enter is the hang being avoided.
+        One decision per rebuild, carried on the command, cannot diverge.
+
+        The configured count alone is sufficient, and deliberately so. It is
+        monotone non-decreasing -- ``register`` below raises it to the live
+        replica count and nothing ever lowers it -- and that raise happens
+        inside the same call that inserts the replica. So a registered policy
+        replica with a configured count of zero cannot occur, and consulting
+        the live count as well would only add a branch nothing can reach.
+
+        The practical consequence is worth stating plainly: once any policy
+        replica has ever registered this is permanently True, so the skip only
+        ever applies to a job configured with no policy replicas at all.
+        """
+        return self.config.policy.parallelism.n_init_replicas > 0
+
     def trigger_rebuild_mesh(
         self,
         valid_replicas: List[Replica],
     ):
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
         command.BuildMeshCommand.trigger(
-            sorted_valid_replicas, redis_handler=self.redis_handler
+            sorted_valid_replicas,
+            redis_handler=self.redis_handler,
+            mesh_is_used=self._rollout_mesh_is_used(),
         )
         self.data_fetcher.set_rollout_global_mesh_size(len(sorted_valid_replicas))
 

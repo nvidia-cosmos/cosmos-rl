@@ -48,8 +48,13 @@ class TestRawCallTimeout(unittest.TestCase):
         released = threading.Event()
 
         def _functor():
+            # Real NCCL does not return quietly once its communicator is
+            # aborted: the blocked call returns an error code and NCCL_CHECK
+            # raises. Returning a Mock here would let the test pass without
+            # exercising what the abort actually produces, and would not
+            # notice a timeout being reported as that error instead.
             released.wait(timeout=30.0)
-            return Mock()
+            raise RuntimeError("NCCL error: unhandled system error (aborted)")
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(pynccl, "_worker_started", True))
@@ -125,6 +130,72 @@ class TestGroupTimeoutForwarding(unittest.TestCase):
         for call in (pynccl.nccl_group_start, pynccl.nccl_group_end):
             args, _ = self._record_submit(call, None)
             self.assertEqual(args[1:], (None, 4))
+
+
+class TestFailureCauseSurvivesTheWorker(unittest.TestCase):
+    """A failure must be reported as itself, not as a timeout.
+
+    ``run_task`` sets ``timed_out`` for every way a task can end badly, so
+    before this distinction existed ``_submit_nccl`` reported an invalid
+    argument, a fabric error and a genuinely absent peer identically -- as
+    ``TimeoutError: NCCL: non-blocking enqueue timed out``. Callers act on that
+    difference (a timeout means a peer never arrived; nothing else does), and
+    the original message, the only thing that named the real fault, was
+    discarded.
+    """
+
+    def _submit(self, functor, comm_idx=None):
+        with patch.object(pynccl, "_worker_started", True):
+            pynccl._submit_nccl(functor, 200, comm_idx=comm_idx)
+
+    def test_raised_exception_is_re_raised_unchanged(self):
+        boom = ValueError("ncclInvalidArgument: bad rank")
+
+        def _functor():
+            raise boom
+
+        with self.assertRaises(ValueError) as caught:
+            self._submit(_functor)
+
+        # The very same object, so type, message and traceback all survive.
+        self.assertIs(caught.exception, boom)
+
+    def test_a_real_deadline_still_raises_timeout(self):
+        # Nothing raised; the async-error poll simply never reports success.
+        # This is the case that genuinely means "a peer never arrived".
+        def _functor():
+            return Mock()
+
+        with patch.object(pynccl, "_nccl") as nccl:
+            nccl.ncclCommGetAsyncError.return_value = ncclResultEnum.ncclInProgress
+            with patch.object(pynccl, "nccl_abort", Mock()):
+                with self.assertRaises(TimeoutError):
+                    self._submit(_functor, comm_idx=3)
+
+    def test_async_error_is_reported_as_an_error_not_a_timeout(self):
+        def _functor():
+            return Mock()
+
+        with patch.object(pynccl, "_nccl") as nccl:
+            nccl.ncclCommGetAsyncError.return_value = ncclResultEnum.ncclSystemError
+            with patch.object(pynccl, "nccl_abort", Mock()):
+                with self.assertRaises(RuntimeError) as caught:
+                    self._submit(_functor, comm_idx=3)
+
+        self.assertNotIsInstance(caught.exception, TimeoutError)
+        self.assertIn("asynchronous error", str(caught.exception))
+
+    def test_successful_task_records_no_error(self):
+        def _functor():
+            return Mock()
+
+        with patch.object(pynccl, "_nccl") as nccl:
+            nccl.ncclCommGetAsyncError.return_value = ncclResultEnum.ncclSuccess
+            task = pynccl._Task(_functor, 200, 3)
+            pynccl.run_task(task)
+
+        self.assertIsNone(task.error)
+        self.assertFalse(task.timed_out.is_set())
 
 
 if __name__ == "__main__":

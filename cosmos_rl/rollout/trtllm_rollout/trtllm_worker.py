@@ -249,6 +249,21 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if len(replica_name_to_rank) == 1:
             # only one rollout replica now, no need to build mesh.
             return
+
+        # Same contract as the vLLM worker: the controller decides once per
+        # rebuild whether this mesh can ever carry a broadcast, so no two
+        # recipients can disagree about entering the collective. Mesh ranks are
+        # assigned above regardless, because data dispatch depends on them.
+        if not getattr(build_mesh_command, "mesh_is_used", True):
+            logger.info(
+                "[Rollout] Skipping global mesh communicator for %s: the "
+                "controller reports no policy replicas, so no "
+                "rollout-to-rollout weight broadcast can follow.",
+                self.replica_name,
+            )
+            self.replica_name_to_rank = replica_name_to_rank
+            return
+
         # generate key for storing the NCCL group id.
         # group_0: [rank 0 in replica 0, rank 0 in replica 1, ..., rank 0 in replica n-1]
         # group_1: [rank 1 in replica 0, rank 1 in replica 1, ..., rank 1 in replica n-1]
@@ -287,9 +302,28 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         logger.debug(
             f"[Rollout] Creating nccl communicator for global mesh: {unique_rollout_group_key}"
         )
-        self.global_commnicator_idex = create_nccl_comm(
-            nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
-        )
+        # Bounded, and attributable when the bound is hit: ncclCommInitRank only
+        # returns once every rank in this snapshot has called it, and the
+        # snapshot was taken as some other replica departed.
+        try:
+            self.global_commnicator_idex = create_nccl_comm(
+                nccl_group_id,
+                self.rank_in_rollout_repicas,
+                len(replica_name_to_rank),
+                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
+            )
+        except TimeoutError as e:
+            raise RuntimeError(
+                f"[Rollout] Timed out building the global mesh communicator "
+                f"for {self.replica_name} (key={unique_rollout_group_key}, "
+                f"rank={self.rank_in_rollout_repicas}, "
+                f"world_size={len(replica_name_to_rank)}) after "
+                f"{constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS} ms. The "
+                f"mesh membership this rebuild was committed to is "
+                f"{sorted(replica_name_to_rank)}; a member that departed "
+                f"before reaching its own ncclCommInitRank leaves every "
+                f"survivor waiting here."
+            ) from e
         # update the replcia_name to rank dict
         self.replica_name_to_rank = replica_name_to_rank
 
@@ -406,10 +440,13 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 )
             # create the communicator index
             # p_rank is the rank in policy, r_rank is the rank in rollout
+            # Multi-party collective spanning policy and rollout ranks, so a
+            # participant that dies before its own call blocks the rest.
             communicator_index = create_nccl_comm(
                 nccl_group_id,
                 self.global_rank + command.src_replica_size,
                 self.world_size + command.src_replica_size,
+                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
             )
             # cache the communicator index
             self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
@@ -535,6 +572,13 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                     if not parameter.is_contiguous():
                         recv_tensor = parameter.contiguous()
 
+                    if self.global_commnicator_idex < 0:
+                        raise RuntimeError(
+                            "[Rollout] rollout-to-rollout broadcast requested "
+                            "but no global mesh communicator exists (the "
+                            "controller reported the mesh unused when it was "
+                            "last rebuilt)."
+                        )
                     nccl_broadcast(recv_tensor, src_rank, self.global_commnicator_idex)
 
                     if not parameter.is_contiguous():

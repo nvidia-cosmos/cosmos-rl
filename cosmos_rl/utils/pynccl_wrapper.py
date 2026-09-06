@@ -154,6 +154,9 @@ class Function:
 class NCCLLibrary:
     # names of optional functions (absence tolerated)
     optional_functions = {"ncclCommInitRankConfig"}
+    # Class-level so the fallback warning is emitted once per process rather
+    # than once per communicator.
+    _warned_no_init_config = False
     exported_functions = [
         # const char* ncclGetErrorString(ncclResult_t result)
         Function("ncclGetErrorString", ctypes.c_char_p, [ncclResult_t]),
@@ -434,9 +437,22 @@ class NCCLLibrary:
 
         fn = self._funcs.get("ncclCommInitRankConfig")
         if fn is None:
-            logger.debug(
-                "ncclCommInitRankConfig symbol missing – falling back to ncclCommInitRank"
-            )
+            # Worth a warning rather than a debug line: this is the one
+            # communicator-creation path that cannot be bounded. The config
+            # call returns ncclInProgress immediately and the caller polls
+            # ncclCommGetAsyncError against a deadline, whereas ncclCommInitRank
+            # blocks until every rank has joined -- and the abort watchdog is
+            # not armed for creation, because the communicator it would abort
+            # does not exist yet. A peer that never joins wedges this thread
+            # for the lifetime of the process.
+            if not NCCLLibrary._warned_no_init_config:
+                NCCLLibrary._warned_no_init_config = True
+                logger.warning(
+                    "ncclCommInitRankConfig symbol missing - falling back to "
+                    "ncclCommInitRank. Communicator creation is BLOCKING and "
+                    "unbounded on this NCCL build: if a peer never reaches its "
+                    "own call, this process hangs instead of timing out."
+                )
             return self.ncclCommInitRank(world_size, unique_id, rank)
 
         ret = fn(

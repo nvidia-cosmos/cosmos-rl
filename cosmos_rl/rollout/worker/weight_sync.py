@@ -504,6 +504,51 @@ class WeightSyncThread:
         self._fenced_seq = current_seq
         return result
 
+    def reset_for_rebuild(self) -> bool:
+        """Quiesce pending work and clear latched failure ahead of a rebuild.
+
+        Returns whether a latched failure had to be cleared.
+
+        A mesh rebuild is the RECOVERY from a replica departing, so a failure
+        caused by that departure must not veto it. Without this, one lost
+        replica is fatal to every survivor:
+
+        * the departing peer makes an in-flight R2R raise, latching
+          ``_task_failed``;
+        * ``fence()`` therefore returns False and latches ``_fence_failed``;
+        * ``_fence_failed`` short-circuits every later ``fence()`` *before* the
+          drain, so the rebuild is refused without even trying;
+        * ``build_global_mesh`` treats that as fatal and the survivor dies,
+          which triggers another rebuild for the next survivor, and so on.
+
+        The flags are cleared BEFORE draining, because the short-circuit would
+        otherwise make this report failure without doing any work. If the drain
+        itself then fails, ``fence()`` has already aborted NCCL -- the old
+        communicator is gone, which is precisely the state a rebuild wants --
+        so the flags are cleared again and the caller proceeds.
+        """
+        had_failure = bool(
+            getattr(self, "_fence_failed", False)
+            or getattr(self, "_task_failed", False)
+        )
+        self._clear_latched_failure()
+        if not self.fence():
+            logger.warning(
+                "[WeightSyncThread] %s: work did not drain cleanly before the "
+                "mesh rebuild; NCCL has been aborted and the stale work is "
+                "being discarded. The rebuild replaces the communicator that "
+                "work targeted, so it cannot be completed.",
+                self._worker.replica_name,
+            )
+            had_failure = True
+            self._clear_latched_failure()
+        return had_failure
+
+    def _clear_latched_failure(self) -> None:
+        self._fence_failed = False
+        self._task_failed = False
+        self._fenced_seq = None
+
     def drain(self, timeout: float = _WST_QUEUE_DRAIN_TIMEOUT_S) -> bool:
         """Compatibility wrapper for the full queue-and-stream fence."""
         return self.fence(queue_timeout=timeout)
@@ -876,6 +921,22 @@ def do_nccl_broadcast_grouped(worker, src_replica_name: str, stream) -> tuple:
         assert worker.rank_in_rollout_repicas >= 0
         assert len(worker.replica_name_to_rank) > 0
         comm_idx = worker.global_commnicator_idex
+        if comm_idx < 0:
+            # No mesh communicator was ever built -- the controller reported
+            # the mesh unused, so BuildMeshCommand skipped the collective.
+            #
+            # Every R2R broadcast path funnels through here, which is why the
+            # check lives here rather than at one of the three call sites.
+            # Without it comm_idx=-1 reaches _COMM_REGISTRY and raises a bare
+            # KeyError, and on the async path that KeyError is swallowed as a
+            # generic task failure -- the replica keeps running and silently
+            # never syncs weights, which is worse than stopping.
+            raise RuntimeError(
+                "[Rollout] rollout-to-rollout broadcast requested but no global "
+                "mesh communicator exists (the controller reported the mesh "
+                "unused when it was last rebuilt). This replica cannot "
+                "participate; a peer that did build one will wait for it."
+            )
         src_rank = worker.replica_name_to_rank[src_replica_name]
 
         buffer_sd = getattr(worker, "_buffer_state_dict", None)

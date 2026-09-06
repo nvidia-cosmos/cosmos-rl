@@ -669,8 +669,16 @@ class HighAvailabilitylNccl:
 
         # create nccl comm, any error will be reported to the controller
         try:
+            # Bounded for the same reason as the rollout mesh: this is a
+            # collective over a controller snapshot, and the rebuild that
+            # issues it is triggered BY membership changing, so a member that
+            # departs before reaching its own call blocks everyone else. An
+            # unset budget resolves to the 10-minute COSMOS_NCCL_TIMEOUT_MS.
             self.comm_idx = create_nccl_comm(
-                nccl_group_id, rank, len(cmd.replica_name_to_rank)
+                nccl_group_id,
+                rank,
+                len(cmd.replica_name_to_rank),
+                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
             )
             self.is_first_time_build_mesh = False
         except Exception as e:
@@ -773,14 +781,21 @@ class HighAvailabilitylNccl:
         start_time = time.time()
 
         if timeout == 0:
-            while not self.is_comm_ready.is_set():
-                time.sleep(0.1)
-        else:
-            done = self.is_comm_ready.wait(timeout=timeout)
-            if not done:
-                raise TimeoutError(
-                    f"{self.__log_prefix()} wait for nccl comm ready timeout, current time: {time.time()}, start time: {start_time}, timeout: {timeout}"
-                )
+            # Was an unbounded `while not set: sleep(0.1)`. A mesh build that
+            # fails leaves is_comm_ready cleared -- __execute_build_mesh reports
+            # the error and returns rather than raising -- so every later
+            # caller that took this default spun here forever, silently, with
+            # no diagnostic. get_replica_rank takes it, and broadcast() calls
+            # get_replica_rank BEFORE __do_nccl_op_with_retry, so the trainer
+            # hung one frame above the timeout-and-retry machinery meant to
+            # handle exactly this.
+            timeout = self.default_timeout_ms / 1000
+
+        done = self.is_comm_ready.wait(timeout=timeout)
+        if not done:
+            raise TimeoutError(
+                f"{self.__log_prefix()} wait for nccl comm ready timeout, current time: {time.time()}, start time: {start_time}, timeout: {timeout}"
+            )
 
     def world_size(self):
         """
