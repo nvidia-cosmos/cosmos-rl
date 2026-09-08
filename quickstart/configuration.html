@@ -46,7 +46,10 @@
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="single_node_example.html">Single node example</a></li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Configuration</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#policy-to-policy-state-packing">Policy-to-policy state packing</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="dataflow.html">Dataset &amp; Process</a></li>
 <li class="toctree-l1"><a class="reference internal" href="customization.html">Customization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="hf_models_support.html">Hugging Face Model Support</a></li>
@@ -4358,7 +4361,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="265"><ul class="simple">
+<tr class="row-even"><td rowspan="269"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -5082,6 +5085,20 @@
 <td colspan="4"><p>1</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>p2p_sync_pack_tensors</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>P2P Sync Pack Tensors</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Pack small tensors into byte-bounded buffers for policy-to-policy initialization and dynamic-scale state synchronization.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>coalesce_weight_sync</p></li>
 </ul>
 </td>
@@ -5696,6 +5713,19 @@
 </tr>
 </tbody>
 </table>
+<section id="policy-to-policy-state-packing">
+<h2>Policy-to-policy state packing<a class="headerlink" href="#policy-to-policy-state-packing" title="Link to this heading"></a></h2>
+<p>Policy initialization and dynamic scaling can pack small state tensors into
+byte-bounded NCCL transfers. Packing is disabled by default because it requires
+an additional device-side copy and scratch buffer. Enable it explicitly in the
+training configuration:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[train]</span>
+<span class="n">p2p_sync_pack_tensors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+</pre></div>
+</div>
+<p>This setting affects policy-to-policy state synchronization only. It does not
+change policy-to-rollout or rollout-to-rollout weight synchronization.</p>
+</section>
 </section>
 
 
