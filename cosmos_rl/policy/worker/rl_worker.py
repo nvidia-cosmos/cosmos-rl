@@ -1092,7 +1092,15 @@ class RLPolicyWorker(PolicyWorkerBase):
                 # after the rollout had already aborted (orphaned P2R recv ->
                 # ncclCommAbort hang; see rollout_multirank_shutdown.md).
                 deadline = time.time() + COSMOS_FINAL_WEIGHT_SYNC_WAIT_S
-                while time.time() < deadline:
+                while True:
+                    keep_waiting = (
+                        time.time() < deadline if self.global_rank == 0 else None
+                    )
+                    keep_waiting = dist_util.broadcast_object_cpu(
+                        keep_waiting, src=0, device=torch.device("cpu")
+                    )
+                    if not keep_waiting:
+                        break
                     self.broadcast_command()
                     if len(self.command_buffer.queue) > 0:
                         break

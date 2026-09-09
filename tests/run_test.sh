@@ -117,6 +117,7 @@ run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
 run python tests/test_multirank_shutdown.py
+run python tests/test_policy_shutdown_deadline.py
 
 # Only end-to-end guard for the NCCL payload transport; it was referenced by no
 # workflow, so it had never executed anywhere until a targeted Slurm probe, where
