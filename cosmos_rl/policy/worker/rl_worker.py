@@ -324,13 +324,25 @@ class RLPolicyWorker(PolicyWorkerBase):
         if not hasattr(self, "_handle_shutdown_called"):
             self._handle_shutdown_called = True
 
-            # Release the payload-transport data packer FIRST: stop its
-            # prefetch thread and abort its cached communicators.  A NCCL
-            # payload transport (NCCLDataPackerMixin) holds 2-rank comms to
-            # the rollout replicas; by shutdown time those replicas have
-            # exited, so the leftover half-open comms would wedge the
-            # NCCL / process-group teardown below and hang the policy exit.
-            # Idempotent + best-effort; also covers the UCXX packer.
+            # Without controller fast-reap, unregister first so the controller
+            # can broadcast STOP to rollout peers before the payload packer
+            # waits for those peers during NCCL teardown.  With fast-reap,
+            # unregister must remain last because it arms the controller's
+            # SIGTERM path.  Use the shared, already-parsed setting so shutdown
+            # truthiness matches the controller exactly.
+            unregister_before_teardown = (
+                not constant.COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS
+            )
+            if unregister_before_teardown:
+                self.unregister_from_controller()
+
+            # Release the payload-transport data packer before the remaining
+            # NCCL teardown: stop its prefetch thread and abort its cached
+            # communicators.  A NCCL payload transport (NCCLDataPackerMixin)
+            # holds 2-rank comms to rollout replicas, so leftover half-open
+            # comms would wedge the NCCL / process-group teardown below and
+            # hang the policy exit.  Idempotent + best-effort; also covers the
+            # UCXX packer.
             self._shutdown_payload_data_packers()
 
             self.shutdown_signal.set()
@@ -352,22 +364,23 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
-            # Complete NCCL + distributed teardown BEFORE announcing departure.
-            # unregister_from_controller() arms the controller's
-            # COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS fast-reap, which SIGTERMs the
-            # job within ~8s.  If we unregister first, the reap pre-empts the
-            # trailing sleep and destroy_worker() (in execute()'s finally) never
-            # runs -- leaving the weight-sync comm (idx=0) un-aborted (a latent
-            # hang were the reap ever disabled) and no graceful teardown.  The
-            # background threads above are joined, so no comm is in use here;
-            # nccl_abort_all() is idempotent and forces any in-flight collective
-            # to stop, so a departed peer can't wedge the destroy.
+            # Complete NCCL + distributed teardown.  In fast-reap mode this
+            # must happen BEFORE announcing departure: unregistering arms the
+            # controller's SIGTERM path, which otherwise pre-empts the trailing
+            # sleep and destroy_worker() (in execute()'s finally).  That leaves
+            # the weight-sync comm (idx=0) un-aborted and prevents graceful
+            # teardown.  The background threads above are joined, so no comm is
+            # in use here; nccl_abort_all() is idempotent and forces any
+            # in-flight collective to stop, so a departed peer can't wedge the
+            # destroy.
             nccl_abort_all()
             self.destroy_worker()
 
-            # Announce departure LAST -- the reap now races an already-torn-down
-            # process, which exits cleanly instead of being killed mid-teardown.
-            self.unregister_from_controller()
+            if not unregister_before_teardown:
+                # Announce departure LAST -- the reap now races an
+                # already-torn-down process, which exits cleanly instead of
+                # being killed mid-teardown.
+                self.unregister_from_controller()
 
             if hasattr(self, "upload_thread") and self.upload_thread is not None:
                 logger.info("[Policy] Waiting for upload thread to finish...")

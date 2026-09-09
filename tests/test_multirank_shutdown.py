@@ -1187,15 +1187,10 @@ class TestTrainAckDuringPartialDrain(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Policy -- teardown-before-unregister ordering (clean fast-reap exit)
+# Policy -- conditional unregister / teardown ordering
 # ---------------------------------------------------------------------------
 class TestPolicyShutdownTeardownOrder(unittest.TestCase):
-    """Bug fix (policy_shutdown_reaped_before_clean_exit): the policy must
-    complete NCCL + distributed teardown BEFORE ``unregister_from_controller()``
-    arms the controller's ``COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS`` fast-reap.
-    Otherwise the reap SIGTERMs the process mid-``sleep(15)``, ``destroy_worker``
-    (in ``execute``'s ``finally``) never runs, and the weight-sync comm (idx=0)
-    is left un-aborted."""
+    """Policy shutdown ordering must match the controller's fast-reap mode."""
 
     @staticmethod
     def _worker(order):
@@ -1213,12 +1208,16 @@ class TestPolicyShutdownTeardownOrder(unittest.TestCase):
             unregister_from_controller=lambda: order.append("unregister"),
         )
 
-    def test_abort_and_destroy_before_unregister(self):
+    @staticmethod
+    def _handle_shutdown(worker, order, *, fast_reap):
         from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 
-        order = []
-        worker = self._worker(order)
         with (
+            patch(
+                "cosmos_rl.policy.worker.rl_worker.constant."
+                "COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS",
+                fast_reap,
+            ),
             patch(
                 "cosmos_rl.policy.worker.rl_worker.nccl_abort_all",
                 lambda: order.append("nccl_abort_all"),
@@ -1226,6 +1225,12 @@ class TestPolicyShutdownTeardownOrder(unittest.TestCase):
             patch("cosmos_rl.policy.worker.rl_worker.time.sleep", lambda _s: None),
         ):
             RLPolicyWorker.handle_shutdown(worker)
+
+    def test_fast_reap_tears_down_before_unregister(self):
+        order = []
+        worker = self._worker(order)
+        self._handle_shutdown(worker, order, fast_reap=True)
+
         self.assertIn("nccl_abort_all", order)
         self.assertIn("destroy_worker", order)
         self.assertIn("unregister", order)
@@ -1240,21 +1245,23 @@ class TestPolicyShutdownTeardownOrder(unittest.TestCase):
         self.assertIn("shutdown_payload", order)
         self.assertLess(order.index("shutdown_payload"), order.index("nccl_abort_all"))
 
-    def test_handle_shutdown_runs_once(self):
-        from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
-
+    def test_without_fast_reap_unregisters_before_payload_teardown(self):
         order = []
         worker = self._worker(order)
-        with (
-            patch(
-                "cosmos_rl.policy.worker.rl_worker.nccl_abort_all",
-                lambda: order.append("nccl_abort_all"),
-            ),
-            patch("cosmos_rl.policy.worker.rl_worker.time.sleep", lambda _s: None),
-        ):
-            RLPolicyWorker.handle_shutdown(worker)
-            RLPolicyWorker.handle_shutdown(worker)  # idempotent -- guard flag
-        self.assertEqual(order.count("unregister"), 1)
+        self._handle_shutdown(worker, order, fast_reap=False)
+
+        self.assertLess(order.index("unregister"), order.index("shutdown_payload"))
+        self.assertLess(order.index("unregister"), order.index("nccl_abort_all"))
+        self.assertLess(order.index("unregister"), order.index("destroy_worker"))
+
+    def test_handle_shutdown_runs_once_in_both_modes(self):
+        for fast_reap in (False, True):
+            with self.subTest(fast_reap=fast_reap):
+                order = []
+                worker = self._worker(order)
+                self._handle_shutdown(worker, order, fast_reap=fast_reap)
+                self._handle_shutdown(worker, order, fast_reap=fast_reap)
+                self.assertEqual(order.count("unregister"), 1)
 
     def test_destroy_worker_is_idempotent(self):
         from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
