@@ -7,13 +7,15 @@ Run from the repository root with:
     python tests/test_policy_shutdown_deadline.py
 
 Requires PyTorch with Gloo and loopback socket access, but no GPU or model.
-Load the actual worker methods and transport helper from this checkout without
-importing the trainer's GPU dependencies. Only clocks, background IO, command
-handlers, and teardown are substituted. A timeout is a test failure.
+Load the actual worker methods and transport helper from this checkout or the
+installed package without importing the trainer's GPU dependencies. Only clocks,
+background IO, command handlers, and teardown are substituted. A timeout is a
+test failure.
 """
 
 import ast
 import datetime
+import importlib.util
 import multiprocessing
 import os
 import queue
@@ -35,8 +37,12 @@ def _run_rank(
     os.environ.update(
         RANK=str(rank), WORLD_SIZE=str(world_size), GLOO_SOCKET_IFNAME="lo"
     )
-    root = Path(__file__).resolve().parents[1]
-    worker_path = root / "cosmos_rl/policy/worker/rl_worker.py"
+    root = Path(__file__).resolve().parents[1] / "cosmos_rl"
+    if not root.is_dir():
+        spec = importlib.util.find_spec("cosmos_rl")
+        assert spec is not None and spec.origin, "cosmos_rl is not importable"
+        root = Path(spec.origin).resolve().parent
+    worker_path = root / "policy/worker/rl_worker.py"
     worker_tree = ast.parse(worker_path.read_text(), filename=str(worker_path))
     methods = [
         method
@@ -46,7 +52,7 @@ def _run_rank(
         if isinstance(method, ast.FunctionDef)
         and method.name in {"main_loop", "broadcast_command"}
     ]
-    transport_path = root / "cosmos_rl/utils/distributed.py"
+    transport_path = root / "utils/distributed.py"
     transport_tree = ast.parse(transport_path.read_text(), filename=str(transport_path))
     transport = [
         node
