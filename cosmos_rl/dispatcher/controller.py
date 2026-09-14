@@ -24,6 +24,7 @@ import os
 import math
 import threading
 import tempfile
+from collections import OrderedDict
 from typing import List, Dict, Tuple, Optional, Callable
 from cosmos_rl.dispatcher.replica import Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES
@@ -66,6 +67,11 @@ def _wait_for_redis_ready(port: int, timeout: float) -> bool:
         except redis.exceptions.RedisError:
             time.sleep(0.2)
     return False
+
+
+#: Discard reports remembered by the refill path, mirroring the settlement
+#: dedup window in :mod:`cosmos_rl.dispatcher.status`.
+_REFILL_REPORT_DEDUP_WINDOW = 4096
 
 
 class Controller:
@@ -153,6 +159,10 @@ class Controller:
         self.weight_version_to_replacement_prompt_num: Dict[int, int] = {}
         self.weight_version_to_replacement_prompt_issued: Dict[int, int] = {}
         self.weight_version_to_discarded_sample_num: Dict[int, int] = {}
+        # Discard reports reach the refill path from both the HTTP route and a
+        # backend settling directly; dedupe by report id so one terminal group
+        # can never reopen two prompt slots.
+        self._applied_refill_report_ids: OrderedDict[str, None] = OrderedDict()
 
         self.data_fetcher = ControllerDataFetcher(
             config=config,
@@ -232,6 +242,12 @@ maxmemory-policy allkeys-lfu
             ips=["0.0.0.0"], port=redis_free_port
         )
 
+        # Terminal discards must free the samples AND reopen the prompt slot
+        # they were fetched under; binding them here keeps the two in step for
+        # every caller of ``settle_discarded_samples``.
+        self.policy_status_manager.set_discard_refill_hook(
+            self.register_discarded_samples_for_refill
+        )
         self.policy_status_manager.setup(
             config,
             self.redis_controller,
@@ -300,7 +316,10 @@ maxmemory-policy allkeys-lfu
     _SOFT_THROTTLE_HEARTBEAT_S = 5.0
 
     def register_discarded_samples_for_refill(
-        self, weight_version: int, discarded_samples: int
+        self,
+        weight_version: int,
+        discarded_samples: int,
+        report_id: Optional[str] = None,
     ) -> int:
         """Reopen same-weight prompt capacity after terminal sample loss.
 
@@ -311,9 +330,17 @@ maxmemory-policy allkeys-lfu
         """
 
         train_policy = self.config.train.train_policy
+        # The prompt-version quota applies to every non-DAPO disaggregated run,
+        # not just those that set ``on_policy``.  What decides whether a leaked
+        # slot deadlocks is the staleness window: a worker with
+        # ``allowed_outdated_steps=0`` can never accept the next-version prompt
+        # a leak produces, so refill on strictness, not on the flag alone.
+        strict = bool(getattr(train_policy, "on_policy", False)) or (
+            getattr(train_policy, "allowed_outdated_steps", None) == 0
+        )
         if (
             discarded_samples <= 0
-            or not getattr(train_policy, "on_policy", False)
+            or not strict
             or train_policy.variant == "dapo"
             or self.config.mode == "colocated"
         ):
@@ -326,6 +353,16 @@ maxmemory-policy allkeys-lfu
                 discarded_samples,
             )
             return 0
+
+        if report_id is not None:
+            applied = getattr(self, "_applied_refill_report_ids", None)
+            if applied is None:
+                applied = self._applied_refill_report_ids = OrderedDict()
+            if report_id in applied:
+                return 0
+            applied[report_id] = None
+            if len(applied) > _REFILL_REPORT_DEDUP_WINDOW:
+                applied.popitem(last=False)
 
         credits = getattr(self, "weight_version_to_replacement_prompt_num", None)
         if credits is None:
@@ -357,6 +394,24 @@ maxmemory-policy allkeys-lfu
         )
         return replacement_prompts
 
+    def _prune_refill_state(self, *, before_weight_version: int) -> None:
+        """Drop refill bookkeeping for weight versions already trained.
+
+        Prompt versions only ever advance, so a credit below the version being
+        assigned can never be spent; keeping it would grow these dicts for the
+        life of the run.
+        """
+        for attr in (
+            "weight_version_to_replacement_prompt_num",
+            "weight_version_to_replacement_prompt_issued",
+            "weight_version_to_discarded_sample_num",
+        ):
+            state = getattr(self, attr, None)
+            if not state:
+                continue
+            for version in [v for v in state if v < before_weight_version]:
+                del state[version]
+
     def _assign_prompt_weight_versions(
         self,
         payloads: List[RLPayload],
@@ -367,6 +422,7 @@ maxmemory-policy allkeys-lfu
         """Assign prompt versions, consuming same-version refill credits first."""
 
         weight_version = starting_weight_version
+        self._prune_refill_state(before_weight_version=starting_weight_version)
         credits = getattr(self, "weight_version_to_replacement_prompt_num", None)
         if credits is None:
             credits = self.weight_version_to_replacement_prompt_num = {}

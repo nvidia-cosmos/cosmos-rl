@@ -725,14 +725,20 @@ async def put_rollout_group(rollout: RolloutRequest):
             discarded_samples = policy_status._parse_non_negative_count(
                 rollout.metrics, "discarded_samples"
             )
+            discard_report_id = rollout.metrics.get("discard_report_id")
             settled_count = policy_status.settle_discarded_samples(
                 source_replica=rollout.src_replica_name,
-                report_id=rollout.metrics.get("discard_report_id"),
+                report_id=discard_report_id,
                 count=discarded_samples,
+                weight_version=rollout.metrics.get(DISCARDED_WEIGHT_VERSION_KEY),
             )
             if settled_count > 0:
+                # Idempotent by report id, so this is a no-op when the
+                # settlement hook already reopened the slot.
                 controller.register_discarded_samples_for_refill(
-                    rollout.metrics.get(DISCARDED_WEIGHT_VERSION_KEY), settled_count
+                    rollout.metrics.get(DISCARDED_WEIGHT_VERSION_KEY),
+                    settled_count,
+                    discard_report_id,
                 )
         if policy_status.rollout_admission_closed():
             policy_status.cleanup_terminal_rollouts(

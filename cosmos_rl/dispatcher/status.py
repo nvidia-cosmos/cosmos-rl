@@ -42,6 +42,19 @@ from cosmos_rl.utils.util import aggregate_report_data
 # while covering a much larger window than any request can remain in flight.
 _REPORT_DEDUP_WINDOW = 4096
 
+#: Settlement sources owned by the controller itself.  Their drops are stale or
+#: filtered samples whose prompt slot must stay spent, so they never reopen
+#: prompt capacity and never warrant the "no weight version" warning.
+_INTERNAL_SETTLEMENT_SOURCES = frozenset(
+    {
+        "rollout_failure",
+        "filter_outdated",
+        "dapo_filter",
+        "terminal_result_cleanup",
+        "terminal_buffer_cleanup",
+    }
+)
+
 
 # Debug-only accounting log for ``samples_on_the_fly``. Only the mutation
 # sites that can drift from dispatch accounting call this helper; the
@@ -289,6 +302,10 @@ class PolicyStatusManager:
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
         self._applied_discard_report_ids: Dict[str, OrderedDict[str, None]] = {}
+        # Set by the controller; see ``set_discard_refill_hook``.
+        self._discard_refill_hook: Optional[
+            Callable[[int, int, Optional[str]], int]
+        ] = None
         self._applied_completion_admission_report_ids: Dict[
             str, OrderedDict[str, None]
         ] = {}
@@ -1160,7 +1177,23 @@ class PolicyStatusManager:
             for key in ("sampled", "filtered_positive", "filtered_negative")
         }
 
-    def _settle_samples_on_the_fly(self, count: int, source: str) -> None:
+    def _settle_samples_on_the_fly(
+        self,
+        count: int,
+        source: str,
+        weight_version: Optional[int] = None,
+        report_id: Optional[str] = None,
+    ) -> None:
+        """Release ``count`` reserved samples, optionally reopening a prompt slot.
+
+        Backends settle terminal drops through this counter.  Freeing the
+        samples alone leaves the prompt-version slot they were fetched under
+        consumed, which strands a strict on-policy step one group short
+        forever -- so a caller that knows the version the drop belongs to
+        should pass it and get the slot back.  Internal callers pass nothing:
+        staleness and DAPO filtering drop samples whose prompt slot must stay
+        spent.
+        """
         if count <= 0:
             return
         before = self.samples_on_the_fly
@@ -1171,14 +1204,82 @@ class PolicyStatusManager:
             self.samples_on_the_fly,
             extra=f"settled_count={count}",
         )
+        if weight_version is not None:
+            self._reopen_prompt_slot(
+                weight_version=weight_version,
+                count=count,
+                source=source,
+                report_id=report_id,
+            )
+        elif source not in _INTERNAL_SETTLEMENT_SOURCES:
+            self._warn_settlement_without_weight_version(source, count)
+
+    def _warn_settlement_without_weight_version(self, source: str, count: int) -> None:
+        """Say once per source that a settled drop left its prompt slot spent."""
+        warned = getattr(self, "_warned_versionless_settlement", None)
+        if warned is None:
+            warned = self._warned_versionless_settlement = set()
+        if source in warned:
+            return
+        warned.add(source)
+        logger.warning(
+            "[Controller] '%s' settled %d sample(s) without a weight version. "
+            "The prompt slot(s) they were fetched under stay consumed, so a "
+            "strict on-policy step can stall one group short; pass "
+            "weight_version= to release them.",
+            source,
+            count,
+        )
+
+    def _reopen_prompt_slot(
+        self,
+        *,
+        weight_version: int,
+        count: int,
+        source: str,
+        report_id: Optional[str],
+    ) -> None:
+        hook = getattr(self, "_discard_refill_hook", None)
+        if hook is None:
+            return
+        if type(weight_version) is not int or weight_version < 0:
+            logger.warning(
+                "[Controller] '%s' settled %d sample(s) with an invalid weight "
+                "version %r; prompt capacity was not reopened.",
+                source,
+                count,
+                weight_version,
+            )
+            return
+        hook(weight_version, count, report_id)
+
+    def set_discard_refill_hook(
+        self, hook: Optional[Callable[[int, int, Optional[str]], int]]
+    ) -> None:
+        """Register the controller callback that reopens prompt capacity.
+
+        Settling a terminal discard frees samples but not the prompt-version
+        slot those samples were fetched under.  Binding the two here means a
+        backend that settles directly -- rather than through the HTTP rollout
+        report -- cannot free the samples and leave the slot leaked, which is
+        exactly what deadlocks strict zero-staleness training.
+        """
+        self._discard_refill_hook = hook
 
     def settle_discarded_samples(
         self,
         source_replica: str,
         report_id: Any,
         count: int,
+        weight_version: Optional[int] = None,
     ) -> int:
-        """Settle one idempotent report of terminally discarded samples."""
+        """Settle one idempotent report of terminally discarded samples.
+
+        ``weight_version`` is the version the discarded samples were generated
+        for; supplying it lets the controller reopen that version's prompt
+        slot.  Omitting it settles the samples only, so a strict run can stall
+        one group short -- warn loudly rather than fail silently.
+        """
         if count <= 0:
             return 0
         if not isinstance(report_id, str) or not report_id:
@@ -1202,7 +1303,21 @@ class PolicyStatusManager:
         self.filter_records["rollout_failed"] = (
             self.filter_records.get("rollout_failed", 0) + count
         )
-        self._settle_samples_on_the_fly(count, "rollout_failure")
+        self._settle_samples_on_the_fly(
+            count,
+            "rollout_failure",
+            weight_version=weight_version,
+            report_id=report_id if isinstance(report_id, str) else None,
+        )
+        if weight_version is None:
+            logger.warning(
+                "[Controller] Discard report %s from %s settled %d sample(s) "
+                "without a weight version; the prompt slot they were fetched "
+                "under stays consumed and a strict on-policy step can stall.",
+                report_id,
+                source_replica,
+                count,
+            )
         return count
 
     def forget_discard_reports(self, source_replica: str) -> None:

@@ -283,9 +283,10 @@ def test_http_discard_report_settles_before_normal_admission():
         source_replica="rollout-0",
         report_id="report-1",
         count=4,
+        weight_version=None,
     )
     fake_controller.register_discarded_samples_for_refill.assert_called_once_with(
-        None, 4
+        None, 4, "report-1"
     )
     fake_controller.put_rollouts.assert_awaited_once_with([])
 
@@ -336,7 +337,9 @@ def test_http_admission_retry_is_idempotent_for_metrics_settlement_and_refill():
         }
     }
     assert policy_status.samples_on_the_fly == 4
-    fake_controller.register_discarded_samples_for_refill.assert_called_once_with(3, 1)
+    fake_controller.register_discarded_samples_for_refill.assert_called_once_with(
+        3, 1, "stable-admission-report"
+    )
 
 
 def test_http_admission_discard_refills_strict_on_policy_step_at_same_weight():
