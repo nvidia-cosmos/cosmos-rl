@@ -142,6 +142,7 @@ run python tests/test_nccl_rendezvous.py
 run python tests/test_nccl_rollout_mixin.py
 run python tests/test_nccl_streams.py
 run python tests/test_nccl_transport.py
+run python tests/test_pack_canonical_stride.py
 run python tests/test_payload_rotation.py
 run python tests/test_payload_transport.py
 run python tests/test_profiler_ucxx.py

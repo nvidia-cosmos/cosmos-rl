@@ -379,7 +379,15 @@ class NCCLRolloutMixin:
                 EPISODE_LENGTH: ep_len,
             }
         except Exception as e:
-            logger.error("[NCCLRolloutMixin] write_to_buffer failed: %s", e)
+            # Name the rollout so a disk fallback is attributable; the packer
+            # already names the offending schema field in its message.
+            logger.error(
+                "[NCCLRolloutMixin] write_to_buffer failed for replica=%s "
+                "rollout_idx=%s; falling back to the plain trajectory: %s",
+                self._nccl_replica_id,
+                self._nccl_rollout_idx,
+                e,
+            )
             return None
 
     def _pack(self, trajectory: Dict[str, Any], ep_len: int, transfer_id: str):

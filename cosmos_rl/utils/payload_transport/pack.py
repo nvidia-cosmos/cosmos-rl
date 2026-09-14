@@ -92,6 +92,44 @@ def _coerce(tensor: torch.Tensor, spec: TensorSpec) -> torch.Tensor:
     return tensor
 
 
+def _layout_error(spec: TensorSpec, tensor: torch.Tensor, exc: Exception) -> str:
+    """Message naming the offending field, so a pack failure is actionable.
+
+    ``write_to_buffer`` logs only the exception text before falling back to
+    the plain trajectory; without the field identity that log says a payload
+    failed but not which one.
+    """
+    return (
+        f"[pack] field '{spec.name}' cannot be viewed as bytes: "
+        f"dtype={tensor.dtype} shape={tuple(tensor.shape)} "
+        f"stride={tuple(tensor.stride())} device={tensor.device} "
+        f"schema_dtype={spec.dtype} schema_shape={tuple(spec.shape)}: {exc}"
+    )
+
+
+def _canonical_for_byte_view(tensor: torch.Tensor) -> torch.Tensor:
+    """Return ``tensor`` in storage that ``view(torch.uint8)`` accepts.
+
+    ``.contiguous()`` alone is NOT enough.  PyTorch's contiguity rules ignore
+    the stride of a size-1 dimension, so an int64 column view such as
+    ``sampled_modes[:, idx]`` -- ``shape=(1,), stride=(8,)`` -- reports
+    ``is_contiguous() is True`` and ``.contiguous()`` returns it untouched.
+    ``view(dtype)`` applies the stricter byte-layout rule and requires
+    ``stride(-1) == 1`` when the element size changes, so that tensor raises
+    "self.stride(-1) must be 1 to view Long as Byte".
+
+    Tensors that already satisfy the byte-view rule are returned as-is, so the
+    common case still packs without an extra copy.
+    """
+    if tensor.is_contiguous() and (tensor.dim() == 0 or tensor.stride(-1) == 1):
+        return tensor
+    # Explicitly allocate canonical storage: a fresh empty + copy_ is the only
+    # form guaranteed to produce unit last stride for every legal input layout.
+    canonical = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+    canonical.copy_(tensor)
+    return canonical
+
+
 def pack_trajectory_into(
     flat: torch.Tensor,
     trajectory: Dict[str, Any],
@@ -127,7 +165,10 @@ def pack_trajectory_into(
                 )
                 padded[: tensor.shape[0]] = tensor
                 tensor = padded
-        tensor = tensor.reshape(spec.shape).contiguous()
-        chunk = tensor.view(torch.uint8).reshape(-1)
+        tensor = _canonical_for_byte_view(tensor.reshape(spec.shape))
+        try:
+            chunk = tensor.view(torch.uint8).reshape(-1)
+        except RuntimeError as e:  # pragma: no cover - defensive
+            raise RuntimeError(_layout_error(spec, tensor, e)) from e
         off = offsets[spec.name]
         flat[off : off + chunk.numel()] = chunk

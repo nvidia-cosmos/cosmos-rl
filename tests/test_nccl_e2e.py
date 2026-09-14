@@ -31,6 +31,7 @@ existing instance with ``COSMOS_TEST_REDIS_HOST`` / ``COSMOS_TEST_REDIS_PORT``.
 
 import json
 import os
+import uuid
 import time
 import unittest
 
@@ -65,8 +66,54 @@ def _make_trajectory(device, ep_len=8, obs_dim=4, action_dim=2):
     }
 
 
-def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
-    """Entry point for each spawned rank.  Reports failures via err_queue."""
+#: Extra schema field for the strided case, mirroring the per-generation
+#: sampled-mode column an NDAS producer emits.
+STRIDED_FIELD = "sampled_mode"
+STRIDED_VALUE = 3
+
+
+def _strided_scalar(device):
+    """``shape=(1,)`` int64 whose last stride is 8, yet reports contiguous.
+
+    A size-1 dimension may hold any stride, so ``.contiguous()`` leaves this
+    untouched and ``view(torch.uint8)`` then rejects it.  Producers emit
+    exactly this when they slice one column out of a per-generation tensor.
+    """
+    row = torch.arange(8, dtype=torch.int64, device=device).reshape(1, 8)
+    value = row[:, STRIDED_VALUE]
+    assert value.is_contiguous() and value.stride(-1) != 1
+    return value
+
+
+def _make_strided_trajectory(device, ep_len=8, obs_dim=4, action_dim=2):
+    """The ordinary trajectory plus one field with a non-unit last stride.
+
+    Dims stay exactly as the passing roundtrips use them: the stride is the
+    only variable, so a failure here cannot be blamed on an unusual schema.
+    """
+    traj = _make_trajectory(device, ep_len, obs_dim, action_dim)
+    traj[STRIDED_FIELD] = _strided_scalar(device)
+    return traj
+
+
+def _worker(
+    rank: int,
+    world_size: int,
+    err_queue,
+    composed: bool = False,
+    strided: bool = False,
+    run_id: str = "",
+    action_dim: int = 2,
+):
+    """Entry point for each spawned rank.  Reports failures via err_queue.
+
+    ``run_id`` namespaces the Redis keys.  Module-level keys let a producer
+    that outlived its own test -- it serves for up to 60s -- be picked up by
+    the next test in the session, which then hangs waiting on a peer that is
+    already tearing down.  One namespace per roundtrip removes that coupling.
+    """
+    meta_key = "%s:%s" % (_META_KEY, run_id) if run_id else _META_KEY
+    done_key = "%s:%s" % (_DONE_KEY, run_id) if run_id else _DONE_KEY
     try:
         import redis
 
@@ -79,10 +126,33 @@ def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
         client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
         config = _Config()
-        dims = dict(max_steps=8, obs_dim=4, action_dim=2)
+        dims = dict(max_steps=8, obs_dim=4, action_dim=action_dim)
+
+        def build(dev):
+            fn = _make_strided_trajectory if strided else _make_trajectory
+            return fn(dev, action_dim=action_dim)
 
         if rank == 0:
             # Producer.
+            if strided:
+                # Extend the schema the way a backend does -- before setup, so
+                # the mixin sizes its buffers from it.  The consumer needs no
+                # change: the producer ships the schema in its metadata.
+                import numpy as np
+
+                import cosmos_rl.utils.payload_transport.nccl.mixins as _mixins
+                from cosmos_rl.utils.trajectory import TensorSpec
+
+                _base_build = _mixins.build_trajectory_schema
+
+                def _build_with_strided_field(dims_arg):
+                    schema = _base_build(dims_arg)
+                    schema.append(
+                        TensorSpec(name=STRIDED_FIELD, shape=(1,), dtype=np.int64)
+                    )
+                    return schema
+
+                _mixins.build_trajectory_schema = _build_with_strided_field
             producer = NCCLRolloutMixin()
             producer.setup_nccl(
                 replica_id="rollout-0",
@@ -93,13 +163,13 @@ def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
                 device=device,
                 **dims,
             )
-            traj = _make_trajectory(device)
+            traj = build(device)
             meta = producer.write_to_buffer(traj)
             assert meta is not None, "producer failed to pack buffer"
-            client.set(_META_KEY, json.dumps(meta))
+            client.set(meta_key, json.dumps(meta))
             # Serve until the consumer signals completion (bounded).
             deadline = time.monotonic() + 60
-            while time.monotonic() < deadline and not client.get(_DONE_KEY):
+            while time.monotonic() < deadline and not client.get(done_key):
                 time.sleep(0.05)
             producer.cleanup_nccl()
         else:
@@ -135,7 +205,7 @@ def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
             raw = None
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and raw is None:
-                raw = client.get(_META_KEY)
+                raw = client.get(meta_key)
                 if raw is None:
                     time.sleep(0.05)
             assert raw is not None, "consumer never saw producer metadata"
@@ -143,10 +213,19 @@ def _worker(rank: int, world_size: int, err_queue, composed: bool = False):
 
             resolved = packer.get_policy_input(rollout_output=meta)
             assert resolved is not None, "consumer failed to resolve NCCL ref"
+            expected_traj = build(device)
             obs = resolved["observations"]
-            expected = _make_trajectory(device)["observations"]
-            assert torch.allclose(obs.float(), expected), "payload mismatch"
-            client.set(_DONE_KEY, "1")
+            assert torch.allclose(obs.float(), expected_traj["observations"]), (
+                "payload mismatch"
+            )
+            if strided:
+                # The point of the strided run: the non-unit-stride field must
+                # arrive intact rather than taking the pack fallback.
+                got = resolved[STRIDED_FIELD].reshape(-1)[0].item()
+                assert got == STRIDED_VALUE, (
+                    "strided field mismatch: got %r want %r" % (got, STRIDED_VALUE)
+                )
+            client.set(done_key, "1")
             if composed:
                 # No transport-specific teardown to call: shutdown_prefetch
                 # defaults before_join to the attached strategy, which is the
@@ -275,13 +354,22 @@ class TestNcclE2E(unittest.TestCase):
         for key in (_META_KEY, _DONE_KEY):
             self.client.delete(key)
 
-    def _run_roundtrip(self, composed: bool):
+    def _run_roundtrip(
+        self, composed: bool, strided: bool = False, action_dim: int = 2
+    ):
         import torch.multiprocessing as mp
 
+        # One Redis namespace per roundtrip: a producer serves for up to 60s,
+        # so with shared keys it can outlive its own test and be picked up by
+        # the next one, which then waits on a peer that is tearing down.
+        run_id = uuid.uuid4().hex[:8]
         ctx = mp.get_context("spawn")
         err_queue = ctx.Queue()
         procs = [
-            ctx.Process(target=_worker, args=(rank, 2, err_queue, composed))
+            ctx.Process(
+                target=_worker,
+                args=(rank, 2, err_queue, composed, strided, run_id, action_dim),
+            )
             for rank in range(2)
         ]
         for p in procs:
@@ -311,6 +399,30 @@ class TestNcclE2E(unittest.TestCase):
         differently, the payload comes back wrong or not at all.
         """
         self._run_roundtrip(composed=True)
+
+    def test_two_rank_roundtrip_narrow_action_dim(self):
+        """A payload schema narrower than the consumer config must still resolve.
+
+        The consumer decodes from the schema the producer ships in its
+        metadata, so ``action_dim=1`` against a config declaring 2 should be
+        transparent.  When this shape was first tried the payload packed and
+        the consumer then dropped the reference inside ``_rendezvous_one``
+        within 18ms -- no bytes moved and the episode fell back to Redis.
+        Ordinary trajectory here, so only the dim differs: if this fails, the
+        consumer path is still sizing from config rather than from the
+        reference, and any backend whose schema differs loses payloads
+        silently.
+        """
+        self._run_roundtrip(composed=False, action_dim=1)
+
+    def test_two_rank_roundtrip_strided_field(self):
+        """A field with a non-unit last stride must survive the real transfer.
+
+        CPU tests cover the packer in isolation; this proves the same payload
+        packs, sends, and unpacks GPU->GPU instead of failing in
+        ``write_to_buffer`` and dropping the run to the disk fallback.
+        """
+        self._run_roundtrip(composed=False, strided=True)
 
 
 if __name__ == "__main__":
