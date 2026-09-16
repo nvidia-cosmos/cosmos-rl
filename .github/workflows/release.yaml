@@ -121,6 +121,12 @@ jobs:
     environment:
       name: testpypi
       url: https://test.pypi.org/p/cosmos-rl
+    # Mapped here because the `secrets` context is not available in a step's
+    # `if:` -- referencing it there is a hard workflow syntax error, and an
+    # invalid workflow is not registered at all, so it silently disappears
+    # from the Actions UI rather than failing loudly. `env` is available.
+    env:
+      TEST_PYPI_API_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v4
@@ -131,7 +137,7 @@ jobs:
       - name: Publish to TestPyPI
         # TestPyPI is a separate site with separate accounts and tokens; skip
         # cleanly rather than failing the run when no token is configured.
-        if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
+        if: env.TEST_PYPI_API_TOKEN != ''
         uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
         with:
           repository-url: https://test.pypi.org/legacy/
