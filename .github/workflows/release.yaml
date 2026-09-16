@@ -1,0 +1,165 @@
+name: release
+
+# Publishing is driven entirely by tags. setuptools-scm derives the version
+# from the tag (see tag_regex in pyproject.toml), so cutting 0.4.6 is literally
+# `git tag v0.4.6 && git push origin v0.4.6` -- there is no version string to
+# bump by hand and nothing to keep in sync.
+#
+# Credentials: a project-scoped PyPI API token, stored as a secret on the
+# `pypi` GitHub environment (NOT as a repository-level secret). The build job
+# never sees it; only the upload job, which checks out no source and runs no
+# repository code, is granted the environment.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'cosmos-rl-v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      publish_to:
+        description: 'Where to upload the built distributions'
+        type: choice
+        default: none
+        options:
+          - none
+          - testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # setuptools-scm reads the version out of git history; a shallow
+          # clone has no tags and silently yields fallback_version 0.0.0.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist and wheel
+        # local_scheme=node-and-date appends "+g<sha>.d<date>" to anything that
+        # is not an exact, clean tag, and PyPI rejects local versions outright.
+        # For manual (non-tag) runs we force a PEP 440-clean version so the
+        # TestPyPI path stays usable; tag builds are already clean.
+        run: |
+          set -eux
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            export SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version
+          fi
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check distributions
+        run: |
+          set -eux
+          python -m pip install --upgrade twine
+          twine check --strict dist/*
+          ls -l dist/
+
+      - name: Verify the built version matches the tag
+        # Guards the shallow-clone / missing-tag failure mode where the
+        # artifact comes out named 0.0.0. Catching it here matters because the
+        # mistake is not reversible: PyPI never lets a version number be
+        # reused, even after the file is deleted.
+        if: github.ref_type == 'tag'
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME#cosmos-rl-}"
+          tag="${tag#v}"
+          test -f "dist/cosmos_rl-${tag}-py3-none-any.whl"
+          test -f "dist/cosmos_rl-${tag}.tar.gz"
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # The environment is both the secret's scope and the approval gate:
+    # PYPI_API_TOKEN is defined on it, and its required-reviewer rule means no
+    # upload happens without a human approving, even though a tag push starts
+    # the run automatically.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cosmos-rl
+    steps:
+      # Deliberately no actions/checkout here. This job holds a long-lived
+      # publishing credential, so nothing from the repository -- no setup.py,
+      # no conftest, no shell script -- executes in it.
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        # Pinned to the v1.14.2 commit rather than a floating tag: this is the
+        # one action that is handed the API token, so a retagged upstream
+        # release must not silently change what runs here.
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/cosmos-rl
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        # TestPyPI is a separate site with separate accounts and tokens; skip
+        # cleanly rather than failing the run when no token is configured.
+        if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          # Re-running a manual build for the same dev version is routine on
+          # TestPyPI; don't fail the job when the file is already there.
+          skip-existing: true
+
+  github-release:
+    needs: publish-pypi
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release and attach the distributions
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
