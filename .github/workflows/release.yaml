@@ -110,7 +110,14 @@ jobs:
         # Pinned to the v1.14.2 commit rather than a floating tag: this is the
         # one action that is handed the API token, so a retagged upstream
         # release must not silently change what runs here.
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        #
+        # This must be the COMMIT sha, not the sha of the annotated tag object
+        # -- `git ls-remote --tags` prints both, and the tag-object one looks
+        # equally valid to git. It is not valid here: this is a Docker action
+        # whose prebuilt image on ghcr.io is tagged by commit sha, so pinning
+        # the tag object fails at pull time with "manifest unknown". Resolve
+        # it with `git ls-remote <url> 'refs/tags/vX.Y.Z^{}'`.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
@@ -138,7 +145,7 @@ jobs:
         # TestPyPI is a separate site with separate accounts and tokens; skip
         # cleanly rather than failing the run when no token is configured.
         if: env.TEST_PYPI_API_TOKEN != ''
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           repository-url: https://test.pypi.org/legacy/
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}
