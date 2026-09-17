@@ -197,6 +197,12 @@ class TestAutoRetryGate(unittest.TestCase):
 
 
 class TestMonitorLoopWiring(unittest.TestCase):
+    def test_distributed_worker_steps_fail_fast(self):
+        src = TEMPLATE.read_text()
+        for marker in ("# Policy nodes", "# Rollout nodes"):
+            step = src[src.index(marker) :].split("bash -c", 1)[0]
+            self.assertIn("--kill-on-bad-exit=1", step)
+
     """The predicate must actually be consulted by the loop.
 
     Without these, deleting the call site -- reverting the fix entirely --

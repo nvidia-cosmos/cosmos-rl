@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
@@ -123,6 +124,7 @@ class PrefetchDataPackerMixin:
     _prefetch_cache: Dict[str, Any] = {}
     _prefetch_timeout_s: float = 300.0
     _prefetch_step_count: int = 0
+    _prefetch_failure: Optional[str] = None
 
     # Double-buffer state for early-ack.  Owned here so any concrete
     # subclass gets it for free.
@@ -146,6 +148,7 @@ class PrefetchDataPackerMixin:
         between leaves the existing worker running and just refreshes
         the timeout.  This makes test-driven re-init paths painless.
         """
+        self._raise_if_prefetch_failed()
         self._prefetch_timeout_s = prefetch_timeout
         if self._prefetch_enabled:
             return
@@ -168,6 +171,9 @@ class PrefetchDataPackerMixin:
         self._prefetch_thread = None
 
         self._prefetch_cache = {}
+        self._prefetch_outstanding = deque()
+        self._prefetch_deadline_lock = threading.Lock()
+        self._prefetch_timers = {}
         self._prefetch_request_queue = queue.Queue()
         self._prefetch_result_queue = queue.Queue()
         self._prefetch_shutdown = threading.Event()
@@ -246,6 +252,10 @@ class PrefetchDataPackerMixin:
                 )
             else:
                 self._prefetch_thread = None
+                with self._prefetch_deadline_lock:
+                    for timer in self._prefetch_timers.values():
+                        timer.cancel()
+                    self._prefetch_timers.clear()
         self._prefetch_enabled = False
 
     # ------------------------------------------------------------------
@@ -371,6 +381,32 @@ class PrefetchDataPackerMixin:
     # Trainer-facing scheduling API
     # ------------------------------------------------------------------
 
+    def _raise_if_prefetch_failed(self) -> None:
+        if self._prefetch_failure is not None:
+            raise TimeoutError(self._prefetch_failure)
+
+    def _expire_prefetch(self, batch_id: int, timeout: float) -> None:
+        # This lock protects only Python bookkeeping, never transport work.
+        # Completion and expiration compete here; exactly one wins.
+        with self._prefetch_deadline_lock:
+            if self._prefetch_timers.pop(batch_id, None) is None:
+                return
+            if self._prefetch_failure is not None:
+                return
+            self._prefetch_failure = (
+                f"prefetch batch {batch_id} exceeded {timeout}s; background fetch "
+                "may still own transport locks; fallback and reuse disabled"
+            )
+            self._prefetch_cache = {}
+            self._prefetch_shutdown.set()
+        try:
+            if self._transport_strategy is not None:
+                self._transport_strategy.on_prefetch_timeout(self._prefetch_failure)
+        finally:
+            # A fatal NCCL hook exits without waking the collector into native
+            # cleanup. Returning hooks still wake it to raise TimeoutError.
+            self._prefetch_result_queue.put((batch_id, {}, 0.0))
+
     def start_prefetch(self, rollouts: List[Any]) -> None:
         """Submit ``rollouts`` for background fetch.  Non-blocking.
 
@@ -378,6 +414,7 @@ class PrefetchDataPackerMixin:
         below) before iterating ``get_policy_input`` over the batch.
         No-op when the prefetch thread isn't running yet.
         """
+        self._raise_if_prefetch_failed()
         if not self._prefetch_enabled or self._prefetch_request_queue is None:
             return
         tasks = self._filter_prefetch_tasks(rollouts)
@@ -385,6 +422,17 @@ class PrefetchDataPackerMixin:
             return
         batch_id = self._prefetch_batch_id
         self._prefetch_batch_id += 1
+        timer = threading.Timer(
+            self._prefetch_timeout_s,
+            self._expire_prefetch,
+            args=(batch_id, self._prefetch_timeout_s),
+        )
+        timer.daemon = True
+        with self._prefetch_deadline_lock:
+            self._raise_if_prefetch_failed()
+            self._prefetch_timers[batch_id] = timer
+        self._prefetch_outstanding.append(batch_id)
+        timer.start()
         self._prefetch_request_queue.put((batch_id, tasks))
 
     def wait_prefetch(self) -> None:
@@ -392,20 +440,23 @@ class PrefetchDataPackerMixin:
 
         After this returns, ``get_policy_input`` resolves references
         from ``_prefetch_cache`` (O(1) dict lookup).
+
+        A timeout is terminal, not a cache miss: the worker may still own
+        native transport locks. The deadline is measured from submission,
+        including deferred-wait overlap. An independent watchdog enforces it
+        even when this method is never called. The fetch worker disarms the
+        watchdog on completion, so delayed collection cannot cause a timeout.
+        NCCL exits the process without native cleanup on this path; other
+        transports raise TimeoutError and permanently reject scheduler reuse.
         """
+        self._raise_if_prefetch_failed()
         if not self._prefetch_enabled or self._prefetch_result_queue is None:
             return
-        try:
-            batch_id, results, fetch_ms = self._prefetch_result_queue.get(
-                timeout=self._prefetch_timeout_s
-            )
-        except queue.Empty:
-            logger.error(
-                "[PrefetchDataPackerMixin] prefetch timeout after %ss",
-                self._prefetch_timeout_s,
-            )
-            self._prefetch_cache = {}
+        if not self._prefetch_outstanding:
             return
+        batch_id, results, fetch_ms = self._prefetch_result_queue.get()
+        self._raise_if_prefetch_failed()
+        self._prefetch_outstanding.popleft()
 
         if isinstance(results, dict) and "_error" in results:
             logger.warning(
@@ -503,9 +554,14 @@ class PrefetchDataPackerMixin:
                     results = {"_error": err}
                 fetch_end = get_trace_time()
 
-                self._prefetch_result_queue.put(
-                    (batch_id, results, fetch_end - fetch_start)
-                )
+                with self._prefetch_deadline_lock:
+                    timer = self._prefetch_timers.pop(batch_id, None)
+                    if timer is not None:
+                        timer.cancel()
+                    if self._prefetch_failure is None:
+                        self._prefetch_result_queue.put(
+                            (batch_id, results, fetch_end - fetch_start)
+                        )
         except Exception as e:  # pragma: no cover - worker-thread crash
             logger.error("[PrefetchDataPackerMixin] worker loop error: %s", e)
         finally:
@@ -528,6 +584,7 @@ class PrefetchDataPackerMixin:
         for plain trajectories), this is a transparent pass-through to
         ``super().get_policy_input``.
         """
+        self._raise_if_prefetch_failed()
         if rollout_output is not None and self._should_intercept(rollout_output):
             cache_key = self._cache_key(rollout_output)
             resolved = self._prefetch_cache.get(cache_key)

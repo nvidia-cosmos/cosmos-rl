@@ -439,6 +439,7 @@ log "Controller started with PID: ${pid_controller}"
 # Policy nodes
 export LOCAL_NODE_LIST=${POLICY_NODES}
 srun \
+    --kill-on-bad-exit=1 \
     --overlap \
     --nodes="${NUM_POLICY_NODES}" \
     --nodelist="${LOCAL_NODE_LIST}" \
@@ -468,6 +469,7 @@ log "Policy started with PID: ${pid_policy}"
 if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
     export LOCAL_NODE_LIST=${ROLLOUT_NODES}
     srun \
+        --kill-on-bad-exit=1 \
         --nodes="${NUM_ROLLOUT_NODES}" \
         --nodelist="${LOCAL_NODE_LIST}" \
         --container-image "${CONTAINER_IMAGE}" \

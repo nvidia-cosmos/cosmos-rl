@@ -422,6 +422,49 @@ def _is_coordinated_controller_exit(
     return returncode in (-signal.SIGTERM, 128 + signal.SIGTERM)
 
 
+def _monitor_processes(processes, controller=None):
+    """Fail the launched cohort on any unexpected child exit.
+
+    Kill descendants as well as shell wrappers, without changing the existing
+    session/signal forwarding behavior of healthy launches.
+    """
+    import psutil
+
+    pending = list(processes)
+    while pending:
+        for process in list(pending):
+            rc = process.poll()
+            if rc is None:
+                continue
+            coordinated = _is_coordinated_controller_exit(
+                0 if process is controller else 1,
+                0 if controller is not None else -1,
+                rc,
+            )
+            if rc != 0 and not coordinated:
+                logger.error("Process %s failed with return code %s", process.pid, rc)
+                victims = []
+                for child in pending:
+                    try:
+                        parent = psutil.Process(child.pid)
+                        victims.extend(parent.children(recursive=True))
+                        victims.append(parent)
+                    except psutil.NoSuchProcess:
+                        pass
+                for victim in victims:
+                    try:
+                        victim.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                for child in processes:
+                    child.wait(timeout=5)
+                raise SystemExit(1)
+            logger.info("Process %s completed (rc=%s)", process.pid, rc)
+            pending.remove(process)
+        if pending:
+            time.sleep(0.1)
+
+
 def main():
     args, parser = parse_args()
     if args.debug:
@@ -957,56 +1000,9 @@ cosmos-rl --config config.toml"""
     # SIGUSR1 used for slurm jop timeout case ckpt saving therefore register signal handler for processing the ckpt handling.
     DistributedSignalHandler.get_instance(["SIGUSR1"], policy_processes)
 
-    # Wait for all processes to complete without blocking
-    while len(processes) > 0:
-        for i, process in enumerate(processes):
-            try:
-                # Check if process has finished without blocking
-                if process.poll() is not None:
-                    returncode = process.returncode
-                    if returncode == 0:
-                        logger.info(f"Process {i} completed successfully")
-                    elif _is_coordinated_controller_exit(i, controller_id, returncode):
-                        # Not a failure: the controller SIGTERMs ITSELF once the
-                        # last policy replica unregisters, so the scheduler can
-                        # release the allocation instead of idling to wall-clock
-                        # (see COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS in
-                        # run_web_panel).  Treating that as a crash made every
-                        # successful run report FAILED to SLURM, which is worse
-                        # than cosmetic -- it leaves no way to tell a completed
-                        # job from a broken one without reading the logs.
-                        logger.info(
-                            f"Process {i} (controller) exited via the coordinated "
-                            f"shutdown path (rc={returncode}); treating as success"
-                        )
-                    else:
-                        logger.error(
-                            f"Process {i} failed with return code {returncode}"
-                        )
-                        # Terminate all remaining processes
-                        if controller_id == -1 or i == controller_id:
-                            for p in processes:
-                                try:
-                                    p.kill()
-                                except Exception as e:
-                                    logger.error(f"Error kill process {p}: {e}")
-                            logger.error("Terminated all processes due to failure")
-                            sys.exit(1)  # Exit with error code 1 if any process failed
-                    # Remove completed process from list
-                    processes.remove(process)
-            except Exception as e:
-                logger.error(f"Error monitoring process {i}: {e}")
-                # Terminate all remaining processes
-                if controller_id == -1 or i == controller_id:
-                    for p in processes:
-                        try:
-                            p.kill()
-                        except Exception as e:
-                            logger.error(f"Error kill process {p}: {e}")
-                    logger.error("Terminated all processes due to error")
-                    sys.exit(1)
-        # Small sleep to prevent busy waiting
-        time.sleep(0.1)
+    _monitor_processes(
+        processes, processes[controller_id] if controller_id >= 0 else None
+    )
 
     if tmpfile_toml is not None and os.path.exists(tmpfile_toml):
         # Clean up the temporary file
