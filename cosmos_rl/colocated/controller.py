@@ -274,8 +274,9 @@ class ColocatedController(Controller):
                 step,
                 self.total_steps,
             )
+            # Heartbeat keeps running until the rollout's ``handle_shutdown``
+            # unregisters (see ``DisaggregatedRolloutControlWorker.handle_stop``).
             self.rollout.shutdown_signal.set()
-            self.rollout.shutdown_mp_signal.set()
             return False
 
         # All replicas have been reduced, trigger allreduce

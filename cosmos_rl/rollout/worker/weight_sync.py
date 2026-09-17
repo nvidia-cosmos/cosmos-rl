@@ -411,8 +411,9 @@ def process_wst_deferred_actions(worker) -> None:
         logger.info("[WeightSync] Published end event to reference")
         if worker.validation_flag.is_set():
             worker.do_validation()
+        # Heartbeat keeps running until ``handle_shutdown`` unregisters (see
+        # ``rollout_control.handle_stop``).
         worker.shutdown_signal.set()
-        worker.shutdown_mp_signal.set()
 
 
 # ---------------------------------------------------------------------------

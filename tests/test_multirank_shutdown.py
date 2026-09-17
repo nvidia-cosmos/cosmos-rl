@@ -159,9 +159,12 @@ class TestStopCommandSerialization(unittest.TestCase):
 class TestStopCommandHandler(unittest.TestCase):
     """``handle_stop`` must break ``main_loop`` out of *any* branch -- a
     normal drain, an empty queue, or the weight-version-gate spin that no
-    longer clears once weight syncs stop -- by setting both shutdown
-    signals.  It must not touch NCCL (the whole point of the redis-channel
-    delivery)."""
+    longer clears once weight syncs stop -- by setting the shutdown signal.
+    It must not touch NCCL (the whole point of the redis-channel delivery),
+    and it must leave the heartbeat running: ``main_loop`` finishes its
+    in-flight batch first, and a replica whose heartbeat stopped minutes
+    before it unregisters gets reaped, which finalizes the controller while
+    the replica is still tearing down."""
 
     @staticmethod
     def _worker():
@@ -171,12 +174,12 @@ class TestStopCommandHandler(unittest.TestCase):
             shutdown_mp_signal=threading.Event(),
         )
 
-    def test_sets_both_shutdown_signals(self):
+    def test_sets_shutdown_signal_and_keeps_heartbeat_alive(self):
         worker = self._worker()
         self.assertFalse(worker.shutdown_signal.is_set())
         DisaggregatedRolloutControlWorker.handle_stop(worker, StopCommand("replica-0"))
         self.assertTrue(worker.shutdown_signal.is_set())
-        self.assertTrue(worker.shutdown_mp_signal.is_set())
+        self.assertFalse(worker.shutdown_mp_signal.is_set())
 
 
 class TestShouldBroadcastStop(unittest.TestCase):
