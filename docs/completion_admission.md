@@ -63,9 +63,19 @@ controller/job restart, not continued training on partially settled state.
 Transport cleanup retains each backend's existing delivery/lease semantics;
 this interface does not add reliable transport recovery.
 
-## Validation still required
+## Validation scope
 
 The focused CPU tests cover replay bounds, malformed reports, partial/all
 rejection, versioned settlement, closed admission, callback failures and late
-payloads. A live strict-version refill run and full producer integration are
-required before release.
+payloads. A live two-policy/two-rollout strict-version canary rejected its first
+four completions, replayed reports, refilled and completed 20 training steps with
+80 accepted completions and zero outstanding accounting. All workers exited
+zero in the combined validation snapshot containing the independent watchdog,
+bounded unregister and transport lifecycle changes. Clean shutdown guarantees
+from those changes are not provided by admission alone.
+
+`tests/completion_admission_canary.py` is the application integration fixture;
+it requires the RL-Gym companion modules. Its test-only wire wrapper allocates
+identities at first send. Production producers must implement allocation before
+generation and failure reporting as specified above. Producer failures and late
+payloads are covered by focused tests, not injected by this live fixture.
