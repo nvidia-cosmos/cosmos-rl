@@ -98,6 +98,7 @@ from cosmos_rl.utils.api_suffix import (
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
+from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from fastapi import Request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -815,7 +816,7 @@ def main(
     val_sampler: Optional[Callable] = None,
     val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
-    resume_adapter=None,
+    resume_adapter: Optional[ControllerResumeAdapter] = None,
     **kwargs,
 ):
     if kwargs:

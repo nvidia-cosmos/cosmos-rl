@@ -3,6 +3,7 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
@@ -169,3 +170,64 @@ def test_adapter_errors_are_not_swallowed(phase):
 def test_metadata_validation(changes):
     with pytest.raises(ValidationError):
         metadata(**changes)
+
+
+def test_real_checkpoint_resume_matches_next_samples_and_optimizer_updates(tmp_path):
+    sampler = CursorSampler()
+    uninterrupted = build(adapter_for(None), sampler, resume=False)
+    weight = torch.nn.Parameter(torch.tensor([0.25]))
+    optimizer = torch.optim.SGD([weight], lr=0.01, momentum=0.9)
+
+    def update(fetcher, parameter, optimizer):
+        indices, _ = next(fetcher.train_dataloader_iter)
+        inputs = torch.tensor([int(i) + 1 for i in indices], dtype=torch.float32)
+        optimizer.zero_grad()
+        loss = ((parameter * inputs - 1) ** 2).mean()
+        loss.backward()
+        optimizer.step()
+        return inputs
+
+    for _ in range(2):
+        update(uninterrupted, weight, optimizer)
+    path = tmp_path / "application.pt"
+    state = metadata(
+        checkpoint_path=str(path),
+        completed_training_steps=2,
+        completed_optimizer_updates=2,
+        sampler_state={"cursor": sampler.position},
+    )
+    torch.save(
+        {
+            "metadata": state.model_dump(),
+            "weight": weight.detach(),
+            "optimizer": optimizer.state_dict(),
+        },
+        path,
+    )
+
+    class FileAdapter:
+        def load_metadata(self, config):
+            return ControllerResumeMetadata.model_validate(
+                torch.load(config.train.resume, weights_only=True)["metadata"]
+            )
+
+        def restore_sampler(self, sampler, metadata):
+            sampler.position = metadata.sampler_state["cursor"]
+
+    restored = build(FileAdapter(), CursorSampler(), resume=str(path))
+    saved = torch.load(path, weights_only=True)
+    restored_weight = torch.nn.Parameter(saved["weight"])
+    restored_optimizer = torch.optim.SGD([restored_weight], lr=0.01, momentum=0.9)
+    restored_optimizer.load_state_dict(saved["optimizer"])
+    # These are new updates 3 and 4, not merely a successful metadata read.
+    for _ in range(2):
+        expected_indices = update(uninterrupted, weight, optimizer)
+        actual_indices = update(restored, restored_weight, restored_optimizer)
+        torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+        torch.testing.assert_close(restored_weight, weight, rtol=0, atol=0)
+        torch.testing.assert_close(
+            restored_optimizer.state[restored_weight]["momentum_buffer"],
+            optimizer.state[weight]["momentum_buffer"],
+            rtol=0,
+            atol=0,
+        )
