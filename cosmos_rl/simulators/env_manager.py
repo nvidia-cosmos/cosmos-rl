@@ -25,7 +25,6 @@ import sys
 from typing import Optional
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torch.multiprocessing as mp
 
 
@@ -47,7 +46,7 @@ def cleanup_cuda_tensors():
         if torch.is_tensor(obj) and obj.is_cuda:
             force_gc_tensor(obj)
     gc.collect()
-    empty_cuda_cache()
+    torch.cuda.empty_cache()
 
 
 def get_gpu_numa_node(gpu_id: int) -> int:

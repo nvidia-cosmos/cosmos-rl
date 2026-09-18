@@ -15,7 +15,7 @@
 
 import os
 
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
+import torch
 import torch.distributed.checkpoint as dcp
 
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
@@ -180,7 +180,7 @@ def load_model_state_dict_from_checkpoint(
             easy_io.dump(model.state_dict(), local_s3_ckpt_fp)
 
     # Clear unused reserved memory from fp32
-    empty_cuda_cache()
+    torch.cuda.empty_cache()
     return model
 
 

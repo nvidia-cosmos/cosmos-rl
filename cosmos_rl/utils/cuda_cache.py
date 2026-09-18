@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Conservative process-wide policy for optional CUDA allocator flushing.
+"""Policy for explicitly opportunistic CUDA allocator flushing only.
 
 An idle Python queue does not prove native transport completion. Once a process
-starts asynchronous payload transport, do not explicitly flush its allocator
-cache again. This is prevention, not native cancellation or fault recovery.
+starts asynchronous payload transport, skip opportunistic flush requests.
+Intentional memory-release call sites are not intercepted or reclassified.
 """
 
 import os
@@ -41,22 +41,27 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_policy.after_fork)
 
 
-def suppress_cuda_cache_cleanup() -> None:
-    """Disable explicit flushing before starting asynchronous transport work.
+def suppress_opportunistic_cuda_cache_cleanup() -> None:
+    """Disable optional flushing before starting asynchronous transport work.
 
-    Process-wide and irreversible: failed setup, shutdown, or an empty queue do
-    not prove CUDA quiescence. Custom transports must call this before startup.
+    This affects only maybe_empty_cuda_cache(), not intentional memory release.
+    Process-wide and sticky: failed setup, shutdown, or an empty queue do not
+    prove CUDA quiescence. Custom transports must call this before startup.
     It does not wait for, synchronize, cancel, or release transport resources.
     """
     _policy.suppress()
 
 
-def empty_cuda_cache() -> bool:
-    """Flush only before asynchronous payload transport has started.
+def maybe_empty_cuda_cache() -> bool:
+    """Request an opportunistic flush that is always safe to omit.
 
+    Use for optional per-wave/periodic cleanup, not model unloading, checkpoint
+    memory handoff, or a request required to give memory to another allocator.
     Return whether PyTorch's flush was called, not whether bytes were released.
     Suppressed requests are skipped, not queued for an implicit later flush.
     Live tensors are unaffected; allocator-cached storage remains reusable.
-    This does not intercept direct PyTorch calls or third-party engine cleanup.
+    Intentional release keeps its direct PyTorch call; its owner must establish
+    quiescence first. This helper neither proves that boundary nor makes direct
+    calls safe. It does not intercept PyTorch calls or third-party cleanup.
     """
     return _policy.empty_cache()

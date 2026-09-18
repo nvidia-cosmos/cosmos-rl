@@ -146,9 +146,9 @@ class PrefetchDataPackerMixin:
         between leaves the existing worker running and just refreshes
         the timeout.  This makes test-driven re-init paths painless.
         """
-        from cosmos_rl.utils.cuda_cache import suppress_cuda_cache_cleanup
+        from cosmos_rl.utils.cuda_cache import suppress_opportunistic_cuda_cache_cleanup
 
-        suppress_cuda_cache_cleanup()
+        suppress_opportunistic_cuda_cache_cleanup()
         self._prefetch_timeout_s = prefetch_timeout
         if self._prefetch_enabled:
             return

@@ -37,7 +37,6 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.data
@@ -1883,7 +1882,7 @@ class EveryNDrawSample(EveryN):
                 info,
                 step=iteration,
             )
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
     @utils.timer("EveryNDrawSample: sample")
     def sample(self, trainer, model, data_batch, output_batch, loss, iteration):

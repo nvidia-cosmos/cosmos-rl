@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import os
 import time
 import random
@@ -165,7 +164,7 @@ class LLMTrainer(Trainer):
                 config.policy.model_gradient_checkpointing
             )
 
-            empty_cuda_cache()
+            torch.cuda.empty_cache()
 
             if isinstance(config.train.optm_lr, (float, list)):
                 self.model_parts = model.separate_model_parts()

@@ -1,49 +1,65 @@
-# Optional CUDA cache cleanup during payload transport
+# Opportunistic CUDA cache cleanup during payload transport
 
-Use `cosmos_rl.utils.cuda_cache.empty_cuda_cache()` instead of direct
-`torch.cuda.empty_cache()` calls in Cosmos extensions. It returns `True` if the
-PyTorch call ran, and `False` when optional cleanup was suppressed. It does not
-report freed bytes or release live tensors.
+Applications sometimes flush the CUDA allocator after every rollout wave even
+though training can continue without that flush. Such opportunistic cleanup
+must be distinguished from intentional memory release, such as giving GPU
+memory to another allocator after unloading a model.
 
-Before asynchronous payload transport starts, cleanup behaves as before. NCCL
-and UCXX producer/consumer setup, and the backend-neutral prefetch scheduler,
-permanently suppress explicit allocator flushing in their process. All in-tree
-explicit cache-cleanup calls use this policy. Custom transports that bypass
-these setup paths must call `suppress_cuda_cache_cleanup()` before starting any
-native/background work.
+## Optional per-wave or periodic cleanup
 
-Suppression and flushing share a lock only to serialize startup against a flush
-already in progress. The lock is **not** a claim that native communication can
-be made safe by locking an `empty_cache()` call. No new CUDA synchronization,
-cross-rank barrier, transport pause, or teardown wait is introduced by skipped
-cleanup. Existing pre-start flushes can still block as they could before.
+Use `cosmos_rl.utils.cuda_cache.maybe_empty_cuda_cache()` **only when skipping
+the flush is acceptable**. It returns `True` if the PyTorch call ran, and `False`
+when the optional request was skipped. It does not report freed bytes.
 
-## Why suppression rather than an idle-queue check
+```python
+from cosmos_rl.utils.cuda_cache import maybe_empty_cuda_cache
 
-An empty queue or completed Python future does not establish completion of all
-GPU streams or remote peers. Flushing the caching allocator can interact with
-concurrent communication. Without a proven global idle boundary, automatically
-flushing between waves or after a local close would reintroduce that risk.
+# Optional housekeeping: no other component depends on memory being returned.
+maybe_empty_cuda_cache()
+```
 
-The policy therefore stays suppressed after successful close, failed setup, and
-failed/timed-out teardown. Requests are skipped, not queued for later replay.
-There is deliberately no force/reset option. Process exit reclaims resources;
-a new process starts with a fresh policy. A fork inherits suppression and gets
-a fresh policy lock; this does not make using CUDA after fork supported.
+NCCL/UCXX producer and consumer setup, and generic prefetch startup, suppress
+these optional requests before starting background work. Custom transports
+bypassing those paths must call `suppress_opportunistic_cuda_cache_cleanup()`
+before native/background startup.
 
-## Tradeoffs and scope
+An idle local queue does not prove native completion across streams and peers.
+Optional suppression therefore remains sticky after close or failed setup.
+It does **not** prohibit intentional memory release, intercept PyTorch calls,
+or change existing model-load, checkpoint-resume, simulator, and phase-transition
+cleanup sites. This PR deliberately does not guess which existing calls are
+unnecessary; downstream per-wave callers must explicitly adopt the helper.
 
-- Allocator-cached memory remains reusable by PyTorch but may remain reserved
-  from other GPU users longer. This is not a device-memory budget or OOM fix.
-- The policy is process-wide, conservatively covering all devices and both
-  transport backends, including UCXX configurations using RDMA.
-- Direct application or third-party `torch.cuda.empty_cache()` calls bypass the
-  helper. They must be removed or migrated; PyTorch is not monkey-patched.
-- CUDA allocator-internal reclamation on allocation pressure, third-party
-  engine cleanup, and arbitrary native transport faults are not controlled.
-- This prevention change is independent of transport deadline containment and
-  resource-lifetime teardown changes; those remain necessary for other faults.
+## Intentional memory release
 
-The original successful run without per-wave flushing supports this prevention
-policy, but does not prove the precise native deadlock mechanism or guarantee
-that every transport stall has the same cause.
+Keep the existing `torch.cuda.empty_cache()` call when memory must be returned.
+Its owner must first establish a safe boundary: stop admitting new work, complete
+the relevant communication with participating peers, join owned background
+operations, and ensure their GPU work has finished. A local synchronization or
+Python lock alone does not prove that boundary. Do not synchronize into an
+unmatched collective and assume it will complete.
+
+This change neither implements a distributed quiescence protocol nor certifies
+existing release sites as safe. It preserves their behavior instead of silently
+turning an intentional release into a no-op. If the owner cannot establish a
+safe boundary, defer the handoff or use process isolation; do not relabel it as
+optional when another component depends on the released memory.
+
+## Scope and tradeoffs
+
+- Only explicitly opted-in cleanup is suppressed. Existing in-tree direct calls
+  and third-party engines are unchanged, so this is not complete prevention of
+  every concurrent allocator-cleanup interaction.
+- Optional callers may retain allocator-reserved memory longer; PyTorch can
+  reuse it, but other allocators may not. This is not a memory budget or OOM fix.
+- Suppression covers both NCCL and UCXX, regardless of network transport. No
+  live RDMA validation is implied.
+- The startup transition waits for a helper flush already in progress. Skipped
+  calls perform no CUDA synchronization, distributed barrier, or transport wait.
+- A fork inherits optional suppression with a fresh lock; this does not make
+  CUDA-after-fork supported. There is no delayed replay of skipped requests.
+- Allocator-internal reclamation and native fault recovery remain outside scope.
+
+The portable `tests/cuda_cache_cleanup_canary.py` checks optional suppression
+alongside real background transfers and intentional release after full teardown.
+It does not reproduce the original allocator deadlock or certify a full workload.

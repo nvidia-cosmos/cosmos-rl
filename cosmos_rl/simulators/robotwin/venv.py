@@ -33,7 +33,6 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import yaml
 
 from cosmos_rl.utils.logging import logger
@@ -869,4 +868,4 @@ class VectorEnv(gym.Env):
         # Force garbage collection
         if clear_cache:
             gc.collect()
-            empty_cuda_cache()
+            torch.cuda.empty_cache()

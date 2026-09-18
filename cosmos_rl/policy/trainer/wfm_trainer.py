@@ -23,7 +23,6 @@ import math
 from typing import Callable
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torch.distributed as dist
 import torch.utils.data
 
@@ -954,7 +953,7 @@ class CosmosVisionGenTrainer(ABC):
                     }
 
                 logger.info("[WFM RL] Finished computing rewards ...")
-                empty_cuda_cache()
+                torch.cuda.empty_cache()
 
                 if self.model.net.is_context_parallel_enabled:
                     sample = split_inputs_cp(
@@ -1018,7 +1017,7 @@ class CosmosVisionGenTrainer(ABC):
                     rl_inference_result["mu_ref"] = mu_ref
 
         self.model.inference_infos.timesteps = 0
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
         logger.info(
             f"[WFM RL] Cached trajectory with {len(self.model.inference_infos.rl_cached_trajectory)} steps at {data_batch['train_on']}, sample shape (with parallelism): {sample.shape}"

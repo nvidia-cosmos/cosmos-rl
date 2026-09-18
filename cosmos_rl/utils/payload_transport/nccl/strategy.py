@@ -154,9 +154,9 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             recv_timeout: Per-``nccl_recv`` / per-rendezvous wall-clock
                 budget so a wedged sender engages retry / quarantine fast.
         """
-        from cosmos_rl.utils.cuda_cache import suppress_cuda_cache_cleanup
+        from cosmos_rl.utils.cuda_cache import suppress_opportunistic_cuda_cache_cleanup
 
-        suppress_cuda_cache_cleanup()
+        suppress_opportunistic_cuda_cache_cleanup()
         self._device = device
         self._redis = redis_client
         self._config = config

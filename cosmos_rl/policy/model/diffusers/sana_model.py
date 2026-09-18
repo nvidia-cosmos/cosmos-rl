@@ -15,7 +15,6 @@
 
 import math
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import inspect
 from diffusers.pipelines.sana.pipeline_sana import (
     ASPECT_RATIO_4096_BIN,
@@ -141,7 +140,7 @@ class SanaModel(DiffuserModel):
 
         if self.offload:
             self.vae.to("cpu")
-            empty_cuda_cache()
+            torch.cuda.empty_cache()
         return visual_embedding
 
     def set_scheduler_timestep(self, timestep: int):

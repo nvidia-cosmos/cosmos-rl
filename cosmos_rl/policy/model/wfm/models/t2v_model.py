@@ -22,7 +22,6 @@ from einops import rearrange
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, List
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed._composable.fsdp import FSDPModule, fully_shard
@@ -282,7 +281,7 @@ class WorldFoundationalModel(nn.Module):
             else:
                 self.net_ref = None
 
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
     @timer("WorldFoundationalModel: set_up_text_encoder")
     def set_up_text_encoder(self):
@@ -314,7 +313,7 @@ class WorldFoundationalModel(nn.Module):
                 self.config.text_encoder_config.ckpt_path, device="cuda"
             )
         self.text_encoder.eval()
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
     def apply_fsdp(self, dp_mesh: DeviceMesh) -> None:
         """Apply FSDP to the net and net_ema."""
@@ -615,7 +614,7 @@ class WorldFoundationalModel(nn.Module):
             for key, value in data_batch.items()
         }
 
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
         torch.distributed.barrier()
         return self.inference_infos.data_batch
 

@@ -29,7 +29,6 @@ from multiprocessing import get_context
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torch.distributed
 import torch.distributed.checkpoint as dcp
 from torch import nn
@@ -594,7 +593,7 @@ class Checkpointer:
             # Checkpoint not found and not specified. We will train everything from scratch.
             iteration = 0
             logger.info("Training from scratch.")
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
         self.callbacks.on_load_checkpoint_end(
             model, iteration=iteration, checkpoint_path=checkpoint_path
@@ -807,7 +806,7 @@ class MultiRankCheckpointer(Checkpointer):
             # Checkpoint not found and not specified. We will train everything from scratch.
             iteration = 0
             logger.info("Training from scratch.")
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
         return iteration
 
 
@@ -1192,7 +1191,7 @@ class DistributedCheckpointer(AbstractCheckpointer):
             )
         else:
             logger.info("Training from scratch.")
-        empty_cuda_cache()
+        torch.cuda.empty_cache()
 
         if self.callbacks is not None:
             self.callbacks.on_load_checkpoint_end(

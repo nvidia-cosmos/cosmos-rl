@@ -170,9 +170,9 @@ class UCXXRolloutMixin:
         Raises:
             RuntimeError: If UCXX is not available or setup fails
         """
-        from cosmos_rl.utils.cuda_cache import suppress_cuda_cache_cleanup
+        from cosmos_rl.utils.cuda_cache import suppress_opportunistic_cuda_cache_cleanup
 
-        suppress_cuda_cache_cleanup()
+        suppress_opportunistic_cuda_cache_cleanup()
         if not UCXX_AVAILABLE:
             raise RuntimeError(
                 "UCXX is required for UCXXRolloutMixin. "

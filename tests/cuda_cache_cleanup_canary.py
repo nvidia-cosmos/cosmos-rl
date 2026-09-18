@@ -20,7 +20,10 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache, suppress_cuda_cache_cleanup
+from cosmos_rl.utils.cuda_cache import (
+    maybe_empty_cuda_cache,
+    suppress_opportunistic_cuda_cache_cleanup,
+)
 
 
 def main():
@@ -35,8 +38,8 @@ def main():
     )
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    assert empty_cuda_cache(), "Fresh process must retain pre-transport cleanup"
-    suppress_cuda_cache_cleanup()
+    assert maybe_empty_cuda_cache(), "Fresh process must retain pre-transport cleanup"
+    suppress_opportunistic_cuda_cache_cleanup()
     dist.init_process_group(args.backend, timeout=timedelta(seconds=45))
     assert dist.get_world_size() == 2
     rank = dist.get_rank()
@@ -72,7 +75,7 @@ def main():
         thread.start()
         attempts = 0
         while thread.is_alive() or attempts < 100:
-            assert not empty_cuda_cache()
+            assert not maybe_empty_cuda_cache()
             attempts += 1
             thread.join(0.001)
         if failures:
@@ -81,7 +84,12 @@ def main():
         raw.assert_not_called()
         dist.barrier()
         dist.destroy_process_group()
-        assert not empty_cuda_cache(), "Teardown must not reenable flushing"
+        assert not maybe_empty_cuda_cache(), "Teardown must not reenable flushing"
+    # This fixture now owns a real idle boundary: the transfer thread joined,
+    # all ranks completed their work, and the process group was destroyed.
+    # Intentional release must remain available despite optional suppression.
+    torch.cuda.empty_cache()
+    assert not maybe_empty_cuda_cache()
     print(
         f"PASS rank={rank} backend={args.backend} transfers=20 skipped_cleanup={attempts}",
         flush=True,

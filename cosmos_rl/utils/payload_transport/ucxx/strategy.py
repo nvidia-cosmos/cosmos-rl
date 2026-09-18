@@ -134,9 +134,9 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                 ``UCXXClient.read`` call -- bounds a single ``send`` /
                 ``recv`` operation.
         """
-        from cosmos_rl.utils.cuda_cache import suppress_cuda_cache_cleanup
+        from cosmos_rl.utils.cuda_cache import suppress_opportunistic_cuda_cache_cleanup
 
-        suppress_cuda_cache_cleanup()
+        suppress_opportunistic_cuda_cache_cleanup()
         if not UCXX_AVAILABLE:
             raise RuntimeError(
                 "UCXX is required for UCXXTransportStrategy. "

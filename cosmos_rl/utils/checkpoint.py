@@ -17,7 +17,6 @@ import os
 import re
 import json
 import torch
-from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import random
 import shutil
 import numpy as np
@@ -717,7 +716,7 @@ class CheckpointMananger:
 
                     gc.collect()
                     if torch.cuda.is_available():
-                        empty_cuda_cache()
+                        torch.cuda.empty_cache()
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
