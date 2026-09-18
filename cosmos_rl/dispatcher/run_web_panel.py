@@ -280,7 +280,13 @@ async def lifespan(app: FastAPI):
                 n_policy=n_policy,
                 had_policy_replicas=_policy_replicas_were_registered,
                 stop_broadcast_sent=stop_broadcast_sent,
-                validation_enabled=controller.config.validation.enable,
+                # Requested stop finishes active validation before completion
+                # ACKs. Unlike natural horizon completion it need not have
+                # sent a final-step R2R shutdown flag, so use STOP afterwards.
+                validation_enabled=(
+                    controller.config.validation.enable
+                    and controller.policy_status_manager.stop_reason is None
+                ),
                 training_finished=controller.policy_status_manager.training_finished(),
                 all_rollouts_ended=controller.rollout_status_manager.all_rollouts_ended(),
             ):
