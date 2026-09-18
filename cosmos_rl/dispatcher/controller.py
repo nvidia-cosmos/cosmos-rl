@@ -47,6 +47,8 @@ from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
+from cosmos_rl.dispatcher.data.admission import CompletionAdmission
+from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 
 
 def _wait_for_redis_ready(port: int, timeout: float) -> bool:
@@ -89,6 +91,7 @@ class Controller:
         self._init_status()
 
     def _init_status(self):
+        self.completion_admission = None
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
         self.teacher_result_manager = set()
@@ -126,6 +129,7 @@ class Controller:
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        completion_admission: Optional[CompletionAdmission] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -134,6 +138,16 @@ class Controller:
 
         self.config = config
         task_type = config.train.train_policy.type
+        if completion_admission is not None:
+            if (
+                task_type != "grpo"
+                or config.train.train_policy.variant == "dapo"
+                or config.mode != "disaggregated"
+            ):
+                raise ValueError(
+                    "Application admission currently requires disaggregated non-DAPO GRPO"
+                )
+            self.completion_admission = CompletionAdmissionState(completion_admission)
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
@@ -814,6 +828,18 @@ maxmemory-policy allkeys-lfu
             )
             return None
         return await replica.set_trace_path(trace_path, global_rank)
+
+    async def put_application_rollouts(self, request, rollouts: List[Rollout]):
+        async with self.life_cycle_lock:
+            admission = self.completion_admission
+            plan = admission.prepare(self, request, rollouts)
+            accepted = admission.settle(self, request, plan)
+            try:
+                accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
+                await self.put_rollouts(accepted)
+            except BaseException:
+                admission.failed = True
+                raise
 
     async def put_rollouts(self, rollouts: List[Rollout]):
         """
