@@ -1,5 +1,60 @@
 # Application checkpoint metadata and sampling restoration
 
+## Deterministic continuation: required follow-up
+
+The adapter below restores metadata and a sampling stream. It is **not yet a
+coordinated checkpoint protocol**. A cursor captured while rollout work is
+outstanding is not necessarily the position corresponding to the saved model.
+Do not use the current sampling/optimizer canary as evidence of deterministic
+asynchronous job continuation.
+
+The intended contract is a checkpoint containing all state required to continue
+from one committed boundary, without serializing completed rollout queues or
+partially generated rollouts. The proposed simplest boundary is:
+
+1. Pause new prompt issuance and membership changes.
+2. Finish or explicitly settle outstanding prompts and issued training updates;
+   ensure there are no unconsumed rollouts or loader-prefetched samples omitted
+   from the sampling snapshot. Partial batches and filtered/stale completions
+   need an explicit settlement policy, not a drain that waits forever for a full
+   batch. On timeout, fail the checkpoint without publishing it.
+3. Freeze controller/sampling state and have every required trainer shard save
+   the same completed-update boundary. Persist model, optimizer, scheduler,
+   trainer RNG, and any mutable reference-model/application state.
+4. Publish one immutable manifest only after all artifacts are durable. It must
+   bind the controller state and all trainer shards to a common checkpoint ID,
+   with artifact integrity checks. Incomplete saves must not be discoverable as
+   resumable checkpoints.
+5. Resume issuance only after committing the checkpoint. On restart, verify
+   the manifest and execution compatibility, restore all state, and require
+   worker/controller agreement before training can proceed.
+
+Controller state must include the epoch, effective sampler/batch-sampler state
+(including permutation, cursor and private RNG), counters, dataset/preprocessing
+identity, and relevant configuration/topology. Controller RNG and request-ID or
+seed-allocation counters must also be saved if they affect subsequent work.
+Rollout generation must use reproducible per-request seeds or restore its RNG
+state; a sampler cursor alone does not restore stochastic generation.
+
+An empty queue at save time removes the need to persist rollout payloads, but
+does **not** by itself make future asynchronous execution deterministic. Exact
+continuation additionally requires reproducible admission/batch ordering and
+weight-version assignment, as well as deterministic kernels and compatible
+execution settings. If those cannot be enforced, the guarantee must be stated
+as consistent checkpoint recovery, not bit-for-bit continuation.
+
+Acceptance requires fresh-process restart parity of subsequent prompt IDs,
+generation seeds/outputs, batch membership, policy versions, optimizer updates,
+scheduler state, parameters and RNG-sensitive behavior. Exercise nonempty work
+at checkpoint request, partial tails, filtering, all shard acknowledgements,
+and interrupted saves. Negative tests must reject incompatible dataset/config,
+mixed checkpoint artifacts and missing state before the next update.
+
+This save-time coordination and end-to-end validation remain to be implemented;
+the interfaces below describe the current restore-only implementation.
+
+## Current restoration interface
+
 Pass an instance implementing `ControllerResumeAdapter` to controller `main`,
 `Controller.setup`, or `ControllerDataFetcher`. No registry or module-global
 callback is required. Without an adapter the existing Cosmos checkpoint loader
