@@ -1,81 +1,101 @@
-# Controller-owned completion admission
+# Completion selection and accounting
 
-Pass a `CompletionAdmission` instance as `completion_admission=` to controller
-`main` or `Controller.setup`. Its synchronous `admit(context, rollout)` returns
-`CompletionDisposition(outcome="accepted")` or
-`CompletionDisposition(outcome="rejected", reason="quality")`. Application
-quality policy stays in the adapter; counters, cleanup and refill stay in Cosmos.
-The adapter receives a copy and must not mutate controller state or perform
-blocking work. No process-global hook is installed.
+## Quality selection: identical in colocated and disaggregated modes
 
-This opt-in path currently supports disaggregated, non-DAPO GRPO. Default
-ingestion, DAPO and validation are unchanged without an adapter. Configuring an
-adapter requires a producer using the identified reporting contract below;
-legacy metric-only failure reports cannot be mixed with it.
+Applications return `RolloutResult.completion_trainable` and optional aligned
+`completion_drop_reasons` from their rollout producer. This existing interface
+is independent of deployment mode and uses the selected algorithm's
+`minimum_trainable_completions`, not a hard-coded GRPO rule.
 
-## Producer identity and ownership
+The shared worker/reward path performs these steps:
+
+1. Compute reward telemetry (including excluded completions where supported).
+2. Resolve the producer's quality mask for each original prompt group.
+3. Exclude the entire group if too few eligible completions remain.
+4. Compute advantages using **only eligible rewards**.
+5. Select all completion-aligned fields consistently and report outcomes.
+
+For example, rejecting reward `100` from `[0, 1, 100]` must normalize `[0, 1]`,
+not retain the first two advantages computed from all three rewards. Rejected
+members of one prompt must not be replaced with members of another prompt to
+satisfy the minimum. Local and remote rewards honor this ordering; bypassed
+rewards select the same members with zero rewards/advantages. Validation ignores
+training masks and continues evaluating every completion.
+
+There is deliberately **no controller quality callback**: received training
+payloads already carry group-derived advantages. Controller extraction rejects
+an unconsumed mask instead of silently training it or filtering too late.
+Late staleness and terminal-job cleanup remain separate lifecycle decisions.
+
+Colocated workers inherit the same producer and reward implementation. Their
+controller queues only selected completions, aggregates numeric telemetry, and
+does not sum routing IDs or originating weight versions. Both centralized and
+uncentralized colocated ingestion follow this contract; existing queue-based
+collection continues until enough accepted samples are available.
+
+## Optional identified reporting
+
+`completion_admission=True` on controller `main` / `Controller.setup` enables
+per-completion replay-protected settlement for custom producers implementing
+the contract below. It does not install quality policy. The ordinary producer
+mask path does **not** require this option and retains report-level discard
+accounting. Identified settlement currently supports disaggregated, non-DAPO RL;
+that accounting limitation does not restrict quality selection in either mode.
 
 `RolloutRequest.completion_identities` contains one `CompletionIdentity` per
-extracted completion in payload/group order. Each identifies its originating
-`weight_version` and a monotonically allocated `sequence` scoped to the source
-replica incarnation and source global rank. Allocate it **before generation**.
-Every new replica incarnation must use a fresh replica name. A retry reuses the
-identity and the same payload reference; it must not publish a different buffer
-under an already reported identity.
+accepted completion in payload/group order. Allocate monotonically increasing
+sequences **before generation**, scoped to source replica incarnation and global
+rank; retain the originating `weight_version`. A restart uses a fresh replica
+name. Retries reuse both identity and payload reference.
 
-Report generation failures through `completion_failures`, whose entries contain
-the same identity and a diagnostic reason. A failure followed by a late payload
-settles only once; the late payload is released once and never admitted. A retry
-of an accepted completion never releases a buffer a consumer may still own.
-Each completion owns its own transport reference; sharing one disposable
-reference across distinct completion identities is not supported.
+Report generation failures, quality exclusions and all members of insufficient
+groups through `completion_failures`. Their identities come from the same
+allocation, not from renumbering the surviving group. An optional `payload`
+carries the rejected completion's transport reference for controller cleanup;
+it never enters the training buffer. Without it, resources remain producer-owned.
+Do not attach an accepted consumer's reference to a rejected identity or share
+one disposable reference across distinct completion identities.
 
-Duplicate identities within a report, missing identities, changed versions,
-future versions, invalid source ranks and reports from departed/ended replicas
-are rejected before settlement. Diagnostic reasons do not affect identity.
-Rejected malformed/expired reports have not transferred new payload ownership;
-the producer remains responsible for their resources.
+The controller settles and refills each rejected identity once using existing
+versioned accounting and cleanup. A failure followed by a late payload settles
+once and releases the late payload once. Replays of accepted completions never
+release buffers a consumer may still own. Legacy discard/admission metric reports
+must not be mixed with identified settlement.
 
-Replay state holds at most 4096 sequences per active source rank. Out-of-order
-reports are allowed within that window. Older sequences are rejected as expired,
-including unseen old sequences: eviction never grants permission to settle them
-again. Producers must bound outstanding/reordered work accordingly. This state
-is not a durable controller-restart journal.
+Duplicate identities within a report, mismatched/future versions, invalid source
+ranks and reports from departed replicas fail before accounting mutation. Malformed
+or expired reports do not transfer new ownership. Replay state retains at most
+4096 sequences per live source rank; sequences below the window are rejected,
+never considered new. Producers must bound reordering. This is not a durable
+controller-restart journal.
 
-## Accounting and synchronization
+Admission and replica changes share the controller lifecycle lock. Closed
+admission discards without reopening prompt capacity. An infrastructure error
+after settlement starts poisons admission and requires job/controller restart;
+automatic fatal propagation remains an outstanding follow-up.
 
-Admission runs before buffer or staleness accounting, under the controller's
-lifecycle lock. The entire report is evaluated before mutations. Callback errors
-return an error with no settlement; unchanged reports may be retried. Concurrent
-ingestion and replica registration/unregistration use that same lock. Validation
-uses its existing separate route and does not invoke training admission.
+## Downstream adoption
 
-Accepted members of partial groups continue through ordinary staleness filtering
-and buffering. Rejections use `settle_discarded_samples`, existing transport
-cleanup dispatch, and its versioned refill hook. Different originating versions
-are settled separately. Closed admission discards without invoking application
-policy or reopening prompt capacity. Reason counters are bounded to 64 labels
-plus an `other` bucket.
-
-An infrastructure exception after settlement begins poisons admission and blocks
-further ingestion; it is not treated as a retryable callback error. It requires
-controller/job restart, not continued training on partially settled state.
-Transport cleanup retains each backend's existing delivery/lease semantics;
-this interface does not add reliable transport recovery.
+Applications should decide quality while producing the completion group and
+populate the mask before submitting it to rewards. They must not discard
+individual members in controller ingest or trainer preprocessing after advantage
+normalization. Existing whole-group pre-save gates can emit an all-false mask;
+partial gates emit the appropriate member mask. Keep driving-specific policy
+and diagnostic retention in the application. Quality-policy errors must not
+silently admit an unchecked group.
 
 ## Validation scope
 
-The focused CPU tests cover replay bounds, malformed reports, partial/all
-rejection, versioned settlement, closed admission, callback failures and late
-payloads. A live two-policy/two-rollout strict-version canary rejected its first
-four completions, replayed reports, refilled and completed 20 training steps with
-80 accepted completions and zero outstanding accounting. All workers exited
-zero in the combined validation snapshot containing the independent watchdog,
-bounded unregister and transport lifecycle changes. Clean shutdown guarantees
-from those changes are not provided by admission alone.
+`tests/test_completion_admission_modes.py` drives real worker generation-result
+processing, local rewards, reporting and ingestion for disaggregated and both
+colocated queue modes. It checks partial/all rejection, insufficient groups,
+algorithm-specific minima, aligned advantages, and rejection accounting.
+Existing tests cover remote/bypassed rewards and validation behavior.
 
-`tests/completion_admission_canary.py` is the application integration fixture;
-it requires the RL-Gym companion modules. Its test-only wire wrapper allocates
-identities at first send. Production producers must implement allocation before
-generation and failure reporting as specified above. Producer failures and late
-payloads are covered by focused tests, not injected by this live fixture.
+`tests/completion_admission_canary.py` is a disaggregated integration fixture
+requiring the RL-Gym companion modules. It marks producer masks before reward
+processing, reports rejected references for cleanup, and replays each report.
+Its identities are allocated at generation return, so it does not test generation
+failure reporting. The previous late-controller-rejection live result does not
+validate this revised design. Fresh live validation and standard producer identity
+integration remain required before marking the PR ready.

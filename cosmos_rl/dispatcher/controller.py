@@ -47,7 +47,6 @@ from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
-from cosmos_rl.dispatcher.data.admission import CompletionAdmission
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 
 
@@ -129,7 +128,7 @@ class Controller:
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
-        completion_admission: Optional[CompletionAdmission] = None,
+        completion_admission: bool = False,
     ):
         if self.config is not None:
             raise Exception(
@@ -138,7 +137,12 @@ class Controller:
 
         self.config = config
         task_type = config.train.train_policy.type
-        if completion_admission is not None:
+        if type(completion_admission) is not bool:
+            raise TypeError(
+                "completion_admission must be a bool; quality decisions belong "
+                "in RolloutResult.completion_trainable before reward processing"
+            )
+        if completion_admission:
             if (
                 task_type != "grpo"
                 or config.train.train_policy.variant == "dapo"
@@ -147,7 +151,7 @@ class Controller:
                 raise ValueError(
                     "Application admission currently requires disaggregated non-DAPO GRPO"
                 )
-            self.completion_admission = CompletionAdmissionState(completion_admission)
+            self.completion_admission = CompletionAdmissionState()
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )

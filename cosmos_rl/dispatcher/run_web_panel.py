@@ -713,9 +713,7 @@ async def put_rollout_group(rollout: RolloutRequest):
             await controller.put_application_rollouts(rollout, rollouts)
             return {"message": "Identified rollout report processed"}
         if rollout.completion_identities is not None or rollout.completion_failures:
-            raise ValueError(
-                "Identified completions require a configured admission adapter"
-            )
+            raise ValueError("Identified completions require completion_admission=True")
         is_dapo = controller.config.train.train_policy.variant == "dapo"
         if any(
             key.startswith(COMPLETION_ADMISSION_METRIC_PREFIX)
@@ -822,7 +820,7 @@ def main(
     val_sampler: Optional[Callable] = None,
     val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
-    completion_admission=None,
+    completion_admission: bool = False,
     **kwargs,
 ):
     if kwargs:

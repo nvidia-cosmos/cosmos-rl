@@ -73,7 +73,7 @@ def test_report_validation_is_atomic():
         assert window.versions == {}
 
 
-def harness(decide=None, closed=False):
+def harness(closed=False):
     status = PolicyStatusManager()
     status.current_step = 2
     status.samples_on_the_fly = 10
@@ -89,13 +89,7 @@ def harness(decide=None, closed=False):
             )
         },
     )
-    adapter = SimpleNamespace(
-        admit=Mock(
-            side_effect=decide
-            or (lambda context, rollout: CompletionDisposition(outcome="accepted"))
-        )
-    )
-    return controller, CompletionAdmissionState(adapter), refill
+    return controller, CompletionAdmissionState(), refill
 
 
 def report(sequences, version=2, failures=()):
@@ -121,35 +115,29 @@ def apply(state, controller, request):
 
 
 def test_partial_rejection_uses_existing_versioned_settlement_once():
-    def decide(context, rollout):
-        return (
-            CompletionDisposition(outcome="rejected", reason="quality")
-            if context.identity.sequence == 0
-            else CompletionDisposition(outcome="accepted")
-        )
-
-    controller, state, refill = harness(decide)
-    request = report([0, 1])
+    controller, state, refill = harness()
+    request = report(
+        [1], failures=[CompletionFailure(identity=identity(0, 2), reason="quality")]
+    )
     assert len(apply(state, controller, request)) == 1
     status = controller.policy_status_manager
     assert status.samples_on_the_fly == 9
     assert status.filter_records["application_rejected/quality"] == 1
-    status._publish_payload_transport_cleanup.assert_called_once()
+    # No rejected payload was transferred; its resources stay producer-owned.
+    status._publish_payload_transport_cleanup.assert_not_called()
     refill.assert_called_once()
     assert apply(state, controller, request) == []
     assert status.samples_on_the_fly == 9
     refill.assert_called_once()
 
 
-def test_callback_error_does_not_settle_any_of_the_report():
-    def decide(context, rollout):
-        if context.identity.sequence == 1:
-            raise RuntimeError("quality unavailable")
-        return CompletionDisposition(outcome="rejected", reason="quality")
-
-    controller, state, refill = harness(decide)
-    with pytest.raises(RuntimeError, match="quality unavailable"):
-        apply(state, controller, report([0, 1]))
+def test_malformed_failure_does_not_settle_any_of_the_report():
+    controller, state, refill = harness()
+    request = report(
+        [0], failures=[CompletionFailure(identity=identity(0, 2), reason="quality")]
+    )
+    with pytest.raises(ValueError, match="duplicate identities"):
+        apply(state, controller, request)
     assert controller.policy_status_manager.samples_on_the_fly == 10
     controller.policy_status_manager._publish_payload_transport_cleanup.assert_not_called()
     refill.assert_not_called()
@@ -162,18 +150,66 @@ def test_producer_failure_and_late_result_share_one_terminal_identity():
     apply(state, controller, report([], failures=[failure]))
     assert apply(state, controller, report([0])) == []
     assert controller.policy_status_manager.samples_on_the_fly == 9
-    state.adapter.admit.assert_not_called()
     refill.assert_called_once()
     controller.policy_status_manager._publish_payload_transport_cleanup.assert_called_once()
     assert apply(state, controller, report([0])) == []
     controller.policy_status_manager._publish_payload_transport_cleanup.assert_called_once()
 
 
-def test_closed_admission_discards_without_callback_or_refill():
+def test_quality_rejection_transfers_cleanup_once_without_training():
+    controller, state, refill = harness()
+    rejected = Rollout(completion="rejected-reference", weight_version=2)
+    request = report(
+        [],
+        failures=[
+            CompletionFailure(
+                identity=identity(0, 2), reason="quality", payload=rejected
+            )
+        ],
+    )
+    for _ in range(2):
+        assert apply(state, controller, request) == []
+    controller.policy_status_manager._publish_payload_transport_cleanup.assert_called_once_with(
+        [rejected], []
+    )
+    refill.assert_called_once()
+
+
+def test_failure_then_rejected_payload_cleans_up_without_resettling():
+    controller, state, refill = harness()
+    failure = CompletionFailure(identity=identity(0, 2), reason="quality")
+    apply(state, controller, report([], failures=[failure]))
+    failure = failure.model_copy(
+        update={"payload": Rollout(completion="late-reference", weight_version=2)}
+    )
+    for _ in range(2):
+        assert apply(state, controller, report([], failures=[failure])) == []
+    controller.policy_status_manager._publish_payload_transport_cleanup.assert_called_once()
+    refill.assert_called_once()
+
+
+def test_rejected_payload_version_mismatch_is_atomic():
+    controller, state, refill = harness()
+    request = report(
+        [],
+        failures=[
+            CompletionFailure(
+                identity=identity(0, 2),
+                reason="quality",
+                payload=Rollout(weight_version=1),
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="weight version disagree"):
+        apply(state, controller, request)
+    assert controller.policy_status_manager.samples_on_the_fly == 10
+    refill.assert_not_called()
+
+
+def test_closed_admission_discards_without_refill():
     controller, state, refill = harness(closed=True)
     assert apply(state, controller, report([0, 1])) == []
     assert controller.policy_status_manager.samples_on_the_fly == 8
-    state.adapter.admit.assert_not_called()
     refill.assert_not_called()
     assert apply(state, controller, report([0, 1])) == []
     assert (
@@ -194,9 +230,7 @@ def test_departed_source_cannot_resettle_after_state_is_pruned():
 
 
 def test_settlement_failure_poisoning_prevents_false_retry_success():
-    controller, state, _ = harness(
-        lambda *_: CompletionDisposition(outcome="rejected", reason="quality")
-    )
+    controller, state, _ = harness(closed=True)
     controller.policy_status_manager._publish_payload_transport_cleanup.side_effect = (
         RuntimeError("control plane failed")
     )
@@ -207,11 +241,14 @@ def test_settlement_failure_poisoning_prevents_false_retry_success():
 
 
 def test_all_rejected_mixed_versions_refill_each_origin_separately():
-    controller, state, refill = harness(
-        lambda *_: CompletionDisposition(outcome="rejected", reason="quality")
+    controller, state, refill = harness()
+    request = report(
+        [],
+        failures=[
+            CompletionFailure(identity=identity(0, 1), reason="quality"),
+            CompletionFailure(identity=identity(1, 2), reason="quality"),
+        ],
     )
-    request = report([0, 1])
-    request.completion_identities[0] = identity(0, 1)
     assert apply(state, controller, request) == []
     assert [call.args[:2] for call in refill.call_args_list] == [(1, 1), (2, 1)]
     assert controller.policy_status_manager.samples_on_the_fly == 8
@@ -289,11 +326,8 @@ def test_reason_metric_cardinality_is_bounded():
     )
 
 
-def test_adapter_cannot_mutate_live_payload():
-    def decide(context, rollout):
-        rollout.completion = "changed"
-        return CompletionDisposition(outcome="accepted")
-
-    controller, state, _ = harness(decide)
+def test_controller_cannot_reselect_precomputed_advantage_group():
+    controller, state, _ = harness()
     accepted = apply(state, controller, report([0]))
     assert accepted[0].completion == "payload-0"
+    assert not hasattr(state, "adapter")

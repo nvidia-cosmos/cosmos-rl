@@ -3,7 +3,6 @@
 """Controller-owned admission transaction; no parallel sample accounting."""
 
 from cosmos_rl.dispatcher.data.admission import (
-    CompletionContext,
     CompletionDisposition,
     SourceWindow,
 )
@@ -11,8 +10,7 @@ from cosmos_rl.reward.admission import COMPLETION_ADMISSION_METRIC_PREFIX
 
 
 class CompletionAdmissionState:
-    def __init__(self, adapter, *, window_size=4096):
-        self.adapter = adapter
+    def __init__(self, *, window_size=4096):
         self.window_size = window_size
         self.sources = {}
         self.failed = False
@@ -21,8 +19,8 @@ class CompletionAdmissionState:
     def prepare(self, controller, request, rollouts):
         """Validate and evaluate everything before the first accounting mutation.
 
-        Called under the controller lifecycle lock. The synchronous adapter
-        cannot interleave with another ingestion/registration coroutine.
+        Called under the controller lifecycle lock. Quality selection must
+        already have happened on the producer, before advantage computation.
         """
         if self.failed:
             raise RuntimeError(
@@ -64,6 +62,12 @@ class CompletionAdmissionState:
             for identity, rollout in zip(identities, rollouts)
         ):
             raise ValueError("Completion identity and payload weight version disagree")
+        if any(
+            failure.payload is not None
+            and failure.payload.weight_version != failure.identity.weight_version
+            for failure in request.completion_failures
+        ):
+            raise ValueError("Rejected payload and identity weight version disagree")
         key = (request.src_replica_name, rank)
         _, window = self.sources.setdefault(
             key, (replica, SourceWindow(self.window_size))
@@ -80,23 +84,24 @@ class CompletionAdmissionState:
             if closed:
                 disposition = CompletionDisposition(outcome="rejected", reason="closed")
             else:
-                disposition = self.adapter.admit(
-                    CompletionContext(request.src_replica_name, rank, identity),
-                    rollout.model_copy(deep=True),
-                )
-                if not isinstance(disposition, CompletionDisposition):
-                    raise TypeError(
-                        "Admission adapter must return CompletionDisposition"
-                    )
+                # Never perform per-completion quality filtering here: the
+                # received advantages describe the producer's selected group.
+                disposition = CompletionDisposition(outcome="accepted")
             decisions.append((identity, rollout, disposition))
         for index, failure in enumerate(
             request.completion_failures, start=len(identities)
         ):
+            if (
+                not unseen[index]
+                and failure.payload is not None
+                and failure.identity.sequence in window.failed_without_payload
+            ):
+                late_payloads.append((failure.identity, failure.payload))
             if unseen[index]:
                 decisions.append(
                     (
                         failure.identity,
-                        None,
+                        failure.payload,
                         CompletionDisposition(
                             outcome="rejected", reason=failure.reason
                         ),

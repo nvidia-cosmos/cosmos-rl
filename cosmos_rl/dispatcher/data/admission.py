@@ -3,10 +3,9 @@
 """Instance-owned admission contracts and bounded completion identity tracking."""
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from cosmos_rl.dispatcher.data.schema import Rollout
 
 
@@ -35,30 +34,18 @@ class CompletionDisposition(BaseModel):
 
 
 class CompletionFailure(BaseModel):
-    """Producer terminal failure, using the identity allocated before generation."""
+    """Producer terminal rejection, using its pre-generation identity.
+
+    Includes generation failures, quality exclusions and otherwise eligible
+    members of groups below the algorithm's minimum trainable size. Filtering
+    happens before advantages. An optional rejected payload transfers cleanup
+    ownership to the controller; it is never admitted to training.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     identity: CompletionIdentity
     reason: str = Field(min_length=1, max_length=64)
-
-
-@dataclass(frozen=True)
-class CompletionContext:
-    source_replica: str
-    source_rank: int
-    identity: CompletionIdentity
-
-
-class CompletionAdmission(Protocol):
-    def admit(
-        self, context: CompletionContext, rollout: Rollout
-    ) -> CompletionDisposition:
-        """Decide synchronously, without mutating controller or rollout state.
-
-        Exceptions reject the whole report before accounting changes; callers
-        may retry the unchanged report. This is not a fail-open hook.
-        """
-        ...
+    payload: Rollout | None = None
 
 
 @dataclass
