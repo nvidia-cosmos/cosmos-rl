@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import threading
+import asyncio
+from collections import deque
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 
 import pytest
 
@@ -139,6 +141,63 @@ def test_ucxx_partial_start_resets_context_before_freeing_buffer(monkeypatch):
         "reset",
         "buffer.close",
     ]
+
+
+def test_ucxx_client_retains_endpoint_when_close_fails():
+    from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXClient
+
+    client = UCXXClient.__new__(UCXXClient)
+    endpoint = Mock(close=AsyncMock(side_effect=RuntimeError("endpoint busy")))
+    client._pool = {("host", 123): deque([endpoint])}
+    with pytest.raises(RuntimeError, match="endpoint busy"):
+        asyncio.run(client.close())
+    assert list(client._pool[("host", 123)]) == [endpoint]
+    endpoint.close.side_effect = None
+    asyncio.run(client.close())
+    assert client._pool == {}
+
+
+def test_ucxx_strategy_retains_client_and_propagates_close_failure():
+    from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+
+    strategy = UCXXTransportStrategy()
+    client = Mock(close=AsyncMock(side_effect=RuntimeError("endpoint busy")))
+    strategy._client = client
+    with pytest.raises(RuntimeError, match="endpoint busy"):
+        strategy.shutdown()
+    assert strategy._client is client
+    client.close.side_effect = None
+    strategy.shutdown()
+
+
+def test_ucxx_strategy_initializes_reads_and_closes_on_one_loop(monkeypatch):
+    from cosmos_rl.utils.payload_transport.ucxx import strategy as module
+
+    loops = []
+
+    class Client:
+        def __init__(self):
+            loops.append(asyncio.get_running_loop())
+
+        async def close(self):
+            loops.append(asyncio.get_running_loop())
+
+    monkeypatch.setattr(module, "UCXX_AVAILABLE", True)
+    monkeypatch.setattr(module, "UCXXClient", Client)
+    strategy = module.UCXXTransportStrategy()
+    strategy.setup(device="cpu")
+
+    async def fetch(tasks):
+        loops.append(asyncio.get_running_loop())
+        return {0: {"value": 1}}, 0, 0
+
+    strategy._fetch_all = fetch
+    assert strategy.sync_fetch({}) == {"value": 1}
+    assert strategy.sync_fetch({}) == {"value": 1}
+    strategy.shutdown()
+    assert len(loops) == 4
+    assert all(loop is loops[0] for loop in loops)
+    assert loops[0].is_closed()
 
 
 def test_producer_partial_setup_rolls_back_and_preserves_original_error():

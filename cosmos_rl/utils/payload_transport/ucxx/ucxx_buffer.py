@@ -1185,10 +1185,10 @@ class UCXXClient:
     async def close(self) -> None:
         """Drain and close all pooled endpoints."""
         for key in list(self._pool):
-            pool = self._pool.pop(key, None)
-            if pool:
-                for ep in pool:
-                    try:
-                        await ep.close()
-                    except Exception:
-                        pass
+            pool = self._pool[key]
+            while pool:
+                # Keep the failed endpoint and the rest of the pool owned.
+                # A close failure is not permission to drop live references.
+                await pool[0].close()
+                pool.popleft()
+            del self._pool[key]
