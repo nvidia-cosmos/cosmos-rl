@@ -1,4 +1,4 @@
-# Transport failure containment (draft)
+# Transport failure containment
 
 The strategy-backed prefetch scheduler owns operation deadlines. Backends own
 buffer lifetimes and ordinary transfer-error handling; supervisors own process
@@ -51,3 +51,13 @@ unsafe freeing and reduce memory pressure; neither proves native completion
 after a hang. This PR does not change cache cleanup, promise transport recovery,
 or introduce a job-wide memory budget. Cancellation and backend parity must be
 validated separately from allocation containment; TCP tests are not RDMA tests.
+
+## Validation scope
+
+A current-revision live NCCL control completed 20 training steps with all four
+workers exiting zero. An injected lock-held stall after real rendezvous produced
+fatal exit 86 at its 15-second deadline; the local CLI terminated its cohort and
+exited nonzero, with no unsafe fallback. Both arms ran on one node with separate
+policy and rollout processes. UCXX deadline behavior is covered by native-call
+subprocess tests, not a live RDMA canary. No cross-node containment or combined
+adoption with the related lifecycle/memory PRs is established by this validation.

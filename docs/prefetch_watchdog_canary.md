@@ -35,8 +35,9 @@ test configuration; the PR does not change those scheduler policies. A scheduler
 timeout is not evidence of prompt cohort termination. See
 `transport_failure_contract.md` for the precise containment boundary.
 
-The injection functions were cluster-tested against the earlier NCCL-only
-watchdog. The revised generic fatal-status and local containment path still needs
-live validation; those older results do not establish its correctness. The
-standalone wrapper is an additional convenience interface. Never install this
-fixture into production startup paths.
+The injection functions were cluster-tested against the revised generic
+fatal-status path: a clean NCCL control completed 20 steps, and an injected
+lock-held stall produced exit 86 and local CLI cohort termination without unsafe
+fallback. This was a single-node test, not cross-node or live RDMA validation.
+The standalone wrapper is an additional convenience interface. Never install
+this fixture into production startup paths.
