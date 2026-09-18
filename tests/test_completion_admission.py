@@ -598,19 +598,24 @@ def test_multiturn_filter_keeps_every_completion_field_aligned():
 
     assert len(valid_payloads) == 1
     assert valid_payloads[0].prompt_idx == 3
-    assert valid_results[0].completions == ["valid"]
-    assert valid_results[0].completed_conversations == [valid_conversation]
-    assert valid_results[0].completion_trainable == [True]
-    assert valid_results[0].completion_drop_reasons == [None]
-    assert valid_results[0].completion_logprobs == [[[1.0]]]
-    assert valid_results[0].completion_token_ids == [[[20]]]
-    assert valid_results[0].cumulative_logprob == [-1.0]
-    assert valid_results[0].extra_info == {
+    # Preserve group slots up to reward processing. Selection (and minimum
+    # size validation) must happen once, before advantage computation.
+    assert valid_results[0].completions == ["invalid", "valid"]
+    selected = select_payload_completions(
+        enqueued[0], resolve_completion_admission(enqueued[0], 1)
+    )
+    assert selected.completions == ["valid"]
+    assert selected.completed_conversations == [valid_conversation]
+    assert selected.completion_logprobs == [[[1.0]]]
+    assert selected.completion_token_ids == [[[20]]]
+    assert selected.cumulative_logprob == [-1.0]
+    assert selected.extra_info == {
         "aligned": ["good"],
         "group": "metadata",
     }
-    assert enqueued[0].completions == ["valid"]
-    worker._report_discarded_samples.assert_called_once_with(1)
+    assert enqueued[0].completion_trainable == [False, True]
+    assert resolve_completion_admission(enqueued[0], 2).group_excluded
+    worker._report_discarded_samples.assert_not_called()
 
 
 def test_rollout_reporter_accounts_for_excluded_completion():

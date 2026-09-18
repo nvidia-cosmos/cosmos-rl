@@ -8,6 +8,8 @@ checkpointing disabled. Disaggregated runs additionally set
 rollout.completion_admission=true. Colocated runs use the same quality masks
 with ordinary local queue accounting. No identity/accounting implementation is
 injected by this fixture: it exercises the standard producer implementation.
+Set ADMISSION_CANARY_SETTLEMENT_FAULT=1 to inject an exception after the first
+real discard settlement; the controller must exit nonzero, not hang or retry.
 """
 
 import os
@@ -99,6 +101,18 @@ if role == "controller":
 
     @run_web_panel.app.middleware("http")
     async def observe(request, call_next):
+        status = run_web_panel.controller.policy_status_manager
+        if os.environ.get("ADMISSION_CANARY_SETTLEMENT_FAULT") == "1" and not getattr(
+            status, "_canary_fault_installed", False
+        ):
+            original_settle = status.settle_discarded_samples
+
+            def fail_after_mutation(*args, **kwargs):
+                original_settle(*args, **kwargs)
+                raise RuntimeError("injected failure after completion settlement")
+
+            status.settle_discarded_samples = fail_after_mutation
+            status._canary_fault_installed = True
         response = await call_next(request)
         status = run_web_panel.controller.policy_status_manager
         rejected = status.filter_records.get("application_rejected", 0)

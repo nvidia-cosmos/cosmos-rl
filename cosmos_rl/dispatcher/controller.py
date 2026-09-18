@@ -454,7 +454,13 @@ maxmemory-policy allkeys-lfu
         for payload in payloads:
             while True:
                 refill_credit = credits.get(weight_version, 0)
-                issued = self.weight_version_to_prompt_num.get(weight_version, 0)
+                # Total issued includes replacements for retry-limit tracking.
+                # They must not consume still-unissued NORMAL quota slots:
+                # failures can arrive before every rollout replica has fetched
+                # its first prompt batch.
+                issued = self.weight_version_to_prompt_num.get(
+                    weight_version, 0
+                ) - issued_replacements.get(weight_version, 0)
                 if refill_credit > 0:
                     credits[weight_version] = refill_credit - 1
                     issued_replacements[weight_version] = (

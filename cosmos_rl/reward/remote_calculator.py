@@ -434,7 +434,7 @@ class RemoteRewardCalculator:
                 self.minimum_trainable_completions,
                 enabled=not is_validation,
             )
-            if admission.explicit:
+            if admission.explicit or payload.completion_sequences is not None:
                 selected_payload = select_payload_completions(payload, admission)
                 training_excluded_indices = (
                     range(admission.original_size)

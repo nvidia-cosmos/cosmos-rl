@@ -130,6 +130,35 @@ def test_validation_does_not_allocate_training_identities():
     w.api_client.post_rollout_completion.assert_not_called()
 
 
+def test_identification_does_not_force_a_quality_mask_on_legacy_groups():
+    w = worker()
+    w.should_report = True
+    w.config.rollout.multi_turn_config = SimpleNamespace(enable=False)
+    w.config.train = SimpleNamespace(
+        non_text=True,
+        local_dataset=False,
+        train_policy=SimpleNamespace(bypass_reward=False),
+    )
+    w.enqueue_teacher_calculation = lambda payloads: payloads
+    w.reward_dispatcher = SimpleNamespace(enqueue_rewards_cal=Mock())
+    payload = RLPayload(completion_sequences=[0], weight_version=7)
+    w._enqueue_masked_results([RolloutResult(completions=["one"])], [payload])
+    assert payload.completion_trainable is None
+    assert payload.completion_sequences == [0]
+    assert w.reward_dispatcher.enqueue_rewards_cal.call_args.args[2] == 7
+
+
+def test_non_reporting_rank_never_enqueues_masked_results():
+    w = worker()
+    w.should_report = False
+    w.reward_dispatcher = SimpleNamespace(enqueue_rewards_cal=Mock())
+    w._enqueue_masked_results(
+        [RolloutResult(completions=["a"], completion_trainable=[False])], [RLPayload()]
+    )
+    w.reward_dispatcher.enqueue_rewards_cal.assert_not_called()
+    w.api_client.post_rollout_completion.assert_not_called()
+
+
 @pytest.mark.parametrize("raises", [False, True])
 def test_async_generation_failure_returns_reserved_payload(raises):
     scheduler = object.__new__(RolloutTaskScheduler)

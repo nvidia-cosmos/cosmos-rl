@@ -18,6 +18,7 @@ prompts), ``on_policy=true``, ``allowed_outdated_steps=0``,
 
 import asyncio
 import logging
+import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,6 +31,27 @@ POLICY_REPLICAS = 3
 TRAIN_BATCH_PER_REPLICA = 8
 ROLLOUTS_PER_GLOBAL_BATCH = TRAIN_BATCH_PER_REPLICA * POLICY_REPLICAS  # 24
 PROMPTS_PER_GLOBAL_BATCH = ROLLOUTS_PER_GLOBAL_BATCH // N_GENERATION  # 3
+
+
+@pytest.mark.parametrize("early_drops", [1, 2, 4])
+def test_replacements_do_not_consume_unissued_normal_quota(early_drops):
+    controller = object.__new__(Controller)
+    controller.weight_version_to_prompt_num = {0: 2}
+    controller.weight_version_to_replacement_prompt_num = {0: early_drops}
+    controller.weight_version_to_replacement_prompt_issued = {}
+    controller.weight_version_to_discarded_sample_num = {0: early_drops}
+    payloads = [RLPayload() for _ in range(early_drops + 2)]
+    controller._assign_prompt_weight_versions(
+        payloads, starting_weight_version=0, prompt_quota=4
+    )
+    assert [p.weight_version for p in payloads] == [0] * (early_drops + 2)
+    assert controller.weight_version_to_prompt_num[0] == 4 + early_drops
+    assert controller.weight_version_to_replacement_prompt_issued[0] == early_drops
+    next_payload = RLPayload()
+    controller._assign_prompt_weight_versions(
+        [next_payload], starting_weight_version=0, prompt_quota=4
+    )
+    assert next_payload.weight_version == 1
 
 
 def _config(*, on_policy=True, allowed_outdated_steps=0, mode="disaggregated"):

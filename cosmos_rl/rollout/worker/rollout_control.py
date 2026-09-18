@@ -2493,8 +2493,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Filter the rollout results with valid completions or valid completed_conversations.
         Returns the valid payloads and valid results for reporting.
         """
-        if getattr(self, "completion_reporter", None) is not None:
-            return self._enqueue_identified_results(rollout_results, payloads_list)
+        if getattr(self, "completion_reporter", None) is not None or any(
+            result.completion_trainable is not None for result in rollout_results
+        ):
+            # Keep original group slots until reward selection. Both modes
+            # use this path; structural failures compose with the quality mask
+            # before the algorithm checks its minimum and computes advantages.
+            return self._enqueue_masked_results(rollout_results, payloads_list)
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
@@ -2611,18 +2616,26 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
         return valid_payloads_list, valid_result
 
-    def _enqueue_identified_results(self, results, payloads):
+    def _enqueue_masked_results(self, results, payloads):
         if len(results) != len(payloads):
             raise ValueError("Generation must return one result per reserved prompt")
+        if not self.should_report:
+            return payloads, results
         for result, payload in zip(results, payloads):
-            size = len(payload.completion_sequences)
+            reporter = getattr(self, "completion_reporter", None)
             if result.completions is None or len(result.completions) == 0:
-                self._post_identified_report(
-                    self.completion_reporter.generation_failure(
-                        [payload], "generation_error"
+                if reporter is not None:
+                    self._post_identified_report(
+                        reporter.generation_failure([payload], "generation_error")
                     )
-                )
+                else:
+                    self._report_discarded_samples(self.config.rollout.n_generation)
                 continue
+            size = (
+                len(payload.completion_sequences)
+                if reporter is not None
+                else len(result.completions)
+            )
             if len(result.completions) != size:
                 raise ValueError(
                     "Generation must preserve reserved completion slots; mark failures with a mask"
@@ -2632,6 +2645,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 result,
                 include_completed_conversations=self.config.rollout.multi_turn_config.enable,
             )
+            explicit_mask = payload.completion_trainable is not None
+            if reporter is None:
+                payload.weight_version = self.current_weight_version
             mask = (
                 list(payload.completion_trainable)
                 if payload.completion_trainable is not None
@@ -2656,14 +2672,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         for msg in conversation
                     ):
                         mask[index], reasons[index] = False, "invalid_completion"
+                        explicit_mask = True
             elif not self.config.train.non_text:
                 payload.completions = [
                     value if value != "" else self.eos_token
                     for value in payload.completions
                 ]
             payload.completion_trainable, payload.completion_drop_reasons = (
-                mask,
-                reasons,
+                mask if explicit_mask else None,
+                reasons if explicit_mask else None,
             )
             if self.config.train.local_dataset:
                 payload.reference_answer = self.data_fetcher.query_reference_answer(
