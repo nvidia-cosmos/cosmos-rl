@@ -52,4 +52,8 @@ CPU tests cover individual acquisition failures, repeated/concurrent close,
 timeout ownership, worker two-packer rollback, pending senders, and incomplete GPU
 events represented by controlled test doubles. The two-node NCCL canary completed
 three exact-payload transfer/close/reattach cycles on both ranks with clean process
-exits. Native UCXX teardown still requires canary validation before release.
+exits. The native UCXX canary passed the same three cross-node cycles with four
+server listeners over TCP. UCXX initialization, reads and endpoint close use one
+owned event loop; a failed endpoint close retains the client and endpoint.
+These tests do not establish recovery from a hung native operation or coverage
+of every UCX network transport.

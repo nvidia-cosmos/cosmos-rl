@@ -63,6 +63,7 @@ class UCXXPayloadTransport(PayloadTransport):
         if operation is None:
             operation = get_close_operation(producer, "_ucxx_close_operation", close)
         operation.close(timeout)
+
     # Intentionally None: UCXX uses dict-shaped completion metadata and
     # SHM ring buffers auto-recycle slots, so it does NOT participate in
     # the controller's discard-cleanup dispatch.  ``handle_discarded``
