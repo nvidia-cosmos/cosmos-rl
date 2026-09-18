@@ -1,54 +1,50 @@
 # Application checkpoint metadata and sampling restoration
 
-## Deterministic continuation: required follow-up
+## Consistent checkpoint recovery: required follow-up
 
 The adapter below restores metadata and a sampling stream. It is **not yet a
 coordinated checkpoint protocol**. A cursor captured while rollout work is
 outstanding is not necessarily the position corresponding to the saved model.
-Do not use the current sampling/optimizer canary as evidence of deterministic
-asynchronous job continuation.
+Do not use the current sampling/optimizer canary as evidence of a consistent
+asynchronous checkpoint boundary.
 
-The intended contract is a checkpoint containing all state required to continue
-from one committed boundary, without serializing completed rollout queues or
-partially generated rollouts. The proposed simplest boundary is:
+The contract is **consistent resumption, not exact replay**. Restore training
+state and a safe sampling position associated with the same committed checkpoint.
+Discard old in-flight work and regenerate unfinished rollouts after restart.
+Some repeated work is acceptable; work must not be skipped merely because it
+was issued before the checkpoint.
 
-1. Pause new prompt issuance and membership changes.
-2. Finish or explicitly settle outstanding prompts and issued training updates;
-   ensure there are no unconsumed rollouts or loader-prefetched samples omitted
-   from the sampling snapshot. Partial batches and filtered/stale completions
-   need an explicit settlement policy, not a drain that waits forever for a full
-   batch. On timeout, fail the checkpoint without publishing it.
-3. Freeze controller/sampling state and have every required trainer shard save
-   the same completed-update boundary. Persist model, optimizer, scheduler,
-   trainer RNG, and any mutable reference-model/application state.
-4. Publish one immutable manifest only after all artifacts are durable. It must
-   bind the controller state and all trainer shards to a common checkpoint ID,
-   with artifact integrity checks. Incomplete saves must not be discoverable as
-   resumable checkpoints.
-5. Resume issuance only after committing the checkpoint. On restart, verify
-   the manifest and execution compatibility, restore all state, and require
-   worker/controller agreement before training can proceed.
+Required properties:
 
-Controller state must include the epoch, effective sampler/batch-sampler state
-(including permutation, cursor and private RNG), counters, dataset/preprocessing
-identity, and relevant configuration/topology. Controller RNG and request-ID or
-seed-allocation counters must also be saved if they affect subsequent work.
-Rollout generation must use reproducible per-request seeds or restore its RNG
-state; a sampler cursor alone does not restore stochastic generation.
+1. All required trainer shards restore the same completed-update boundary,
+   including model, optimizer, scheduler, trainer RNG and any mutable
+   reference-model/application state needed by the training algorithm.
+2. The saved sampling state represents a safe replay position, not simply the
+   latest fetched cursor. It includes the epoch and effective sampler state
+   (permutation, cursor and private RNG where relevant). Out-of-order completion
+   may require a conservative rewind so no uncommitted work is skipped. Repeated
+   prompts after that rewind are allowed; progress counters must reflect the
+   chosen replay policy rather than treating issued work as committed.
+3. Controller state and trainer artifacts share a verified checkpoint identity.
+   Publish the checkpoint only after all required artifacts are durable; reject
+   incomplete or mixed saves and incompatible dataset/configuration state.
+4. Restart with fresh transient rollout/transport state and reject results from
+   the old execution. Require worker/controller metadata agreement before
+   resumed training proceeds.
 
-An empty queue at save time removes the need to persist rollout payloads, but
-does **not** by itself make future asynchronous execution deterministic. Exact
-continuation additionally requires reproducible admission/batch ordering and
-weight-version assignment, as well as deterministic kernels and compatible
-execution settings. If those cannot be enforced, the guarantee must be stated
-as consistent checkpoint recovery, not bit-for-bit continuation.
+There is no requirement to persist rollout payload queues or partially generated
+rollouts, drain all outstanding rollouts, reproduce generation outputs, or impose
+deterministic asynchronous scheduling. Future completion order, batch composition
+and numerical trajectory may differ from an uninterrupted run.
 
-Acceptance requires fresh-process restart parity of subsequent prompt IDs,
-generation seeds/outputs, batch membership, policy versions, optimizer updates,
-scheduler state, parameters and RNG-sensitive behavior. Exercise nonempty work
-at checkpoint request, partial tails, filtering, all shard acknowledgements,
-and interrupted saves. Negative tests must reject incompatible dataset/config,
-mixed checkpoint artifacts and missing state before the next update.
+Acceptance requires fresh-process restoration of the committed training state
+and safe sampling progress, followed by successful new updates. Exercise
+outstanding/out-of-order work, conservative replay, partial tails, filtering,
+and interrupted saves. Verify that uncommitted work is not skipped, repeated
+work is allowed, and stale results cannot be admitted after restart. Negative
+tests must reject incompatible dataset/configuration, mixed checkpoint artifacts
+and missing required state. Exact future output or parameter parity is not an
+acceptance requirement.
 
 This save-time coordination and end-to-end validation remain to be implemented;
 the interfaces below describe the current restore-only implementation.
