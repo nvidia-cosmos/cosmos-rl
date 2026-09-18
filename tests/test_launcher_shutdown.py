@@ -94,12 +94,12 @@ class TestCoordinatedControllerExit(unittest.TestCase):
                 launch_all._is_coordinated_controller_exit(0, -1, SIGTERM_RC)
             )
 
-    def test_worker_failure_kills_healthy_controller_and_peer(self):
+    def test_fatal_transport_failure_kills_healthy_controller_and_peer(self):
         children = [
             subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
             for code in [
                 "import time; time.sleep(60)",
-                "raise SystemExit(1)",
+                "raise SystemExit(86)",
                 "import time; time.sleep(60)",
             ]
         ]
@@ -123,6 +123,20 @@ class TestCoordinatedControllerExit(unittest.TestCase):
         with self._predicate(True), mock.patch.object(launch_all.time, "sleep"):
             launch_all._monitor_processes([worker, controller], controller)
 
+    def test_ordinary_worker_error_preserves_controller_supervision(self):
+        worker = mock.Mock(pid=101)
+        worker.poll.return_value = 1
+        controller = mock.Mock(pid=102)
+        controller.poll.return_value = 0
+        peer = mock.Mock(pid=103)
+        peer.poll.side_effect = [None, 0]
+        with (
+            mock.patch("psutil.Process") as process,
+            mock.patch.object(launch_all.time, "sleep"),
+        ):
+            launch_all._monitor_processes([worker, controller, peer], controller)
+        process.assert_not_called()
+
     def test_fatal_cleanup_kills_descendants_without_new_sessions(self):
         import psutil
 
@@ -140,7 +154,7 @@ class TestCoordinatedControllerExit(unittest.TestCase):
             text=True,
         )
         descendant = psutil.Process(int(parent.stdout.readline()))
-        failed = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])
+        failed = subprocess.Popen([sys.executable, "-c", "raise SystemExit(86)"])
         try:
             with self.assertRaises(SystemExit):
                 launch_all._monitor_processes([parent, failed], parent)

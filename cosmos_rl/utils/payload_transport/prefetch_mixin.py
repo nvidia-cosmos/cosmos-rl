@@ -81,6 +81,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections import deque
+from cosmos_rl.utils.transport_failure import fail_transport, TransportUnusableError
 from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
@@ -397,14 +398,19 @@ class PrefetchDataPackerMixin:
                 f"prefetch batch {batch_id} exceeded {timeout}s; background fetch "
                 "may still own transport locks; fallback and reuse disabled"
             )
-            self._prefetch_cache = {}
+            # Retain CUDA-backed objects on the fatal path: dropping their last
+            # references here could itself enter allocator/native cleanup.
+            if self._transport_strategy is None:
+                self._prefetch_cache = {}
             self._prefetch_shutdown.set()
         try:
             if self._transport_strategy is not None:
-                self._transport_strategy.on_prefetch_timeout(self._prefetch_failure)
+                # No backend has proved this outstanding operation completed.
+                # Do not call backend cleanup from the deadline thread.
+                fail_transport(self._prefetch_failure)
         finally:
-            # A fatal NCCL hook exits without waking the collector into native
-            # cleanup. Returning hooks still wake it to raise TimeoutError.
+            # Strategy-backed timeout exits without entering native cleanup.
+            # Legacy strategy-less packers retain their terminal exception path.
             self._prefetch_result_queue.put((batch_id, {}, 0.0))
 
     def start_prefetch(self, rollouts: List[Any]) -> None:
@@ -446,8 +452,8 @@ class PrefetchDataPackerMixin:
         including deferred-wait overlap. An independent watchdog enforces it
         even when this method is never called. The fetch worker disarms the
         watchdog on completion, so delayed collection cannot cause a timeout.
-        NCCL exits the process without native cleanup on this path; other
-        transports raise TimeoutError and permanently reject scheduler reuse.
+        All strategy-backed transports exit without native cleanup on this
+        path. Legacy strategy-less packers raise a terminal TimeoutError.
         """
         self._raise_if_prefetch_failed()
         if not self._prefetch_enabled or self._prefetch_result_queue is None:
@@ -544,6 +550,8 @@ class PrefetchDataPackerMixin:
                 fetch_start = get_trace_time()
                 try:
                     results = self._fetch_batch(tasks)
+                except TransportUnusableError as error:
+                    fail_transport(str(error))
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                     logger.error(

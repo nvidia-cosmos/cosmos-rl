@@ -7,7 +7,8 @@ import pytest
 
 
 @pytest.mark.parametrize("action", ["collect", "no-collect", "shutdown"])
-def test_nccl_prefetch_timeout_exits_without_cleanup(action):
+@pytest.mark.parametrize("backend", ["nccl", "ucxx"])
+def test_prefetch_timeout_exits_without_cleanup(action, backend):
     # A separate process exercises the real os._exit, rather than mocking away
     # the only operation capable of terminating an uninterruptible native call.
     code = r"""
@@ -16,8 +17,13 @@ import sys
 import ctypes
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 from cosmos_rl.utils.payload_transport.nccl.strategy import NCCLTransportStrategy
+from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
 
-class HungStrategy(NCCLTransportStrategy):
+base = NCCLTransportStrategy if sys.argv[2] == "nccl" else UCXXTransportStrategy
+class HungStrategy(base):
+    def filter_prefetch_tasks(self, rollouts):
+        return list(enumerate(rollouts))
+
     def fetch_batch(self, tasks):
         with lock:
             print("receive lock held", flush=True)
@@ -48,13 +54,13 @@ else:
 raise AssertionError("timeout returned")
 """
     result = subprocess.run(
-        [sys.executable, "-c", code, action],
+        [sys.executable, "-c", code, action, backend],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert result.returncode == 1, result.stderr
+    assert result.returncode == 86, result.stderr
     assert "receive lock held" in result.stdout
-    assert "NCCL payload FATAL" in result.stderr
+    assert "Transport FATAL" in result.stderr
     assert "fallback and reuse disabled" in result.stderr
     assert "Traceback" not in result.stderr

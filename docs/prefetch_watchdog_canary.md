@@ -26,11 +26,16 @@ concurrent cache cleanup safe.
 
 Require the clean control to complete its training horizon and release the
 allocation. For the fault arm, require exactly one elected receiver, a watchdog
-nonzero exit, termination of its peers, no `UNSAFE FALLBACK` marker, and bounded
+fatal exit (86 through the Cosmos torchrun wrapper), termination of its peers,
+no `UNSAFE FALLBACK` marker, and bounded
 allocation release. Disable relaunch/autoresume and do not count manual
 cancellation as success. For cross-node checks use the native multi-node Slurm
-template, which sets `--kill-on-bad-exit=1` for worker steps.
+template, whose shared fatal marker triggers allocation containment. Verify that
+ordinary worker failures do not create that marker. See
+`transport_failure_contract.md` for the shared-filesystem requirement.
 
-The injection functions were cluster-tested; the standalone wrapper is an
-additional convenience interface. Never install this fixture into production
-startup paths.
+The injection functions were cluster-tested against the earlier NCCL-only
+watchdog. The revised generic fatal-status and Slurm marker path still needs
+live validation; those older results do not establish its correctness. The
+standalone wrapper is an additional convenience interface. Never install this
+fixture into production startup paths.

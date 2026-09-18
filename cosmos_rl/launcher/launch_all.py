@@ -423,12 +423,13 @@ def _is_coordinated_controller_exit(
 
 
 def _monitor_processes(processes, controller=None):
-    """Fail the launched cohort on any unexpected child exit.
+    """Contain explicit fatal transport failures, preserving other exit policy.
 
     Kill descendants as well as shell wrappers, without changing the existing
     session/signal forwarding behavior of healthy launches.
     """
     import psutil
+    from cosmos_rl.utils.transport_failure import FATAL_TRANSPORT_EXIT_CODE
 
     pending = list(processes)
     while pending:
@@ -443,6 +444,16 @@ def _monitor_processes(processes, controller=None):
             )
             if rc != 0 and not coordinated:
                 logger.error("Process %s failed with return code %s", process.pid, rc)
+                if (
+                    rc != FATAL_TRANSPORT_EXIT_CODE
+                    and controller is not None
+                    and process is not controller
+                ):
+                    # Preserve the pre-existing controller-supervised policy
+                    # for ordinary worker errors. This PR is not a new elastic
+                    # recovery policy for every application failure.
+                    pending.remove(process)
+                    continue
                 victims = []
                 for child in pending:
                     try:

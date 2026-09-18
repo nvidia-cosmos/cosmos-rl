@@ -79,16 +79,6 @@ class PayloadTransportStrategy(ABC):
         """
         return None
 
-    def on_prefetch_timeout(self, context: str) -> None:
-        """Handle a terminal fetch timeout without waiting for native cleanup.
-
-        Runs on an independent watchdog thread. The scheduler has disabled
-        further fetches; collectors raise TimeoutError if this returns.
-        Transports whose native cleanup can hang must fail the
-        process here instead. Do not acquire transport locks in this hook.
-        """
-        return None
-
     # ------------------------------------------------------------------
     # Wire-format recognition
     # ------------------------------------------------------------------

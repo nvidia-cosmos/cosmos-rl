@@ -340,6 +340,7 @@ fi
 
 # Create a new run directory for this execution
 new_run_dir=$(add_run)
+export COSMOS_FATAL_TRANSPORT_FILE="${new_run_dir}/fatal-transport"
 log "New run dir: ${new_run_dir}"
 
 # Symlinks for easy access
@@ -439,7 +440,6 @@ log "Controller started with PID: ${pid_controller}"
 # Policy nodes
 export LOCAL_NODE_LIST=${POLICY_NODES}
 srun \
-    --kill-on-bad-exit=1 \
     --overlap \
     --nodes="${NUM_POLICY_NODES}" \
     --nodelist="${LOCAL_NODE_LIST}" \
@@ -469,7 +469,6 @@ log "Policy started with PID: ${pid_policy}"
 if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
     export LOCAL_NODE_LIST=${ROLLOUT_NODES}
     srun \
-        --kill-on-bad-exit=1 \
         --nodes="${NUM_ROLLOUT_NODES}" \
         --nodelist="${LOCAL_NODE_LIST}" \
         --container-image "${CONTAINER_IMAGE}" \
@@ -540,6 +539,19 @@ if [[ ${NUM_ROLLOUT_NODES} -eq 0 ]]; then
 fi
 
 while true; do
+    # Explicit fatal transport failure only. Do not broaden Slurm's ordinary
+    # task-exit policy with --kill-on-bad-exit for unrelated application errors.
+    if [[ -n "${COSMOS_FATAL_TRANSPORT_FILE:-}" ]] && [[ -f "${COSMOS_FATAL_TRANSPORT_FILE}" ]]; then
+        log "Fatal transport failure; terminating this allocation's worker steps"
+        for fatal_pid in "${pid_policy:-}" "${pid_rollout:-}" "${pid_reference:-}" "${pid_controller:-}"; do
+            [[ -n "${fatal_pid}" ]] && kill "${fatal_pid}" 2>/dev/null || true
+        done
+        for fatal_pid in "${pid_policy:-}" "${pid_rollout:-}" "${pid_reference:-}" "${pid_controller:-}"; do
+            [[ -n "${fatal_pid}" ]] && wait "${fatal_pid}" 2>/dev/null || true
+        done
+        status=86
+        break
+    fi
     # Check if we received a signal
     if [[ -n "${received_signal}" ]]; then
         log "Signal received (${received_signal}), exiting monitoring loop"
@@ -655,6 +667,9 @@ done
 # --- 3g. Cleanup and Exit --------------------------------------------------
 
 log "Main loop exited with status: ${status:-0}"
+if [[ "${status:-0}" -eq 86 ]]; then
+    exit 86
+fi
 
 # Handle autoresume (for timeout/preemption signals)
 submit_autoresume ${status:-0}

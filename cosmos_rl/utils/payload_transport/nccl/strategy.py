@@ -231,24 +231,6 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             except Exception as e:  # pragma: no cover - teardown best-effort
                 logger.warning("[NCCLTransportStrategy] comm abort failed: %s", e)
 
-    def on_prefetch_timeout(self, context: str) -> None:
-        # Neither ncclCommInitRankConfig nor ncclCommAbort is reliably
-        # cancellable. Exception unwinding would enter that same cleanup and
-        # can hang forever. Exit nonzero so the worker supervisor can terminate
-        # its process group; never retry a receive against this CUDA context.
-        # Use stderr directly: logging handlers may be held by the stuck worker.
-        try:
-            os.write(
-                2,
-                (
-                    f"[NCCL payload FATAL] replica={self._receiver_replica} "
-                    f"rank={self._receiver_rank} prefix={self._prefix}: {context}; "
-                    "exiting without NCCL cleanup\n"
-                ).encode(),
-            )
-        finally:
-            os._exit(1)
-
     def shutdown(self) -> None:
         """Log the run summary and release the transport.
 
