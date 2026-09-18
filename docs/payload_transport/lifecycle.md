@@ -50,5 +50,6 @@ implementation and are not covered by in-tree strategy rollback guarantees.
 
 CPU tests cover individual acquisition failures, repeated/concurrent close,
 timeout ownership, worker two-packer rollback, pending senders, and incomplete GPU
-events represented by controlled test doubles. Live cross-node producer/consumer
-cleanup and UCXX native teardown still require canary validation before release.
+events represented by controlled test doubles. The two-node NCCL canary completed
+three exact-payload transfer/close/reattach cycles on both ranks with clean process
+exits. Native UCXX teardown still requires canary validation before release.

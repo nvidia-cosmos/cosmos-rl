@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Two-rank NCCL lifecycle canary; one CUDA GPU per process, across nodes.
+"""Two-rank payload lifecycle canary; one CUDA GPU per process, across nodes.
 
-Run using torchrun with two ranks. Requires redis-server on rank zero and
+Run using torchrun with two ranks; select --backend nccl (default) or ucxx.
+Requires redis-server on rank zero and
 network reachability between ranks. Uses an isolated ephemeral Redis instance.
 Tests exact payloads, repeated close, and reattachment across three cycles.
 This is healthy teardown validation, not native-fault recovery validation.
 """
 
 import json
+import argparse
 import os
 import socket
 import subprocess
@@ -46,6 +48,9 @@ def trajectory(device):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=("nccl", "ucxx"), default="nccl")
+    backend = parser.parse_args().backend
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
     device = torch.device("cuda", torch.cuda.current_device())
     dist.init_process_group("gloo", timeout=timedelta(seconds=120))
@@ -91,35 +96,62 @@ def main():
             logging=SimpleNamespace(experiment_name="transport-lifecycle-canary"),
             custom={"nccl_max_steps": 8, "nccl_obs_dim": 4, "nccl_action_dim": 2},
         )
-        producer = NCCLRolloutMixin() if rank == 0 else None
+        if backend == "ucxx":
+            from cosmos_rl.utils.payload_transport.ucxx.mixins import UCXXRolloutMixin
+            from cosmos_rl.utils.payload_transport.ucxx.strategy import (
+                compose_ucxx_transport,
+            )
+            from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
+                UCXXBufferConfig,
+            )
+            from cosmos_rl.utils.payload_transport.ucxx.transport import (
+                UCXXPayloadTransport,
+            )
+
+            producer = UCXXRolloutMixin() if rank == 0 else None
+        else:
+            producer = NCCLRolloutMixin() if rank == 0 else None
         packer = Packer() if rank == 1 else None
         for cycle in range(3):
             metadata = [None]
             if rank == 0:
-                producer.setup_nccl(
-                    replica_id="lifecycle-producer",
-                    rollout_idx=0,
-                    redis_client=client,
-                    config=config,
-                    sender_rank=0,
-                    device=device,
-                    max_steps=8,
-                    obs_dim=4,
-                    action_dim=2,
-                )
+                if backend == "ucxx":
+                    producer.setup_ucxx(
+                        replica_id=f"lifecycle-{os.getpid()}-{cycle}",
+                        max_steps=8,
+                        obs_dim=4,
+                        action_dim=2,
+                        port=31000 + cycle * 16,
+                        config=UCXXBufferConfig(max_entries=8, entry_size_bytes=4096),
+                    )
+                else:
+                    producer.setup_nccl(
+                        replica_id="lifecycle-producer",
+                        rollout_idx=0,
+                        redis_client=client,
+                        config=config,
+                        sender_rank=0,
+                        device=device,
+                        max_steps=8,
+                        obs_dim=4,
+                        action_dim=2,
+                    )
                 metadata[0] = producer.write_to_buffer(trajectory(device))
                 assert metadata[0] is not None
             else:
                 packer._nccl_dp_receiver_replica = "lifecycle-consumer"
-                compose_nccl_transport(
-                    packer,
-                    device=device,
-                    redis_client=client,
-                    config=config,
-                    prefetch_timeout=30,
-                    max_attempts=2,
-                    recv_timeout=10,
-                )
+                if backend == "ucxx":
+                    compose_ucxx_transport(packer, device=device, read_timeout=10)
+                else:
+                    compose_nccl_transport(
+                        packer,
+                        device=device,
+                        redis_client=client,
+                        config=config,
+                        prefetch_timeout=30,
+                        max_attempts=2,
+                        recv_timeout=10,
+                    )
             dist.broadcast_object_list(metadata, src=0)
             if rank == 1:
                 result = packer.get_policy_input(rollout_output=metadata[0])
@@ -134,10 +166,20 @@ def main():
                 assert packer._transport_strategy is None
             dist.barrier()
             if rank == 0:
-                producer.cleanup_nccl(timeout=30)
-                producer.cleanup_nccl(timeout=0)
-                assert all(not thread.is_alive() for thread in producer._nccl_threads)
-                assert not producer._nccl_retained_entries
+                if backend == "ucxx":
+                    buffer = producer._ucxx_buffer
+                    UCXXPayloadTransport().close_producer(producer, timeout=30)
+                    UCXXPayloadTransport().close_producer(producer, timeout=0)
+                    assert producer._ucxx_buffer is None
+                    assert not buffer._server_threads
+                    buffer.unlink()
+                else:
+                    producer.cleanup_nccl(timeout=30)
+                    producer.cleanup_nccl(timeout=0)
+                    assert all(
+                        not thread.is_alive() for thread in producer._nccl_threads
+                    )
+                    assert not producer._nccl_retained_entries
             dist.barrier()
             print(
                 json.dumps(
