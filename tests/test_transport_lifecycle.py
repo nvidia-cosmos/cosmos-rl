@@ -200,14 +200,14 @@ def test_ucxx_strategy_initializes_reads_and_closes_on_one_loop(monkeypatch):
     assert loops[0].is_closed()
 
 
-def test_producer_partial_setup_rolls_back_and_preserves_original_error():
+def test_producer_partial_setup_rolls_back_and_preserves_original_error(monkeypatch):
     from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
 
     producer = NCCLRolloutMixin()
     producer._nccl_registry = Mock()
     producer._nccl_comm_cache = Mock()
     failure = ValueError("after registry acquisition")
-    producer._setup_nccl = Mock(side_effect=failure)
+    monkeypatch.setattr(NCCLRolloutMixin, "_setup_nccl", Mock(side_effect=failure))
     with pytest.raises(ValueError) as raised:
         producer.setup_nccl()
     assert raised.value is failure
@@ -215,6 +215,27 @@ def test_producer_partial_setup_rolls_back_and_preserves_original_error():
     producer._nccl_comm_cache.abort_all.assert_called_once()
     producer.cleanup_nccl()
     producer._nccl_registry.clear.assert_called_once()
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ucxx"])
+def test_setup_does_not_dispatch_to_application_private_helper(monkeypatch, backend):
+    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.ucxx.mixins import UCXXRolloutMixin
+
+    mixin = NCCLRolloutMixin if backend == "nccl" else UCXXRolloutMixin
+    setup = Mock()
+    monkeypatch.setattr(mixin, f"_setup_{backend}", setup)
+
+    class Application(mixin):
+        def _setup_nccl(self):
+            raise AssertionError("application helper is not an override hook")
+
+        def _setup_ucxx(self):
+            raise AssertionError("application helper is not an override hook")
+
+    producer = Application()
+    getattr(producer, f"setup_{backend}")(replica_id="application")
+    setup.assert_called_once_with(producer, replica_id="application")
 
 
 def test_producer_does_not_clear_registry_until_executor_has_joined():

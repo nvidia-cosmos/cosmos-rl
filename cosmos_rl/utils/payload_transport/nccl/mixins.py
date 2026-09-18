@@ -229,7 +229,9 @@ class NCCLRolloutMixin:
             raise RuntimeError("NCCL transport is already attached or still closing")
         self._nccl_close_operation = TransportClose(self._cleanup_nccl_owned)
         try:
-            self._setup_nccl(**kwargs)
+            # This implementation detail is not an application override hook.
+            # Existing mixin consumers may already use this private name.
+            NCCLRolloutMixin._setup_nccl(self, **kwargs)
         except BaseException:
             try:
                 self.cleanup_nccl()

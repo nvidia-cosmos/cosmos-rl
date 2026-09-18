@@ -157,7 +157,8 @@ class UCXXRolloutMixin:
         self._ucxx_write_lock = threading.Lock()
         self._ucxx_close_operation = TransportClose(self.cleanup_ucxx)
         try:
-            self._setup_ucxx(*args, **kwargs)
+            # Do not dispatch into an application's same-named private helper.
+            UCXXRolloutMixin._setup_ucxx(self, *args, **kwargs)
         except BaseException:
             try:
                 self._ucxx_close_operation.close()
