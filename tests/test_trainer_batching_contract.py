@@ -3,7 +3,7 @@
 import tempfile
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -15,6 +15,7 @@ from cosmos_rl.policy.trainer.batching import (
     ExpandedTrainingBatch,
     RecoverablePreparationError,
     run_training_step,
+    agree_batching_schedule,
 )
 
 
@@ -42,6 +43,44 @@ def test_fixed_trainer_keeps_existing_entrypoint():
     assert run_training_step(trainer, before_step=before, rollouts=[1]) == {"loss": 2}
     before.assert_called_once()
     trainer.step_training.assert_called_once_with(rollouts=[1])
+
+
+def test_fixed_schedule_is_sealed_once_and_pads_empty_slots():
+    trainer = trainer_for([[1.0]])
+    trainer.batching_contract = ExpandedSampleBatching(
+        partial_tail="include", fixed_minibatches=3
+    )
+    with patch(
+        "cosmos_rl.policy.trainer.batching._gather", side_effect=lambda value: [value]
+    ) as gather:
+        agree_batching_schedule(trainer)
+        run_training_step(trainer, rollouts=["first"])
+        assert trainer.step_expanded_training.call_args.args[
+            0
+        ] == ExpandedTrainingBatch(((1.0,), (), ()), None, 2)
+        trainer.prepare_training_batch.side_effect = RecoverablePreparationError(
+            "missing"
+        )
+        run_training_step(trainer, rollouts=["second"])
+        batch = trainer.step_expanded_training.call_args.args[0]
+        assert batch == ExpandedTrainingBatch(((), (), ()), None, 2)
+        assert gather.call_count == 1
+        with pytest.raises(ValueError, match="trainer-owned"):
+            batch.mean_gradient_scale(0, 1)
+        trainer.config.train.train_policy.mu_iterations = 3
+        with pytest.raises(ValueError, match="Sealed"):
+            run_training_step(trainer, rollouts=[])
+        assert gather.call_count == 1
+
+
+def test_fixed_schedule_never_silently_truncates_overflow():
+    trainer = trainer_for([[1], [2]])
+    trainer.batching_contract = ExpandedSampleBatching(
+        partial_tail="include", fixed_minibatches=1
+    )
+    with pytest.raises(ValueError, match="exceeds sealed"):
+        run_training_step(trainer, rollouts=[])
+    trainer.step_expanded_training.assert_not_called()
 
 
 def test_variable_episode_expansion_and_partial_tail():
@@ -182,6 +221,26 @@ def _distributed_worker(rank, rendezvous):
                     dist.all_reduce(count)
                     assert count.item() == batch.global_sample_counts[i]
             dist.barrier()
+        trainer = trainer_for([[1.0]] if rank == 0 else [])
+        trainer.batching_contract = ExpandedSampleBatching(
+            partial_tail="include", fixed_minibatches=2
+        )
+        with patch.object(
+            dist, "all_gather_object", wraps=dist.all_gather_object
+        ) as gather:
+            agree_batching_schedule(trainer)
+            for _ in range(2):
+                run_training_step(trainer, rollouts=[])
+                batch = trainer.step_expanded_training.call_args.args[0]
+                assert len(batch.minibatches) == 2
+                assert batch.global_sample_counts is None
+                for _ in range(batch.mu_iterations):
+                    for samples in batch.minibatches:
+                        dist.all_reduce(torch.tensor(float(len(samples))))
+                trainer.prepare_training_batch.side_effect = (
+                    RecoverablePreparationError("missing")
+                )
+            assert gather.call_count == 1
     finally:
         dist.destroy_process_group()
 

@@ -23,10 +23,15 @@ class ExpandedSampleBatching:
     """Opt in to a shared schedule with empty local contributions."""
 
     partial_tail: Literal["include", "reject"] = "reject"
+    fixed_minibatches: int | None = None
 
     def __post_init__(self):
         if self.partial_tail not in ("include", "reject"):
             raise ValueError("Unsupported partial-tail policy")
+        if self.fixed_minibatches is not None and (
+            type(self.fixed_minibatches) is not int or self.fixed_minibatches < 1
+        ):
+            raise ValueError("fixed_minibatches must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -38,11 +43,13 @@ class ExpandedTrainingBatch:
     """
 
     minibatches: tuple[Sequence, ...]
-    global_sample_counts: tuple[int, ...] = ()
+    global_sample_counts: tuple[int, ...] | None = ()
     mu_iterations: int = 1
 
     def mean_gradient_scale(self, index, world_size):
         """Scale a local SUM loss when the trainer averages gradients across ranks."""
+        if self.global_sample_counts is None:
+            raise ValueError("Fixed schedules require trainer-owned sample weighting")
         return world_size / self.global_sample_counts[index]
 
 
@@ -80,6 +87,38 @@ def _describe(batch, mini_batch):
     return sizes
 
 
+def _gather(local):
+    if not dist.is_initialized():
+        return [local]
+    plans = [None] * dist.get_world_size()
+    dist.all_gather_object(plans, local)
+    return plans
+
+
+def agree_batching_schedule(trainer):
+    """Seal replica-local configuration once, before any expanded preparation.
+
+    Called lazily by the worker entrypoint; may also be called at trainer startup
+    after its process group exists. Configuration/group changes require a new
+    trainer, not an independently renegotiated schedule on one rank.
+    """
+    contract = trainer.batching_contract
+    policy = trainer.config.train.train_policy
+    signature = (contract, policy.mini_batch, getattr(policy, "mu_iterations", None))
+    group = dist.group.WORLD if dist.is_initialized() else None
+    sealed = getattr(trainer, "_sealed_batching_schedule", None)
+    if sealed is not None:
+        if sealed != (signature, group):
+            raise ValueError("Sealed batching schedule or process group changed")
+        return
+    signatures = _gather(signature)
+    if any(other != signature for other in signatures):
+        raise ValueError("Expanded ranks disagree on batching schedule configuration")
+    if any(type(value) is not int or value < 1 for value in signature[1:]):
+        raise ValueError("mini_batch and mu_iterations must be positive integers")
+    trainer._sealed_batching_schedule = (signature, group)
+
+
 def run_training_step(trainer, *, before_step=None, **kwargs):
     """Worker entrypoint enforcing the declared contract, not a boolean bypass.
 
@@ -94,6 +133,7 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
         return trainer.step_training(**kwargs)
     if not isinstance(contract, ExpandedSampleBatching):
         raise TypeError("Unknown trainer batching contract")
+    agree_batching_schedule(trainer)
 
     policy = trainer.config.train.train_policy
     mu = getattr(policy, "mu_iterations", None)
@@ -119,17 +159,33 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
             dropped += len(samples) - len(valid)
             cleaned.append(valid)
         batch = ExpandedTrainingBatch(tuple(cleaned))
+        if (
+            contract.fixed_minibatches is not None
+            and len(cleaned) > contract.fixed_minibatches
+        ):
+            raise ValueError(
+                "Prepared batch exceeds sealed fixed_minibatches; trainer must bound preparation"
+            )
         local = {"sizes": tuple(map(len, cleaned)), "mu": mu, "error": None}
     except Exception as error:
+        if contract.fixed_minibatches is not None:
+            # The schedule is already sealed: no extra error agreement here.
+            # Unexpected errors use the normal worker/cohort failure path.
+            raise
         local = {
             "sizes": (),
             "mu": mu,
             "error": f"{type(error).__name__}: {error}"[:512],
         }
-    plans = [local]
-    if dist.is_initialized():
-        plans = [None] * dist.get_world_size()
-        dist.all_gather_object(plans, local)
+    if contract.fixed_minibatches is not None:
+        batch = ExpandedTrainingBatch(
+            batch.minibatches
+            + ((),) * (contract.fixed_minibatches - len(batch.minibatches)),
+            None,
+            mu,
+        )
+        return _consume(trainer, batch, before_step, dropped, recovery, kwargs)
+    plans = _gather(local)
     errors = [(rank, plan["error"]) for rank, plan in enumerate(plans) if plan["error"]]
     if errors:
         raise ValueError(f"Expanded training preflight failed on ranks: {errors}")
@@ -148,7 +204,11 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
         tuple(counts[i] for i in active),
         mu,
     )
-    if active and before_step is not None:
+    return _consume(trainer, batch, before_step, dropped, recovery, kwargs)
+
+
+def _consume(trainer, batch, before_step, dropped, recovery, kwargs):
+    if batch.minibatches and before_step is not None:
         before_step()
     expanded_kwargs = {key: value for key, value in kwargs.items() if key != "rollouts"}
     # Even an all-empty plan reaches the trainer for checkpoint/control work,
@@ -156,7 +216,7 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
     result = trainer.step_expanded_training(batch, **expanded_kwargs)
     result.update(
         {
-            "batching/skipped_update": int(not active),
+            "batching/skipped_update": int(not batch.minibatches),
             "batching/dropped_samples": dropped,
             "batching/preparation_failed": int(recovery is not None),
         }

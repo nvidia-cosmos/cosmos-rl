@@ -15,6 +15,7 @@ from cosmos_rl.policy.trainer.batching import (
     ExpandedTrainingBatch,
     RecoverablePreparationError,
     run_training_step,
+    agree_batching_schedule,
 )
 
 
@@ -57,9 +58,12 @@ class CanaryTrainer:
                     if samples
                     else self.weight.sum() * 0
                 )
-                (
-                    loss * batch.mean_gradient_scale(index, dist.get_world_size())
-                ).backward()
+                scale = (
+                    batch.mean_gradient_scale(index, dist.get_world_size())
+                    if batch.global_sample_counts is not None
+                    else 1 / self.config.train.train_policy.mini_batch
+                )
+                (loss * scale).backward()
                 dist.all_reduce(self.weight.grad)
                 self.weight.grad.div_(dist.get_world_size())
                 self.optimizer.step()
@@ -163,8 +167,72 @@ def main():
                 f"rank={rank} case={case} updates={updates} numerical_parity=PASS",
                 flush=True,
             )
+        fixed_schedule_canary(device, rank)
     finally:
         dist.destroy_process_group()
+
+
+def fixed_schedule_canary(device, rank):
+    from unittest.mock import patch
+
+    trainer = CanaryTrainer(device)
+    trainer.batching_contract = ExpandedSampleBatching(
+        partial_tail="include", fixed_minibatches=2
+    )
+    reference = torch.nn.Parameter(
+        torch.tensor([0.5], dtype=torch.float64, device=device)
+    )
+    optimizer = torch.optim.SGD([reference], lr=0.1, momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+    with patch.object(
+        dist, "all_gather_object", wraps=dist.all_gather_object
+    ) as gather:
+        agree_batching_schedule(trainer)
+        for case in (
+            "healthy",
+            "one_empty",
+            "all_empty",
+            "nonfinite",
+            "preparation_error",
+            "unequal_steps",
+        ):
+            data = torch.tensor(values(case, rank), dtype=torch.float64, device=device)
+            episodes = None if case == "preparation_error" and rank == 1 else [data]
+            run_training_step(trainer, rollouts=episodes)
+            for _ in range(2):
+                for offset in (0, 2):
+                    samples = torch.tensor(
+                        [
+                            x
+                            for r in range(2)
+                            for x in values(case, r)[offset : offset + 2]
+                        ],
+                        dtype=torch.float64,
+                        device=device,
+                    )
+                    samples = samples[torch.isfinite(samples)]
+                    optimizer.zero_grad()
+                    # Fixed nominal denominator: empty samples have zero weight.
+                    # This is deliberately NOT a mean over valid samples.
+                    loss = ((reference * samples - 1) ** 2).sum() / 4
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+            torch.testing.assert_close(
+                trainer.weight, reference, rtol=1e-12, atol=1e-12
+            )
+            torch.testing.assert_close(
+                trainer.optimizer.state[trainer.weight]["momentum_buffer"],
+                optimizer.state[reference]["momentum_buffer"],
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            assert trainer.scheduler.state_dict() == scheduler.state_dict()
+            assert gather.call_count == 1
+            print(
+                f"rank={rank} fixed_case={case} single_agreement=PASS numerical_parity=PASS",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
