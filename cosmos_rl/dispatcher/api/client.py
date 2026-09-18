@@ -63,6 +63,7 @@ from cosmos_rl.utils.api_suffix import (
 from cosmos_rl.utils.parallelism_map import WeightSyncInstructionsGroup
 from cosmos_rl.utils.util import list_to_b64, sanitize, b64_to_list
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import ResumeMetadataMismatch
 
 
 class APIClient(object):
@@ -514,18 +515,31 @@ class APIClient(object):
         Args:
             resume_info: The resumed extra info to post.
         """
+
+        def check_response(response):
+            # Return a permanent conflict through the retry helper without
+            # raising inside it; transport failures and other statuses retain
+            # the existing retry policy.
+            if response.status_code != 409:
+                response.raise_for_status()
+
         try:
-            make_request_with_retry(
+            response = make_request_with_retry(
                 partial(
                     requests.post,
                     json={"ckpt_extra_info": resume_info},
                 ),
                 self.get_alternative_urls(COSMOS_API_RESUME_INFO_SUFFIX),
                 max_retries=self.max_retries,
+                response_parser=check_response,
             )
         except Exception as e:
             raise RuntimeError(
                 f"[Policy] Failed in post resume info to controller after retries {e}."
+            )
+        if response.status_code == 409:
+            raise ResumeMetadataMismatch(
+                "Controller rejected checkpoint resume agreement; training must not continue."
             )
 
     def get_trainable_params(self) -> List[str]:

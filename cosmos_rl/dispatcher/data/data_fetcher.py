@@ -455,9 +455,9 @@ class ControllerDataFetcher(DataFetcherBase):
         self.remain_samples_num = remain_samples_num
 
     def validate_after_resume(self, ckpt_extra_info: dict):
-        assert ckpt_extra_info == self.ckpt_extra_info, (
-            "The keys in the checkpoint extra info should be consistent with the initial ckpt extra info. Please check the checkpoint path and config."
-        )
+        from cosmos_rl.utils.resume import validate_resume_metadata
+
+        validate_resume_metadata(self.ckpt_extra_info, ckpt_extra_info)
 
     def get_batched_prompt(
         self,

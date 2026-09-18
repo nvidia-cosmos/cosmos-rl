@@ -28,6 +28,8 @@ import threading
 
 
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.background import BackgroundTask
+from cosmos_rl.utils.resume import ResumeMetadataMismatch
 from typing import Dict, List, Optional, Callable, Union, Iterable
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.command import StopCommand
@@ -582,10 +584,25 @@ async def get_trainable_params():
         )
 
 
+async def _exit_on_resume_mismatch():
+    # Async background task: do not wait for a free thread-pool worker to exit.
+    os._exit(1)
+
+
 @app.post(COSMOS_API_RESUME_INFO_SUFFIX)
 async def resume_info(request: ResumeInfoRequest):
-    logger.info(f"[Dispatcher] Validate resume info: {request.ckpt_extra_info}")
-    controller.data_fetcher.validate_after_resume(request.ckpt_extra_info)
+    try:
+        controller.data_fetcher.validate_after_resume(request.ckpt_extra_info)
+    except ResumeMetadataMismatch as error:
+        logger.error("[Dispatcher] %s", error)
+        # A bad resume is terminal, not a transient worker loss for which the
+        # controller should await a replacement. Send the conflict first, then
+        # exit nonzero without waiting for distributed teardown/collectives.
+        return JSONResponse(
+            status_code=409,
+            content={"error": "resume_metadata_mismatch", "detail": str(error)},
+            background=BackgroundTask(_exit_on_resume_mismatch),
+        )
     return {"message": "Resume info received and processed"}
 
 
