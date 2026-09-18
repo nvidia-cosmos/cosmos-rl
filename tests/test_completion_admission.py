@@ -481,6 +481,34 @@ def test_remote_reward_uses_registered_algorithm_advantage(monkeypatch):
     assert result[0].advantages == [11.0, 13.0, 15.0]
 
 
+@pytest.mark.parametrize("mask", [None, [True, False, True, True]])
+def test_remote_rewards_preserve_reservations_with_and_without_quality_masks(
+    mask, monkeypatch
+):
+    payload = _payload(mask)
+    payload.completion_sequences = [4, 5, 6, 7]
+    payload.weight_version = 9
+    calculator = RemoteRewardCalculator()
+    calculator.minimum_trainable_completions = 2
+    calculator.rl_algo = _TestAlgo([])
+    calculator.uuid2payload = {"request": [payload]}
+    calculator.uuid2replica = {"request": None}
+    calculator.uuid2stage = {"request": "training"}
+    calculator.uuid2step = {"request": 9}
+    calculator.uuid2completions_per_payload = {"request": [4]}
+    monkeypatch.setattr(
+        calculator, "fetch_reward", lambda *_: torch.tensor([1.0, 100.0, 3.0, 5.0])
+    )
+    requests = Queue()
+    requests.put("request")
+    result, _, _ = calculator.get_results(requests)
+    assert result[0].weight_version == 9
+    assert result[0].completion_sequences == ([4, 6, 7] if mask else [4, 5, 6, 7])
+    assert [r["sequence"] for r in result[0].completion_rejections] == (
+        [5] if mask else []
+    )
+
+
 def test_remote_validation_ignores_misaligned_admission_metadata(monkeypatch):
     payload = _payload([False], ["stale"])
     calculator = RemoteRewardCalculator()

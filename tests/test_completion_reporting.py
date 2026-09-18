@@ -174,12 +174,11 @@ def test_async_generation_failure_returns_reserved_payload(raises):
     assert result is scheduler.complete_queue.get_nowait()
     assert result.payload.completion_sequences == [12, 13]
     assert result.result.completions == []
+    call = scheduler.rollout_engine.rollout_generation.call_args
+    assert call.kwargs["payloads"][0].weight_version == 9
     assert (
-        scheduler.rollout_engine.rollout_generation.call_args.kwargs[
-            "current_weight_version"
-        ]
-        == 9
-    )
+        "current_weight_version" not in call.kwargs
+    )  # async engine API has no such parameter
 
 
 @pytest.mark.parametrize("stage", ["settle", "filter", "buffer"])

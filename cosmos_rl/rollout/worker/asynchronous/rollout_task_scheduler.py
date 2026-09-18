@@ -279,18 +279,12 @@ class RolloutTaskScheduler:
         """
         try:
             # Call rollout engine's async generation method
-            identity_kwargs = (
-                {"current_weight_version": task.payload.weight_version}
-                if task.payload.completion_sequences is not None
-                else {}
-            )
             results = await self.rollout_engine.rollout_generation(
                 payloads=[task.payload],
                 stream=self.stream,
                 data_packer=self.data_packer,
                 data_fetcher=None,  # data should already be loaded in the task
                 is_validation=task.is_validation,
-                **identity_kwargs,
             )
 
             if results and len(results) > 0:
