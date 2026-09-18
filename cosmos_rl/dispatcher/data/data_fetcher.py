@@ -35,6 +35,10 @@ from cosmos_rl.dispatcher.data import (
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
+from cosmos_rl.dispatcher.data.resume import (
+    ControllerResumeAdapter,
+    ControllerResumeMetadata,
+)
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import split_train_n_val_dataset
 
@@ -105,6 +109,7 @@ class ControllerDataFetcher(DataFetcherBase):
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
         is_rl: bool = True,
+        resume_adapter: Optional[ControllerResumeAdapter] = None,
     ):
         # ControllerDataFetcher doesn't need data packer.
         super().__init__(
@@ -117,6 +122,12 @@ class ControllerDataFetcher(DataFetcherBase):
         )
 
         self.ckpt_extra_info = {}
+        self.resume_adapter = resume_adapter
+        self.resume_metadata: Optional[ControllerResumeMetadata] = None
+        if resume_adapter is not None and not is_rl:
+            raise ValueError(
+                "Controller resume adapters require controller-owned sampling"
+            )
         self.epoch = 1
         self.remain_samples_num = -1
         self.sampler = sampler
@@ -236,7 +247,35 @@ class ControllerDataFetcher(DataFetcherBase):
                 # Filter kwargs to only those the function accepts
                 filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
                 self.batch_sampler = self.batch_sampler(**filtered)
-            if self.config.train.resume:
+            if self.config.train.resume and self.resume_adapter is not None:
+                metadata = self.resume_adapter.load_metadata(self.config)
+                if metadata is None:
+                    if isinstance(self.config.train.resume, str):
+                        raise FileNotFoundError(self.config.train.resume)
+                    self.config.train.resume = False
+                    # Discovery found nothing. Do not reconstruct a cursor or
+                    # turn step zero into a false 'no checkpoint' result.
+                else:
+                    if not isinstance(metadata, ControllerResumeMetadata):
+                        raise TypeError(
+                            "load_metadata must return ControllerResumeMetadata or None"
+                        )
+                    owner = (
+                        "batch_sampler" if self.batch_sampler is not None else "sampler"
+                    )
+                    if metadata.sampling_owner != owner:
+                        raise ValueError(
+                            f"Resume sampling owner {metadata.sampling_owner!r} does not match {owner!r}"
+                        )
+                    self.resume_metadata = metadata
+                    # Publish one selected checkpoint through controller config
+                    # so custom trainers need not independently rediscover it.
+                    self.config.train.resume = metadata.checkpoint_path
+                    self.ckpt_extra_info = metadata.to_checkpoint_extra_info()
+                    self.epoch = metadata.epoch
+                    remain_samples_num = metadata.remaining_completions
+                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
+            elif self.config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
                     PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
@@ -326,6 +365,16 @@ class ControllerDataFetcher(DataFetcherBase):
                 self.train_sampler.set_epoch(self.epoch)
             if hasattr(self.batch_sampler, "set_epoch"):
                 self.batch_sampler.set_epoch(self.epoch)
+
+            if self.resume_metadata is not None:
+                effective_sampler = (
+                    self.batch_sampler
+                    if self.batch_sampler is not None
+                    else self.train_sampler
+                )
+                self.resume_adapter.restore_sampler(
+                    effective_sampler, self.resume_metadata
+                )
 
             if self.batch_sampler is not None:
                 logger.info(

@@ -815,6 +815,7 @@ def main(
     val_sampler: Optional[Callable] = None,
     val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
+    resume_adapter=None,
     **kwargs,
 ):
     if kwargs:
@@ -923,6 +924,7 @@ def main(
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
+            resume_adapter=resume_adapter,
         )
         logger.info(f"Successfully loaded configuration from {args.config}")
     except FileNotFoundError:
