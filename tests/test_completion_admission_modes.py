@@ -201,3 +201,21 @@ def test_ingestion_rejects_late_quality_mask():
     )
     with pytest.raises(ValueError, match="before computing advantages"):
         extract_rollouts([payload], False)
+
+
+def test_colocated_minor_step_handles_empty_generation():
+    worker = object.__new__(ColocatedRolloutControlWorker)
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(n_generation=3))
+    worker.global_rank = 0
+    worker.current_weight_version = 0
+    worker.batch_size = 1
+    worker._prompt_queue = Queue()
+    worker._prompt_queue.put([RLPayload(prompt="p", weight_version=0)])
+    worker.request_new_prompts = Mock(return_value=False)
+    worker._call_rollout_generation = Mock(return_value=[])
+    worker._report_discarded_samples = Mock()
+    worker.inference_stream = worker.data_packer = worker.data_fetcher = None
+
+    assert worker.rollout_for_one_minor_step() == (False, 0)
+    assert worker._prompt_queue.empty()
+    worker._report_discarded_samples.assert_called_once_with(3)

@@ -82,7 +82,7 @@ def test_empty_outer_result_reports_every_consumed_prompt():
     worker.data_packer = None
     worker.data_fetcher = None
 
-    assert worker.one_step_generation() is False
+    assert worker.one_step_generation() == ([], [])
 
     request = worker.api_client.post_rollout_completion.call_args.args[0]
     assert request.metrics["discarded_samples"] == 8

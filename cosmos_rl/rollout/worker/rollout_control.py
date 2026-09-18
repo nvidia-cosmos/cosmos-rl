@@ -2700,7 +2700,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     ) -> Tuple[List[RLPayload], List[RolloutResult]]:
         """
         Perform one step of rollout generation.
-        Returns the number of valid payloads generated.
+        Return payloads and results, including an empty pair on generation failure.
         """
         generation_start_ts = time.time()
         try:
@@ -2736,12 +2736,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             logger.debug(
                 "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
-                "batch=%d produced=0 returned_false=True",
+                "batch=%d produced=0",
                 self.global_rank,
                 (time.time() - generation_start_ts) * 1000.0,
                 len(payloads_list),
             )
-            return False
+            return [], []
 
         assert len(rollout_results) == len(payloads_list), (
             f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
