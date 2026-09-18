@@ -20,7 +20,8 @@ belongs to the application.
 Defaults preserve existing behavior: the timestamp is the ID, the display name
 is `experiment_name/timestamp` (or the output directory), and resume is `allow`.
 Resume accepts `allow`, `must`, `never`, `auto`, or Python/JSON `None`/`null` to
-leave resuming disabled. W&B defines their semantics in its
+defer to SDK settings, including environment configuration. `None` does not
+guarantee that resuming is disabled. W&B defines these policies in its
 [initialization API](https://docs.wandb.ai/models/ref/python/functions/init).
 Project and group already use `project_name` and `group_name`. Vision-generation
 configs retain their existing `job` identity behavior.
@@ -31,6 +32,12 @@ configuration overrides apply only when Cosmos initializes a new run. Logging
 invalidates a cached handle when the SDK global run is finished or replaced.
 Call `init_wandb` explicitly to adopt a replacement. Failed initialization clears
 the previous cached handle and retains existing best-effort error logging.
+
+Initialization remains best-effort for every resume policy. For example, if
+`wandb_resume = "must"` causes the SDK to reject initialization, Cosmos logs the
+error and continues without W&B logging; it does not fail training. This setting
+governs W&B resume behavior, not a requirement that telemetry be available for
+training to proceed. Application-owned runs retain their application's policy.
 
 This logger targets the SDK's single active global run. Concurrent independent
 W&B runs (`reinit="create_new"`) are not supported by this global logger; use

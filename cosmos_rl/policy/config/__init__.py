@@ -1661,7 +1661,7 @@ class LoggingConfig(BaseModel):
     )
     wandb_resume: Optional[Literal["allow", "must", "never", "auto"]] = Field(
         default="allow",
-        description="W&B resume policy; None uses the SDK's no-resume behavior. Defaults to allow for compatibility.",
+        description="W&B resume policy; None defers to SDK settings, including environment configuration. Defaults to allow for compatibility. Initialization remains best-effort, including must mode.",
     )
     logger: List[str] = Field(
         default_factory=list,
