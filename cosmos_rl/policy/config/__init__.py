@@ -1649,6 +1649,20 @@ class RolloutConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
+    wandb_run_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Explicit W&B run ID. Unset preserves train.timestamp.",
+    )
+    wandb_run_name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Exact W&B display name, without an appended timestamp. Unset preserves experiment_name behavior.",
+    )
+    wandb_resume: Optional[Literal["allow", "must", "never", "auto"]] = Field(
+        default="allow",
+        description="W&B resume policy; None uses the SDK's no-resume behavior. Defaults to allow for compatibility.",
+    )
     logger: List[str] = Field(
         default_factory=list,
         description="List of loggers to use, e.g., ['console', 'wandb']",
