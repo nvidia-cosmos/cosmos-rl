@@ -137,7 +137,7 @@ def test_same_counters_from_different_save_fail_agreement():
     state = metadata()
     fetcher = build(adapter_for(state), CursorSampler())
     other_save = state.to_checkpoint_extra_info() | {"checkpoint_id": "different-save"}
-    with pytest.raises(AssertionError):
+    with pytest.raises((AssertionError, ValueError)):
         fetcher.validate_after_resume(other_save)
 
 

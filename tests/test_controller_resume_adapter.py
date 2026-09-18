@@ -159,7 +159,8 @@ def test_worker_resume_agreement_uses_normalized_metadata_and_rejects_mismatch()
     state = metadata()
     fetcher = build(adapter_for(state), CursorSampler())
     fetcher.validate_after_resume(state.to_checkpoint_extra_info())
-    with pytest.raises(AssertionError, match="consistent"):
+    # The independent fail-fast PR replaces the legacy assertion with ValueError.
+    with pytest.raises((AssertionError, ValueError), match="consistent|agreement"):
         fetcher.validate_after_resume(
             state.to_checkpoint_extra_info() | {"optimizer_updates": 39}
         )
