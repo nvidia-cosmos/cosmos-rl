@@ -702,8 +702,11 @@ class RLPolicyWorker(PolicyWorkerBase):
             self.signal_handler.release()
             self.signal_handled = True
 
-        self.trainer.update_lr_schedulers(command.total_steps)
-        report_data = self.trainer.step_training(
+        from cosmos_rl.policy.trainer.batching import run_training_step
+
+        report_data = run_training_step(
+            self.trainer,
+            before_step=lambda: self.trainer.update_lr_schedulers(command.total_steps),
             rollouts=self.dispatch_rollouts(),
             current_step=command.global_step,
             total_steps=command.total_steps,
