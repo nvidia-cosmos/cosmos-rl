@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run with torchrun --nproc-per-node=2 on CUDA for expanded-batch validation."""
+"""torchrun --nproc-per-node=2 tests/trainer_batching_canary.py [--cpu]."""
 
-import json
 import os
+import sys
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -13,6 +13,7 @@ import torch.distributed as dist
 from cosmos_rl.policy.trainer.batching import (
     ExpandedSampleBatching,
     ExpandedTrainingBatch,
+    RecoverablePreparationError,
     run_training_step,
 )
 
@@ -22,7 +23,9 @@ class CanaryTrainer:
 
     def __init__(self, device):
         self.config = SimpleNamespace(
-            train=SimpleNamespace(train_policy=SimpleNamespace(mini_batch=2))
+            train=SimpleNamespace(
+                train_policy=SimpleNamespace(mini_batch=2, mu_iterations=2)
+            )
         )
         self.weight = torch.nn.Parameter(
             torch.tensor([0.5], dtype=torch.float64, device=device)
@@ -32,106 +35,132 @@ class CanaryTrainer:
             self.optimizer, step_size=1, gamma=0.9
         )
         self.updates = 0
+        self.saved = False
 
     def prepare_training_batch(self, episodes):
+        if episodes is None:
+            raise RecoverablePreparationError("unavailable episode")
         samples = [sample for episode in episodes for sample in episode]
         return ExpandedTrainingBatch(
-            tuple(samples[offset : offset + 2] for offset in range(0, len(samples), 2))
+            tuple(samples[i : i + 2] for i in range(0, len(samples), 2))
         )
 
     def step_expanded_training(self, batch, **kwargs):
-        for samples in batch.minibatches:
-            self.optimizer.zero_grad()
-            loss = ((self.weight * torch.stack(samples) - 1) ** 2).mean()
-            loss.backward()
-            dist.all_reduce(self.weight.grad)
-            self.weight.grad.div_(dist.get_world_size())
-            self.optimizer.step()
-            self.scheduler.step()
-            self.updates += 1
+        self.plan = batch
+        for _ in range(batch.mu_iterations):
+            for index, samples in enumerate(batch.minibatches):
+                self.optimizer.zero_grad()
+                # Real models need matching forward/backward collectives too,
+                # e.g. a masked dummy sample. This toy has one manual reduction.
+                loss = (
+                    ((self.weight * torch.stack(samples) - 1) ** 2).sum()
+                    if samples
+                    else self.weight.sum() * 0
+                )
+                (
+                    loss * batch.mean_gradient_scale(index, dist.get_world_size())
+                ).backward()
+                dist.all_reduce(self.weight.grad)
+                self.weight.grad.div_(dist.get_world_size())
+                self.optimizer.step()
+                self.scheduler.step()
+                self.updates += 1
+        self.saved = kwargs.get("do_save_checkpoint", False)
         return {"updates": self.updates}
 
 
+def values(case, rank):
+    if case == "all_empty" or (
+        case in ("one_empty", "preparation_error") and rank == 1
+    ):
+        return []
+    if case == "nonfinite" and rank == 1:
+        return [float("nan"), 3.0, 4.0]
+    if case == "all_nonfinite":
+        return [float("inf")]
+    if case == "unequal_steps" and rank == 1:
+        return [2.0]
+    if case == "empty_slot":
+        return [float("nan"), float("nan"), 3.0 + rank]
+    return [1.0 + rank, 2.0 + rank, 3.0 + rank]
+
+
 def main():
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    device = torch.device("cuda", torch.cuda.current_device())
-    dist.init_process_group("nccl", timeout=timedelta(seconds=60))
+    cpu = "--cpu" in sys.argv
+    if not cpu:
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    device = torch.device("cpu" if cpu else "cuda")
+    dist.init_process_group("gloo" if cpu else "nccl", timeout=timedelta(seconds=60))
     try:
+        assert dist.get_world_size() == 2
         rank = dist.get_rank()
-        world = dist.get_world_size()
-        assert world == 2
-        trainer = CanaryTrainer(device)
-        samples = torch.arange(1 + rank, 4 + rank, dtype=torch.float64, device=device)
-        episodes = (
-            [samples[:1], samples[1:]] if rank == 0 else [samples[:2], samples[2:]]
-        )
-        assert run_training_step(trainer, rollouts=episodes) == {"updates": 2}
-
-        reference = torch.nn.Parameter(
-            torch.tensor([0.5], dtype=torch.float64, device=device)
-        )
-        optimizer = torch.optim.SGD([reference], lr=0.1, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
-        for offset in (0, 2):
-            explicit = torch.cat(
-                [
-                    torch.arange(1 + r, 4 + r, dtype=torch.float64, device=device)[
-                        offset : offset + 2
-                    ]
-                    for r in range(world)
-                ]
+        for case in (
+            "healthy",
+            "one_empty",
+            "all_empty",
+            "nonfinite",
+            "all_nonfinite",
+            "unequal_steps",
+            "preparation_error",
+            "empty_slot",
+        ):
+            trainer = CanaryTrainer(device)
+            data = torch.tensor(values(case, rank), dtype=torch.float64, device=device)
+            episodes = None if case == "preparation_error" and rank == 1 else [data]
+            setup_calls = []
+            run_training_step(
+                trainer,
+                before_step=lambda: setup_calls.append(True),
+                rollouts=episodes,
+                do_save_checkpoint=True,
             )
-            optimizer.zero_grad()
-            ((reference * explicit - 1) ** 2).mean().backward()
-            optimizer.step()
-            scheduler.step()
-        torch.testing.assert_close(trainer.weight, reference, rtol=1e-12, atol=1e-12)
-        torch.testing.assert_close(
-            trainer.optimizer.state[trainer.weight]["momentum_buffer"],
-            optimizer.state[reference]["momentum_buffer"],
-            rtol=1e-12,
-            atol=1e-12,
-        )
-        assert trainer.scheduler.state_dict() == scheduler.state_dict()
-        print(
-            json.dumps(
-                {
-                    "rank": rank,
-                    "numerical_parity": True,
-                    "optimizer_updates": trainer.updates,
-                }
-            ),
-            flush=True,
-        )
-
-        for case in ("one_empty", "all_empty", "nonfinite", "unequal_steps"):
-            candidate = episodes
-            if case == "all_empty" or (case == "one_empty" and rank == 1):
-                candidate = []
-            elif case == "nonfinite" and rank == 1:
-                candidate = [
-                    torch.tensor(
-                        [float("nan"), 2, 3], dtype=torch.float64, device=device
+            reference = torch.nn.Parameter(
+                torch.tensor([0.5], dtype=torch.float64, device=device)
+            )
+            optimizer = torch.optim.SGD([reference], lr=0.1, momentum=0.9)
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=1, gamma=0.9
+            )
+            per_rank = [values(case, r) for r in range(2)]
+            updates = 0
+            for _ in range(2):
+                for offset in range(0, max(map(len, per_rank)), 2):
+                    explicit = torch.tensor(
+                        [
+                            x
+                            for samples in per_rank
+                            for x in samples[offset : offset + 2]
+                        ],
+                        dtype=torch.float64,
+                        device=device,
                     )
-                ]
-            elif case == "unequal_steps" and rank == 1:
-                candidate = [samples[:2]]
-            try:
-                run_training_step(trainer, rollouts=candidate)
-            except ValueError:
-                pass
-            else:
-                raise AssertionError(f"{case} unexpectedly trained")
-            assert trainer.updates == 2
-            assert trainer.scheduler.state_dict() == scheduler.state_dict()
+                    explicit = explicit[torch.isfinite(explicit)]
+                    if not len(explicit):
+                        continue
+                    optimizer.zero_grad()
+                    ((reference * explicit - 1) ** 2).mean().backward()
+                    optimizer.step()
+                    scheduler.step()
+                    updates += 1
+            assert trainer.updates == updates
+            assert len(setup_calls) == bool(updates)
+            assert trainer.saved
             torch.testing.assert_close(
                 trainer.weight, reference, rtol=1e-12, atol=1e-12
             )
+            assert trainer.scheduler.state_dict() == scheduler.state_dict()
+            if updates:
+                torch.testing.assert_close(
+                    trainer.optimizer.state[trainer.weight]["momentum_buffer"],
+                    optimizer.state[reference]["momentum_buffer"],
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
+            else:
+                assert not trainer.optimizer.state
             dist.barrier()
             print(
-                json.dumps(
-                    {"rank": rank, "case": case, "rejected_before_training": True}
-                ),
+                f"rank={rank} case={case} updates={updates} numerical_parity=PASS",
                 flush=True,
             )
     finally:

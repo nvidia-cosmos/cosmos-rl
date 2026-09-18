@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 from cosmos_rl.policy.trainer.batching import (
     ExpandedSampleBatching,
     ExpandedTrainingBatch,
+    RecoverablePreparationError,
     run_training_step,
 )
 
@@ -21,7 +22,9 @@ def trainer_for(minibatches, *, tail="include"):
     return SimpleNamespace(
         batching_contract=ExpandedSampleBatching(partial_tail=tail),
         config=SimpleNamespace(
-            train=SimpleNamespace(train_policy=SimpleNamespace(mini_batch=2))
+            train=SimpleNamespace(
+                train_policy=SimpleNamespace(mini_batch=2, mu_iterations=2)
+            )
         ),
         prepare_training_batch=Mock(
             return_value=ExpandedTrainingBatch(tuple(minibatches))
@@ -43,11 +46,11 @@ def test_fixed_trainer_keeps_existing_entrypoint():
 
 def test_variable_episode_expansion_and_partial_tail():
     trainer = trainer_for([[1.0, 2.0], [3.0]])
-    assert run_training_step(trainer, rollouts=["episode"], current_step=7) == {
-        "updates": 2
-    }
+    assert (
+        run_training_step(trainer, rollouts=["episode"], current_step=7)["updates"] == 2
+    )
     trainer.step_expanded_training.assert_called_once_with(
-        ExpandedTrainingBatch(([1.0, 2.0], [3.0])), current_step=7
+        ExpandedTrainingBatch(((1.0, 2.0), (3.0,)), (2, 1), 2), current_step=7
     )
 
 
@@ -61,21 +64,31 @@ def test_variable_episode_expansion_and_partial_tail():
         ([[1], [2, 3]], "include"),
     ],
 )
-def test_invalid_expansion_does_not_touch_optimizer_or_scheduler(batches, tail):
+def test_empty_and_nonfinite_data_produces_a_recoverable_plan(batches, tail):
     trainer = trainer_for(batches, tail=tail)
     scheduler = Mock()
-    with pytest.raises(ValueError, match="preflight"):
-        run_training_step(trainer, before_step=scheduler, rollouts=["episode"])
-    trainer.step_expanded_training.assert_not_called()
-    scheduler.assert_not_called()
+    report = run_training_step(trainer, before_step=scheduler, rollouts=["episode"])
+    batch = trainer.step_expanded_training.call_args.args[0]
+    assert all(batch.global_sample_counts)
+    assert scheduler.call_count == bool(batch.minibatches)
+    assert report["batching/skipped_update"] == (not batch.minibatches)
 
 
-def test_expansion_failure_is_a_preflight_error():
+def test_expansion_failure_is_recoverable():
     trainer = trainer_for([[1, 2]])
-    trainer.prepare_training_batch.side_effect = FileNotFoundError("missing completion")
-    with pytest.raises(ValueError, match="missing completion"):
-        run_training_step(trainer, rollouts=["missing"])
-    trainer.step_expanded_training.assert_not_called()
+    trainer.prepare_training_batch.side_effect = RecoverablePreparationError(
+        "missing completion"
+    )
+    before = Mock()
+    report = run_training_step(
+        trainer, before_step=before, rollouts=["missing"], do_save_checkpoint=True
+    )
+    assert report["batching/preparation_failed"] == 1
+    assert report["batching/skipped_update"] == 1
+    before.assert_not_called()
+    trainer.step_expanded_training.assert_called_once_with(
+        ExpandedTrainingBatch((), (), 2), do_save_checkpoint=True
+    )
 
 
 def test_expanded_training_matches_explicit_sample_updates():
@@ -99,7 +112,7 @@ def test_expanded_training_matches_explicit_sample_updates():
         return {"updates": len(batch.minibatches)}
 
     trainer.step_expanded_training = step
-    assert run_training_step(trainer, rollouts=["episode"]) == {"updates": 2}
+    assert run_training_step(trainer, rollouts=["episode"])["updates"] == 2
     for samples in batches:
         update(expected, reference, samples)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -127,6 +140,8 @@ def _distributed_worker(rank, rendezvous):
             "unequal_steps",
             "expansion_error",
             "healthy",
+            "mu_mismatch",
+            "programming_error",
         ):
             batches = [[1.0, 2.0], [3.0]]
             if scenario == "all_empty" or (scenario == "one_empty" and rank == 1):
@@ -137,21 +152,35 @@ def _distributed_worker(rank, rendezvous):
                 batches = [[1.0, 2.0]]
             trainer = trainer_for(batches)
             if scenario == "expansion_error" and rank == 1:
-                trainer.prepare_training_batch.side_effect = ValueError(
-                    "missing rollout"
+                trainer.prepare_training_batch.side_effect = (
+                    RecoverablePreparationError("missing rollout")
                 )
             scheduler = Mock()
-            if scenario == "healthy":
-                run_training_step(trainer, before_step=scheduler, rollouts=["episode"])
-                trainer.step_expanded_training.assert_called_once()
-                scheduler.assert_called_once()
-            else:
+            if scenario == "mu_mismatch" and rank == 1:
+                trainer.config.train.train_policy.mu_iterations = 3
+            if scenario == "programming_error" and rank == 1:
+                trainer.prepare_training_batch.side_effect = RuntimeError("bug")
+            if scenario in ("mu_mismatch", "programming_error"):
                 with pytest.raises(ValueError):
                     run_training_step(
                         trainer, before_step=scheduler, rollouts=["episode"]
                     )
                 trainer.step_expanded_training.assert_not_called()
                 scheduler.assert_not_called()
+                dist.barrier()
+                continue
+            run_training_step(trainer, before_step=scheduler, rollouts=["episode"])
+            trainer.step_expanded_training.assert_called_once()
+            batch = trainer.step_expanded_training.call_args.args[0]
+            assert batch.mu_iterations == 2
+            assert len(batch.minibatches) == (0 if scenario == "all_empty" else 2)
+            assert scheduler.call_count == (scenario != "all_empty")
+            # Empty ranks must execute the same gradient schedule as their peers.
+            for _ in range(batch.mu_iterations):
+                for i, samples in enumerate(batch.minibatches):
+                    count = torch.tensor(len(samples))
+                    dist.all_reduce(count)
+                    assert count.item() == batch.global_sample_counts[i]
             dist.barrier()
     finally:
         dist.destroy_process_group()

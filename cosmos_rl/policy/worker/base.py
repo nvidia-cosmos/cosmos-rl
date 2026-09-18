@@ -138,7 +138,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 if getattr(trainer_cls, method, None) is getattr(Trainer, method):
                     raise TypeError(f"Expanded trainer must implement {method}")
             logger.info(
-                "Expanded batching: validate actual samples on all ranks before training"
+                "Expanded batching: agree a replica-local schedule with zero contributions"
             )
             return
         if policy_type == "grpo":
