@@ -722,10 +722,15 @@ class TestControlPlaneNotBlockedBySends(unittest.TestCase):
         sent = []
 
         def blocking_send(entry, *_args, **_kwargs):
-            sent.append(entry.transfer_id)
-            if entry.transfer_id == blocked_id:
-                started.set()
-                release.wait(timeout=10)
+            try:
+                sent.append(entry.transfer_id)
+                if entry.transfer_id == blocked_id:
+                    started.set()
+                    release.wait(timeout=10)
+            finally:
+                # Like the production _send, balance the lease even when the
+                # queued send wins the race with shutdown and actually runs.
+                p._nccl_registry.abandon_inflight(entry)
 
         p._send = blocking_send
         for tid in ("0:first", "0:second"):

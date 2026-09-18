@@ -31,6 +31,7 @@ from unittest import mock
 
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils.payload_transport import (
+    PayloadTransport,
     PAYLOAD_TRANSFER_KEY,
     PayloadTransportRegistry,
 )
@@ -62,6 +63,10 @@ class _FakeRedis:
     def __init__(self, *, ping_raises=None):
         self._ping_raises = ping_raises
         self.pinged = False
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def ping(self):
         self.pinged = True
@@ -108,6 +113,44 @@ class _CommHarness(CommMixin):
 
 class TestAttachPayloadTransportContract(unittest.TestCase):
     """Full-integration regression guards for the 55745c contract."""
+
+    def test_inert_redis_allows_repeated_worker_setup(self):
+        harness = _CommHarness(mode="redis", data_packer=_NoOpPacker())
+        harness._attach_payload_transport()
+        harness.data_packer = _NoOpPacker()
+        harness.val_data_packer = _NoOpPacker()
+        harness._attach_payload_transport()
+        self.assertEqual(harness._payload_transport_attachments, [])
+
+    def test_redis_composed_packer_requires_close_before_reattachment(self):
+        packer = _NoOpPacker()
+        packer.close_transport = mock.Mock()
+        harness = _CommHarness(mode="redis", data_packer=packer)
+        harness._attach_payload_transport()
+        with self.assertRaisesRegex(RuntimeError, "before reattachment"):
+            harness._attach_payload_transport()
+        harness.close_payload_transports()
+        packer.close_transport.assert_called_once()
+        harness._attach_payload_transport()
+        self.assertEqual(len(harness._payload_transport_attachments), 1)
+        harness.close_payload_transports()
+
+    def test_custom_redis_backend_requires_close_before_reattachment(self):
+        class CustomRedis(PayloadTransport):
+            def attach_data_packer(self, packer, **kwargs):
+                pass
+
+        transport = CustomRedis()
+        harness = _CommHarness(mode="redis", data_packer=_NoOpPacker())
+        with mock.patch.object(
+            PayloadTransportRegistry, "get_optional", return_value=transport
+        ):
+            harness._attach_payload_transport()
+            with self.assertRaisesRegex(RuntimeError, "before reattachment"):
+                harness._attach_payload_transport()
+            harness.close_payload_transports()
+            harness._attach_payload_transport()
+            harness.close_payload_transports()
 
     def _patch_nccl_redis(self, fake_factory):
         return mock.patch(
@@ -270,7 +313,7 @@ class TestSingleReceiverTopologyGuard(unittest.TestCase):
         # explicit_fatal failure policy: when the user explicitly sets
         # payload_transfer in config and the transport's attach raises
         # ImportError/RuntimeError, the failure must propagate.
-        class _ExplodingTransport:
+        class _ExplodingTransport(PayloadTransport):
             name = "_test_explode"
             completion_prefix = None
 
@@ -292,7 +335,7 @@ class TestSingleReceiverTopologyGuard(unittest.TestCase):
         # user-explicit), an attach failure must be logged-and-swallowed
         # rather than re-raised.  This is the warn-and-continue branch
         # of the explicit_fatal policy.
-        class _SneakyTransport:
+        class _SneakyTransport(PayloadTransport):
             """Reuses a default-resolved name ("redis") to ensure the
             mode is inferred, not explicit, from the harness config."""
 

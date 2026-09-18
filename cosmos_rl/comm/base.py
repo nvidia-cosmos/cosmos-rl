@@ -41,6 +41,7 @@ import cosmos_rl.utils.util as util
 from transformers import AutoConfig  # noqa: F401  re-exported for downstream importers
 from cosmos_rl.utils.model_config import load_model_config
 from cosmos_rl.utils.payload_transport import (
+    PayloadTransport,
     PayloadTransportRegistry,
     RedisEndpoint,
     get_payload_transfer_mode,
@@ -291,7 +292,20 @@ class CommMixin:
                         device=device,
                         redis_endpoint=endpoint,
                     )
-                    self._payload_transport_attachments.append((transport, packer))
+                    # The default Redis descriptor acquires no resources. Do
+                    # not turn its no-op attachment into a reinitialization
+                    # prohibition (workers may set up reward/data packers again).
+                    # Any custom attach/close hook or composed packer remains
+                    # owned and must be explicitly closed before replacement.
+                    inert = (
+                        getattr(transport.attach_data_packer, "__func__", None)
+                        is PayloadTransport.attach_data_packer
+                        and getattr(transport.close_data_packer, "__func__", None)
+                        is PayloadTransport.close_data_packer
+                        and not callable(getattr(packer, "close_transport", None))
+                    )
+                    if not inert:
+                        self._payload_transport_attachments.append((transport, packer))
                 except Exception as exc:
                     # Include the partially attached packer. Keep failed closes
                     # owned so worker teardown may wait on the same operation.
