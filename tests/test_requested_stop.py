@@ -110,10 +110,27 @@ def test_uninitialized_stop_is_rejected_without_mutation(manager):
 def test_controller_serializes_request_and_closes_training_prompts(manager):
     controller = object.__new__(Controller)
     controller.policy_status_manager = manager
+    controller.config = manager.config
+    controller.rollout_status_manager = Mock()
+    controller.rollout_status_manager.get_all_atoms_arrived_replicas.return_value = [
+        object()
+    ] * manager.config.rollout.parallelism.n_init_replicas
     controller.life_cycle_lock = asyncio.Lock()
     with patch.object(TrainingCompleteCommand, "trigger"):
         assert asyncio.run(controller.request_stop("stop"))
     assert asyncio.run(controller._get_batched_prompt_impl(4)) == ([], True)
+
+
+def test_stop_before_rollout_registration_does_not_close_admission(manager):
+    controller = object.__new__(Controller)
+    controller.policy_status_manager = manager
+    controller.config = manager.config
+    controller.life_cycle_lock = asyncio.Lock()
+    controller.rollout_status_manager = Mock()
+    controller.rollout_status_manager.get_all_atoms_arrived_replicas.return_value = []
+    with pytest.raises(RuntimeError, match="initialized rollout"):
+        asyncio.run(controller.request_stop("stop"))
+    assert manager.stop_reason is None
 
 
 def test_zero_horizon_stop_still_requests_step_zero_checkpoint(manager):

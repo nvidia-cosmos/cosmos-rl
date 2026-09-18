@@ -322,6 +322,13 @@ maxmemory-policy allkeys-lfu
         return value acknowledges the request, not completion of shutdown.
         """
         async with self.life_cycle_lock:
+            if self.policy_status_manager.stop_reason is None:
+                expected = self.config.rollout.parallelism.n_init_replicas
+                arrived = self.rollout_status_manager.get_all_atoms_arrived_replicas()
+                if len(arrived) < expected:
+                    raise RuntimeError(
+                        "request_stop requires initialized rollout replicas"
+                    )
             return self.policy_status_manager.request_stop(reason)
 
     _SOFT_THROTTLE_HEARTBEAT_S = 5.0

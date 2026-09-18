@@ -12,7 +12,7 @@ finished shutdown. This is successful early completion, not a transport-error
 handler or an immediate process kill. Application thresholds and quality policy
 remain application-owned. No new HTTP endpoint is exposed.
 
-Supported scope is initialized **disaggregated GRPO** policy replicas, including
+Supported scope is initialized **disaggregated GRPO** policy and rollout replicas, including
 registered custom GRPO trainers. Other modes and requests before policy
 initialization fail without changing admission. Membership is frozen after a
 request: new registrations are rejected and a changed policy cohort cannot be
