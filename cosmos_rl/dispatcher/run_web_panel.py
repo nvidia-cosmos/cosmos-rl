@@ -53,6 +53,8 @@ from cosmos_rl.dispatcher.protocol import (
     IpcInfoRequest,
     QueryIpcInfoRequest,
     ResumeInfoRequest,
+    StopRequest,
+    StepBoundaryRequest,
     Role,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -72,6 +74,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_PANEL_SUFFIX,
     COSMOS_API_STATUS_SUFFIX,
     COSMOS_API_META_SUFFIX,
+    COSMOS_API_REQUEST_STOP_SUFFIX,
+    COSMOS_API_TRAINING_BOUNDARY_SUFFIX,
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_SET_PROFILE_SUFFIX,
     COSMOS_API_SET_TRACE_PATH_SUFFIX,
@@ -423,6 +427,48 @@ async def meta():
         "config": controller.config,
     }
     return meta
+
+
+@app.post(COSMOS_API_REQUEST_STOP_SUFFIX)
+async def request_stop(request: StopRequest):
+    try:
+        return {"accepted": await controller.request_stop(request.reason)}
+    except (ValueError, RuntimeError) as error:
+        return JSONResponse(status_code=409, content={"error": str(error)})
+
+
+@app.post(COSMOS_API_TRAINING_BOUNDARY_SUFFIX)
+async def training_boundary(request: StepBoundaryRequest):
+    manager = controller.policy_status_manager
+    if controller.config.train.train_policy.type != "sft":
+        return JSONResponse(
+            status_code=409, content={"error": "This loop uses terminal commands"}
+        )
+    try:
+        if request.checkpoint_complete:
+            done = manager.step_boundary.complete(
+                request.replica_name, request.completed_step
+            )
+            if done:
+                manager.current_step = request.completed_step
+                manager.terminal_complete = True
+            return {"complete": done}
+        participants = {
+            replica.name for replica in manager.get_all_atoms_arrived_replicas()
+        }
+        if (
+            manager.stop_reason is not None
+            and participants != manager._stop_policy_recipients
+        ):
+            raise ValueError("Policy membership changed during requested stop")
+        return await manager.step_boundary.arrive(
+            request.replica_name,
+            request.completed_step,
+            participants,
+            lambda: manager.stop_reason,
+        )
+    except ValueError as error:
+        return JSONResponse(status_code=409, content={"error": str(error)})
 
 
 @app.post(COSMOS_API_REGISTER_SUFFIX)

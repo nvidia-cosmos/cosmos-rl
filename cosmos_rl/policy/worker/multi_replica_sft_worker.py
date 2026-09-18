@@ -18,6 +18,7 @@ import asyncio
 import copy
 from queue import Queue
 import threading
+from cosmos_rl.policy.worker.stop import training_boundary, final_checkpoint
 import time
 from typing import List, Tuple
 from cosmos_rl.dispatcher.command import (
@@ -426,6 +427,15 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
                 continue
             if self.train_step is None:
                 val_avg_loss = self.validate(is_last_step=False)
+            completed_step = (
+                self.train_step
+                if self.train_step is not None
+                else (self.loaded_train_step or 0)
+            )
+            if training_boundary(self, completed_step):
+                self.train_step = completed_step
+                val_avg_loss = None
+                break
             is_end, new_epoch = self.request_new_prompts(
                 batch_size=self.config.train.train_batch_per_replica
                 // self.dp_world_size,
@@ -534,17 +544,22 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
             val_avg_loss = self.validate(is_last_step=False)
 
         # Finally: validation and save checkpoint
-        val_avg_loss = self.validate(is_last_step=True)
-        if self.is_master_replica:
-            self.trainer.checkpointing(
-                total_steps=self.total_steps,
-                train_step=self.train_step,
-                save_freq=self._save_freq,
-                is_last_step=True,
-                pp_last_stage=pp_last_stage,
-                val_score=val_avg_loss,
-                do_save=True,
-            )
+        if self.requested_stop_reason is None:
+            val_avg_loss = self.validate(is_last_step=True)
+
+        def save_final():
+            if self.is_master_replica:
+                self.trainer.checkpointing(
+                    total_steps=self.total_steps,
+                    train_step=self.train_step,
+                    save_freq=self._save_freq,
+                    is_last_step=True,
+                    pp_last_stage=pp_last_stage,
+                    val_score=val_avg_loss,
+                    do_save=True,
+                )
+
+        final_checkpoint(self, save_final)
 
         self.train_stream.synchronize()
         self.handle_shutdown()

@@ -322,7 +322,10 @@ maxmemory-policy allkeys-lfu
         return value acknowledges the request, not completion of shutdown.
         """
         async with self.life_cycle_lock:
-            if self.policy_status_manager.stop_reason is None:
+            if (
+                self.policy_status_manager.stop_reason is None
+                and self.config.train.train_policy.type != "sft"
+            ):
                 expected = self.config.rollout.parallelism.n_init_replicas
                 arrived = self.rollout_status_manager.get_all_atoms_arrived_replicas()
                 if len(arrived) < expected:
@@ -536,6 +539,17 @@ maxmemory-policy allkeys-lfu
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
         if not is_validation and self.policy_status_manager.stop_reason is not None:
+            if (
+                self.policy_status_manager.completion_step is not None
+                or self.policy_status_manager.step_boundary.stopped_step is not None
+            ):
+                return [], True
+        if (
+            not is_validation
+            and self.policy_status_manager.stop_reason is not None
+            and self.config.train.train_policy.type != "sft"
+            and self.config.mode != "colocated"
+        ):
             return [], True
 
         # Short-circuit when all policy replicas have unregistered during

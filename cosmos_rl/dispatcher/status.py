@@ -363,6 +363,9 @@ class PolicyStatusManager:
         self.terminal_complete = False
         self.stop_reason: Optional[str] = None
         self._stop_policy_recipients: set[str] = set()
+        from cosmos_rl.dispatcher.step_boundary import StepBoundary
+
+        self.step_boundary = StepBoundary()
 
         # For rank specific data dispatch
         self.rollout_buffer_per_rank: List[Queue] = []
@@ -490,11 +493,6 @@ class PolicyStatusManager:
             raise ValueError("stop reason must be a nonempty string")
         if self.stop_reason is not None or self.rollout_admission_closed():
             return False
-        if (
-            self.config.train.train_policy.type != "grpo"
-            or self.config.mode != "disaggregated"
-        ):
-            raise ValueError("request_stop currently supports disaggregated GRPO only")
         participants = self.get_all_atoms_arrived_replicas()
         if not participants or not self.policy_init_done:
             raise RuntimeError("request_stop requires initialized policy replicas")
@@ -508,6 +506,10 @@ class PolicyStatusManager:
 
     @_serialize_policy_lifecycle
     def _try_complete_requested_stop(self) -> None:
+        if self.config.train.train_policy.type == "sft":
+            # SFT owns its loop and checkpoints through its existing trainer
+            # interface after all replicas agree on a completed-step boundary.
+            return
         if (
             self.stop_reason is None
             or self.terminal_complete
