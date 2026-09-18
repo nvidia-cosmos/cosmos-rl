@@ -103,6 +103,13 @@ class RLPayload(BaseModel):
         description="Internal group-level completion-admission counters consumed by the rollout worker.",
     )
 
+    # Producer-only reservation metadata. Kept through reward-worker pickling,
+    # but sent only via RolloutRequest's explicit identity/failure contract.
+    completion_sequences: Optional[List[int]] = Field(default=None, exclude=True)
+    completion_rejections: List[Dict[str, Any]] = Field(
+        default_factory=list, exclude=True
+    )
+
     n_ignore_prefix_tokens: Optional[List[int]] = Field(
         default=None,
         description="The number of prefix tokens to ignore when computing reward.",

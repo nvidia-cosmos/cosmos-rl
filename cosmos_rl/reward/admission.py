@@ -37,6 +37,7 @@ _COMPLETION_ALIGNED_FIELDS = (
     "cumulative_logprob",
     "report_metrics",
     "teacher_result_uuids",
+    "completion_sequences",
 )
 
 _ROLLOUT_RESULT_COMPLETION_ALIGNED_FIELDS = (
@@ -348,6 +349,39 @@ def select_payload_completions(
 
     selected = payload.model_copy(deep=False)
     selected_indices = [] if admission.group_excluded else admission.eligible_indices
+    selected.completion_rejections = list(payload.completion_rejections)
+    if payload.completion_sequences is not None:
+        if len(payload.completion_sequences) != admission.original_size:
+            raise ValueError("Completion reservations must be completion-aligned")
+        selected_set = set(selected_indices)
+        for index, sequence in enumerate(payload.completion_sequences):
+            if index not in selected_set:
+                selected.completion_rejections.append(
+                    {
+                        "sequence": sequence,
+                        "weight_version": payload.weight_version,
+                        "reason": (
+                            "insufficient_group"
+                            if admission.group_excluded
+                            else (
+                                payload.completion_drop_reasons
+                                or [None] * admission.original_size
+                            )[index]
+                            or "quality"
+                        ),
+                        "completion": payload.completions[index],
+                        **{
+                            name: getattr(payload, name)[index]
+                            if getattr(payload, name) is not None
+                            else None
+                            for name in (
+                                "completed_conversations",
+                                "completion_logprobs",
+                                "completion_token_ids",
+                            )
+                        },
+                    }
+                )
     for field_name in _COMPLETION_ALIGNED_FIELDS:
         setattr(
             selected,

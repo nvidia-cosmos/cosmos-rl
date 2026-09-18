@@ -11,6 +11,9 @@ import pytest
 
 from cosmos_rl.colocated.controller import ColocatedController
 from cosmos_rl.dispatcher import run_web_panel
+from cosmos_rl.dispatcher.controller import Controller
+from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
+from cosmos_rl.reward.identity import CompletionReporter
 from cosmos_rl.dispatcher.algo.grpo import GRPO
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.status import PolicyStatusManager
@@ -38,7 +41,7 @@ class RecordingGRPO(GRPO):
 
 
 @pytest.mark.parametrize(
-    "mode", ["disaggregated", "colocated", "colocated_centralized"]
+    "mode", ["disaggregated", "identified", "colocated", "colocated_centralized"]
 )
 @pytest.mark.parametrize(
     "mask", [[True, True, False], [True, False, False], [False] * 3, [True] * 3]
@@ -46,7 +49,9 @@ class RecordingGRPO(GRPO):
 @pytest.mark.parametrize("minimum", [1, 2])
 def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     config = SimpleNamespace(
-        mode="disaggregated" if mode == "disaggregated" else "colocated",
+        mode="disaggregated"
+        if mode in ("disaggregated", "identified")
+        else "colocated",
         train=SimpleNamespace(
             non_text=True,
             local_dataset=False,
@@ -74,7 +79,7 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
 
     cls = (
         DisaggregatedRolloutControlWorker
-        if mode == "disaggregated"
+        if mode in ("disaggregated", "identified")
         else ColocatedRolloutControlWorker
     )
     worker = object.__new__(cls)
@@ -94,13 +99,17 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
         get_rollout_output=lambda *values: (*values, None)
     )
     worker.api_client = SimpleNamespace(post_rollout_completion=Mock())
+    source = RLPayload(prompt_idx=0, prompt="p", reference_answer="a")
+    if mode == "identified":
+        worker.completion_reporter = CompletionReporter("source", 0)
+        worker.completion_reporter.reserve([source], 3, 0)
     worker._filter_valid_rollout_results_and_report(
         [
             RolloutResult(
                 completions=["zero", "one", "outlier"], completion_trainable=mask
             )
         ],
-        [RLPayload(prompt_idx=0, prompt="p", reference_answer="a")],
+        [source],
     )
     worker.report_rollouts()
     request = worker.api_client.post_rollout_completion.call_args.args[0]
@@ -108,9 +117,12 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     trainable = len(selected) >= algo.minimum_trainable_completions
     assert algo.advantage_inputs == ([selected] if trainable else [])
     expected_count = len(selected) if trainable else 0
-    assert request.metrics.get("discarded_samples", 0) == 3 - expected_count
+    if mode == "identified":
+        assert len(request.completion_failures) == 3 - expected_count
+    else:
+        assert request.metrics.get("discarded_samples", 0) == 3 - expected_count
 
-    if mode == "disaggregated":
+    if mode in ("disaggregated", "identified"):
         status = PolicyStatusManager()
         status.current_step = 0
         status.samples_on_the_fly = 3
@@ -124,9 +136,27 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
             register_discarded_samples_for_refill=Mock(),
             put_rollouts=AsyncMock(),
         )
+        if mode == "identified":
+            controller.completion_admission = CompletionAdmissionState()
+            controller.life_cycle_lock = asyncio.Lock()
+            controller.rollout_status_manager = {
+                "source": SimpleNamespace(
+                    n_atoms_per_replica=lambda: 1, status=SimpleNamespace(ended=False)
+                )
+            }
+            status._publish_payload_transport_cleanup = Mock()
+            controller.put_application_rollouts = (
+                lambda request, rollouts: Controller.put_application_rollouts(
+                    controller, request, rollouts
+                )
+            )
         monkeypatch.setattr(run_web_panel, "controller", controller)
         response = asyncio.run(run_web_panel.put_rollout_group(request))
-        assert response == {"message": "Rollout put"}
+        assert response == {
+            "message": "Identified rollout report processed"
+            if mode == "identified"
+            else "Rollout put"
+        }
         received = controller.put_rollouts.call_args.args[0]
         assert status.samples_on_the_fly == expected_count
     else:

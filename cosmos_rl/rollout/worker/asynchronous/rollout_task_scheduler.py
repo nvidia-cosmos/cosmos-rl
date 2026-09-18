@@ -279,12 +279,18 @@ class RolloutTaskScheduler:
         """
         try:
             # Call rollout engine's async generation method
+            identity_kwargs = (
+                {"current_weight_version": task.payload.weight_version}
+                if task.payload.completion_sequences is not None
+                else {}
+            )
             results = await self.rollout_engine.rollout_generation(
                 payloads=[task.payload],
                 stream=self.stream,
                 data_packer=self.data_packer,
                 data_fetcher=None,  # data should already be loaded in the task
                 is_validation=task.is_validation,
+                **identity_kwargs,
             )
 
             if results and len(results) > 0:
@@ -308,14 +314,23 @@ class RolloutTaskScheduler:
                 logger.warning(
                     "[RolloutTaskScheduler] Generation returned empty results"
                 )
-                return None
+                return self._report_identified_failure(task)
 
         except Exception as e:
             logger.error(f"[RolloutTaskScheduler] Error during generation: {str(e)}")
             import traceback
 
             traceback.print_exc()
+            return self._report_identified_failure(task)
+
+    def _report_identified_failure(self, task):
+        if task.payload.completion_sequences is None:
             return None
+        completed = CompletedRollout(
+            task.idx, task.payload, RolloutResult(completions=[])
+        )
+        self.complete_queue.put(completed)
+        return completed
 
     async def _worker_loop(self):
         """

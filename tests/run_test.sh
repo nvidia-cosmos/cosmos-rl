@@ -173,6 +173,7 @@ run python tests/test_put_rollouts.py
 run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
 # Pytest-style CPU suites; install pytest in case the image lacks it.
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract

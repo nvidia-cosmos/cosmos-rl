@@ -142,7 +142,9 @@ class Controller:
                 "completion_admission must be a bool; quality decisions belong "
                 "in RolloutResult.completion_trainable before reward processing"
             )
-        if completion_admission:
+        if completion_admission or getattr(
+            config.rollout, "completion_admission", False
+        ):
             if (
                 task_type != "grpo"
                 or config.train.train_policy.variant == "dapo"
@@ -837,13 +839,20 @@ maxmemory-policy allkeys-lfu
         async with self.life_cycle_lock:
             admission = self.completion_admission
             plan = admission.prepare(self, request, rollouts)
-            accepted = admission.settle(self, request, plan)
             try:
+                accepted = admission.settle(self, request, plan)
                 accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
                 await self.put_rollouts(accepted)
             except BaseException:
                 admission.failed = True
-                raise
+                # Accounting may already be partially mutated. An HTTP error
+                # alone leaves workers training or waiting on corrupt state.
+                # Do not wait for distributed teardown on this fatal path.
+                logger.critical(
+                    "Completion settlement failed; terminating controller",
+                    exc_info=True,
+                )
+                os._exit(86)
 
     async def put_rollouts(self, rollouts: List[Rollout]):
         """
