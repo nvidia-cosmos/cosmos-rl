@@ -266,7 +266,7 @@ def test_startup_validation_uses_registered_trainer_contract(monkeypatch, expand
     worker = SimpleNamespace(
         config=SimpleNamespace(
             train=SimpleNamespace(
-                train_batch_per_replica=3,
+                train_batch_per_replica=6,
                 train_policy=SimpleNamespace(
                     type="grpo", mini_batch=2, trainer_type="custom"
                 ),
@@ -277,10 +277,18 @@ def test_startup_validation_uses_registered_trainer_contract(monkeypatch, expand
                 )
             ),
         ),
-        parallel_dims=SimpleNamespace(dp_shard=2),
+        parallel_dims=SimpleNamespace(dp_shard=2, dp_replicate=1),
     )
     if expanded:
         PolicyWorkerBase.check_config(worker)
+        worker.config.train.train_batch_per_replica = 3
+        with pytest.raises(ValueError, match="Collection count"):
+            PolicyWorkerBase.check_config(worker)
+        worker.config.train.train_batch_per_replica = 6
+        worker.parallel_dims.dp_replicate = 2
+        with pytest.raises(ValueError, match="data-parallel size \\(4\\)"):
+            PolicyWorkerBase.check_config(worker)
+        worker.parallel_dims.dp_replicate = 1
         worker.config.policy.parallelism.tp_size = 2
         with pytest.raises(ValueError, match="pure data parallelism"):
             PolicyWorkerBase.check_config(worker)

@@ -134,6 +134,18 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 raise ValueError(
                     "Collection and training batch counts must be positive"
                 )
+            # Dispatch and colocated local queues still shard collected
+            # completions evenly. Expansion relaxes sample-minibatch divisibility,
+            # not this upstream collection constraint (include replicated DP).
+            collection_dp_size = (
+                self.parallel_dims.dp_shard * self.parallel_dims.dp_replicate
+            )
+            if train_batch_per_replica % collection_dp_size:
+                raise ValueError(
+                    f"Collection count ({train_batch_per_replica}) must be divisible "
+                    f"by the data-parallel size ({collection_dp_size}); expanded "
+                    "sample counts need not be divisible by mini_batch"
+                )
             for method in ("prepare_training_batch", "step_expanded_training"):
                 if getattr(trainer_cls, method, None) is getattr(Trainer, method):
                     raise TypeError(f"Expanded trainer must implement {method}")

@@ -119,6 +119,87 @@ def agree_batching_schedule(trainer):
     trainer._sealed_batching_schedule = (signature, group)
 
 
+def _require_cpu(value):
+    if isinstance(value, torch.Tensor) and value.device.type != "cpu":
+        raise ValueError("Background batch preparation must return CPU samples")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _require_cpu(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _require_cpu(item)
+
+
+def _prepare_local_batch(trainer, rollouts, *, background=False):
+    contract = trainer.batching_contract
+    policy = trainer.config.train.train_policy
+    recovery = None
+    try:
+        batch = trainer.prepare_training_batch(rollouts)
+    except RecoverablePreparationError as error:
+        batch = ExpandedTrainingBatch(())
+        recovery = str(error)[:512]
+        logger.warning(
+            "Expanded preparation unavailable; contributing zero: %s", recovery
+        )
+    _describe(batch, policy.mini_batch)
+    cleaned = []
+    dropped = 0
+    for samples in batch.minibatches:
+        if background:
+            _require_cpu(samples)
+        valid = tuple(sample for sample in samples if _finite(sample))
+        if contract.partial_tail == "reject" and len(valid) < policy.mini_batch:
+            valid = ()
+        dropped += len(samples) - len(valid)
+        cleaned.append(valid)
+    if (
+        contract.fixed_minibatches is not None
+        and len(cleaned) > contract.fixed_minibatches
+    ):
+        raise ValueError(
+            "Prepared batch exceeds sealed fixed_minibatches; trainer must bound preparation"
+        )
+    return ExpandedTrainingBatch(tuple(cleaned)), dropped, recovery
+
+
+def prefetch_training_batch(trainer, rollouts):
+    """Submit the next owned batch through the trainer's payload prefetcher.
+
+    Call on the training thread when the next batch is available. Existing
+    controller ACK/step ordering is unchanged; this never invents a future batch.
+    ``run_training_step`` consumes it when called with the same rollout objects.
+    """
+    if not isinstance(trainer.batching_contract, ExpandedSampleBatching):
+        raise TypeError("Background preparation requires expanded batching")
+    if getattr(trainer, "_prepared_training_batch", None) is not None:
+        raise RuntimeError("Only one unconsumed prepared training batch is allowed")
+    agree_batching_schedule(trainer)
+    owned = tuple(rollouts)
+    packer = trainer.data_packer
+    future = packer.start_prepared_prefetch(
+        owned, lambda: _prepare_local_batch(trainer, owned, background=True)
+    )
+    trainer._prepared_training_batch = (owned, future, packer)
+
+
+def _take_local_batch(trainer, rollouts):
+    pending = getattr(trainer, "_prepared_training_batch", None)
+    if pending is None:
+        return _prepare_local_batch(trainer, rollouts)
+    owned, future, packer = pending
+    if len(owned) != len(rollouts) or any(a is not b for a, b in zip(owned, rollouts)):
+        raise ValueError(
+            "Prepared batch does not match the training command's rollouts"
+        )
+    try:
+        return future.result(timeout=packer._prefetch_timeout_s)
+    finally:
+        if future.done():
+            packer.release_prepared_prefetch(future)
+            trainer._prepared_training_batch = None
+
+
 def run_training_step(trainer, *, before_step=None, **kwargs):
     """Worker entrypoint enforcing the declared contract, not a boolean bypass.
 
@@ -142,31 +223,8 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
     try:
         if type(mu) is not int or mu < 1:
             raise ValueError("mu_iterations must be a positive integer")
-        try:
-            batch = trainer.prepare_training_batch(kwargs["rollouts"])
-        except RecoverablePreparationError as error:
-            batch = ExpandedTrainingBatch(())
-            recovery = str(error)[:512]
-            logger.warning(
-                "Expanded preparation unavailable; contributing zero: %s", recovery
-            )
-        _describe(batch, policy.mini_batch)
-        cleaned = []
-        for samples in batch.minibatches:
-            valid = tuple(sample for sample in samples if _finite(sample))
-            if contract.partial_tail == "reject" and len(valid) < policy.mini_batch:
-                valid = ()
-            dropped += len(samples) - len(valid)
-            cleaned.append(valid)
-        batch = ExpandedTrainingBatch(tuple(cleaned))
-        if (
-            contract.fixed_minibatches is not None
-            and len(cleaned) > contract.fixed_minibatches
-        ):
-            raise ValueError(
-                "Prepared batch exceeds sealed fixed_minibatches; trainer must bound preparation"
-            )
-        local = {"sizes": tuple(map(len, cleaned)), "mu": mu, "error": None}
+        batch, dropped, recovery = _take_local_batch(trainer, kwargs["rollouts"])
+        local = {"sizes": tuple(map(len, batch.minibatches)), "mu": mu, "error": None}
     except Exception as error:
         if contract.fixed_minibatches is not None:
             # The schedule is already sealed: no extra error agreement here.

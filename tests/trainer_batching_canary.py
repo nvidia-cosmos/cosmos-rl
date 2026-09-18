@@ -16,6 +16,7 @@ from cosmos_rl.policy.trainer.batching import (
     RecoverablePreparationError,
     run_training_step,
     agree_batching_schedule,
+    prefetch_training_batch,
 )
 
 
@@ -54,7 +55,10 @@ class CanaryTrainer:
                 # Real models need matching forward/backward collectives too,
                 # e.g. a masked dummy sample. This toy has one manual reduction.
                 loss = (
-                    ((self.weight * torch.stack(samples) - 1) ** 2).sum()
+                    (
+                        (self.weight * torch.stack(samples).to(self.weight.device) - 1)
+                        ** 2
+                    ).sum()
                     if samples
                     else self.weight.sum() * 0
                 )
@@ -168,8 +172,63 @@ def main():
                 flush=True,
             )
         fixed_schedule_canary(device, rank)
+        preparation_prefetch_canary(device, rank)
     finally:
         dist.destroy_process_group()
+
+
+def preparation_prefetch_canary(device, rank):
+    import threading
+    from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
+
+    trainer = CanaryTrainer(device)
+    reference = CanaryTrainer(device)
+    for candidate in (trainer, reference):
+        candidate.batching_contract = ExpandedSampleBatching(
+            partial_tail="include", fixed_minibatches=2
+        )
+    packer = PrefetchDataPackerMixin()
+    packer._setup_prefetch(prefetch_timeout=30)
+    trainer.data_packer = packer
+    first = [torch.tensor(values("healthy", rank), dtype=torch.float64)]
+    second = [torch.tensor(values("one_empty", rank), dtype=torch.float64)]
+    prepare_threads = []
+    original_prepare = trainer.prepare_training_batch
+    original_step = trainer.step_expanded_training
+
+    def prepare(rollouts):
+        prepare_threads.append(threading.get_ident())
+        return original_prepare(rollouts)
+
+    def train(batch, **kwargs):
+        prefetch_training_batch(trainer, second)
+        return original_step(batch, **kwargs)
+
+    trainer.prepare_training_batch = prepare
+    try:
+        prefetch_training_batch(trainer, first)
+        trainer.step_expanded_training = train
+        run_training_step(trainer, rollouts=first)
+        trainer.step_expanded_training = original_step
+        run_training_step(trainer, rollouts=second)
+        run_training_step(reference, rollouts=first)
+        run_training_step(reference, rollouts=second)
+        assert len(prepare_threads) == 2
+        assert all(thread != threading.get_ident() for thread in prepare_threads)
+        assert trainer._prepared_training_batch is None
+        torch.testing.assert_close(trainer.weight, reference.weight, rtol=0, atol=0)
+        torch.testing.assert_close(
+            trainer.optimizer.state[trainer.weight]["momentum_buffer"],
+            reference.optimizer.state[reference.weight]["momentum_buffer"],
+            rtol=0,
+            atol=0,
+        )
+        assert trainer.scheduler.state_dict() == reference.scheduler.state_dict()
+        print(
+            f"rank={rank} background_preparation=PASS numerical_parity=PASS", flush=True
+        )
+    finally:
+        packer.shutdown_prefetch(join_timeout=30)
 
 
 def fixed_schedule_canary(device, rank):

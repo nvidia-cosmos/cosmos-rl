@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from concurrent.futures import Future
 from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
@@ -168,6 +169,8 @@ class PrefetchDataPackerMixin:
         self._prefetch_thread = None
 
         self._prefetch_cache = {}
+        self._preparation_local = threading.local()
+        self._prepared_prefetch_future = None
         self._prefetch_request_queue = queue.Queue()
         self._prefetch_result_queue = queue.Queue()
         self._prefetch_shutdown = threading.Event()
@@ -220,6 +223,9 @@ class PrefetchDataPackerMixin:
         """
         if self._prefetch_shutdown is not None:
             self._prefetch_shutdown.set()
+        pending_preparation = getattr(self, "_prepared_prefetch_future", None)
+        if pending_preparation is not None:
+            pending_preparation.cancel()
 
         if before_join is None and self._transport_strategy is not None:
             before_join = self._transport_strategy.before_join
@@ -387,6 +393,36 @@ class PrefetchDataPackerMixin:
         self._prefetch_batch_id += 1
         self._prefetch_request_queue.put((batch_id, tasks))
 
+    def start_prepared_prefetch(self, rollouts, prepare):
+        """Fetch and CPU-prepare one owned batch on the existing prefetch thread.
+
+        The trainer thread submits/consumes; no collectives run in ``prepare``.
+        This queue slot stays occupied until consumption, not just fetch completion.
+        It does not rotate the legacy double buffer or overwrite its active cache.
+        """
+        if not self._prefetch_enabled or self._prefetch_shutdown.is_set():
+            raise RuntimeError(
+                "Prepared prefetch requires an active payload prefetcher"
+            )
+        if self._prepared_prefetch_future is not None:
+            raise RuntimeError(
+                "Consume the previous prepared batch before submitting another"
+            )
+        tasks = self._filter_prefetch_tasks(rollouts)
+        future = Future()
+        self._prepared_prefetch_future = future
+        batch_id = self._prefetch_batch_id
+        self._prefetch_batch_id += 1
+        self._prefetch_request_queue.put((batch_id, tasks, prepare, future))
+        return future
+
+    def release_prepared_prefetch(self, future):
+        if future is not self._prepared_prefetch_future:
+            raise ValueError("Prepared prefetch ownership mismatch")
+        if not future.done():
+            raise RuntimeError("Cannot release an unfinished prepared prefetch")
+        self._prepared_prefetch_future = None
+
     def wait_prefetch(self) -> None:
         """Block until the in-flight prefetch completes; populate cache.
 
@@ -486,9 +522,28 @@ class PrefetchDataPackerMixin:
         try:
             while not self._prefetch_shutdown.is_set():
                 try:
-                    batch_id, tasks = self._prefetch_request_queue.get(timeout=0.1)
+                    request = self._prefetch_request_queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
+
+                if len(request) == 4:
+                    _, tasks, prepare, future = request
+                    if not future.set_running_or_notify_cancel():
+                        continue
+                    try:
+                        # Retain fetched tensors while preparing; avoid racing
+                        # the current training batch's shared transport cache.
+                        self._preparation_local.cache = (
+                            self._fetch_batch(tasks) if tasks else {}
+                        )
+                        future.set_result(prepare())
+                    except BaseException as error:
+                        future.set_exception(error)
+                    finally:
+                        self._preparation_local.__dict__.clear()
+                    continue
+
+                batch_id, tasks = request
 
                 fetch_start = get_trace_time()
                 try:
@@ -530,7 +585,9 @@ class PrefetchDataPackerMixin:
         """
         if rollout_output is not None and self._should_intercept(rollout_output):
             cache_key = self._cache_key(rollout_output)
-            resolved = self._prefetch_cache.get(cache_key)
+            local = getattr(self, "_preparation_local", None)
+            cache = getattr(local, "cache", self._prefetch_cache)
+            resolved = cache.get(cache_key)
             if resolved is None:
                 resolved = self._sync_fetch(rollout_output)
             if resolved is not None:

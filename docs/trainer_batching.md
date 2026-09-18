@@ -6,6 +6,13 @@ Custom GRPO trainers opt in with
 Collection counts refer to completions/episodes; `mini_batch` refers to expanded
 training samples. Their counts need not divide each other.
 
+Collection still must shard evenly across the full data-parallel mesh, including
+replicated DP: `train_batch_per_replica % dp_world_size == 0`. Startup checks
+retain that dispatch constraint; expanded dispatch also rejects uneven command
+counts before dequeuing, rather than silently rounding down. For example six
+episodes over two ranks is valid even with sample minibatches of size two;
+three episodes over two ranks is not yet supported by collection dispatch.
+
 Implement two methods:
 
 - `prepare_training_batch(rollouts) -> ExpandedTrainingBatch`: return ordered
@@ -93,6 +100,40 @@ use rather than inventing actual sample counts. A trainer can use an explicit
 fixed nominal denominator (changing the objective when samples are missing), or
 obtain true counts through its own existing collective protocol. Use dynamic
 mode for automatic valid-sample counts and globally empty update skipping.
+
+## Background preparation with payload prefetch
+
+Expanded trainers may call `trainer.prefetch_training_batch(next_rollouts)` on
+the training thread when the next owned batch becomes available. The attached
+data packer must have an active `PrefetchDataPackerMixin` prefetcher. This replaces
+the plain `start_prefetch` submission for that batch: the existing background
+worker fetches its payloads, calls `prepare_training_batch`, validates CPU output,
+and filters samples before publishing a prepared result.
+
+The regular worker's `run_training_step` consumes that result when it receives
+the same rollout objects; without a submission it prepares synchronously.
+Submit the next batch while consuming/training the current batch to overlap CPU
+preparation with GPU work. This is opt-in custom-trainer/prefetch-scheduler
+integration, not an automatic change to existing fixed-rollout trainers.
+It does not fetch future controller commands, change ACK timing, shift update
+numbers, or replay the cold-start batch. The caller must supply the next batch
+in the original command order; this cannot create overlap if none is available.
+
+Only one unconsumed prepared batch is permitted. The submitted rollout objects
+and fetched storage remain owned until preparation/consumption completes; do not
+mutate them. Background resolution uses a thread-local cache, not the cache used
+by the currently training batch. Exceptions surface at consumption, where the
+normal dynamic/fixed recovery policy applies; waiting uses the packer's finite
+prefetch timeout. Packer shutdown cancels queued work and joins running work with
+its existing bounded timeout; it cannot forcibly interrupt a hung Python/native
+preparation function. Such timeouts remain fatal infrastructure errors.
+
+Preparation must be CPU-only, thread-safe and independent of mutable model,
+optimizer, scheduler and shared RNG state. Use batch-local RNG if needed. Move
+prepared CPU tensors to GPU on the training thread. Configuration agreement,
+per-update agreement, scheduler setup and all training collectives stay on that
+thread. Quality decisions affecting group advantages still belong before
+advantage computation (#752), not in this late sample-preparation stage.
 
 ## Boundaries and validation
 

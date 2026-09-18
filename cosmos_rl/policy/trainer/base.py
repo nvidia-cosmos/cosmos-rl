@@ -107,6 +107,12 @@ class Trainer(ABC):
     # Expansion is opt-in and enforced by the policy worker's step entrypoint.
     batching_contract = FixedRolloutBatching()
 
+    def prefetch_training_batch(self, rollouts):
+        """Fetch and CPU-prepare an owned next batch without changing ACK order."""
+        from cosmos_rl.policy.trainer.batching import prefetch_training_batch
+
+        prefetch_training_batch(self, rollouts)
+
     def prepare_training_batch(self, rollouts):
         raise NotImplementedError("Expanded trainers must implement sample preparation")
 
