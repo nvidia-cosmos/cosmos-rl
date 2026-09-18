@@ -35,6 +35,11 @@ main(dataset=my_dataset, sampler=my_sampler_factory, resume_adapter=ApplicationR
 The example's checkpoint decoder, sampler, and dataset are application-owned.
 The existing Trainer methods still restore model, optimizer, scheduler and RNG
 state; this adapter does not replace them or prescribe an on-disk format.
+The custom trainer's existing `weight_resume()` method must return
+`metadata.to_checkpoint_extra_info()` for the checkpoint it actually loaded.
+The existing worker/controller resume agreement compares that dictionary
+exactly; an adapter does not disable this check. Decode the same metadata in
+both processes and do not report controller counters for different model state.
 
 ## Metadata contract (schema version 1)
 

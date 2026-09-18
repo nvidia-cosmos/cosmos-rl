@@ -112,6 +112,58 @@ def test_partial_batch_tail():
     assert [int(i) for i in indices] == [9]
 
 
+def test_restored_tail_then_next_epoch_uses_normal_epoch_transition():
+    state = metadata(sampler_state={"cursor": 9})
+    sampler = CursorSampler()
+    adapter = adapter_for(state)
+    fetcher = build(adapter, sampler)
+    payloads, ended = fetcher.get_batched_prompt(3)
+    assert [payload.prompt for payload in payloads] == [
+        "prompt-9",
+        "prompt-0",
+        "prompt-1",
+    ]
+    assert not ended
+    assert sampler.epochs == [1, 2]
+    adapter.restore_sampler.assert_called_once()
+
+
+def test_application_sharded_order_is_owned_by_sampler_not_remaining_counts():
+    class ShardedSampler(CursorSampler):
+        def __iter__(self):
+            self.iterations += 1
+            order = [8, 2, 6, 0, 4]
+            while self.position < len(order):
+                index = order[self.position]
+                self.position += 1
+                yield index
+
+    state = metadata(sampler_state={"cursor": 2}, remaining_completions=91)
+    sampler = ShardedSampler()
+    fetcher = build(adapter_for(state), sampler)
+    payloads, ended = fetcher.get_batched_prompt(2)
+    assert [payload.prompt for payload in payloads] == ["prompt-6", "prompt-0"]
+    assert not ended
+    assert sampler.position == 4
+
+
+def test_invalid_provider_return_rejected_before_sampler_consumption():
+    sampler = CursorSampler()
+    with pytest.raises(TypeError, match="ControllerResumeMetadata"):
+        build(adapter_for({"step": 20}), sampler)
+    assert sampler.iterations == 0
+
+
+def test_worker_resume_agreement_uses_normalized_metadata_and_rejects_mismatch():
+    state = metadata()
+    fetcher = build(adapter_for(state), CursorSampler())
+    fetcher.validate_after_resume(state.to_checkpoint_extra_info())
+    with pytest.raises(AssertionError, match="consistent"):
+        fetcher.validate_after_resume(
+            state.to_checkpoint_extra_info() | {"optimizer_updates": 39}
+        )
+
+
 def test_explicit_missing_path_fails_without_consuming_sampler():
     sampler = CursorSampler()
     with pytest.raises(FileNotFoundError):
