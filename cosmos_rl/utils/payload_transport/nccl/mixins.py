@@ -246,6 +246,9 @@ class NCCLRolloutMixin:
         should be at least the number of policy replicas fetching concurrently,
         or requests head-of-line-block behind the pool.
         """
+        from cosmos_rl.utils.cuda_cache import suppress_cuda_cache_cleanup
+
+        suppress_cuda_cache_cleanup()
         if num_sender_threads is None:
             num_sender_threads = _resolve_custom_int(
                 config, "nccl_num_sender_threads", 2

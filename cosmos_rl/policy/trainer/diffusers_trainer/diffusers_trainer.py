@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import os
 import json
 import random
@@ -116,7 +117,7 @@ class DiffusersTrainer(Trainer):
                 config.policy.model_gradient_checkpointing
             )
 
-            torch.cuda.empty_cache()
+            empty_cuda_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
             # util.add_nan_checks(model)

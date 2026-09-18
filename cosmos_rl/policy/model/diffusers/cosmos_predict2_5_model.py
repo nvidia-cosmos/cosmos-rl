@@ -16,6 +16,7 @@
 import inspect
 import math
 import torch
+from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import torchvision
 from diffusers.image_processor import PipelineImageInput
 from diffusers.utils.torch_utils import randn_tensor
@@ -113,7 +114,7 @@ class CosmosPredict2_5Model(DiffuserModel):
 
         if self.offload:
             self.vae.to("cpu")
-            torch.cuda.empty_cache()
+            empty_cuda_cache()
         return visual_embedding
 
     def set_scheduler_timestep(self, timestep: int):

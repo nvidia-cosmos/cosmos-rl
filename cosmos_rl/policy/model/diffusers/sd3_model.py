@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import inspect
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
     retrieve_timesteps,
@@ -120,7 +121,7 @@ class SD3Model(DiffuserModel):
 
         if self.offload:
             self.vae.to("cpu")
-            torch.cuda.empty_cache()
+            empty_cuda_cache()
         return visual_embedding
 
     def set_scheduler_timestep(self, timestep: int):

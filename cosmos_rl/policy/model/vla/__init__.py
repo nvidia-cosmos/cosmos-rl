@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+from cosmos_rl.utils.cuda_cache import empty_cuda_cache
 import json
 import os
 import inspect
@@ -662,7 +663,7 @@ class OpenVLA(BaseModel):
             )
 
             del hf_model
-            torch.cuda.empty_cache()
+            empty_cuda_cache()
 
             if missing_keys:
                 logger.warning(f"⚠️  {len(missing_keys)} missing keys")
