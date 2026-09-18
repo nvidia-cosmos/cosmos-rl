@@ -1017,19 +1017,24 @@ def compose_nccl_transport(
     ancestry is required.
     """
     strategy = NCCLTransportStrategy()
-    strategy.setup(
-        device=device,
-        redis_client=redis_client,
-        config=config,
-        max_attempts=max_attempts,
-        recv_timeout=recv_timeout,
-        first_transfer_timeout=first_transfer_timeout,
-        # Set by _attach_payload_transport before setup to disambiguate policy
-        # replicas sharing a receiver_rank; absent on standalone/test packers.
-        receiver_replica=getattr(packer, "_nccl_dp_receiver_replica", None),
-    )
     packer.set_transport_strategy(strategy)
-    packer._setup_prefetch(
-        prefetch_timeout=prefetch_timeout,
-        thread_name="NCCLDataPackerPrefetch",
-    )
+    try:
+        strategy.setup(
+            device=device,
+            redis_client=redis_client,
+            config=config,
+            max_attempts=max_attempts,
+            recv_timeout=recv_timeout,
+            first_transfer_timeout=first_transfer_timeout,
+            receiver_replica=getattr(packer, "_nccl_dp_receiver_replica", None),
+        )
+        packer._setup_prefetch(
+            prefetch_timeout=prefetch_timeout,
+            thread_name="NCCLDataPackerPrefetch",
+        )
+    except BaseException:
+        try:
+            packer.close_transport()
+        except Exception as cleanup_error:
+            logger.error("NCCL attachment rollback failed: %s", cleanup_error)
+        raise

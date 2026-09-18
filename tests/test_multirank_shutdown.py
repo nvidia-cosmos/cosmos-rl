@@ -669,7 +669,11 @@ class TestCleanupPayloadServer(unittest.TestCase):
     backends without a UCXX server are unaffected."""
 
     def _call(self, rollout):
-        fake_self = SimpleNamespace(rollout=rollout, replica_name="r-test")
+        fake_self = SimpleNamespace(
+            rollout=rollout,
+            replica_name="r-test",
+            config=SimpleNamespace(custom={"payload_transfer": "ucxx"}),
+        )
         DisaggregatedRolloutControlWorker._cleanup_payload_server(fake_self)
 
     def test_calls_cleanup_when_present(self):
@@ -682,12 +686,13 @@ class TestCleanupPayloadServer(unittest.TestCase):
         self._call(SimpleNamespace())
         self._call(None)
 
-    def test_swallows_cleanup_exception(self):
+    def test_propagates_cleanup_exception(self):
         rollout = SimpleNamespace(
             cleanup_ucxx=MagicMock(side_effect=RuntimeError("boom"))
         )
-        # Must not propagate: teardown has to continue to the NCCL abort.
-        self._call(rollout)
+        # Failed transport cleanup must not be certified as a clean shutdown.
+        with self.assertRaisesRegex(RuntimeError, "teardown failed"):
+            self._call(rollout)
         rollout.cleanup_ucxx.assert_called_once_with()
 
 

@@ -153,10 +153,5 @@ class UCXXDataPackerMixin(PrefetchDataPackerMixin):
         ``read_timeout``, so waiting that long lets the worker unwind on its
         own.  The strategy therefore leaves ``before_join`` unimplemented.
         """
-        self.shutdown_prefetch(
-            join_timeout=max(5.0, float(self._ucxx_dp_read_timeout or 5.0))
-        )
-        strategy = self._transport_strategy
-        if strategy is not None:
-            strategy.shutdown()
+        self.close_transport(timeout=max(5.0, float(self._ucxx_dp_read_timeout or 5.0)))
         logger.info("[UCXXDataPackerMixin] Shut down")

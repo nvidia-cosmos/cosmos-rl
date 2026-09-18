@@ -578,9 +578,18 @@ def compose_ucxx_transport(
     UCXX ancestry is required.
     """
     strategy = UCXXTransportStrategy()
-    strategy.setup(device=device, max_attempts=max_attempts, read_timeout=read_timeout)
     packer.set_transport_strategy(strategy)
-    packer._setup_prefetch(
-        prefetch_timeout=prefetch_timeout,
-        thread_name="UCXXDataPackerPrefetch",
-    )
+    try:
+        strategy.setup(
+            device=device, max_attempts=max_attempts, read_timeout=read_timeout
+        )
+        packer._setup_prefetch(
+            prefetch_timeout=prefetch_timeout,
+            thread_name="UCXXDataPackerPrefetch",
+        )
+    except BaseException:
+        try:
+            packer.close_transport()
+        except Exception as cleanup_error:
+            logger.error("UCXX attachment rollback failed: %s", cleanup_error)
+        raise

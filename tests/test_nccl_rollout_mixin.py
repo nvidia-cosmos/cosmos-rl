@@ -550,7 +550,8 @@ class TestOnBufferFree(unittest.TestCase):
         t0 = time.time()
         p._on_buffer_free(entry)  # must return within ~the bound, not hang
         self.assertLess(time.time() - t0, 5.0)
-        self.assertIsNone(entry.buffer)  # released anyway
+        self.assertIsNotNone(entry.buffer)
+        self.assertIs(p._nccl_retained_entries[entry.transfer_id], entry)
 
     def test_no_events_releases_immediately(self):
         from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
@@ -603,7 +604,8 @@ class TestOnBufferFree(unittest.TestCase):
         t0 = time.time()
         p._on_buffer_free(entry)  # must return within ~the bound, not hang
         self.assertLess(time.time() - t0, 5.0)
-        self.assertIsNone(entry.buffer)  # released anyway
+        self.assertIsNotNone(entry.buffer)
+        self.assertIs(p._nccl_retained_entries[entry.transfer_id], entry)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA device")

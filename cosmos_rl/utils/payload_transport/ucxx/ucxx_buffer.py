@@ -743,6 +743,11 @@ class UCXXBuffer:
                         f"[UCXXBuffer] Server thread {t.name} did not stop cleanly"
                     )
 
+        if any(t is not None and t.is_alive() for t in self._server_threads):
+            # The loops still own endpoints and may be reading shared memory.
+            # Retain all references and prohibit the caller from freeing it.
+            raise TimeoutError("UCXX server threads remain active after shutdown")
+
         for listener in self._listeners:
             if listener is not None:
                 try:

@@ -134,6 +134,44 @@ class PrefetchDataPackerMixin:
     # Setup / teardown
     # ------------------------------------------------------------------
 
+    def close_transport(self, timeout: float = 5.0) -> None:
+        """Close this packer's owned transport, retaining resources on timeout.
+
+        This is not recovery from native CUDA/NCCL failure. A timed-out close
+        prevents reattachment; the worker owner must surface the failure.
+        """
+        from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
+
+        operation = getattr(self, "_transport_close_operation", None)
+        if operation is None:
+            if self._prefetch_shutdown is not None:
+                self._prefetch_shutdown.set()
+            self._prefetch_enabled = False
+            operation = get_close_operation(
+                self, "_transport_close_operation", self._close_transport_owned
+            )
+        operation.close(timeout)
+
+    def _close_transport_owned(self) -> None:
+        strategy = self._transport_strategy
+        if strategy is not None:
+            strategy.before_join()
+        thread = self._prefetch_thread
+        if thread is not None and thread.ident is not None:
+            thread.join()
+        self._prefetch_thread = None
+        use_lock = getattr(self, "_transport_use_lock", threading.RLock())
+        with use_lock:
+            if strategy is not None:
+                strategy.shutdown()
+        self._prefetch_cache = {}
+        self._prefetch_buffer = None
+        self._prefetch_rollouts = None
+        self._prefetch_pending = False
+        self._prefetch_request_queue = None
+        self._prefetch_result_queue = None
+        self._transport_strategy = None
+
     def _setup_prefetch(
         self,
         *,
@@ -147,6 +185,9 @@ class PrefetchDataPackerMixin:
         the timeout.  This makes test-driven re-init paths painless.
         """
         self._prefetch_timeout_s = prefetch_timeout
+        operation = getattr(self, "_transport_close_operation", None)
+        if operation is not None:
+            raise RuntimeError("Attach a transport before restarting a closed packer")
         if self._prefetch_enabled:
             return
 
@@ -262,6 +303,16 @@ class PrefetchDataPackerMixin:
         already-queued tasks being resolved by the outgoing transport.  Pass
         ``None`` to detach (the hooks fall back to their pass-through defaults).
         """
+        operation = getattr(self, "_transport_close_operation", None)
+        if operation is not None and not operation.completed:
+            raise RuntimeError("Cannot replace a transport that is still closing")
+        if self._prefetch_enabled or (
+            self._transport_strategy is not None
+            and self._transport_strategy is not strategy
+        ):
+            raise RuntimeError("Close the attached transport before replacing it")
+        self._transport_close_operation = None
+        self._transport_use_lock = threading.RLock()
         self._transport_strategy = strategy
 
     def _should_intercept(self, rollout_output: Any) -> bool:
@@ -328,10 +379,13 @@ class PrefetchDataPackerMixin:
         skip the episode).  Subclasses may override to provide a
         synchronous transport fetch for the not-yet-prefetched case.
         """
-        strategy = self._transport_strategy
-        if strategy is not None:
-            return strategy.sync_fetch(rollout_output)
-        return None
+        with getattr(self, "_transport_use_lock", threading.RLock()):
+            if getattr(self, "_transport_close_operation", None) is not None:
+                raise RuntimeError("Payload transport is closing or closed")
+            strategy = self._transport_strategy
+            if strategy is not None:
+                return strategy.sync_fetch(rollout_output)
+            return None
 
     def _on_prefetch_complete(
         self,
@@ -379,6 +433,8 @@ class PrefetchDataPackerMixin:
         No-op when the prefetch thread isn't running yet.
         """
         if not self._prefetch_enabled or self._prefetch_request_queue is None:
+            if getattr(self, "_transport_close_operation", None) is not None:
+                raise RuntimeError("Payload transport is closing or closed")
             return
         tasks = self._filter_prefetch_tasks(rollouts)
         if not tasks:
@@ -528,6 +584,8 @@ class PrefetchDataPackerMixin:
         for plain trajectories), this is a transparent pass-through to
         ``super().get_policy_input``.
         """
+        if getattr(self, "_transport_close_operation", None) is not None:
+            raise RuntimeError("Payload transport is closing or closed")
         if rollout_output is not None and self._should_intercept(rollout_output):
             cache_key = self._cache_key(rollout_output)
             resolved = self._prefetch_cache.get(cache_key)

@@ -236,10 +236,11 @@ class CommMixin:
            passively expose a ``redis_client`` attribute.
 
         Failure handling follows the ``explicit_fatal`` policy: when
-        the user explicitly selected the transport in config, ``ImportError``
-        / ``RuntimeError`` from attach is re-raised so misconfiguration
+        the user explicitly selected the transport in config, any exception
+        from attach is re-raised after rollback so misconfiguration
         (e.g. ``payload_transfer="ucxx"`` with no ``ucxx-cu12`` installed)
-        crashes loudly.  Other failures are logged and swallowed.
+        crashes loudly. Implicit selection logs attachment failures after
+        successful rollback; rollback failures always propagate.
         """
         mode = get_payload_transfer_mode(self.config)
         # Fail fast (before any transfer) when a point-to-point transport is
@@ -255,6 +256,9 @@ class CommMixin:
         device = getattr(self, "device", None)
 
         packers = [(self.data_packer, "data_packer")]
+        if getattr(self, "_payload_transport_attachments", None):
+            raise RuntimeError("Close worker payload transports before reattachment")
+        self._payload_transport_attachments = []
         if (
             hasattr(self, "val_data_packer")
             and self.val_data_packer is not self.data_packer
@@ -287,24 +291,24 @@ class CommMixin:
                         device=device,
                         redis_endpoint=endpoint,
                     )
-                except (ImportError, RuntimeError) as exc:
-                    if explicit:
-                        # User-chosen transport failed hard (e.g.
-                        # ucxx-cu12 not installed but config sets
-                        # payload_transfer="ucxx").  Re-raise per
-                        # explicit_fatal policy so the misconfig is
-                        # visible immediately.
-                        raise
-                    logger.warning(
-                        f"[{self.role}] {mode} attach_data_packer for "
-                        f"{packer_name} failed: {exc}"
-                    )
+                    self._payload_transport_attachments.append((transport, packer))
                 except Exception as exc:
+                    # Include the partially attached packer. Keep failed closes
+                    # owned so worker teardown may wait on the same operation.
+                    self._payload_transport_attachments.append((transport, packer))
+                    try:
+                        self.close_payload_transports()
+                    except Exception as cleanup_error:
+                        logger.error("Transport rollback failed: %s", cleanup_error)
+                        raise exc
+                    if explicit:
+                        raise
                     logger.warning(
                         f"[{self.role}] {mode} attach_data_packer for "
                         f"{packer_name} raised "
                         f"{type(exc).__name__}: {exc}"
                     )
+                    return
 
             # (2) Opportunistic Redis injection compat fallback.  See
             # the long-form comment above for why this exists.  Skipped
@@ -314,6 +318,22 @@ class CommMixin:
             # double-inject or stomp on the assigned client.
             if mode != "nccl":
                 self._opportunistic_inject_redis(packer, packer_name, endpoint)
+
+    def close_payload_transports(self, timeout: float = 5.0):
+        """Close each attached packer once, preserving ownership on failure."""
+        attachments = getattr(self, "_payload_transport_attachments", [])
+        errors = []
+        for transport, packer in list(reversed(attachments)):
+            try:
+                transport.close_data_packer(packer, timeout=timeout)
+            except Exception as error:
+                errors.append(error)
+            else:
+                attachments.remove((transport, packer))
+        if errors:
+            raise RuntimeError(
+                f"Payload transport shutdown failed: {errors}"
+            ) from errors[0]
 
     def _opportunistic_inject_redis(self, packer, packer_name: str, endpoint):
         """Best-effort Redis injection for non-NCCL modes.
