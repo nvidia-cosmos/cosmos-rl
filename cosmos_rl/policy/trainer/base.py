@@ -111,7 +111,7 @@ class Trainer(ABC):
         """Fetch and CPU-prepare an owned next batch without changing ACK order."""
         from cosmos_rl.policy.trainer.batching import prefetch_training_batch
 
-        prefetch_training_batch(self, rollouts)
+        return prefetch_training_batch(self, rollouts)
 
     def prepare_training_batch(self, rollouts):
         raise NotImplementedError("Expanded trainers must implement sample preparation")

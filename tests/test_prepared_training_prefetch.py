@@ -36,6 +36,112 @@ class Packer(PrefetchDataPackerMixin, BasePacker):
     def _fetch_batch(self, tasks):
         return {ref: [1.0, float("nan"), 2.0] for _, ref in tasks}
 
+    def _sync_fetch(self, ref):
+        return self._fetch_batch([(0, ref)])[ref]
+
+
+@pytest.mark.parametrize("fixed", [None, 2])
+@pytest.mark.parametrize(
+    "case", ["healthy", "empty", "nonfinite", "recoverable", "bug"]
+)
+def test_prefetch_on_off_and_absent_have_identical_training_semantics(fixed, case):
+    observations = []
+    for mode in ("on", "off", "absent"):
+        packer = Packer()
+        if mode == "on":
+            packer._setup_prefetch(prefetch_timeout=2)
+        main = threading.get_ident()
+        prepare_threads, trained, scheduler_calls = [], [], []
+        candidate = SimpleNamespace(
+            batching_contract=ExpandedSampleBatching(
+                partial_tail="include", fixed_minibatches=fixed
+            ),
+            config=SimpleNamespace(
+                train=SimpleNamespace(
+                    train_policy=SimpleNamespace(mini_batch=3, mu_iterations=2)
+                )
+            ),
+        )
+        if mode != "absent":
+            candidate.data_packer = packer
+
+        def prepare(rollouts):
+            prepare_threads.append(threading.get_ident())
+            if case == "recoverable":
+                raise RecoverablePreparationError("missing")
+            if case == "bug":
+                raise ValueError("bug")
+            if case == "empty":
+                return ExpandedTrainingBatch(())
+            return ExpandedTrainingBatch(
+                ((1.0, float("nan") if case == "nonfinite" else 2.0),)
+            )
+
+        def train(batch, **kwargs):
+            assert threading.get_ident() == main
+            trained.append((batch, kwargs))
+            return {"updates": len(batch.minibatches) * batch.mu_iterations}
+
+        candidate.prepare_training_batch = prepare
+        candidate.step_expanded_training = train
+        rollouts = [SimpleNamespace(completion="ref")]
+        try:
+            assert prefetch_training_batch(candidate, rollouts) == (mode == "on")
+            if mode != "on":
+                assert not prepare_threads  # No eager work or thread creation.
+                assert getattr(candidate, "_prepared_training_batch", None) is None
+            if case == "bug":
+                with pytest.raises(ValueError, match="bug"):
+                    run_training_step(candidate, rollouts=rollouts)
+                assert not trained
+            else:
+                report = run_training_step(
+                    candidate,
+                    rollouts=rollouts,
+                    before_step=lambda: scheduler_calls.append(True),
+                    do_save_checkpoint=True,
+                )
+                observations.append((trained, scheduler_calls, report))
+            assert len(prepare_threads) == 1
+            assert (prepare_threads[0] != main) == (mode == "on")
+            assert getattr(candidate, "_prepared_training_batch", None) is None
+        finally:
+            packer.shutdown_prefetch(join_timeout=2)
+    if observations:
+        assert observations[0] == observations[1] == observations[2]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_transport_resolution_with_or_without_prefetch(enabled):
+    packer = Packer()
+    if enabled:
+        packer._setup_prefetch(prefetch_timeout=2)
+    candidate = SimpleNamespace(
+        data_packer=packer,
+        batching_contract=ExpandedSampleBatching(partial_tail="include"),
+        config=SimpleNamespace(
+            train=SimpleNamespace(
+                train_policy=SimpleNamespace(mini_batch=3, mu_iterations=1)
+            )
+        ),
+        step_expanded_training=Mock(return_value={}),
+        prepare_training_batch=lambda rollouts: ExpandedTrainingBatch(
+            tuple(
+                packer.get_policy_input(rollout_output=r.completion) for r in rollouts
+            )
+        ),
+    )
+    rollouts = [SimpleNamespace(completion="ref")]
+    try:
+        assert prefetch_training_batch(candidate, rollouts) == enabled
+        report = run_training_step(candidate, rollouts=rollouts)
+        assert candidate.step_expanded_training.call_args.args[0].minibatches == (
+            (1.0, 2.0),
+        )
+        assert report["batching/dropped_samples"] == 1
+    finally:
+        packer.shutdown_prefetch(join_timeout=2)
+
 
 @pytest.fixture
 def trainer():

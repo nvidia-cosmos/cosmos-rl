@@ -104,11 +104,18 @@ mode for automatic valid-sample counts and globally empty update skipping.
 ## Background preparation with payload prefetch
 
 Expanded trainers may call `trainer.prefetch_training_batch(next_rollouts)` on
-the training thread when the next owned batch becomes available. The attached
-data packer must have an active `PrefetchDataPackerMixin` prefetcher. This replaces
+the training thread when the next owned batch becomes available. When the attached
+data packer has an active `PrefetchDataPackerMixin` prefetcher, this replaces
 the plain `start_prefetch` submission for that batch: the existing background
 worker fetches its payloads, calls `prepare_training_batch`, validates CPU output,
 and filters samples before publishing a prepared result.
+
+The same caller works with prefetch disabled or with a packer that has no
+prefetch capability: `prefetch_training_batch` returns `False` without doing
+preparation or allocating a pending batch. The normal training entrypoint then
+prepares/filters synchronously. It returns `True` when background submission
+succeeds. Both modes use the same preparation, filtering and schedule logic;
+callers must not skip training when the return value is `False`.
 
 The regular worker's `run_training_step` consumes that result when it receives
 the same rollout objects; without a submission it prepares synchronously.

@@ -169,18 +169,23 @@ def prefetch_training_batch(trainer, rollouts):
     Call on the training thread when the next batch is available. Existing
     controller ACK/step ordering is unchanged; this never invents a future batch.
     ``run_training_step`` consumes it when called with the same rollout objects.
+    Return False without preparing when payload prefetch is disabled/unavailable;
+    the normal entrypoint will prepare synchronously. Return True when submitted.
     """
     if not isinstance(trainer.batching_contract, ExpandedSampleBatching):
         raise TypeError("Background preparation requires expanded batching")
     if getattr(trainer, "_prepared_training_batch", None) is not None:
         raise RuntimeError("Only one unconsumed prepared training batch is allowed")
+    packer = getattr(trainer, "data_packer", None)
+    if not getattr(packer, "_prefetch_enabled", False):
+        return False
     agree_batching_schedule(trainer)
     owned = tuple(rollouts)
-    packer = trainer.data_packer
     future = packer.start_prepared_prefetch(
         owned, lambda: _prepare_local_batch(trainer, owned, background=True)
     )
     trainer._prepared_training_batch = (owned, future, packer)
+    return True
 
 
 def _take_local_batch(trainer, rollouts):

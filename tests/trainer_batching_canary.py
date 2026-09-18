@@ -172,12 +172,13 @@ def main():
                 flush=True,
             )
         fixed_schedule_canary(device, rank)
-        preparation_prefetch_canary(device, rank)
+        preparation_prefetch_canary(device, rank, fixed=None)
+        preparation_prefetch_canary(device, rank, fixed=2)
     finally:
         dist.destroy_process_group()
 
 
-def preparation_prefetch_canary(device, rank):
+def preparation_prefetch_canary(device, rank, fixed):
     import threading
     from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 
@@ -185,7 +186,7 @@ def preparation_prefetch_canary(device, rank):
     reference = CanaryTrainer(device)
     for candidate in (trainer, reference):
         candidate.batching_contract = ExpandedSampleBatching(
-            partial_tail="include", fixed_minibatches=2
+            partial_tail="include", fixed_minibatches=fixed
         )
     packer = PrefetchDataPackerMixin()
     packer._setup_prefetch(prefetch_timeout=30)
@@ -211,7 +212,9 @@ def preparation_prefetch_canary(device, rank):
         run_training_step(trainer, rollouts=first)
         trainer.step_expanded_training = original_step
         run_training_step(trainer, rollouts=second)
+        assert prefetch_training_batch(reference, first) is False
         run_training_step(reference, rollouts=first)
+        assert prefetch_training_batch(reference, second) is False
         run_training_step(reference, rollouts=second)
         assert len(prepare_threads) == 2
         assert all(thread != threading.get_ident() for thread in prepare_threads)
@@ -224,9 +227,7 @@ def preparation_prefetch_canary(device, rank):
             atol=0,
         )
         assert trainer.scheduler.state_dict() == reference.scheduler.state_dict()
-        print(
-            f"rank={rank} background_preparation=PASS numerical_parity=PASS", flush=True
-        )
+        print(f"rank={rank} fixed={fixed} prefetch_on_off_parity=PASS", flush=True)
     finally:
         packer.shutdown_prefetch(join_timeout=30)
 
