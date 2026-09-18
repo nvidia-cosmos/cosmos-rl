@@ -11,6 +11,7 @@ This is healthy teardown validation, not native-fault recovery validation.
 
 import json
 import argparse
+import sys
 import os
 import socket
 import subprocess
@@ -58,6 +59,8 @@ def main():
     assert dist.get_world_size() == 2
     server = None
     client = None
+    producer = None
+    packer = None
     try:
         endpoint = [None]
         if rank == 0:
@@ -188,6 +191,19 @@ def main():
                 flush=True,
             )
     finally:
+        active_error = sys.exc_info()[0] is not None
+        try:
+            if packer is not None:
+                packer.close_transport(timeout=30)
+            if producer is not None:
+                if backend == "ucxx":
+                    UCXXPayloadTransport().close_producer(producer, timeout=30)
+                else:
+                    producer.cleanup_nccl(timeout=30)
+        except Exception as error:
+            print(f"rank={rank} explicit cleanup failed: {error!r}", flush=True)
+            if not active_error:
+                raise
         if client is not None:
             client.close()
         if server is not None:
