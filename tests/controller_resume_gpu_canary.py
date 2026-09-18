@@ -130,6 +130,7 @@ def main():
                 update()
             metadata = ControllerResumeMetadata(
                 checkpoint_path=str(checkpoint),
+                checkpoint_id="gpu-canary-step-2",
                 completed_training_steps=2,
                 completed_optimizer_updates=2,
                 remaining_completions=12,

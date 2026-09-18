@@ -135,6 +135,13 @@ class Controller:
             )
 
         self.config = config
+        # Never restore an execution fence from a checkpoint/config file. A
+        # resumed application starts a fresh attempt and discards old results.
+        from uuid import uuid4
+
+        config.controller_execution_id = (
+            uuid4().hex if resume_adapter is not None else None
+        )
         task_type = config.train.train_policy.type
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config

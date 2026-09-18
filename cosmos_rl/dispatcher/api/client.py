@@ -75,8 +75,10 @@ class APIClient(object):
         role: Role,
         remote_ips: Optional[List[str]] = None,
         remote_port: Optional[int] = None,
+        controller_execution_id: Optional[str] = None,
     ):
         self.role = role
+        self.controller_execution_id = controller_execution_id
 
         self.remote_ips = remote_ips
         self.remote_port = remote_port
@@ -589,16 +591,25 @@ class APIClient(object):
             return [], False
 
     def post_rollout_completion(self, response: RolloutRequest) -> bool:
+        payload = response.model_dump()
+        payload["controller_execution_id"] = self.controller_execution_id
+
+        def check_response(result):
+            # An old attempt cannot be retried into the current execution.
+            if result.status_code != 410:
+                result.raise_for_status()
+
         try:
-            make_request_with_retry(
+            result = make_request_with_retry(
                 partial(
                     requests.post,
-                    json=response.model_dump(),
+                    json=payload,
                 ),
                 self.get_alternative_urls(COSMOS_API_ROLLOUT_SUFFIX),
                 max_retries=self.max_retries,
+                response_parser=check_response,
             )
-            return True
+            return result.status_code != 410
         except Exception as e:
             logger.error(
                 f"[Rollout] Failed in sending rollout completion to controller after retries {e}."

@@ -41,6 +41,7 @@ def metadata(**overrides):
         **(
             {
                 "checkpoint_path": "/application/checkpoint",
+                "checkpoint_id": "application-save-20",
                 "completed_training_steps": 20,
                 "completed_optimizer_updates": 40,
                 "remaining_completions": 16,
@@ -217,6 +218,7 @@ def test_adapter_errors_are_not_swallowed(phase):
         {"epoch": 0},
         {"sampling_owner": "both"},
         {"checkpoint_path": ""},
+        {"checkpoint_id": ""},
     ],
 )
 def test_metadata_validation(changes):

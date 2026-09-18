@@ -76,6 +76,7 @@ class TestRankedRolloutEnd(unittest.TestCase):
 
         rollout_end = MagicMock(return_value=False)
         fake_controller = SimpleNamespace(
+            config=SimpleNamespace(controller_execution_id=None),
             rollout_status_manager=SimpleNamespace(rollout_end=rollout_end)
         )
         request = SimpleNamespace(
