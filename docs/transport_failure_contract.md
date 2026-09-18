@@ -31,15 +31,14 @@ handling of ordinary errors and coordinated controller shutdown remains intact.
 External launchers must preserve and supervise this status themselves. The MPI
 launch path is not covered by the torchrun exit-code bridge.
 
-Native Slurm uses its existing shared run directory for a fatal marker written
-by the torchrun supervisor, after the worker has exited. The batch supervisor
-detects that marker and terminates this allocation's worker steps. Ordinary
-worker exits retain the existing Slurm policy; no blanket kill-on-bad-exit flag
-is added. Each attempt has a fresh run directory. Fatal attempts bypass automatic
-retry/autoresume. This mechanism requires a responsive, shared run directory;
-if notification fails, the fatal exit remains visible but cross-node containment
-depends on the scheduler's own failure policy. It is not independent of storage
-availability. Native Slurm validation remains required before review readiness.
+No Slurm propagation mechanism is added. Native Slurm templates, task-exit policy,
+retry and autoresume behavior remain unchanged. There is no shared fatal marker,
+extra polling loop or new kill-on-bad-exit flag. Surviving tasks may remain blocked
+until the allocation reaches its configured time limit, so deployments relying
+on this fallback must set a finite limit. This PR does not guarantee prompt
+cross-node termination or correct job-level failure classification on every
+existing early-shutdown path. Worker fatal status and allocation status are
+different guarantees. Scheduler-specific containment is deferred.
 
 The process exit intentionally bypasses final checkpointing and native cleanup.
 Python scheduling is still required. This is not an OS-level watchdog and cannot

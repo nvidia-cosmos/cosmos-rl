@@ -19,23 +19,24 @@ submission script and does not configure the application or allocate GPUs.
 After successful transfers, a run-scoped Redis election selects one consumer.
 The fixture parks that consumer after real NCCL rendezvous while its receive
 lock is held. Its prefetch deadline is shortened; peer deadlines stay at 300
-seconds so their termination must come from cohort failure propagation, not
-another watchdog expiration. A threading wait releases the GIL. This models
+seconds so any earlier peer termination can be distinguished from another
+watchdog expiration. A threading wait releases the GIL. This models
 a blocked native call; it does not reproduce a CUDA driver deadlock or make
 concurrent cache cleanup safe.
 
 Require the clean control to complete its training horizon and release the
 allocation. For the fault arm, require exactly one elected receiver, a watchdog
-fatal exit (86 through the Cosmos torchrun wrapper), termination of its peers,
-no `UNSAFE FALLBACK` marker, and bounded
-allocation release. Disable relaunch/autoresume and do not count manual
-cancellation as success. For cross-node checks use the native multi-node Slurm
-template, whose shared fatal marker triggers allocation containment. Verify that
-ordinary worker failures do not create that marker. See
-`transport_failure_contract.md` for the shared-filesystem requirement.
+fatal exit (86 through the Cosmos torchrun wrapper) and no `UNSAFE FALLBACK`
+marker. Local CLI checks additionally require termination of its launched peers.
+For cross-node checks, use a finite Slurm time limit and record worker failure
+separately from allocation outcome. Peers may remain blocked until that limit;
+this PR does not add cross-node propagation. Disable relaunch/autoresume in the
+test configuration; the PR does not change those scheduler policies. A scheduler
+timeout is not evidence of prompt cohort termination. See
+`transport_failure_contract.md` for the precise containment boundary.
 
 The injection functions were cluster-tested against the earlier NCCL-only
-watchdog. The revised generic fatal-status and Slurm marker path still needs
+watchdog. The revised generic fatal-status and local containment path still needs
 live validation; those older results do not establish its correctness. The
 standalone wrapper is an additional convenience interface. Never install this
 fixture into production startup paths.

@@ -197,17 +197,6 @@ class TestAutoRetryGate(unittest.TestCase):
 
 
 class TestMonitorLoopWiring(unittest.TestCase):
-    def test_only_explicit_fatal_transport_marker_adds_cohort_escalation(self):
-        src = TEMPLATE.read_text()
-        for marker in ("# Policy nodes", "# Rollout nodes"):
-            step = src[src.index(marker) :].split("bash -c", 1)[0]
-            self.assertNotIn("--kill-on-bad-exit=1", step)
-        self.assertIn(
-            'export COSMOS_FATAL_TRANSPORT_FILE="${new_run_dir}/fatal-transport"', src
-        )
-        self.assertIn('[[ -f "${COSMOS_FATAL_TRANSPORT_FILE}" ]]', src)
-        self.assertIn("status=86", src)
-
     """The predicate must actually be consulted by the loop.
 
     Without these, deleting the call site -- reverting the fix entirely --

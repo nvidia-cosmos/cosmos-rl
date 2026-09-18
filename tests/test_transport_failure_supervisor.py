@@ -35,7 +35,8 @@ def test_torchrun_preserves_only_explicit_fatal_status(tmp_path, worker_exit):
         timeout=45,
     )
     assert result.returncode == worker_exit, result.stderr
-    assert marker.exists() == (worker_exit == 86)
+    # A stale deployment variable must not re-enable filesystem notification.
+    assert not marker.exists()
 
 
 def test_expiration_retains_live_cache_before_fatal_exit(monkeypatch):
@@ -60,31 +61,3 @@ def test_expiration_retains_live_cache_before_fatal_exit(monkeypatch):
     monkeypatch.setattr(prefetch_mixin, "fail_transport", fatal)
     with pytest.raises(SystemExit, match="86"):
         packer._expire_prefetch(7, 1)
-
-
-def test_slurm_fatal_marker_terminates_running_steps(tmp_path):
-    from test_slurm_multinode_exit import _extract_monitor_loop
-
-    marker = tmp_path / "fatal-transport"
-    marker.touch()
-    script = (
-        """
-set -u
-log() { :; }
-sleep 30 & pid_policy=$!
-sleep 30 & pid_rollout=$!
-sleep 30 & pid_controller=$!
-trap 'kill "$pid_policy" "$pid_rollout" "$pid_controller" 2>/dev/null || true' EXIT
-"""
-        + _extract_monitor_loop()
-        + '\necho "status=$status"\n'
-    )
-    result = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env={**os.environ, "COSMOS_FATAL_TRANSPORT_FILE": str(marker)},
-    )
-    assert result.returncode == 0, result.stderr
-    assert "status=86" in result.stdout
