@@ -51,7 +51,21 @@ def trajectory(device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=("nccl", "ucxx"), default="nccl")
-    backend = parser.parse_args().backend
+    parser.add_argument("--server-threads", type=int, default=4)
+    args = parser.parse_args()
+    backend = args.backend
+    print(
+        json.dumps(
+            {
+                "ucx_environment": {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key.startswith(("UCX_", "UCXPY_"))
+                }
+            }
+        ),
+        flush=True,
+    )
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
     device = torch.device("cuda", torch.cuda.current_device())
     dist.init_process_group("gloo", timeout=timedelta(seconds=120))
@@ -125,7 +139,11 @@ def main():
                         obs_dim=4,
                         action_dim=2,
                         port=31000 + cycle * 16,
-                        config=UCXXBufferConfig(max_entries=8, entry_size_bytes=4096),
+                        config=UCXXBufferConfig(
+                            max_entries=8,
+                            entry_size_bytes=4096,
+                            n_server_threads=args.server_threads,
+                        ),
                     )
                 else:
                     producer.setup_nccl(
