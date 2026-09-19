@@ -534,12 +534,21 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         The controller publishes STOP once every policy replica has
         unregistered (its main loop finished, so no policy will read this
-        rollout's output again).  Setting the shutdown signals here breaks
+        rollout's output again).  Setting the shutdown signal here breaks
         ``main_loop`` out of *any* branch -- normal drain, an empty queue,
         or the weight-version-gate spin that no longer clears once weight
         syncs have stopped (the residual hang the prompt-stream ``is_end``
         could not reach).  No NCCL collective is involved, and teardown's
         bounded ``cleanup_ucxx`` still lets any in-flight output read drain.
+
+        Only ``shutdown_signal`` is set.  ``main_loop`` observes it between
+        generation batches, so the replica keeps working for as long as its
+        in-flight batch takes; the heartbeat must keep running for that whole
+        time.  Stopping it here (``shutdown_mp_signal``) let the controller
+        reap a live replica after ``COSMOS_HEARTBEAT_TIMEOUT``, finalize while
+        it was still tearing down, and strand its later unregister on a dead
+        controller.  ``handle_shutdown`` stops the heartbeat right before it
+        unregisters.
         """
         wst = getattr(self, "_weight_sync_thread", None)
         if wst is not None:
@@ -555,7 +564,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.replica_name,
         )
         self.shutdown_signal.set()
-        self.shutdown_mp_signal.set()
 
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
@@ -1694,8 +1702,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 logger.info("[Rollout] Published end event to reference")
                 if self.validation_flag.is_set():
                     self.do_validation()
+                # Heartbeat keeps running until ``handle_shutdown`` unregisters
+                # (see ``handle_stop``).
                 self.shutdown_signal.set()
-                self.shutdown_mp_signal.set()
 
         # In async mode the WST's _execute_r2r calls set_weight_synced
         # after the broadcast actually completes.  Calling it here would

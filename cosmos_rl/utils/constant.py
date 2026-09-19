@@ -187,6 +187,12 @@ COSMOS_HTTP_LONG_WAIT_MAX_RETRY = 100
 # which hangs the teardown join in handle_shutdown. Fail fast (one attempt) and
 # let the outer loop re-check shutdown_signal and re-poll.
 COSMOS_HTTP_STREAM_POLL_MAX_RETRY = 1
+# ``/unregister`` is best-effort: the controller GCs a replica that never
+# unregisters via heartbeat timeout, and a replica that unregisters after the
+# controller has already finalized only sees connection-refused. The deep
+# retry chain turned that into a ~50 min stall per replica holding the job's
+# allocation; three quick attempts cover a transiently busy controller.
+COSMOS_HTTP_UNREGISTER_MAX_RETRY = 3
 
 COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK = int(
     os.environ.get("COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK", "64")

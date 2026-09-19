@@ -116,8 +116,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             self.do_validation()
 
         if broadcast_command.replica_should_stop():
+            # Heartbeat keeps running until ``handle_shutdown`` unregisters
+            # (see ``DisaggregatedRolloutControlWorker.handle_stop``).
             self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
 
     @torch.no_grad()
     def rollout_for_one_minor_step(self):
