@@ -1849,9 +1849,11 @@ class PolicyStatusManager:
                     is_validation=True,
                 )
             return
-        if not self.any_with_status([PolicyStatus.REDUCED]):
-            # For SFT, we increment current_step at first train_ack received in each step
-            self.current_step += 1
+        if step > self.current_step:
+            # Validation ACKs can overwrite REDUCED while other training ACKs
+            # for the same step are still in flight. Advance from the worker's
+            # completed step, never from these transient status flags.
+            self.current_step = step
             if self.config.validation.enable and (
                 self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps

@@ -94,6 +94,7 @@ run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl
 
 # run tests
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
+run python -m pytest -q tests/test_sft_ack_progress.py
 run python tests/test_apex.py
 run python tests/test_cosmos_hf_precision.py
 run /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
