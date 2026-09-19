@@ -4,6 +4,7 @@ from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import threading
+import time
 
 import pytest
 import torch
@@ -247,7 +248,7 @@ def test_background_preparation_rejects_non_cpu_output(trainer):
         run_training_step(trainer, rollouts=rollouts)
 
 
-def test_preparation_wait_is_bounded_and_does_not_release_running_ownership(trainer):
+def test_preparation_deadline_is_terminal_and_retains_running_ownership(trainer):
     entered, release = threading.Event(), threading.Event()
 
     def prepare(_):
@@ -267,7 +268,20 @@ def test_preparation_wait_is_bounded_and_does_not_release_running_ownership(trai
             prefetch_training_batch(trainer, [])
     finally:
         release.set()
+    assert trainer.data_packer._prefetch_shutdown.wait(2)
+    with pytest.raises(TimeoutError):
+        run_training_step(trainer, rollouts=[])
+    with pytest.raises(TimeoutError):
+        trainer.data_packer.start_prepared_prefetch([], lambda: None)
+
+
+def test_completed_preparation_disarms_watchdog_before_delayed_consumption(trainer):
+    trainer.data_packer._prefetch_timeout_s = 0.1
+    prefetch_training_batch(trainer, [])
     trainer._prepared_training_batch[1].result(timeout=2)
+    time.sleep(0.2)
+    assert not trainer.data_packer._prefetch_timers
+    assert trainer.data_packer._prefetch_failure is None
     run_training_step(trainer, rollouts=[])
 
 

@@ -129,11 +129,16 @@ in the original command order; this cannot create overlap if none is available.
 Only one unconsumed prepared batch is permitted. The submitted rollout objects
 and fetched storage remain owned until preparation/consumption completes; do not
 mutate them. Background resolution uses a thread-local cache, not the cache used
-by the currently training batch. Exceptions surface at consumption, where the
-normal dynamic/fixed recovery policy applies; waiting uses the packer's finite
-prefetch timeout. Packer shutdown cancels queued work and joins running work with
-its existing bounded timeout; it cannot forcibly interrupt a hung Python/native
-preparation function. Such timeouts remain fatal infrastructure errors.
+by the currently training batch. Ordinary preparation exceptions surface at
+consumption, where the normal dynamic/fixed recovery policy applies.
+Both submission paths share the independent watchdog from PR #747. Its deadline
+covers queueing, fetch and CPU preparation, even if training never consumes the
+result. Completion disarms the watchdog before publishing the result, so delayed
+consumption of completed work is safe. Strategy-backed timeouts and terminal
+transport errors exit without native cleanup; they are not recoverable data
+errors. Strategy-less legacy packers become terminally unusable on timeout.
+Packer shutdown cancels queued work but does not disarm running work's watchdog
+until the worker exits; it cannot forcibly interrupt a hung Python/native call.
 
 Preparation must be CPU-only, thread-safe and independent of mutable model,
 optimizer, scheduler and shared RNG state. Use batch-local RNG if needed. Move

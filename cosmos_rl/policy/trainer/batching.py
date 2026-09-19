@@ -193,12 +193,15 @@ def _take_local_batch(trainer, rollouts):
     if pending is None:
         return _prepare_local_batch(trainer, rollouts)
     owned, future, packer = pending
+    packer._raise_if_prefetch_failed()
     if len(owned) != len(rollouts) or any(a is not b for a, b in zip(owned, rollouts)):
         raise ValueError(
             "Prepared batch does not match the training command's rollouts"
         )
     try:
-        return future.result(timeout=packer._prefetch_timeout_s)
+        result = future.result(timeout=packer._prefetch_timeout_s)
+        packer._raise_if_prefetch_failed()
+        return result
     finally:
         if future.done():
             packer.release_prepared_prefetch(future)
