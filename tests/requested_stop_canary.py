@@ -8,8 +8,8 @@ Run from the companion project root so its relative assets resolve.
 
 STOP_CANARY_AFTER=0 requests step-zero stop; set 2 for partial progress.
 STOP_CANARY_FAIL_SAVE=1 injects final checkpoint failure (expect job failure).
-STOP_CANARY_DURING_VALIDATION=1 waits for an active, partially reported validation
-round; enable validation in the workload for this case. Check the terminal ACKs,
+STOP_CANARY_DURING_VALIDATION=1 waits for an active validation round with
+multiple prompt requests; enable validation for this case. Check the terminal ACKs,
 actual saved step, unchanged horizon, and all role exits, not just batch status.
 
 The published fixture uses per-process output directories to prevent independent
@@ -18,6 +18,7 @@ checkpoints, not a distributed checkpoint format or a resume implementation.
 """
 
 import os
+import faulthandler
 from pathlib import Path
 import uuid
 import torch
@@ -31,6 +32,11 @@ from rl_gym.policy.trainer.simple_trainer import SimpleRLTrainer
 from rl_gym.rollouts.modular_rollout_worker import ModularRolloutWorker  # noqa: F401
 from rl_gym.reward_function import rl_gym_reward_fn
 from rl_gym.simple_data_packer import SimpleRLDataPacker, TransportSimpleRLDataPacker
+
+if os.environ.get("STOP_CANARY_STACK_TIMEOUT"):
+    faulthandler.dump_traceback_later(
+        float(os.environ["STOP_CANARY_STACK_TIMEOUT"]), repeat=True
+    )
 
 register_tokenizer_loader(
     predicate=lambda path: str(path).endswith(".toml"),
@@ -101,13 +107,18 @@ if role == "controller":
             >= controller.config.rollout.parallelism.n_init_replicas
         )
         validation_active = controller.data_fetcher.activated_val_iter is not None
+        if request.query_params.get("validation_step") not in (None, ""):
+            controller._canary_validation_requests = (
+                getattr(controller, "_canary_validation_requests", 0) + 1
+            )
         validation_reported = sum(
             len(group)
             for groups in manager.val_report_data.values()
             for group in groups
         )
         validation_ready = os.environ.get("STOP_CANARY_DURING_VALIDATION") != "1" or (
-            validation_active and validation_reported > 0
+            validation_active
+            and getattr(controller, "_canary_validation_requests", 0) >= 2
         )
         if (
             manager.policy_init_done
@@ -132,8 +143,15 @@ if role == "controller":
     run_web_panel.main()
 elif role == "policy":
     from cosmos_rl.policy.policy_entry import policy_entry
+    from cosmos_rl.dispatcher.api.client import APIClient
 
-    packer = TransportSimpleRLDataPacker()
+    metadata = APIClient(role="POLICY").get_controller_metadata()
+    # Colocated payloads are already local; no transport prefetch is submitted.
+    packer = (
+        SimpleRLDataPacker()
+        if metadata["config"]["mode"] == "colocated"
+        else TransportSimpleRLDataPacker()
+    )
     policy_entry(
         data_packer=packer, val_data_packer=packer, reward_fns=[rl_gym_reward_fn]
     )

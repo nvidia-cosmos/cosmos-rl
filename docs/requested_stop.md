@@ -59,3 +59,36 @@ The stop reason is exposed as `policy_status_manager.stop_reason` and logged
 when accepted. Worker/cohort failure handling remains the launcher's
 responsibility; see the separate watchdog/launcher PR #747. A missing participant
 or stalled operation must not be presented as a successful requested stop.
+
+## Live validation fixtures
+
+`tests/requested_stop_sft_live.py` generates a tiny local model and dataset
+without downloading weights, then exercises the real multi-replica SFT workers
+and checkpoint saver:
+
+```bash
+python tests/requested_stop_sft_live.py --prepare /tmp/stop-assets
+STOP_CANARY_AFTER=2 timeout --kill-after=15 300 \
+  python -m cosmos_rl.launcher.launch_all --config /tmp/stop-assets/sft.toml \
+  --policy 2 --rollout 0 tests/requested_stop_sft_live.py
+```
+
+Run separate cases with `STOP_CANARY_AFTER=0`,
+`STOP_CANARY_DURING_VALIDATION=1`, or `STOP_CANARY_FAIL_SAVE=1`.
+The active-validation case requests stop after a real validation minibatch.
+The failure case raises inside the final saver, retaining the production
+checkpoint failure agreement. Two GPUs and the normal SFT dependencies are
+required; the generated configuration uses the Hugging Face backend.
+
+`tests/requested_stop_canary.py` supports the RL-Gym companion custom trainer.
+For colocated execution, use `tests/configs/requested_stop_colocated.toml` from
+the companion root with its synthetic dataset and simple model configuration.
+Use the same environment controls; set `STOP_CANARY_AFTER=0` when testing
+initial active validation. Optional `STOP_CANARY_STACK_TIMEOUT=120` emits
+periodic thread dumps to diagnose stalls.
+
+For successful cases, check the actual saved step, unchanged horizon, all
+terminal acknowledgements, and clean role exits. For injected failure, require
+the injection marker and absence of terminal success; the failed participant
+must not acknowledge checkpoint completion. Remaining processes may require
+the finite outer timeout: these fixtures do not add job-wide failure propagation.
