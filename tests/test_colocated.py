@@ -122,7 +122,10 @@ class TestColocated(unittest.TestCase):
         )
 
         processes = [controller_process, policy_process0, policy_process1]
-        wait_all_or_fail(self, processes, timeout_s=300, context="test_colocated")
+        # This deadline covers model loading plus both training steps, not just
+        # shutdown. CI can still be making step-1 progress near five minutes.
+        # Keep a finite budget and the existing failure/process-tree cleanup.
+        wait_all_or_fail(self, processes, timeout_s=600, context="test_colocated")
 
 
 if __name__ == "__main__":
