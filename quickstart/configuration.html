@@ -2017,7 +2017,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="35"><ul class="simple">
+<tr class="row-even"><td rowspan="53"><ul class="simple">
 <li><p>LoggingConfig</p></li>
 </ul>
 </td>
@@ -2027,6 +2027,69 @@
 <td colspan="5"><p><em>object</em></p></td>
 </tr>
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>wandb_run_id</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Wandb Run Id</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Explicit W&amp;B run ID. Unset preserves train.timestamp.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>minLength</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>wandb_run_name</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Wandb Run Name</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Exact W&amp;B display name, without an appended timestamp. Unset preserves experiment_name behavior.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>minLength</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>wandb_resume</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Wandb Resume</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>W&amp;B resume policy; None defers to SDK settings, including environment configuration. Defaults to allow for compatibility. Initialization remains best-effort, including must mode.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="4"><p>allow</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>enum</p></td>
+<td colspan="3"><p>allow, must, never, auto</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>logger</p></li>
