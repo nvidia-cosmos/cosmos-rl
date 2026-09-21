@@ -47,6 +47,7 @@ from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
+from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 
 
 def _wait_for_redis_ready(port: int, timeout: float) -> bool:
@@ -126,6 +127,7 @@ class Controller:
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        resume_adapter: Optional[ControllerResumeAdapter] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -133,6 +135,13 @@ class Controller:
             )
 
         self.config = config
+        # Never restore an execution fence from a checkpoint/config file. A
+        # resumed application starts a fresh attempt and discards old results.
+        from uuid import uuid4
+
+        config.controller_execution_id = (
+            uuid4().hex if resume_adapter is not None else None
+        )
         task_type = config.train.train_policy.type
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
@@ -173,6 +182,7 @@ class Controller:
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
             is_rl=self.is_rl,
+            resume_adapter=resume_adapter,
         )
 
         ips = network_util.get_eth_ips()

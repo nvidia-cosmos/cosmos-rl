@@ -98,6 +98,7 @@ from cosmos_rl.utils.api_suffix import (
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
+from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from fastapi import Request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -678,6 +679,11 @@ async def validation_report(request: ValidationReportRequest):
 
 @app.post(COSMOS_API_ROLLOUT_SUFFIX)
 async def put_rollout_group(rollout: RolloutRequest):
+    execution_id = getattr(controller.config, "controller_execution_id", None)
+    if execution_id is not None and rollout.controller_execution_id != execution_id:
+        # Reject before extracting payloads, handling end signals, touching
+        # counters, or publishing cleanup into the new attempt's transports.
+        return JSONResponse(status_code=410, content={"error": "stale_execution"})
     try:
         if rollout.is_end:
             logger.info(
@@ -815,6 +821,7 @@ def main(
     val_sampler: Optional[Callable] = None,
     val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
+    resume_adapter: Optional[ControllerResumeAdapter] = None,
     **kwargs,
 ):
     if kwargs:
@@ -923,6 +930,7 @@ def main(
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
+            resume_adapter=resume_adapter,
         )
         logger.info(f"Successfully loaded configuration from {args.config}")
     except FileNotFoundError:

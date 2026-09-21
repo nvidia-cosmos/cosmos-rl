@@ -1905,6 +1905,11 @@ class DistillationConfig(BaseModel):
 
 
 class Config(BaseModel):
+    controller_execution_id: Optional[str] = Field(
+        default=None,
+        description="Controller-owned attempt fence for application checkpoint recovery.",
+        json_schema_extra={"hide_in_doc": True},
+    )
     custom: Dict[str, Any] = Field(
         default_factory=dict, description="Custom script configuration."
     )

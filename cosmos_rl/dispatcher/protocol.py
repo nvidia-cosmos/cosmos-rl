@@ -78,6 +78,7 @@ class ValidationReportRequest(BaseModel):
 
 
 class RolloutRequest(BaseModel):
+    controller_execution_id: Optional[str] = None
     src_replica_name: str
     src_global_rank: Optional[int] = None
     stays_command_participant: bool = False

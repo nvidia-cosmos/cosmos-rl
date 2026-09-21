@@ -40,6 +40,7 @@ def test_rollout_end_request_supports_ranked_and_legacy_reporters():
 
 def test_http_rollout_end_reports_controller_acknowledgement():
     client = object.__new__(APIClient)
+    client.controller_execution_id = None
     client.max_retries = 1
     client.get_alternative_urls = lambda _suffix: ["http://controller/rollout"]
     request = RolloutRequest(
@@ -60,6 +61,7 @@ def test_http_rollout_end_reports_controller_acknowledgement():
 
 def test_http_rollout_end_reports_failed_delivery():
     client = object.__new__(APIClient)
+    client.controller_execution_id = None
     client.max_retries = 1
     client.get_alternative_urls = lambda _suffix: ["http://controller/rollout"]
     request = RolloutRequest(
