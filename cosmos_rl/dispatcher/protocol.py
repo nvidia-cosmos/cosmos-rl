@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Dict, Any, Optional
 from cosmos_rl.dispatcher.data.schema import RLPayload
 
@@ -123,6 +123,16 @@ class GetShardSendRecvInstsRequest(BaseModel):
 
 class ResumeInfoRequest(BaseModel):
     ckpt_extra_info: Dict[str, Any]
+
+
+class StopRequest(BaseModel):
+    reason: str
+
+
+class StepBoundaryRequest(BaseModel):
+    replica_name: str
+    completed_step: int = Field(strict=True, ge=0)
+    checkpoint_complete: bool = False
 
 
 class RegisterRequest(BaseModel):

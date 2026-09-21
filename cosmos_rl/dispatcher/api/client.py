@@ -37,6 +37,8 @@ from cosmos_rl.utils import constant
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_STATUS_SUFFIX,
     COSMOS_API_META_SUFFIX,
+    COSMOS_API_REQUEST_STOP_SUFFIX,
+    COSMOS_API_TRAINING_BOUNDARY_SUFFIX,
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_SET_PROFILE_SUFFIX,
     COSMOS_API_SET_TRACE_PATH_SUFFIX,
@@ -114,6 +116,45 @@ class APIClient(object):
         for base_url in self.base_urls:
             urls.append(urljoin(base_url, suffix))
         return urls
+
+    def request_stop(self, reason: str) -> bool:
+        def parse(response):
+            if response.status_code != 409:
+                response.raise_for_status()
+
+        response = make_request_with_retry(
+            partial(requests.post, json={"reason": reason}),
+            self.get_alternative_urls(COSMOS_API_REQUEST_STOP_SUFFIX),
+            response_parser=parse,
+            max_retries=self.max_retries,
+        )
+        if response.status_code == 409:
+            raise RuntimeError(f"Stop request rejected: {response.text}")
+        return response.json()["accepted"]
+
+    def training_boundary(
+        self, replica_name, completed_step, *, checkpoint_complete=False
+    ):
+        def parse(response):
+            if response.status_code != 409:
+                response.raise_for_status()
+
+        response = make_request_with_retry(
+            partial(
+                requests.post,
+                json={
+                    "replica_name": replica_name,
+                    "completed_step": completed_step,
+                    "checkpoint_complete": checkpoint_complete,
+                },
+            ),
+            self.get_alternative_urls(COSMOS_API_TRAINING_BOUNDARY_SUFFIX),
+            response_parser=parse,
+            max_retries=self.max_retries,
+        )
+        if response.status_code == 409:
+            raise RuntimeError(f"Training boundary rejected: {response.text}")
+        return response.json()
 
     def get_controller_metadata(self) -> Dict[str, Any]:
         """

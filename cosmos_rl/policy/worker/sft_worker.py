@@ -50,6 +50,7 @@ from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.cache as cache
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
+from cosmos_rl.policy.worker.stop import training_boundary, final_checkpoint
 from cosmos_rl.dispatcher.data.load_balanced_dataset import LoadBalancedDataset
 
 
@@ -961,10 +962,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 f"Epoch set to {cur_epoch + 1} for load-balanced dynamic batching"
             )
             self.epoch = cur_epoch + 1
-        stop_training = False
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
+        stop_training = training_boundary(self, self.train_step)
         for _ in range(self.start_epoch, self.epoch):
+            if stop_training:
+                break
             if hasattr(self.train_sampler, "set_epoch"):
                 self.train_sampler.set_epoch(cur_epoch)
             if hasattr(self.train_batch_sampler, "set_epoch"):
@@ -979,6 +982,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_arrival_event.record()
             # global_batch is a list of items from `datapacker.sft_process_sample()`
             for global_batch in self.get_batch_from_dataloader(self.train_data_loader):
+                if training_boundary(self, self.train_step):
+                    stop_training = True
+                    break
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
                 if (
@@ -1068,14 +1074,18 @@ class SFTPolicyWorker(PolicyWorkerBase):
             cur_epoch += 1
 
         # Finally: validation and save checkpoint
-        val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
-        self.trainer.checkpointing(
-            total_steps=self.total_steps,
-            train_step=self.train_step,
-            save_freq=self._save_freq,
-            is_last_step=True,
-            pp_last_stage=pp_last_stage,
-            val_score=val_avg_loss,
+        if self.requested_stop_reason is None:
+            val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
+        final_checkpoint(
+            self,
+            lambda: self.trainer.checkpointing(
+                total_steps=self.total_steps,
+                train_step=self.train_step,
+                save_freq=self._save_freq,
+                is_last_step=True,
+                pp_last_stage=pp_last_stage,
+                val_score=val_avg_loss,
+            ),
         )
 
     def handle_shutdown(self):
