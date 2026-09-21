@@ -270,12 +270,57 @@ class TestSchedulerWithBackgroundThread(unittest.TestCase):
         # Cache cleared because the worker reported an error.
         self.assertEqual(self.p._prefetch_cache, {})
 
-    def test_wait_prefetch_timeout_clears_cache(self):
-        # No request submitted -> wait should time out and reset cache.
+    def test_wait_without_request_is_noop(self):
+        self.p.wait_prefetch()
+        self.p.start_prefetch([{"plain": True}])
+        self.p.wait_prefetch()
+
+    def test_completion_disarms_watchdog_before_collection(self):
+        self.p._prefetch_timeout_s = 0.05
+        self.p.start_prefetch([{"_fake": True, "id": "q"}])
+        # Observe worker completion without consuming its result.
+        deadline = time.monotonic() + 2
+        while self.p._prefetch_result_queue.empty():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.001)
+        time.sleep(0.1)
+        self.assertIsNone(self.p._prefetch_failure)
+        self.p.wait_prefetch()
+        self.assertIn("q", self.p._prefetch_cache)
+
+    def test_timeout_poison_prevents_fallback_and_late_result_reuse(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_fetch(tasks):
+            entered.set()
+            release.wait(5)
+            return {"q": "late payload"}
+
+        self.p._fetch_batch = blocked_fetch
         self.p._prefetch_cache = {"stale": 1}
         self.p._prefetch_timeout_s = 0.05
-        self.p.wait_prefetch()
-        self.assertEqual(self.p._prefetch_cache, {})
+        ref = {"_fake": True, "id": "q"}
+        self.p.start_prefetch([ref])
+        try:
+            self.assertTrue(entered.wait(1))
+            with self.assertRaisesRegex(TimeoutError, "batch 0"):
+                self.p.wait_prefetch()
+            self.assertEqual(self.p._prefetch_cache, {})
+            self.assertTrue(self.p._prefetch_shutdown.is_set())
+            # Even a caller that catches the timeout cannot enter sync fetch.
+            self.p._sync_fetch = lambda ref: self.fail("unsafe fallback")
+            with self.assertRaises(TimeoutError):
+                self.p.get_policy_input(rollout_output=ref)
+            with self.assertRaises(TimeoutError):
+                self.p.start_prefetch([ref])
+        finally:
+            release.set()
+            self.p.shutdown_prefetch()
+        with self.assertRaises(TimeoutError):
+            self.p.wait_prefetch()
+        with self.assertRaises(TimeoutError):
+            self.p._setup_prefetch()
 
     def test_defer_then_collect_drives_full_cycle(self):
         # Cycle 1: cold start -> seed buffer.
