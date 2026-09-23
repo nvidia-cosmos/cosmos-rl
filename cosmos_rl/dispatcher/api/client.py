@@ -37,6 +37,8 @@ from cosmos_rl.utils import constant
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_STATUS_SUFFIX,
     COSMOS_API_META_SUFFIX,
+    COSMOS_API_REQUEST_STOP_SUFFIX,
+    COSMOS_API_TRAINING_BOUNDARY_SUFFIX,
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_SET_PROFILE_SUFFIX,
     COSMOS_API_SET_TRACE_PATH_SUFFIX,
@@ -63,6 +65,7 @@ from cosmos_rl.utils.api_suffix import (
 from cosmos_rl.utils.parallelism_map import WeightSyncInstructionsGroup
 from cosmos_rl.utils.util import list_to_b64, sanitize, b64_to_list
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import ResumeMetadataMismatch
 
 
 class APIClient(object):
@@ -75,8 +78,10 @@ class APIClient(object):
         role: Role,
         remote_ips: Optional[List[str]] = None,
         remote_port: Optional[int] = None,
+        controller_execution_id: Optional[str] = None,
     ):
         self.role = role
+        self.controller_execution_id = controller_execution_id
 
         self.remote_ips = remote_ips
         self.remote_port = remote_port
@@ -112,6 +117,45 @@ class APIClient(object):
         for base_url in self.base_urls:
             urls.append(urljoin(base_url, suffix))
         return urls
+
+    def request_stop(self, reason: str) -> bool:
+        def parse(response):
+            if response.status_code != 409:
+                response.raise_for_status()
+
+        response = make_request_with_retry(
+            partial(requests.post, json={"reason": reason}),
+            self.get_alternative_urls(COSMOS_API_REQUEST_STOP_SUFFIX),
+            response_parser=parse,
+            max_retries=self.max_retries,
+        )
+        if response.status_code == 409:
+            raise RuntimeError(f"Stop request rejected: {response.text}")
+        return response.json()["accepted"]
+
+    def training_boundary(
+        self, replica_name, completed_step, *, checkpoint_complete=False
+    ):
+        def parse(response):
+            if response.status_code != 409:
+                response.raise_for_status()
+
+        response = make_request_with_retry(
+            partial(
+                requests.post,
+                json={
+                    "replica_name": replica_name,
+                    "completed_step": completed_step,
+                    "checkpoint_complete": checkpoint_complete,
+                },
+            ),
+            self.get_alternative_urls(COSMOS_API_TRAINING_BOUNDARY_SUFFIX),
+            response_parser=parse,
+            max_retries=self.max_retries,
+        )
+        if response.status_code == 409:
+            raise RuntimeError(f"Training boundary rejected: {response.text}")
+        return response.json()
 
     def get_controller_metadata(self) -> Dict[str, Any]:
         """
@@ -179,21 +223,14 @@ class APIClient(object):
         # which then deadlocks worker teardown -- the worker process
         # never reaches ``destroy_distributed()`` and its UCXX server
         # threads keep polling until the orchestrator hard-kills the
-        # job.  Cap the per-attempt time; retries use ``self.max_retries``
-        # (``COSMOS_HTTP_RETRY_CONFIG``).  Best-effort cleanup, not a
-        # correctness requirement (the controller will GC the replica via
-        # heartbeat timeout if this fails).
+        # job. Make one bounded attempt, without the operational request
+        # retry/backoff chain: the controller may already have exited.
+        # This is best-effort cleanup, not a correctness requirement.
         try:
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"replica_name": replica_name},
-                    # Bounded so a hung socket during teardown cannot block the
-                    # clean unregister forever (which would strand the controller).
-                    timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
-                ),
-                self.get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX),
-                max_retries=self.max_retries,
+            requests.post(
+                self.get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX)[0],
+                json={"replica_name": replica_name},
+                timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
             )
         except Exception as e:
             logger.error(f"Failed to unregister from controller: {e}")
@@ -514,18 +551,31 @@ class APIClient(object):
         Args:
             resume_info: The resumed extra info to post.
         """
+
+        def check_response(response):
+            # Return a permanent conflict through the retry helper without
+            # raising inside it; transport failures and other statuses retain
+            # the existing retry policy.
+            if response.status_code != 409:
+                response.raise_for_status()
+
         try:
-            make_request_with_retry(
+            response = make_request_with_retry(
                 partial(
                     requests.post,
                     json={"ckpt_extra_info": resume_info},
                 ),
                 self.get_alternative_urls(COSMOS_API_RESUME_INFO_SUFFIX),
                 max_retries=self.max_retries,
+                response_parser=check_response,
             )
         except Exception as e:
             raise RuntimeError(
                 f"[Policy] Failed in post resume info to controller after retries {e}."
+            )
+        if response.status_code == 409:
+            raise ResumeMetadataMismatch(
+                "Controller rejected checkpoint resume agreement; training must not continue."
             )
 
     def get_trainable_params(self) -> List[str]:
@@ -589,16 +639,25 @@ class APIClient(object):
             return [], False
 
     def post_rollout_completion(self, response: RolloutRequest) -> bool:
+        payload = response.model_dump()
+        payload["controller_execution_id"] = self.controller_execution_id
+
+        def check_response(result):
+            # An old attempt cannot be retried into the current execution.
+            if result.status_code != 410:
+                result.raise_for_status()
+
         try:
-            make_request_with_retry(
+            result = make_request_with_retry(
                 partial(
                     requests.post,
-                    json=response.model_dump(),
+                    json=payload,
                 ),
                 self.get_alternative_urls(COSMOS_API_ROLLOUT_SUFFIX),
                 max_retries=self.max_retries,
+                response_parser=check_response,
             )
-            return True
+            return result.status_code != 410
         except Exception as e:
             logger.error(
                 f"[Rollout] Failed in sending rollout completion to controller after retries {e}."

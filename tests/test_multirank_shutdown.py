@@ -900,6 +900,7 @@ class TestFinalValidationCompletion(unittest.TestCase):
                 return 0
 
         psm = NoPolicyStatus()
+        psm.stop_reason = None
         controller = SimpleNamespace(policy_status_manager=psm)
         method = Controller._get_batched_prompt_impl.__get__(controller)
         payloads, is_end = asyncio.run(method(8))
@@ -1014,6 +1015,7 @@ class TestJobPhaseEnterDraining(unittest.TestCase):
 class TestJobPhaseWeightSync(unittest.TestCase):
     def test_draining_suppresses_weight_sync(self):
         psm = SimpleNamespace(
+            stop_reason=None,
             job_phase=JobPhase.DRAINING,
             total_steps=10,
             config=SimpleNamespace(
@@ -1171,6 +1173,7 @@ class TestOnRolloutIsEndSequence(unittest.TestCase):
 class TestTrainAckDuringPartialDrain(unittest.TestCase):
     def test_train_ack_suppresses_weight_sync_while_draining(self):
         psm = SimpleNamespace(
+            stop_reason=None,
             job_phase=JobPhase.DRAINING,
             total_steps=10,
             config=SimpleNamespace(

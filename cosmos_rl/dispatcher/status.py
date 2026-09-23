@@ -15,6 +15,8 @@
 
 import time
 import math
+import threading
+from functools import wraps
 from collections import OrderedDict
 from queue import Empty, Queue
 from strenum import StrEnum
@@ -272,6 +274,17 @@ class JobPhase(StrEnum):
     DRAINING = "draining"
 
 
+def _serialize_policy_lifecycle(method):
+    """Serialize stop snapshots against heartbeat-thread membership changes."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lifecycle_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class PolicyStatusManager:
     """
     A class to manage the status of a policy.
@@ -290,6 +303,7 @@ class PolicyStatusManager:
     status: Dict[str, PolicyStatus]
 
     def __init__(self):
+        self._lifecycle_lock = threading.RLock()
         self.policy_replicas = {}
         # number of steps that needed to interate over all the samples across all the epochs.
         self.total_steps = 0
@@ -347,6 +361,11 @@ class PolicyStatusManager:
         self.completion_recipients: set[str] = set()
         self.completion_acks: set[str] = set()
         self.terminal_complete = False
+        self.stop_reason: Optional[str] = None
+        self._stop_policy_recipients: set[str] = set()
+        from cosmos_rl.dispatcher.step_boundary import StepBoundary
+
+        self.step_boundary = StepBoundary()
 
         # For rank specific data dispatch
         self.rollout_buffer_per_rank: List[Queue] = []
@@ -456,7 +475,63 @@ class PolicyStatusManager:
 
     def rollout_admission_closed(self) -> bool:
         """Whether new rollout results can no longer feed a training step."""
-        return self.terminal_complete or self.completion_step is not None
+        return (
+            self.stop_reason is not None
+            or self.terminal_complete
+            or self.completion_step is not None
+        )
+
+    @_serialize_policy_lifecycle
+    def request_stop(self, reason: str) -> bool:
+        """Request successful early completion on the controller event loop.
+
+        Discard unissued training inputs, finish issued training/validation,
+        then use the existing final-checkpoint/ACK protocol. First reason wins.
+        This operation does not provide crash recovery or elastic membership.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("stop reason must be a nonempty string")
+        if self.stop_reason is not None or self.rollout_admission_closed():
+            return False
+        participants = self.get_all_atoms_arrived_replicas()
+        if not participants or not self.policy_init_done:
+            raise RuntimeError("request_stop requires initialized policy replicas")
+        self._stop_policy_recipients = {replica.name for replica in participants}
+        self.stop_reason = reason
+        self.enter_draining_phase()
+        self.cleanup_buffered_rollouts()
+        logger.info("[Controller] Application requested successful stop: %s", reason)
+        self._try_complete_requested_stop()
+        return True
+
+    @_serialize_policy_lifecycle
+    def _try_complete_requested_stop(self) -> None:
+        if self.config.train.train_policy.type == "sft":
+            # SFT owns its loop and checkpoints through its existing trainer
+            # interface after all replicas agree on a completed-step boundary.
+            return
+        if (
+            self.stop_reason is None
+            or self.terminal_complete
+            or self.completion_step is not None
+        ):
+            return
+        participants = {
+            replica.name for replica in self.get_all_atoms_arrived_replicas()
+        }
+        if participants != self._stop_policy_recipients:
+            raise RuntimeError(
+                "Policy membership changed during requested stop; cannot certify completion"
+            )
+        if (
+            self.dispatched_rollouts_by_step
+            or not self.all_ready_or_reduced()
+            or self.data_fetcher.activated_val_iter is not None
+        ):
+            return
+        # current_step is incremented on dispatch. Only use it once the
+        # command's complete ACK set has removed its dispatch record.
+        self.trigger_training_complete()
 
     def maintain_life_status(self):
         """
@@ -544,6 +619,9 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> None:
         """Dispatch complete tail batches, then complete without inventing work."""
+        if self.stop_reason is not None:
+            self._try_complete_requested_stop()
+            return
         if not rollout_status_manager.all_rollouts_ended():
             return
         if self.job_phase == JobPhase.RUNNING:
@@ -585,7 +663,10 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> bool:
         """Whether ``train_ack`` should schedule P2R/R2R for ``step``."""
-        if self.job_phase == JobPhase.DRAINING:
+        if self.job_phase == JobPhase.DRAINING and not (
+            self.stop_reason is not None
+            and self.data_fetcher.activated_val_iter is not None
+        ):
             return False
         need_sync_weight = need_weight_sync(
             step=step,
@@ -647,7 +728,10 @@ class PolicyStatusManager:
         for replica in arrived_replicas:
             self.set_status(replica.name, PolicyStatus.RUNNING)
 
-        do_save = bool(frozen_total > 0 and self.config.train.ckpt.enable_checkpoint)
+        do_save = bool(
+            (frozen_total > 0 or self.stop_reason is not None)
+            and self.config.train.ckpt.enable_checkpoint
+        )
         for replica in arrived_replicas:
             command.TrainingCompleteCommand.trigger(
                 replica=replica,
@@ -768,6 +852,7 @@ class PolicyStatusManager:
         """
         self.policy_init_done = False
 
+    @_serialize_policy_lifecycle
     def unregister(self, replica_name: str):
         """
         Unregister the replica from the status manager.
@@ -790,6 +875,7 @@ class PolicyStatusManager:
         if replica.in_mesh and len(valid_replicas) > 0:
             self.trigger_rebuild_mesh(valid_replicas)
 
+    @_serialize_policy_lifecycle
     def register(
         self,
         atom: Atom,
@@ -800,6 +886,8 @@ class PolicyStatusManager:
         """
         Register the atom to the status manager.
         """
+        if self.stop_reason is not None:
+            raise RuntimeError("Cannot register policy participants after request_stop")
         replica = self[atom.replica_name]
         if replica is None:
             replica = Replica(atom.replica_name, Role.POLICY, [atom])
@@ -1761,9 +1849,11 @@ class PolicyStatusManager:
                     is_validation=True,
                 )
             return
-        if not self.any_with_status([PolicyStatus.REDUCED]):
-            # For SFT, we increment current_step at first train_ack received in each step
-            self.current_step += 1
+        if step > self.current_step:
+            # Validation ACKs can overwrite REDUCED while other training ACKs
+            # for the same step are still in flight. Advance from the worker's
+            # completed step, never from these transient status flags.
+            self.current_step = step
             if self.config.validation.enable and (
                 self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
@@ -2224,6 +2314,9 @@ class PolicyStatusManager:
         return do_save and self.config.train.ckpt.enable_checkpoint
 
     def try_trigger_data_fetch_and_training(self):
+        if self.stop_reason is not None:
+            self._try_complete_requested_stop()
+            return
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.data_fetcher.activated_val_iter is not None:
             return

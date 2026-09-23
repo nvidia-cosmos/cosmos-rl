@@ -11,6 +11,22 @@ import pytest
 from cosmos_rl.utils.payload_transport.lifecycle import TransportClose
 
 
+@pytest.mark.parametrize("closing,failed", [(True, False), (False, True), (True, True)])
+def test_policy_input_rejects_closed_or_failed_transport(closing, failed):
+    from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
+
+    packer = PrefetchDataPackerMixin()
+    if closing:
+        packer._transport_close_operation = object()
+    if failed:
+        packer._prefetch_failure = "prefetch failed"
+    packer._should_intercept = Mock()
+    expected = RuntimeError if closing else TimeoutError
+    with pytest.raises(expected, match="closing or closed|prefetch failed"):
+        packer.get_policy_input(rollout_output=object())
+    packer._should_intercept.assert_not_called()
+
+
 def test_close_is_idempotent():
     cleanup = Mock()
     operation = TransportClose(cleanup)

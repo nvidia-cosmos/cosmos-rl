@@ -103,7 +103,10 @@ class CommMixin:
         self.api_client = (
             ColocatedAPIClient(self.role)
             if hasattr(self, "colocated")
-            else APIClient(self.role)
+            else APIClient(
+                self.role,
+                controller_execution_id=self.config.controller_execution_id,
+            )
         )
 
         policy_type = self.config.train.train_policy.type

@@ -17,6 +17,8 @@
 COSMOS_API_PANEL_SUFFIX = "/panel"
 COSMOS_API_STATUS_SUFFIX = "/api/status"
 COSMOS_API_META_SUFFIX = "/api/meta"
+COSMOS_API_REQUEST_STOP_SUFFIX = "/api/request_stop"
+COSMOS_API_TRAINING_BOUNDARY_SUFFIX = "/api/training_boundary"
 COSMOS_API_REGISTER_SUFFIX = "/api/register"
 COSMOS_API_SET_PROFILE_SUFFIX = "/api/set_profile"
 COSMOS_API_SET_TRACE_PATH_SUFFIX = "/api/set_trace_path"

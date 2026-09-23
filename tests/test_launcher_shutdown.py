@@ -27,6 +27,9 @@ SIGTERM (pre-emption, ``scancel``, an OOM reaper) must still fail loudly.
 """
 
 import signal
+import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -90,6 +93,79 @@ class TestCoordinatedControllerExit(unittest.TestCase):
             self.assertFalse(
                 launch_all._is_coordinated_controller_exit(0, -1, SIGTERM_RC)
             )
+
+    def test_fatal_transport_failure_kills_healthy_controller_and_peer(self):
+        children = [
+            subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+            for code in [
+                "import time; time.sleep(60)",
+                "raise SystemExit(86)",
+                "import time; time.sleep(60)",
+            ]
+        ]
+        try:
+            with self.assertRaises(SystemExit) as exc:
+                launch_all._monitor_processes(children, controller=children[0])
+            self.assertEqual(exc.exception.code, 1)
+            self.assertEqual(children[0].returncode, -signal.SIGKILL)
+            self.assertEqual(children[2].returncode, -signal.SIGKILL)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+    def test_controller_identity_survives_completed_worker_removal(self):
+        worker = mock.Mock(pid=101)
+        worker.poll.return_value = 0
+        controller = mock.Mock(pid=102)
+        controller.poll.side_effect = [None, SIGTERM_RC]
+        with self._predicate(True), mock.patch.object(launch_all.time, "sleep"):
+            launch_all._monitor_processes([worker, controller], controller)
+
+    def test_ordinary_worker_error_preserves_controller_supervision(self):
+        worker = mock.Mock(pid=101)
+        worker.poll.return_value = 1
+        controller = mock.Mock(pid=102)
+        controller.poll.return_value = 0
+        peer = mock.Mock(pid=103)
+        peer.poll.side_effect = [None, 0]
+        with (
+            mock.patch("psutil.Process") as process,
+            mock.patch.object(launch_all.time, "sleep"),
+        ):
+            launch_all._monitor_processes([worker, controller, peer], controller)
+        process.assert_not_called()
+
+    def test_fatal_cleanup_kills_descendants_without_new_sessions(self):
+        import psutil
+
+        parent = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess,sys,time; "
+                    "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                    "print(p.pid,flush=True); time.sleep(60)"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        descendant = psutil.Process(int(parent.stdout.readline()))
+        failed = subprocess.Popen([sys.executable, "-c", "raise SystemExit(86)"])
+        try:
+            with self.assertRaises(SystemExit):
+                launch_all._monitor_processes([parent, failed], parent)
+            _, alive = psutil.wait_procs([descendant], timeout=2)
+            self.assertTrue(not alive or descendant.status() == psutil.STATUS_ZOMBIE)
+        finally:
+            parent.kill() if parent.poll() is None else None
+            if descendant.is_running():
+                descendant.kill()
+            parent.wait()
+            failed.wait()
 
 
 if __name__ == "__main__":
