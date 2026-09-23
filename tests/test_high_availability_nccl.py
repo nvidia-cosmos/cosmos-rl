@@ -49,6 +49,22 @@ os.environ["COSMOS_LOG_LEVEL"] = "DEBUG"
 # os.environ["NCCL_DEBUG"] = "INFO"
 
 
+def wait_for_mesh_command(fetch_command, expected_members, timeout=30):
+    """Wait for the requested controller snapshot, not an intermediate mesh."""
+    deadline = time.monotonic() + timeout
+    observed = []
+    while time.monotonic() < deadline:
+        for cmd in fetch_command(block=False):
+            if isinstance(cmd, BuildMeshCommand):
+                observed = sorted(cmd.replica_name_to_rank)
+                if set(observed) == set(expected_members):
+                    return cmd
+        time.sleep(0.01)
+    raise TimeoutError(
+        f"Expected mesh members {sorted(expected_members)}, last observed {observed}"
+    )
+
+
 def write_train_config():
     os.makedirs(WORK_DIR, exist_ok=True)
 
@@ -212,17 +228,11 @@ class TestHANccl(CommMixin):
             api_client=self.api_client,
         )
 
-        # wait all ranks fetch latest command from controller
+        # Registration emits intermediate meshes. A ready singleton is not
+        # evidence that the final four-rank mesh has been built.
         dist.barrier()
-        time.sleep(2)
-
-        query_cmd = self.fetch_command()
-        for cmd in query_cmd:
-            if isinstance(cmd, BuildMeshCommand):
-                logger.info(
-                    f"  ({self.replica_name}) push build mesh command: {cmd.replica_name_to_rank}"
-                )
-                comm.push_cmd(cmd)
+        expected = {f"HANCCL-{rank}" for rank in range(dist.get_world_size())}
+        comm.push_cmd(wait_for_mesh_command(self.fetch_command, expected))
 
         # 2. wait for the comm to be ready
         comm.wait_comm_ready()
@@ -258,16 +268,10 @@ class TestHANccl(CommMixin):
             self.unregister_from_controller()
         else:
             # other rank do scale down buildmesh
-            while True:
-                # wait until controller trigger the buildmesh command
-                cmds = self.fetch_command()
-                cmds = [cmd for cmd in cmds if isinstance(cmd, BuildMeshCommand)]
-                if len(cmds) == 0:
-                    time.sleep(0.1)
-                    continue
-                for cmd in cmds:
-                    comm.push_cmd(cmd)
-                break
+            expected = {
+                f"HANCCL-{rank}" for rank in range(dist.get_world_size()) if rank != 1
+            }
+            comm.push_cmd(wait_for_mesh_command(self.fetch_command, expected))
             comm.wait_comm_ready()
             assert comm.world_size() == dist.get_world_size() - 1, (
                 f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
@@ -442,6 +446,6 @@ if __name__ == "__main__":
         ]
         env = os.environ.copy()
         env["RECURSIVE_ENTRYPOINT"] = "1"
-        subprocess.run(command, env=env)
+        sys.exit(subprocess.run(command, env=env).returncode)
     else:
         main()

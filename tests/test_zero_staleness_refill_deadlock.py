@@ -79,6 +79,7 @@ def _controller(config, *, current_step=8, samples_on_the_fly, pending_rollouts)
     policy_status = MagicMock()
     policy_status.__len__.return_value = POLICY_REPLICAS
     policy_status.current_step = current_step
+    policy_status.stop_reason = None
     policy_status.total_pending_rollouts.return_value = pending_rollouts
     policy_status.samples_on_the_fly = samples_on_the_fly
     policy_status.replica_scaling_log = []

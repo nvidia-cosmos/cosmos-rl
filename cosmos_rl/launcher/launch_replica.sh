@@ -146,6 +146,9 @@ if [ -z "$COSMOS_CONTROLLER_HOST" ]; then
 fi
 
 LAUNCH_CMD=("$LAUNCH_BINARY")
+if [ "$LAUNCH_BINARY" == "torchrun" ]; then
+  LAUNCH_CMD=(python -m cosmos_rl.launcher.torchrun)
+fi
 
 if [ "$TYPE" == "policy" ]; then
   LAUNCH_CMD+=(

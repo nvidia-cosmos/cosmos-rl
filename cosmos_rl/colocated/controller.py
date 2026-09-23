@@ -38,6 +38,7 @@ from cosmos_rl.dispatcher.command import (
     WeightResumeCommand,
     PolicyToRolloutUnicastCommand,
     DataFetchCommand,
+    TrainingCompleteCommand,
     RolloutToRolloutBroadcastCommand,
     BuildMeshCommand,
     Command,
@@ -78,6 +79,33 @@ class ColocatedController(Controller):
     Handles coordinations with policy and rollout including recording the step updates, issuing commands, and collecting results.
     Act as the controller in colocated mode.
     """
+
+    async def request_stop(self, reason: str) -> bool:
+        # The dispatcher, not this per-replica facade, owns cohort agreement.
+        return self.policy.api_client.request_stop(reason)
+
+    def finish_requested_stop(self, command: TrainingCompleteCommand):
+        self.command_dispatcher.publish_command(
+            command.pack(), self.policy.replica_name
+        )
+        if not self.policy.consume_command(TrainingCompleteCommand):
+            raise RuntimeError("Terminal command did not stop the policy")
+        self.rollout.shutdown_signal.set()
+        self.rollout.shutdown_mp_signal.set()
+        self.requested_stop_complete = True
+
+    def prepare_iteration(self) -> bool:
+        if getattr(self, "requested_stop_complete", False):
+            return False
+        if not hasattr(self, "init_data_fetch_command") and not hasattr(
+            self, "next_data_fetch_command"
+        ):
+            command = self.policy_consume_one_step_commands_util_data_fetch()
+            if isinstance(command, TrainingCompleteCommand):
+                self.finish_requested_stop(command)
+                return False
+            self.next_data_fetch_command = command
+        return True
 
     def setup(
         self,
@@ -183,6 +211,35 @@ class ColocatedController(Controller):
             Tuple[Command, bool]: The received command and a boolean indicating if it matches the expected type.
         """
         while True:
+            if replica is self.rollout:
+                # A requested stop emits a policy terminal command instead of
+                # another R2R weight sync. Observe both streams to avoid waiting
+                # forever for a sync that will never be sent.
+                commands = (
+                    self.policy.subscribe_remote_commands()
+                    if self.policy.global_rank == 0
+                    else []
+                )
+                commands = dist_util.broadcast_object_cpu(
+                    commands, src=0, device=torch.device("cpu")
+                )
+                for pending in commands:
+                    self.remote_command_manager.publish_command(
+                        pending.pack(), self.policy.replica_name
+                    )
+                pending = self.remote_command_manager.front_command(
+                    self.policy.replica_name
+                )
+                # These are synthesized locally after the corresponding R2R;
+                # leaving one queued here can hide a later terminal command.
+                while isinstance(pending, PolicyToRolloutUnicastCommand):
+                    self.remote_command_manager.pop_command(self.policy.replica_name)
+                    pending = self.remote_command_manager.front_command(
+                        self.policy.replica_name
+                    )
+                if isinstance(pending, TrainingCompleteCommand):
+                    self.remote_command_manager.pop_command(self.policy.replica_name)
+                    return pending
             command = self.remote_command_manager.front_command(replica.replica_name)
             if remove and command is not None:
                 self.remote_command_manager.pop_command(replica.replica_name)
@@ -216,9 +273,13 @@ class ColocatedController(Controller):
         This is called once at the beginning to prepare the initial state including model weights.
         """
         data_fetch_cmd = self.policy_consume_one_step_commands_util_data_fetch()
+        if isinstance(data_fetch_cmd, TrainingCompleteCommand):
+            self.finish_requested_stop(data_fetch_cmd)
+            return False
         self.rollout_consume_one_step_commands_util_r2r()
         assert isinstance(data_fetch_cmd, DataFetchCommand)
         self.init_data_fetch_command = data_fetch_cmd
+        return True
 
     def policy_consume_one_step_commands_util_data_fetch(self) -> DataFetchCommand:
         """
@@ -238,7 +299,7 @@ class ColocatedController(Controller):
         ]
 
         # DataFetchCommand is the stopping point for each step so break when we see it
-        should_stop = [DataFetchCommand]
+        should_stop = [DataFetchCommand, TrainingCompleteCommand]
 
         # PolicyToRolloutUnicastCommand is self triggered separately in colocated mode so ignore it.
         others = [PolicyToRolloutUnicastCommand]
@@ -294,6 +355,9 @@ class ColocatedController(Controller):
             # R2R command is the stopping point for each step so break when we see it
             while True:
                 cmd = self.wait_for_remote_command(self.rollout)
+                if isinstance(cmd, TrainingCompleteCommand):
+                    self.finish_requested_stop(cmd)
+                    return False
                 if isinstance(cmd, RolloutToRolloutBroadcastCommand):
                     break
             # Further trigger P2R & R2R commands locally
@@ -364,7 +428,11 @@ class ColocatedController(Controller):
             data_fetch_cmd = self.init_data_fetch_command
             delattr(self, "init_data_fetch_command")
         else:
-            data_fetch_cmd = self.policy_consume_one_step_commands_util_data_fetch()
+            if hasattr(self, "next_data_fetch_command"):
+                data_fetch_cmd = self.next_data_fetch_command
+                delattr(self, "next_data_fetch_command")
+            else:
+                data_fetch_cmd = self.policy_consume_one_step_commands_util_data_fetch()
             logger.debug(
                 f"[Controller] DataFetchCommand details: {data_fetch_cmd} at step {self.current_step}"
             )

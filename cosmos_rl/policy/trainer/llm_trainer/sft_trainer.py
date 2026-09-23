@@ -651,7 +651,7 @@ class SFTTrainer(LLMTrainer):
 
         return val_loss * val_inputs.size(0)
 
-    def checkpointing(
+    def _checkpointing(
         self,
         total_steps: int,
         train_step: int,
@@ -710,7 +710,46 @@ class SFTTrainer(LLMTrainer):
                     pp_master_rank=self.parallel_dims.world_size
                     - self.parallel_dims.world_size / self.parallel_dims.pp,
                 )
-            torch.distributed.barrier()
+
+    def checkpointing(
+        self,
+        total_steps: int,
+        train_step: int,
+        save_freq: int,
+        is_last_step: bool = False,
+        pp_last_stage: bool = False,
+        val_score: Optional[float] = None,
+        do_save: bool = False,
+        **kwargs,
+    ):
+        if not self.config.train.ckpt.enable_checkpoint or not (
+            is_last_step or do_save or (train_step > 0 and train_step % save_freq == 0)
+        ):
+            return
+        error = None
+        try:
+            self._checkpointing(
+                total_steps,
+                train_step,
+                save_freq,
+                is_last_step,
+                pp_last_stage,
+                val_score,
+                do_save,
+                **kwargs,
+            )
+        except Exception as failure:
+            error = failure
+        # A local save failure must not strand peers in the old trailing
+        # barrier, or let another rank acknowledge a successful final save.
+        success = dist_util.all_reduce_tensor_object_cpu(
+            torch.tensor([error is None], dtype=torch.int32),
+            op=torch.distributed.ReduceOp.MIN,
+        ).item()
+        if not success:
+            if error is not None:
+                raise error
+            raise RuntimeError("SFT checkpoint failed on another rank")
 
     def load_model(self):
         """Load model weights from checkpoint if available."""

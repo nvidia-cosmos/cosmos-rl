@@ -47,6 +47,7 @@ from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
+from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 
 
@@ -128,6 +129,7 @@ class Controller:
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        resume_adapter: Optional[ControllerResumeAdapter] = None,
         completion_admission: bool = False,
     ):
         if self.config is not None:
@@ -136,6 +138,13 @@ class Controller:
             )
 
         self.config = config
+        # Never restore an execution fence from a checkpoint/config file. A
+        # resumed application starts a fresh attempt and discards old results.
+        from uuid import uuid4
+
+        config.controller_execution_id = (
+            uuid4().hex if resume_adapter is not None else None
+        )
         task_type = config.train.train_policy.type
         if type(completion_admission) is not bool:
             raise TypeError(
@@ -193,6 +202,7 @@ class Controller:
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
             is_rl=self.is_rl,
+            resume_adapter=resume_adapter,
         )
 
         ips = network_util.get_eth_ips()
@@ -332,6 +342,27 @@ maxmemory-policy allkeys-lfu
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         return await self._get_batched_prompt_impl(n, validation_step, rank_in_mesh)
+
+    async def request_stop(self, reason: str) -> bool:
+        """Close training admission and request successful, checkpointed completion.
+
+        Call from the controller event loop, not directly from a worker or
+        background thread. Existing issued training and validation finish;
+        buffered and late training results are discarded by Cosmos. A true
+        return value acknowledges the request, not completion of shutdown.
+        """
+        async with self.life_cycle_lock:
+            if (
+                self.policy_status_manager.stop_reason is None
+                and self.config.train.train_policy.type != "sft"
+            ):
+                expected = self.config.rollout.parallelism.n_init_replicas
+                arrived = self.rollout_status_manager.get_all_atoms_arrived_replicas()
+                if len(arrived) < expected:
+                    raise RuntimeError(
+                        "request_stop requires initialized rollout replicas"
+                    )
+            return self.policy_status_manager.request_stop(reason)
 
     _SOFT_THROTTLE_HEARTBEAT_S = 5.0
 
@@ -543,6 +574,19 @@ maxmemory-policy allkeys-lfu
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        if not is_validation and self.policy_status_manager.stop_reason is not None:
+            if (
+                self.policy_status_manager.completion_step is not None
+                or self.policy_status_manager.step_boundary.stopped_step is not None
+            ):
+                return [], True
+        if (
+            not is_validation
+            and self.policy_status_manager.stop_reason is not None
+            and self.config.train.train_policy.type != "sft"
+            and self.config.mode != "colocated"
+        ):
+            return [], True
 
         # Short-circuit when all policy replicas have unregistered during
         # teardown.  Without this guard, global_batch_size becomes 0 and
@@ -937,6 +981,10 @@ maxmemory-policy allkeys-lfu
 
     async def register(self, atom: Atom, role: Role):
         async with self.life_cycle_lock:
+            if self.policy_status_manager.stop_reason is not None:
+                raise RuntimeError(
+                    "Cannot register new participants after request_stop"
+                )
             if role == Role.POLICY:
                 self.policy_status_manager.register(
                     atom, self.config, self.rollout_status_manager

@@ -210,6 +210,7 @@ def test_on_policy_prompt_fetch_uses_same_weight_after_partial_admission():
     policy_status = MagicMock()
     policy_status.__len__.return_value = 1
     policy_status.current_step = 5
+    policy_status.stop_reason = None
     policy_status.total_pending_rollouts.return_value = 7
     policy_status.samples_on_the_fly = 7
     policy_status.replica_scaling_log = []
