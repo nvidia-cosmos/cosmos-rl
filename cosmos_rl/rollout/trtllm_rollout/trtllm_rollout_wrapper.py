@@ -80,7 +80,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         super(TRTLLMRolloutWrapper, self).__init__()
         self.post_init(config, None, init_comm=False)
         # only init some meta info.
-        self.api_client = APIClient(self.role)
+        self.api_client = APIClient(
+            self.role, controller_execution_id=config.controller_execution_id
+        )
 
         self.state = State()
 

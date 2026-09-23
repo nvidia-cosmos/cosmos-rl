@@ -136,7 +136,8 @@ class ColocatedRLControlWorker(WorkerBase):
         """
 
         # Generate the initial commands such as WeightResume, PolicyToRolloutUnicast, etc.
-        self.controller.init_commands()
+        if not self.controller.init_commands():
+            return
 
         # Process the initial PolicyToRolloutUnicast command
         self.rollout.consume_command(PolicyToRolloutUnicastCommand)
@@ -147,6 +148,8 @@ class ColocatedRLControlWorker(WorkerBase):
 
         is_end = False
         while not is_end:
+            if not self.controller.prepare_iteration():
+                break
             self.controller.advance_iteration()
             assert (
                 self.config.train.train_batch_per_replica
@@ -225,5 +228,8 @@ class ColocatedRLControlWorker(WorkerBase):
             self.destroy_worker()
 
     def destroy_worker(self):
+        if getattr(self.controller, "requested_stop_complete", False):
+            self.rollout.unregister_from_controller()
+            self.policy.handle_shutdown()
         self.policy.destroy_worker()
         # No need to destroy rollout worker separately in colocated mode

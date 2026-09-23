@@ -23,6 +23,7 @@ from cosmos_rl.utils.logging import logger
 try:
     import wandb
 except ImportError:
+    wandb = None
     logger.warning(
         "wandb is not installed. Please install it to use wandb logging features."
     )
@@ -47,16 +48,29 @@ wandb_run = None
 
 
 def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
-    # Avoid duplicate initialization of wandb
-    if wandb.run is not None:
-        logger.warning("Wandb is already initialized. Skipping initialization.")
-        return
+    """Create or borrow the active SDK run; never finish an application run.
 
+    An existing run owns its identity/configuration. Call this again explicitly
+    to adopt a replacement run. Failed initialization must not retain an old
+    cached handle.
+    """
+    global wandb_run
+    wandb_run = None
+    if wandb is None:
+        logger.warning("Wandb is not installed; logging is disabled.")
+        return None
+    if wandb.run is not None:
+        wandb_run = wandb.run
+        logger.info("Using the existing W&B run without changing its configuration.")
+        return wandb_run
+
+    resume = "allow"
     if isinstance(config, CosmosConfig):
         output_dir = config.train.output_dir
         project_name = config.logging.project_name
         group_name = config.logging.group_name
-        wandb_id = config.train.timestamp
+        wandb_id = config.logging.wandb_run_id or config.train.timestamp
+        resume = config.logging.wandb_resume
         os.makedirs(output_dir, exist_ok=True)
         if (
             config.logging.experiment_name is None
@@ -68,6 +82,8 @@ def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
             experiment_name = os.path.join(
                 config.logging.experiment_name, config.train.timestamp
             )
+        if config.logging.wandb_run_name is not None:
+            experiment_name = config.logging.wandb_run_name
     elif isinstance(config, CosmosVisionGenConfig):
         output_dir = config.job.path_local
         experiment_name = config.job.name
@@ -88,10 +104,9 @@ def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
             name=experiment_name,
             config=config.model_dump(),
             dir=output_dir,
-            id=wandb_id,  # Use timestamp as the run ID
-            resume="allow",
+            id=wandb_id,
+            resume=resume,
         )
-        global wandb_run
         wandb_run = run
         return run
     except Exception as e:
@@ -101,6 +116,10 @@ def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
 
 def log_wandb(data: dict, step: int):
     global wandb_run
+    # Finishing/replacing a run in the host application invalidates our borrowed
+    # handle. Do not log to a finished run or silently adopt an unrelated run.
+    if wandb is None or wandb_run is not wandb.run:
+        wandb_run = None
     if wandb_run is not None:
         wandb_run.log(data, step=step)
     else:
