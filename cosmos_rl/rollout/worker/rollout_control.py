@@ -2130,34 +2130,20 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 )
 
     def _cleanup_payload_server(self) -> None:
-        """Best-effort, bounded shutdown of the rollout's UCXX output server.
+        """Close the configured producer transport before distributed teardown."""
+        from cosmos_rl.utils.payload_transport.registry import (
+            PayloadTransportRegistry,
+            get_payload_transfer_mode,
+        )
 
-        Invoked at the very start of teardown (before NCCL abort).  The server
-        lives on the rollout backend (``self.rollout``) when it composes
-        ``UCXXRolloutMixin``; guarded with ``getattr`` so backends without a
-        UCXX server are unaffected.
-        """
         rollout_engine = getattr(self, "rollout", None)
-        cleanup = getattr(rollout_engine, "cleanup_ucxx", None)
-        if not callable(cleanup):
+        if rollout_engine is None:
             return
-        logger.info(
-            "[Teardown] %s: stopping UCXX output server (cleanup_ucxx)",
-            self.replica_name,
+        transport = PayloadTransportRegistry.get_optional(
+            get_payload_transfer_mode(self.config)
         )
-        _t0 = time.monotonic()
-        try:
-            cleanup()
-        except Exception:
-            logger.exception(
-                "[Teardown] %s: cleanup_ucxx raised (continuing teardown)",
-                self.replica_name,
-            )
-        logger.info(
-            "[Teardown] %s: UCXX output server stopped in %.2fs",
-            self.replica_name,
-            time.monotonic() - _t0,
-        )
+        if transport is not None:
+            transport.close_producer(rollout_engine)
 
     # Main-loop branch counters and prompt-version rejection logging.
     _MAINLOOP_LOG_INTERVAL_S = 1.0

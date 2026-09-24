@@ -120,8 +120,5 @@ class NCCLDataPackerMixin(PrefetchDataPackerMixin):
         in a recv fails fast instead of the join waiting on work only the abort
         can unwedge.
         """
-        self.shutdown_prefetch()
-        strategy = self._transport_strategy
-        if strategy is not None:
-            strategy.shutdown()
+        self.close_transport()
         logger.info("[NCCLDataPackerMixin] Shut down")

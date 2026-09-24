@@ -743,6 +743,11 @@ class UCXXBuffer:
                         f"[UCXXBuffer] Server thread {t.name} did not stop cleanly"
                     )
 
+        if any(t is not None and t.is_alive() for t in self._server_threads):
+            # The loops still own endpoints and may be reading shared memory.
+            # Retain all references and prohibit the caller from freeing it.
+            raise TimeoutError("UCXX server threads remain active after shutdown")
+
         for listener in self._listeners:
             if listener is not None:
                 try:
@@ -1180,10 +1185,10 @@ class UCXXClient:
     async def close(self) -> None:
         """Drain and close all pooled endpoints."""
         for key in list(self._pool):
-            pool = self._pool.pop(key, None)
-            if pool:
-                for ep in pool:
-                    try:
-                        await ep.close()
-                    except Exception:
-                        pass
+            pool = self._pool[key]
+            while pool:
+                # Keep the failed endpoint and the rest of the pool owned.
+                # A close failure is not permission to drop live references.
+                await pool[0].close()
+                pool.popleft()
+            del self._pool[key]

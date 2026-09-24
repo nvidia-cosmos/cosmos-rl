@@ -136,6 +136,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                     ckpt_manager.finalize()
                 except Exception as e:
                     logger.error(f"Failed to finalize checkpoint manager: {e}")
+            self.close_payload_transports()
             self.destroy_worker()
 
     def handle_shutdown(self):

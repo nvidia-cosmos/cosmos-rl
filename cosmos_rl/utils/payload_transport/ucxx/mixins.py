@@ -147,7 +147,26 @@ class UCXXRolloutMixin:
     _ucxx_tensor_offsets: Optional[Dict[str, int]] = None
     _ucxx_entry_data_size: int = 0
 
-    def setup_ucxx(
+    def setup_ucxx(self, *args, **kwargs) -> None:
+        """Own partial setup and reject replacement of a live producer."""
+        from cosmos_rl.utils.payload_transport.lifecycle import TransportClose
+
+        previous = getattr(self, "_ucxx_close_operation", None)
+        if self._ucxx_enabled or (previous is not None and not previous.completed):
+            raise RuntimeError("UCXX transport is already attached or still closing")
+        self._ucxx_write_lock = threading.Lock()
+        self._ucxx_close_operation = TransportClose(self.cleanup_ucxx)
+        try:
+            # Do not dispatch into an application's same-named private helper.
+            UCXXRolloutMixin._setup_ucxx(self, *args, **kwargs)
+        except BaseException:
+            try:
+                self._ucxx_close_operation.close()
+            except Exception:
+                logger.exception("UCXX attachment rollback failed")
+            raise
+
+    def _setup_ucxx(
         self,
         replica_id: str,
         max_steps: int,
@@ -216,6 +235,7 @@ class UCXXRolloutMixin:
             )
 
             # Start UCXX server
+            self._ucxx_server_start_attempted = True
             self._ucxx_buffer.start_server()
             self._ucxx_ip = self._ucxx_buffer.local_ip
             self._ucxx_port = self._ucxx_buffer.port
@@ -229,9 +249,14 @@ class UCXXRolloutMixin:
             )
 
         except Exception as e:
-            raise RuntimeError(f"UCXX setup failed: {e}") from e
+            logger.error("UCXX setup failed: %s", e)
+            raise
 
     def write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        with getattr(self, "_ucxx_write_lock", threading.Lock()):
+            return self._write_to_buffer(trajectory)
+
+    def _write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Write trajectory to buffer with padding and return metadata for UCXX fetch.
 
         Uses a coalesced write strategy for large payloads:
@@ -359,6 +384,15 @@ class UCXXRolloutMixin:
             return None
 
     def cleanup_ucxx(self) -> None:
+        # Stop new writers before waiting for the current write to finish.
+        self._ucxx_server_start_attempted = self._ucxx_enabled or getattr(
+            self, "_ucxx_server_start_attempted", False
+        )
+        self._ucxx_enabled = False
+        with getattr(self, "_ucxx_write_lock", threading.Lock()):
+            self._cleanup_ucxx_owned()
+
+    def _cleanup_ucxx_owned(self) -> None:
         """Clean up UCXX resources.
 
         Order matters:
@@ -374,15 +408,23 @@ class UCXXRolloutMixin:
         3. ``close()`` releases the shared-memory buffer once the progress
            thread is quiescent.
 
-        Reset is gated on ``_ucxx_enabled`` so it only fires in a process that
-        actually started a UCXX server.
+        Reset also covers partial server startup. A failed server join retains
+        the buffer and prevents context reset or shared-memory release.
         """
-        started_ucxx = self._ucxx_enabled
+        started_ucxx = self._ucxx_enabled or getattr(
+            self, "_ucxx_server_start_attempted", False
+        )
+        self._ucxx_server_start_attempted = started_ucxx
+        self._ucxx_enabled = False
         if self._ucxx_buffer:
             self._ucxx_buffer.stop_server()
             if started_ucxx:
                 reset_ucxx_context()
             self._ucxx_buffer.close()
             self._ucxx_buffer = None
-        self._ucxx_enabled = False
-        logger.info(f"[UCXXRolloutMixin] Worker '{self._ucxx_replica_id}' cleaned up")
+        self._ucxx_server_start_attempted = False
+        self._ucxx_packed_cpu = None
+        logger.info(
+            "[UCXXRolloutMixin] Worker '%s' cleaned up",
+            getattr(self, "_ucxx_replica_id", "?"),
+        )

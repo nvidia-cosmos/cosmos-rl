@@ -28,6 +28,7 @@ afterwards instead (see :meth:`shutdown`).
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -89,6 +90,19 @@ _NP_TO_TORCH = {
 class UCXXTransportStrategy(PayloadTransportStrategy):
     """Resolve UCXX payload references for a single consumer."""
 
+    def __init__(self):
+        self._io_lock = threading.RLock()
+        self._event_loop = None
+
+    def _run_async(self, coroutine):
+        # UCXX ties progress work to the event loop used at initialization.
+        # Keep that loop alive across reads and endpoint teardown, and serialize
+        # prefetch/synchronous fallback so it is never run on two threads.
+        with self._io_lock:
+            if self._event_loop is None:
+                self._event_loop = asyncio.new_event_loop()
+            return self._event_loop.run_until_complete(coroutine)
+
     _client: Optional[UCXXClient] = None
     _device: Optional[torch.device] = None
     _max_attempts: int = 2
@@ -143,7 +157,11 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         self._device = device
         self._max_attempts = max(1, max_attempts)
         self._read_timeout = read_timeout
-        self._client = UCXXClient()
+
+        async def initialize_client():
+            self._client = UCXXClient()
+
+        self._run_async(initialize_client())
 
         logger.info(
             "[UCXXTransportStrategy] Initialised: device=%s, "
@@ -159,14 +177,13 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         Called AFTER the packer has joined its worker -- see the module
         docstring for why UCXX closes late rather than aborting early.
         """
-        if self._client is not None:
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self._client.close())
-                loop.close()
-            except Exception as e:
-                logger.warning("[UCXXTransportStrategy] Failed to close client: %s", e)
-            self._client = None
+        with self._io_lock:
+            if self._client is not None:
+                self._run_async(self._client.close())
+                self._client = None
+            if self._event_loop is not None:
+                self._event_loop.close()
+                self._event_loop = None
 
         if self._steps > 0:
             avg_ms = self._total_latency_ms / self._steps
@@ -220,13 +237,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         Called by the base mixin's worker loop.  Returns
         ``{cache_key: gpu_data}``.
         """
-        loop = asyncio.new_event_loop()
-        try:
-            raw_results, transfer_ms, copy_ms = loop.run_until_complete(
-                self._fetch_all(tasks)
-            )
-        finally:
-            loop.close()
+        raw_results, transfer_ms, copy_ms = self._run_async(self._fetch_all(tasks))
 
         cache_results: Dict[str, Any] = {}
         total_bytes = 0
@@ -267,17 +278,12 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         """Blocking single-episode UCXX fetch (cache-miss fallback)."""
         if self._client is None:
             return None
-        loop = asyncio.new_event_loop()
         try:
-            results, _, _ = loop.run_until_complete(
-                self._fetch_all([(0, rollout_output)])
-            )
+            results, _, _ = self._run_async(self._fetch_all([(0, rollout_output)]))
             return results.get(0)
         except Exception as e:
             logger.warning("[UCXXTransportStrategy] Sync fallback failed: %s", e)
             return None
-        finally:
-            loop.close()
 
     def on_prefetch_complete(
         self,
@@ -578,9 +584,18 @@ def compose_ucxx_transport(
     UCXX ancestry is required.
     """
     strategy = UCXXTransportStrategy()
-    strategy.setup(device=device, max_attempts=max_attempts, read_timeout=read_timeout)
     packer.set_transport_strategy(strategy)
-    packer._setup_prefetch(
-        prefetch_timeout=prefetch_timeout,
-        thread_name="UCXXDataPackerPrefetch",
-    )
+    try:
+        strategy.setup(
+            device=device, max_attempts=max_attempts, read_timeout=read_timeout
+        )
+        packer._setup_prefetch(
+            prefetch_timeout=prefetch_timeout,
+            thread_name="UCXXDataPackerPrefetch",
+        )
+    except BaseException:
+        try:
+            packer.close_transport()
+        except Exception as cleanup_error:
+            logger.error("UCXX attachment rollback failed: %s", cleanup_error)
+        raise

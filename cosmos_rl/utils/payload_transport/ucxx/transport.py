@@ -52,6 +52,18 @@ class UCXXPayloadTransport(PayloadTransport):
     """UCXX backend (zero-copy RDMA / shared-memory transfer)."""
 
     name = "ucxx"
+
+    def close_producer(self, producer: Any, *, timeout: float = 5.0) -> None:
+        from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
+
+        close = getattr(producer, "cleanup_ucxx", None)
+        if not callable(close):
+            return
+        operation = getattr(producer, "_ucxx_close_operation", None)
+        if operation is None:
+            operation = get_close_operation(producer, "_ucxx_close_operation", close)
+        operation.close(timeout)
+
     # Intentionally None: UCXX uses dict-shaped completion metadata and
     # SHM ring buffers auto-recycle slots, so it does NOT participate in
     # the controller's discard-cleanup dispatch.  ``handle_discarded``

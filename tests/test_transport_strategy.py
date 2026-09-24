@@ -189,6 +189,9 @@ class TestWithoutStrategy(unittest.TestCase):
     def test_detaching_restores_pass_through(self):
         self.packer.set_transport_strategy(_RecordingStrategy())
         self.assertTrue(self.packer._should_intercept("ref:a"))
+        with self.assertRaises(RuntimeError):
+            self.packer.set_transport_strategy(None)
+        self.packer.close_transport()
         self.packer.set_transport_strategy(None)
         self.assertFalse(self.packer._should_intercept("ref:a"))
 

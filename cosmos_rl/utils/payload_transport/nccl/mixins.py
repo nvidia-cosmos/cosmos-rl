@@ -216,7 +216,30 @@ class NCCLRolloutMixin:
     _nccl_pair_queues: Optional[Dict[Any, Deque[_PendingSend]]] = None
     _nccl_pair_draining: Optional[Set[Any]] = None
 
-    def setup_nccl(
+    def setup_nccl(self, **kwargs) -> None:
+        """Attach once, rolling back partial acquisitions on failure.
+
+        Reattachment requires a successfully completed close. Native teardown
+        that times out retains ownership and cannot be replaced by a new setup.
+        """
+        from cosmos_rl.utils.payload_transport.lifecycle import TransportClose
+
+        previous = getattr(self, "_nccl_close_operation", None)
+        if self._nccl_enabled or (previous is not None and not previous.completed):
+            raise RuntimeError("NCCL transport is already attached or still closing")
+        self._nccl_close_operation = TransportClose(self._cleanup_nccl_owned)
+        try:
+            # This implementation detail is not an application override hook.
+            # Existing mixin consumers may already use this private name.
+            NCCLRolloutMixin._setup_nccl(self, **kwargs)
+        except BaseException:
+            try:
+                self.cleanup_nccl()
+            except Exception as cleanup_error:
+                logger.error("NCCL attachment rollback failed: %s", cleanup_error)
+            raise
+
+    def _setup_nccl(
         self,
         *,
         replica_id: str,
@@ -255,6 +278,7 @@ class NCCLRolloutMixin:
         self._nccl_replica_id = replica_id
         self._nccl_send_timeout_ms = send_timeout_ms
         self._nccl_send_lock = threading.Lock()
+        self._nccl_write_lock = threading.Lock()
         self._nccl_pair_lock = threading.Lock()
         self._nccl_pair_queues = {}
         self._nccl_pair_draining = set()
@@ -271,6 +295,7 @@ class NCCLRolloutMixin:
         self._nccl_offsets, self._nccl_entry_size = schema_layout(self._nccl_schema)
 
         self._nccl_prefix = _resolve_prefix(config)
+        self._nccl_retained_entries = {}
         self._nccl_registry = SendBufferRegistry(
             capacity=registry_capacity,
             block_timeout=registry_block_timeout,
@@ -331,6 +356,11 @@ class NCCLRolloutMixin:
     # ------------------------------------------------------------------
 
     def write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Serialize producer admission against final buffer release."""
+        with getattr(self, "_nccl_write_lock", threading.Lock()):
+            return self._write_to_buffer(trajectory)
+
+    def _write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Pack ``trajectory`` into a GPU send buffer; return dict metadata.
 
         The returned dict is the consumer-facing reference; its
@@ -887,7 +917,7 @@ class NCCLRolloutMixin:
         recorded send-complete event -- but **bounded**: ``Event.synchronize``
         has no timeout and would hang forever if a send never got a matching
         recv (receiver crash / discard race), so poll ``query`` up to the send
-        timeout and release regardless once it elapses.  The registry invokes
+        timeout and retain ownership if it elapses. The registry invokes
         this OUTSIDE its lock, so the wait blocks nothing.
 
         Ordering: first wait out any still-open send LEASE (``inflight`` -- a
@@ -902,56 +932,89 @@ class NCCLRolloutMixin:
         full send timeout) rather than sharing one deadline: otherwise a lease
         that consumes most of the budget would leave almost no time for the
         recorded events to actually drain before the unconditional release.
-        Each phase stays independently bounded, so a wedged sender still cannot
-        hang teardown -- at the cost of freeing live storage only in the
-        pathological case where a genuine send outlives 2x the send timeout.
+        A failed drain retains the entry on the producer and makes close fail;
+        a deadline is not evidence that a native operation stopped using storage.
         """
+        retained = self.__dict__.setdefault("_nccl_retained_entries", {})
+        retained[entry.transfer_id] = entry
         timeout_s = max(0.0, self._nccl_send_timeout_ms / 1000.0)
         lease_deadline = time.monotonic() + timeout_s
         while entry.inflight > 0 and time.monotonic() < lease_deadline:
             time.sleep(0.001)
+        if entry.inflight > 0:
+            logger.error(
+                "Retaining payload %s with a live sender lease", entry.transfer_id
+            )
+            return
         # Fresh budget for the recorded events to drain.
         deadline = time.monotonic() + timeout_s
-        for event in entry.done_events:
+        events = list(entry.done_events)
+        if entry.ready_event is not None:
+            events.append(entry.ready_event)
+        for event in events:
+            if event is None:
+                # A synchronous send records no CUDA event but still drops its lease.
+                continue
             query = getattr(event, "query", None)
             if query is None:
-                continue
+                logger.error(
+                    "Cannot query event for payload %s; retaining it", entry.transfer_id
+                )
+                return
             try:
                 while not query():
                     if time.monotonic() >= deadline:
-                        logger.warning(
+                        logger.error(
                             "[NCCLRolloutMixin] send event for %s still pending "
-                            "after %.1fs; releasing buffer anyway",
+                            "after %.1fs; retaining buffer",
                             entry.transfer_id,
                             self._nccl_send_timeout_ms / 1000.0,
                         )
-                        break
+                        return
                     time.sleep(0.001)
-            except Exception:  # pragma: no cover - teardown best-effort
-                pass
+            except Exception:
+                logger.exception(
+                    "Cannot confirm payload %s is idle; retaining it", entry.transfer_id
+                )
+                return
         entry.buffer = None
+        retained.pop(entry.transfer_id, None)
 
     # ------------------------------------------------------------------
     # Pub/sub listener plumbing
     # ------------------------------------------------------------------
 
     def _start_listener(self, *, channel: str, handler, name: str) -> None:
+        # Subscribe before reporting attachment success, not on an unobserved
+        # background thread whose startup error used to be silently lost.
+        pubsub = self._nccl_redis.pubsub()
+        try:
+            pubsub.subscribe(channel)
+        except BaseException:
+            try:
+                pubsub.close()
+            except Exception:
+                logger.exception("Failed to close pubsub after subscription failure")
+            raise
         thread = threading.Thread(
             target=self._listen_loop,
-            args=(channel, handler),
+            args=(channel, handler, pubsub),
             name=name,
             daemon=True,
         )
-        thread.start()
         self._nccl_threads.append(thread)
-
-    def _listen_loop(self, channel: str, handler) -> None:
         try:
-            pubsub = self._nccl_redis.pubsub()
-            pubsub.subscribe(channel)
-        except Exception as e:
-            logger.warning("[NCCLRolloutMixin] cannot subscribe to %s: %s", channel, e)
-            return
+            thread.start()
+        except BaseException:
+            try:
+                pubsub.close()
+            except Exception:
+                logger.exception(
+                    "Failed to close pubsub after listener startup failure"
+                )
+            raise
+
+    def _listen_loop(self, channel: str, handler, pubsub) -> None:
         while not self._nccl_shutdown.is_set():
             try:
                 message = pubsub.get_message(
@@ -978,14 +1041,32 @@ class NCCLRolloutMixin:
     # Teardown
     # ------------------------------------------------------------------
 
-    def cleanup_nccl(self) -> None:
-        """Stop threads, abort comms, and free all buffers."""
-        if not self._nccl_enabled:
-            return
+    def cleanup_nccl(self, timeout: float = 5.0) -> None:
+        """Close with a caller deadline; never free buffers under live senders."""
+        from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
+
+        self._nccl_enabled = False
+        shutdown = getattr(self, "_nccl_shutdown", None)
+        if shutdown is not None:
+            shutdown.set()
+        operation = getattr(self, "_nccl_close_operation", None)
+        if operation is None:
+            operation = get_close_operation(
+                self, "_nccl_close_operation", self._cleanup_nccl_owned
+            )
+        operation.close(timeout)
+
+    def _cleanup_nccl_owned(self) -> None:
+        """Owned teardown sequence; retained intact if the caller times out."""
+        if self._nccl_device is not None:
+            bind_thread_device(self._nccl_device)
         # 1. Stop the pub/sub listeners so no new requests are dispatched.
-        self._nccl_shutdown.set()
+        shutdown = getattr(self, "_nccl_shutdown", None)
+        if shutdown is not None:
+            shutdown.set()
         for thread in getattr(self, "_nccl_threads", []):
-            thread.join(timeout=5.0)
+            if thread.ident is not None:
+                thread.join()
         # 2. Abort comms BEFORE joining the sender pool.  ncclCommAbort forces
         #    any in-flight nccl_send (whose peer may have departed at job end)
         #    to stop, so the executor threads unblock.  Doing this *after* a
@@ -993,17 +1074,24 @@ class NCCLRolloutMixin:
         #    sends that only the abort can unwedge.
         if self._nccl_comm_cache is not None:
             self._nccl_comm_cache.abort_all()
-        # 3. Now shut the pool down without blocking the worker's exit path;
-        #    the finite send timeout + the abort above guarantee the threads
-        #    terminate promptly.
+        # 3. Join senders before releasing their buffers. The caller's deadline
+        # bounds waiting on this entire operation, including native abort.
         executor = getattr(self, "_nccl_executor", None)
         if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
         # 4. A cancelled drain task leaves its pair's queue populated and those
         #    entries leased; release them before clearing the registry.
-        self._abandon_queued_sends()
-        if self._nccl_registry is not None:
-            self._nccl_registry.clear()
+        if hasattr(self, "_nccl_pair_lock"):
+            self._abandon_queued_sends()
+        with getattr(self, "_nccl_write_lock", threading.Lock()):
+            if self._nccl_registry is not None:
+                self._nccl_registry.clear()
+        # Entries previously evicted while in flight remain owned here. Retry
+        # only after all sender threads have exited and communicator abort ran.
+        for entry in list(getattr(self, "_nccl_retained_entries", {}).values()):
+            self._on_buffer_free(entry)
+        if getattr(self, "_nccl_retained_entries", {}):
+            raise RuntimeError("NCCL buffers remain live after transport shutdown")
         self._nccl_enabled = False
         logger.info(
             "[NCCLRolloutMixin] Worker '%s' cleaned up",

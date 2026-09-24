@@ -122,6 +122,19 @@ class PayloadTransport(ABC):
     # Controller-side hooks
     # ------------------------------------------------------------------
 
+    def close_data_packer(self, packer: Any, *, timeout: float = 5.0) -> None:
+        """Close per-packer state, not this shared registry backend instance.
+
+        Stateful backends may override this method. The default supports the
+        common composed packer lifecycle and is inert for ordinary packers.
+        """
+        close = getattr(packer, "close_transport", None)
+        if callable(close):
+            close(timeout=timeout)
+
+    def close_producer(self, producer: Any, *, timeout: float = 5.0) -> None:
+        """Close producer resources owned by this backend, if any."""
+
     def publish_cleanup_for_discarded(
         self,
         *,

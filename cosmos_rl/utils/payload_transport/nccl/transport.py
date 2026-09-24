@@ -111,6 +111,7 @@ def _build_redis_client(redis_endpoint: Optional[RedisEndpoint]) -> Any:
             "cannot attach NCCL data packer"
         )
         return None
+    client = None
     try:
         client = _redis_lib.Redis(
             host=redis_endpoint.host,
@@ -120,6 +121,11 @@ def _build_redis_client(redis_endpoint: Optional[RedisEndpoint]) -> Any:
         )
         client.ping()
     except Exception as exc:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.exception("Failed to close Redis client after ping failure")
         logger.warning(
             f"[NcclPayloadTransport] Redis ping failed at "
             f"{redis_endpoint.host}:{redis_endpoint.port}/{redis_endpoint.db}: "
@@ -139,6 +145,18 @@ class NcclPayloadTransport(PayloadTransport):
 
     name = "nccl"
     completion_prefix = NCCL_COMPLETION_PREFIX
+
+    def close_producer(self, producer: Any, *, timeout: float = 5.0) -> None:
+        close = getattr(producer, "cleanup_nccl", None)
+        if callable(close):
+            close(timeout=timeout)
+
+    def close_data_packer(self, packer: Any, *, timeout: float = 5.0) -> None:
+        super().close_data_packer(packer, timeout=timeout)
+        client = getattr(packer, "_payload_transport_redis_client", None)
+        if client is not None:
+            client.close()
+            packer._payload_transport_redis_client = None
 
     def attach_data_packer(
         self,
@@ -197,9 +215,10 @@ class NcclPayloadTransport(PayloadTransport):
 
             setup = functools.partial(compose_nccl_transport, packer)
         if callable(setup):
-            self._attach_via_mixin(
+            client = self._attach_via_mixin(
                 setup, config=config, device=device, redis_endpoint=redis_endpoint
             )
+            packer._payload_transport_redis_client = client
             return
         if hasattr(packer, "redis_client"):
             self._attach_via_legacy(packer, redis_endpoint=redis_endpoint)
@@ -215,7 +234,7 @@ class NcclPayloadTransport(PayloadTransport):
         config: Any,
         device: Any,
         redis_endpoint: Optional[RedisEndpoint],
-    ) -> None:
+    ) -> Any:
         client = _build_redis_client(redis_endpoint)
         if client is None:
             # Without a control plane the mixin cannot rendezvous.  RAISE rather
@@ -298,15 +317,25 @@ class NcclPayloadTransport(PayloadTransport):
             f"max_attempts={max_attempts}, recv_timeout={recv_timeout}, "
             f"first_transfer_timeout={first_transfer_timeout})"
         )
-        setup(
-            device=device,
-            redis_client=client,
-            config=config,
-            prefetch_timeout=prefetch_timeout,
-            max_attempts=max_attempts,
-            recv_timeout=recv_timeout,
-            first_transfer_timeout=first_transfer_timeout,
-        )
+        try:
+            setup(
+                device=device,
+                redis_client=client,
+                config=config,
+                prefetch_timeout=prefetch_timeout,
+                max_attempts=max_attempts,
+                recv_timeout=recv_timeout,
+                first_transfer_timeout=first_transfer_timeout,
+            )
+        except BaseException:
+            try:
+                client.close()
+            except Exception:
+                logger.exception(
+                    "Failed to close Redis client after attachment failure"
+                )
+            raise
+        return client
 
     # ------------------------------------------------------------------
     # Legacy attach (deprecated; PR #670 / commit 55745c contract)
