@@ -784,6 +784,11 @@ async def put_rollout_group(rollout: RolloutRequest):
             for extracted in rollouts_group
         ]
         policy_status = controller.policy_status_manager
+        if getattr(controller, "completion_admission", None) is not None:
+            await controller.put_application_rollouts(rollout, rollouts)
+            return {"message": "Identified rollout report processed"}
+        if rollout.completion_identities is not None or rollout.completion_failures:
+            raise ValueError("Identified completions require completion_admission=True")
         is_dapo = controller.config.train.train_policy.variant == "dapo"
         if any(
             key.startswith(COMPLETION_ADMISSION_METRIC_PREFIX)
@@ -891,6 +896,7 @@ def main(
     val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
     resume_adapter: Optional[ControllerResumeAdapter] = None,
+    completion_admission: bool = False,
     **kwargs,
 ):
     if kwargs:
@@ -1000,6 +1006,7 @@ def main(
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
             resume_adapter=resume_adapter,
+            completion_admission=completion_admission,
         )
         logger.info(f"Successfully loaded configuration from {args.config}")
     except FileNotFoundError:

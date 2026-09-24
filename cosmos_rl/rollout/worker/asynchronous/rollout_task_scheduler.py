@@ -308,14 +308,23 @@ class RolloutTaskScheduler:
                 logger.warning(
                     "[RolloutTaskScheduler] Generation returned empty results"
                 )
-                return None
+                return self._report_identified_failure(task)
 
         except Exception as e:
             logger.error(f"[RolloutTaskScheduler] Error during generation: {str(e)}")
             import traceback
 
             traceback.print_exc()
+            return self._report_identified_failure(task)
+
+    def _report_identified_failure(self, task):
+        if task.payload.completion_sequences is None:
             return None
+        completed = CompletedRollout(
+            task.idx, task.payload, RolloutResult(completions=[])
+        )
+        self.complete_queue.put(completed)
+        return completed
 
     async def _worker_loop(self):
         """

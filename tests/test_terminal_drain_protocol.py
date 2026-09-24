@@ -437,6 +437,8 @@ class TestTerminalHttpAdmission(unittest.TestCase):
             src_replica_name="rollout-0",
             payloads=[object()],
             metrics={"filtered_positive": 2},
+            completion_identities=None,
+            completion_failures=[],
         )
         with (
             patch.object(run_web_panel, "controller", fake_controller),

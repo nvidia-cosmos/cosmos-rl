@@ -15,6 +15,7 @@
 
 from typing import List, Optional, Callable, Any, Type, Union
 from itertools import chain
+from numbers import Real
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -536,6 +537,16 @@ class ColocatedController(Controller):
         This method extracts rollouts from the rollout request and enqueues them for training.
         """
         for k, v in rollout_request.metrics.items():
+            # Admission reports also carry routing IDs and originating weight
+            # versions. These are not additive training metrics. Selection
+            # itself already ran in the shared worker/reward path.
+            if k in {
+                "completion_admission_report_id",
+                "completion_admission_weight_version",
+                "discard_report_id",
+                "discarded_weight_version",
+            } or not isinstance(v, Real):
+                continue
             # Handle dynamic sampling statistics update in colocated mode
             self.train_report_data.setdefault(self.current_step, {})[k] = (
                 self.train_report_data.get(self.current_step, {}).get(k, 0) + v

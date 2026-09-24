@@ -1490,6 +1490,10 @@ class ValidationConfig(BaseModel):
 
 
 class RolloutConfig(BaseModel):
+    completion_admission: bool = Field(
+        default=False,
+        description="Enable pre-generation completion identities and replay-protected reporting for disaggregated non-DAPO RL. Quality masks work in all modes independently.",
+    )
     parallelism: RolloutParallelismConfig = Field(
         default_factory=RolloutParallelismConfig
     )
@@ -2002,6 +2006,15 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def check_params_value(self):
+        if self.rollout.completion_admission:
+            if (
+                self.mode != "disaggregated"
+                or self.train.train_policy.type != "grpo"
+                or self.train.train_policy.variant == "dapo"
+            ):
+                raise ValueError(
+                    "Identified completion reporting requires disaggregated non-DAPO RL"
+                )
         if self.policy.parallelism.pp_size > 1:
             pp = self.policy.parallelism
             batch = self.train.train_batch_per_replica

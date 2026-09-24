@@ -48,6 +48,11 @@ def extract_rollouts(
     rollouts_list: List[List[Rollout]] = []
     for _, payload in enumerate(payloads):
         if not is_validation:
+            if payload.completion_trainable is not None:
+                raise ValueError(
+                    "Unconsumed completion_trainable mask: select the training "
+                    "group before computing advantages, not at controller ingestion"
+                )
             # if this func is called for validation, we don't need to check the length of `completions`.
             assert (
                 len(payload.completions)

@@ -72,6 +72,7 @@ from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
 )
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.dispatcher import RewardDispatcher
+from cosmos_rl.reward.identity import CompletionReporter
 from cosmos_rl.reward.admission import (
     apply_rollout_result_to_payload,
     consume_completion_admission_metrics,
@@ -356,6 +357,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.should_report = self.parallel_dims.tp_coord[0] == 0 and (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
         )
+        if (
+            self.should_report
+            and getattr(self.config.rollout, "completion_admission", False)
+            and not hasattr(self, "completion_reporter")
+        ):
+            self.completion_reporter = CompletionReporter(
+                self.replica_name, self.global_rank
+            )
 
         self.reward_dispatcher.setup(
             config=self.config,
@@ -2028,6 +2037,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if is_validation:
                     break
 
+                identified_payloads = (
+                    list(payloads)
+                    if getattr(self, "completion_reporter", None) is not None
+                    else None
+                )
                 payloads, metadata = consume_completion_admission_metrics(payloads)
                 metadata = prepare_completion_admission_report(
                     metadata,
@@ -2063,7 +2077,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     metrics=metadata,
                     is_end=False,
                 )
-                self.api_client.post_rollout_completion(response)
+                if identified_payloads is not None:
+                    response = self.completion_reporter.report(
+                        identified_payloads, self.data_packer
+                    )
+                    self._post_identified_report(response)
+                else:
+                    self.api_client.post_rollout_completion(response)
             elif not block or empty:
                 break
         return payloads, is_validation, step, empty
@@ -2085,7 +2105,33 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             sync_buffer_to_live(self)
 
         kwargs["current_weight_version"] = self.current_weight_version
-        return self.rollout.rollout_generation(**kwargs)
+        reporter = getattr(self, "completion_reporter", None)
+        identified = reporter is not None and not kwargs.get("is_validation", False)
+        if identified:
+            reporter.reserve(
+                kwargs["payloads"],
+                self.config.rollout.n_generation,
+                self.current_weight_version,
+            )
+        try:
+            results = self.rollout.rollout_generation(**kwargs)
+        except Exception:
+            if identified:
+                self._post_identified_report(
+                    reporter.generation_failure(kwargs["payloads"], "generation_error")
+                )
+            raise
+        if identified and not results:
+            self._post_identified_report(
+                reporter.generation_failure(kwargs["payloads"], "generation_error")
+            )
+        return results
+
+    def _post_identified_report(self, report):
+        # APIClient retries this same serialized request; never allocate new
+        # IDs after a timeout. Exhausted delivery must not silently lose work.
+        if not self.api_client.post_rollout_completion(report):
+            raise RuntimeError("Identified completion report delivery failed")
 
     @torch.no_grad()
     def main_loop(self):
@@ -2398,6 +2444,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self, count: int, weight_version: Optional[int] = None
     ) -> None:
         """Report fetched samples that terminated without trainable results."""
+        if getattr(self, "completion_reporter", None) is not None:
+            # Identified generation/selection paths report exact reservations.
+            return
         if count <= 0 or not self.should_report:
             return
 
@@ -2430,6 +2479,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Filter the rollout results with valid completions or valid completed_conversations.
         Returns the valid payloads and valid results for reporting.
         """
+        if getattr(self, "completion_reporter", None) is not None or any(
+            result.completion_trainable is not None for result in rollout_results
+        ):
+            # Keep original group slots until reward selection. Both modes
+            # use this path; structural failures compose with the quality mask
+            # before the algorithm checks its minimum and computes advantages.
+            return self._enqueue_masked_results(rollout_results, payloads_list)
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
@@ -2546,12 +2602,91 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
         return valid_payloads_list, valid_result
 
+    def _enqueue_masked_results(self, results, payloads):
+        if len(results) != len(payloads):
+            raise ValueError("Generation must return one result per reserved prompt")
+        if not self.should_report:
+            return payloads, results
+        for result, payload in zip(results, payloads):
+            reporter = getattr(self, "completion_reporter", None)
+            if result.completions is None or len(result.completions) == 0:
+                if reporter is not None:
+                    self._post_identified_report(
+                        reporter.generation_failure([payload], "generation_error")
+                    )
+                else:
+                    self._report_discarded_samples(self.config.rollout.n_generation)
+                continue
+            size = (
+                len(payload.completion_sequences)
+                if reporter is not None
+                else len(result.completions)
+            )
+            if len(result.completions) != size:
+                raise ValueError(
+                    "Generation must preserve reserved completion slots; mark failures with a mask"
+                )
+            apply_rollout_result_to_payload(
+                payload,
+                result,
+                include_completed_conversations=self.config.rollout.multi_turn_config.enable,
+            )
+            explicit_mask = payload.completion_trainable is not None
+            if reporter is None:
+                payload.weight_version = self.current_weight_version
+            mask = (
+                list(payload.completion_trainable)
+                if payload.completion_trainable is not None
+                else [True] * size
+            )
+            reasons = (
+                list(payload.completion_drop_reasons)
+                if payload.completion_drop_reasons is not None
+                else [None] * size
+            )
+            if len(mask) != size or len(reasons) != size:
+                raise ValueError(
+                    "Quality mask and reasons must match reserved completions"
+                )
+            if self.config.rollout.multi_turn_config.enable:
+                conversations = result.completed_conversations or []
+                if len(conversations) != size:
+                    raise ValueError("Conversations must match reserved completions")
+                for index, conversation in enumerate(conversations):
+                    if not any(
+                        msg.role == "assistant" and msg.content != ""
+                        for msg in conversation
+                    ):
+                        mask[index], reasons[index] = False, "invalid_completion"
+                        explicit_mask = True
+            elif not self.config.train.non_text:
+                payload.completions = [
+                    value if value != "" else self.eos_token
+                    for value in payload.completions
+                ]
+            payload.completion_trainable, payload.completion_drop_reasons = (
+                mask if explicit_mask else None,
+                reasons if explicit_mask else None,
+            )
+            if self.config.train.local_dataset:
+                payload.reference_answer = self.data_fetcher.query_reference_answer(
+                    payload.prompt_idx
+                )
+            ready = self.enqueue_teacher_calculation([payload])
+            self.reward_dispatcher.enqueue_rewards_cal(
+                ready,
+                False,
+                payload.weight_version,
+                bypass_reward=self.config.train.train_policy.bypass_reward,
+            )
+        return payloads, results
+
     def one_step_generation(
         self,
     ) -> Tuple[List[RLPayload], List[RolloutResult]]:
         """
         Perform one step of rollout generation.
-        Returns the number of valid payloads generated.
+        Return payloads and results, including an empty pair on generation failure.
         """
         generation_start_ts = time.time()
         try:
@@ -2587,12 +2722,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             logger.debug(
                 "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
-                "batch=%d produced=0 returned_false=True",
+                "batch=%d produced=0",
                 self.global_rank,
                 (time.time() - generation_start_ts) * 1000.0,
                 len(payloads_list),
             )
-            return False
+            return [], []
 
         assert len(rollout_results) == len(payloads_list), (
             f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
@@ -2675,6 +2810,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             return 0, is_end
 
         # packing the prompts into tasks and put into the scheduler
+        if not is_validation and getattr(self, "completion_reporter", None) is not None:
+            self.completion_reporter.reserve(
+                payloads_list,
+                self.config.rollout.n_generation,
+                self.current_weight_version,
+            )
         tasks = [
             RolloutTask(
                 idx=payload.prompt_idx,

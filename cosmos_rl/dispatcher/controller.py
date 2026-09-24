@@ -48,6 +48,7 @@ from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
+from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 
 
 def _wait_for_redis_ready(port: int, timeout: float) -> bool:
@@ -90,6 +91,7 @@ class Controller:
         self._init_status()
 
     def _init_status(self):
+        self.completion_admission = None
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
         self.teacher_result_manager = set()
@@ -128,6 +130,7 @@ class Controller:
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
         resume_adapter: Optional[ControllerResumeAdapter] = None,
+        completion_admission: bool = False,
     ):
         if self.config is not None:
             raise Exception(
@@ -143,6 +146,23 @@ class Controller:
             uuid4().hex if resume_adapter is not None else None
         )
         task_type = config.train.train_policy.type
+        if type(completion_admission) is not bool:
+            raise TypeError(
+                "completion_admission must be a bool; quality decisions belong "
+                "in RolloutResult.completion_trainable before reward processing"
+            )
+        if completion_admission or getattr(
+            config.rollout, "completion_admission", False
+        ):
+            if (
+                task_type != "grpo"
+                or config.train.train_policy.variant == "dapo"
+                or config.mode != "disaggregated"
+            ):
+                raise ValueError(
+                    "Application admission currently requires disaggregated non-DAPO GRPO"
+                )
+            self.completion_admission = CompletionAdmissionState()
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
@@ -465,7 +485,13 @@ maxmemory-policy allkeys-lfu
         for payload in payloads:
             while True:
                 refill_credit = credits.get(weight_version, 0)
-                issued = self.weight_version_to_prompt_num.get(weight_version, 0)
+                # Total issued includes replacements for retry-limit tracking.
+                # They must not consume still-unissued NORMAL quota slots:
+                # failures can arrive before every rollout replica has fetched
+                # its first prompt batch.
+                issued = self.weight_version_to_prompt_num.get(
+                    weight_version, 0
+                ) - issued_replacements.get(weight_version, 0)
                 if refill_credit > 0:
                     credits[weight_version] = refill_credit - 1
                     issued_replacements[weight_version] = (
@@ -858,6 +884,25 @@ maxmemory-policy allkeys-lfu
             )
             return None
         return await replica.set_trace_path(trace_path, global_rank)
+
+    async def put_application_rollouts(self, request, rollouts: List[Rollout]):
+        async with self.life_cycle_lock:
+            admission = self.completion_admission
+            plan = admission.prepare(self, request, rollouts)
+            try:
+                accepted = admission.settle(self, request, plan)
+                accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
+                await self.put_rollouts(accepted)
+            except BaseException:
+                admission.failed = True
+                # Accounting may already be partially mutated. An HTTP error
+                # alone leaves workers training or waiting on corrupt state.
+                # Do not wait for distributed teardown on this fatal path.
+                logger.critical(
+                    "Completion settlement failed; terminating controller",
+                    exc_info=True,
+                )
+                os._exit(86)
 
     async def put_rollouts(self, rollouts: List[Rollout]):
         """

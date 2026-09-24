@@ -16,6 +16,7 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Dict, Any, Optional
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.dispatcher.data.admission import CompletionIdentity, CompletionFailure
 
 
 MESH_NAMES: List[str] = ["pp", "dp_shard", "cp", "tp"]
@@ -85,6 +86,10 @@ class RolloutRequest(BaseModel):
     payloads: List[RLPayload]
     metrics: Dict[str, Any] = {}
     is_end: bool = False
+    # Opt-in application admission: one identity per extracted completion.
+    # Generation failures share the same identity namespace, not metric IDs.
+    completion_identities: Optional[List[CompletionIdentity]] = None
+    completion_failures: List[CompletionFailure] = []
 
 
 class UnregisterRequest(BaseModel):
