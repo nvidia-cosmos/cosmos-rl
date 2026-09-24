@@ -19,6 +19,7 @@ import numpy as np
 from typing import Type, Dict, Optional
 
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.trainer.batching import FixedRolloutBatching
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import (
     msgpack_c_long,
@@ -103,6 +104,23 @@ def extract_from_cuda_tensor(device, key, obj, tensor):
 
 
 class Trainer(ABC):
+    # Expansion is opt-in and enforced by the policy worker's step entrypoint.
+    batching_contract = FixedRolloutBatching()
+
+    def prefetch_training_batch(self, rollouts):
+        """Fetch and CPU-prepare an owned next batch without changing ACK order."""
+        from cosmos_rl.policy.trainer.batching import prefetch_training_batch
+
+        return prefetch_training_batch(self, rollouts)
+
+    def prepare_training_batch(self, rollouts):
+        raise NotImplementedError("Expanded trainers must implement sample preparation")
+
+    def step_expanded_training(self, batch, **kwargs):
+        raise NotImplementedError(
+            "Expanded trainers must consume the validated sample batch"
+        )
+
     def __init__(
         self,
         config: CosmosConfig,

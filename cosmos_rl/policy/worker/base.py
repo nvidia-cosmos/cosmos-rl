@@ -94,12 +94,65 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             )
 
     def check_config(self):
+        from cosmos_rl.policy.trainer.base import Trainer, TrainerRegistry
+        from cosmos_rl.policy.trainer.batching import (
+            ExpandedSampleBatching,
+            FixedRolloutBatching,
+        )
+
         mini_batch = 1
         policy_type = self.config.train.train_policy.type
         train_batch_per_replica = self.config.train.train_batch_per_replica
         dp_shard_size = self.config.policy.parallelism.dp_shard_size
         error_msg = f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by dp_shard_size({dp_shard_size})"
         mini_batch = self.config.train.train_policy.mini_batch
+        trainer_type = getattr(self.config.train.train_policy, "trainer_type", None)
+        trainer_cls = (
+            TrainerRegistry.get_trainer_cls(trainer_type) if trainer_type else Trainer
+        )
+        contract = getattr(trainer_cls, "batching_contract", FixedRolloutBatching())
+        if not isinstance(contract, (FixedRolloutBatching, ExpandedSampleBatching)):
+            raise TypeError("Unknown trainer batching contract")
+        if isinstance(contract, ExpandedSampleBatching):
+            if policy_type != "grpo":
+                raise ValueError(
+                    "Expanded batching currently supports GRPO trainers only"
+                )
+            parallelism = self.config.policy.parallelism
+            if any(
+                getattr(parallelism, dim, 1) != 1
+                for dim in ("tp_size", "cp_size", "pp_size")
+            ):
+                raise ValueError(
+                    "Expanded batching currently requires pure data parallelism"
+                )
+            if dp_shard_size != self.parallel_dims.dp_shard or dp_shard_size <= 0:
+                raise ValueError(
+                    "Expanded batching requires a valid data-parallel mesh"
+                )
+            if train_batch_per_replica <= 0 or mini_batch <= 0:
+                raise ValueError(
+                    "Collection and training batch counts must be positive"
+                )
+            # Dispatch and colocated local queues still shard collected
+            # completions evenly. Expansion relaxes sample-minibatch divisibility,
+            # not this upstream collection constraint (include replicated DP).
+            collection_dp_size = (
+                self.parallel_dims.dp_shard * self.parallel_dims.dp_replicate
+            )
+            if train_batch_per_replica % collection_dp_size:
+                raise ValueError(
+                    f"Collection count ({train_batch_per_replica}) must be divisible "
+                    f"by the data-parallel size ({collection_dp_size}); expanded "
+                    "sample counts need not be divisible by mini_batch"
+                )
+            for method in ("prepare_training_batch", "step_expanded_training"):
+                if getattr(trainer_cls, method, None) is getattr(Trainer, method):
+                    raise TypeError(f"Expanded trainer must implement {method}")
+            logger.info(
+                "Expanded batching: agree a replica-local schedule with zero contributions"
+            )
+            return
         if policy_type == "grpo":
             error_msg += f" * mini_batch({mini_batch})"
             assert dp_shard_size == self.parallel_dims.dp_shard
