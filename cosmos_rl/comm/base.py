@@ -36,7 +36,7 @@ from cosmos_rl.dispatcher.data.packer import (
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
-from cosmos_rl.dispatcher.protocol import MESH_NAMES
+from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.utils.util as util
 from transformers import AutoConfig  # noqa: F401  re-exported for downstream importers
 from cosmos_rl.utils.model_config import load_model_config
@@ -453,6 +453,20 @@ class CommMixin:
         if host_info_tuple is None:
             raise Exception("Failed to get local IP address")
         host_ip, host_name = host_info_tuple
+        registration_options = {}
+        if self.role == Role.ROLLOUT:
+            if getattr(self, "backend", None) == "trtllm":
+                # The wrapper process reports on behalf of the whole executor.
+                rollout_reporter = self.global_rank == 0
+            else:
+                rollout_reporter = (
+                    ranks[MESH_NAMES.index("tp")] == 0
+                    and ranks[MESH_NAMES.index("pp")]
+                    == group_size[MESH_NAMES.index("pp")] - 1
+                )
+            registration_options["rollout_reporter"] = rollout_reporter
+            if self.config.validation.enable:
+                registration_options["validation_reporter"] = rollout_reporter
         self.api_client.register(
             replica_name=self.replica_name,
             role=self.role,
@@ -462,6 +476,7 @@ class CommMixin:
             global_rank=self.global_rank,
             host_ip=host_ip,
             host_name=host_name,
+            **registration_options,
         )
 
         dist.barrier()  # wait all the atoms registered.

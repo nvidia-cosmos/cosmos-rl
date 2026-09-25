@@ -511,6 +511,7 @@ def test_remote_rewards_preserve_reservations_with_and_without_quality_masks(
 
 def test_remote_validation_ignores_misaligned_admission_metadata(monkeypatch):
     payload = _payload([False], ["stale"])
+    payload.validation_work_id = 17
     calculator = RemoteRewardCalculator()
     calculator.rl_algo = _IdentityAdvantageAlgo()
     calculator.minimum_trainable_completions = 1
@@ -530,9 +531,21 @@ def test_remote_validation_ignores_misaligned_admission_metadata(monkeypatch):
     rewards = torch.tensor([1.0, 2.0, 3.0, 4.0])
     expected = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
     assert is_validation
+    assert result[0].validation_work_id == 17
     assert result[0].completions == payload.completions
     assert result[0].advantages == pytest.approx(expected.tolist())
     assert calculator.rl_algo.advantage_inputs is None
+
+
+def test_local_validation_preserves_issued_work_identity():
+    calculator = LocalRewardCalculator()
+    calculator.val_rl_algo = _TestAlgo([1.0, 2.0, 3.0, 4.0])
+    payload = _payload()
+    payload.validation_work_id = 17
+    result, is_validation, step = calculator.compute_validation_rewards([payload], 9)
+    assert is_validation and step == 9
+    assert result[0].validation_work_id == 17
+    assert result[0].rewards == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_bypass_reward_applies_admission():

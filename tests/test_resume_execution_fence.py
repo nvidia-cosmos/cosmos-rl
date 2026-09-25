@@ -23,6 +23,7 @@ def test_setup_replaces_saved_execution_id_and_disables_legacy_fence(monkeypatch
     config = SimpleNamespace(
         controller_execution_id="saved-attempt",
         train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
+        rollout=SimpleNamespace(completion_admission=False),
     )
     identities = []
     for adapter in (object(), object(), None):
@@ -69,26 +70,29 @@ def test_old_reports_rejected_before_any_state_mutation(monkeypatch, token, is_e
 @pytest.mark.parametrize("token", [None, "new-execution"])
 def test_disabled_fence_and_current_execution_keep_normal_path(monkeypatch, token):
     from cosmos_rl.dispatcher import run_web_panel as panel
+    from rollout_receipt_fixture import install_report_source
 
     controller = Mock(config=SimpleNamespace(controller_execution_id=token))
     controller.rollout_status_manager.rollout_end.return_value = False
+    rollout_end = controller.rollout_status_manager.rollout_end
     monkeypatch.setattr(panel, "controller", controller)
-    result = asyncio.run(
-        panel.put_rollout_group(
-            RolloutRequest(
-                controller_execution_id=token,
-                src_replica_name="worker",
-                payloads=[],
-                is_end=True,
-            )
-        )
+    request = install_report_source(
+        controller,
+        RolloutRequest(
+            controller_execution_id=token,
+            src_replica_name="worker",
+            payloads=[],
+            is_end=True,
+        ),
     )
+    result = asyncio.run(panel.put_rollout_group(request))
     assert result == {"message": "Rollout end signal received"}
-    controller.rollout_status_manager.rollout_end.assert_called_once()
+    rollout_end.assert_called_once()
 
 
 def test_client_sends_pinned_attempt_and_does_not_retry_stale_result(monkeypatch):
-    client = APIClient.__new__(APIClient)
+    client = APIClient("ROLLOUT", remote_ips=["localhost"], remote_port=12345)
+    client._registered_replica_name, client._registered_global_rank = "worker", 0
     client.controller_execution_id = "old-execution"
     client.get_alternative_urls = Mock(return_value=["http://controller/rollouts"])
     client.max_retries = 3

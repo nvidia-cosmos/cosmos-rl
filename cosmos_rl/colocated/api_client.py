@@ -45,6 +45,7 @@ class ColocatedAPIClient(APIClient):
         batch_size: int,
         validation_step: Optional[int] = None,
         rank_in_mesh: Optional[int] = None,
+        **validation_identity,
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """
         Get the next batch of prompts from the controller.
@@ -55,7 +56,9 @@ class ColocatedAPIClient(APIClient):
         Returns:
             A tuple of (list of prompts as dicts, is_end flag).
         """
-        return super().get_next_prompt(batch_size, validation_step, rank_in_mesh)
+        return super().get_next_prompt(
+            batch_size, validation_step, rank_in_mesh, **validation_identity
+        )
 
     def post_rollout_completion(self, response: RolloutRequest) -> bool:
         """

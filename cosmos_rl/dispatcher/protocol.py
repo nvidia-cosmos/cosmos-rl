@@ -15,7 +15,7 @@
 
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Dict, Any, Optional
-from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.dispatcher.data.schema import RLPayload, TrainingCompletionIdentity
 from cosmos_rl.dispatcher.data.admission import CompletionIdentity, CompletionFailure
 
 
@@ -61,6 +61,8 @@ class TrainAckRequest(BaseModel):
     replica_name: str
     weight_step: int
     total_steps: int
+    report_session_id: Optional[str] = Field(default=None, min_length=1)
+    src_global_rank: Optional[int] = Field(default=None, ge=0, strict=True)
     # For profiling
     profile_finished: bool = False
     # For logger report data
@@ -73,13 +75,18 @@ class WeightReadyRequest(BaseModel):
 
 class ValidationReportRequest(BaseModel):
     src_replica_name: str
+    src_global_rank: Optional[int] = Field(default=None, ge=0, strict=True)
     validation_step: int
+    validation_round_id: Optional[str] = None
+    report_sequence: Optional[int] = Field(default=None, ge=0, strict=True)
     payloads: List[RLPayload]
     is_end: bool = False
 
 
 class RolloutRequest(BaseModel):
     controller_execution_id: Optional[str] = None
+    report_session_id: Optional[str] = Field(default=None, min_length=1)
+    report_sequence: Optional[int] = Field(default=None, ge=0, strict=True)
     src_replica_name: str
     src_global_rank: Optional[int] = None
     stays_command_participant: bool = False
@@ -90,6 +97,8 @@ class RolloutRequest(BaseModel):
     # Generation failures share the same identity namespace, not metric IDs.
     completion_identities: Optional[List[CompletionIdentity]] = None
     completion_failures: List[CompletionFailure] = []
+    # Exact rejected slots; metrics are diagnostic, not reservation identities.
+    training_rejections: List[TrainingCompletionIdentity] = []
 
 
 class UnregisterRequest(BaseModel):
@@ -149,6 +158,9 @@ class RegisterRequest(BaseModel):
     host_name: str
     ranks: List[int]
     group_size: List[int]
+    validation_reporter: Optional[bool] = Field(default=None, strict=True)
+    report_session_id: Optional[str] = Field(default=None, min_length=1)
+    rollout_reporter: Optional[bool] = Field(default=None, strict=True)
 
     @model_validator(mode="after")
     def validate_mesh_names(self):

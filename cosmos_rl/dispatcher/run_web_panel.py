@@ -60,6 +60,7 @@ from cosmos_rl.dispatcher.protocol import (
     Role,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.dispatcher.receipt import request_digest
 from cosmos_rl.reward.admission import (
     COMPLETION_ADMISSION_METRIC_PREFIX,
     COMPLETION_ADMISSION_REPORT_ID_KEY,
@@ -106,7 +107,7 @@ from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from fastapi import Request
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 
 
 def create_error_response(
@@ -197,7 +198,7 @@ def _maybe_finalize(reason: str) -> bool:
     return False
 
 
-def _await_rollout_checkout(
+async def _await_rollout_checkout(
     controller,
     shutdown_event,
     timeout_s: float = COSMOS_HEARTBEAT_TIMEOUT,
@@ -231,7 +232,8 @@ def _await_rollout_checkout(
         return True
     deadline = time.monotonic() + timeout_s
     while not rsm.all_rollouts_ended():
-        rsm.maintain_life_status(controller.policy_status_manager)
+        async with controller.life_cycle_lock:
+            rsm.maintain_life_status(controller.policy_status_manager)
         if time.monotonic() > deadline:
             n_total = len(rsm.rollout_replicas)
             n_ended = sum(1 for r in rsm.rollout_replicas.values() if r.status.ended)
@@ -244,8 +246,9 @@ def _await_rollout_checkout(
                 n_total,
             )
             return False
-        if shutdown_event.wait(timeout=scan_interval_s):
+        if shutdown_event.is_set():
             return False
+        await asyncio.sleep(scan_interval_s)
     logger.info(
         "[Controller] All rollout replicas checked out; proceeding with "
         "coordinated controller shutdown."
@@ -256,17 +259,29 @@ def _await_rollout_checkout(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     shutdown_event = threading.Event()
-    executor = ThreadPoolExecutor(max_workers=1)
-    loop = asyncio.get_running_loop()
 
-    def monitor_replica_status():
+    async def monitor_replica_status():
         stop_broadcast_sent = False
         while not shutdown_event.is_set():
-            # Run in separate process
-            controller.policy_status_manager.maintain_life_status()
-            controller.rollout_status_manager.maintain_life_status(
-                controller.policy_status_manager
+            # All mutations run on the same event loop as request handlers.
+            # Redis publication uses an ordered writer outbox; the writer never
+            # mutates controller state or blocks heartbeat request handling.
+            if controller.policy_status_manager.terminal_error is not None:
+                raise controller.policy_status_manager.terminal_error
+            publication_error = getattr(
+                controller.policy_status_manager.redis_handler,
+                "_publication_failure",
+                None,
             )
+            if publication_error is not None:
+                raise RuntimeError(
+                    "Controller publication failed terminally"
+                ) from publication_error
+            async with controller.life_cycle_lock:
+                controller.policy_status_manager.maintain_life_status()
+                controller.rollout_status_manager.maintain_life_status(
+                    controller.policy_status_manager
+                )
             # A replica reaped via heartbeat timeout is just as "gone" as one
             # that unregistered cleanly -- finalize the controller here too so a
             # dead/ungracefully-exiting replica can never strand it.
@@ -287,12 +302,13 @@ async def lifespan(app: FastAPI):
                 n_policy=n_policy,
                 had_policy_replicas=_policy_replicas_were_registered,
                 stop_broadcast_sent=stop_broadcast_sent,
-                # Requested stop finishes active validation before completion
-                # ACKs. Unlike natural horizon completion it need not have
-                # sent a final-step R2R shutdown flag, so use STOP afterwards.
+                # Requested stop and validation-aware early exhaustion finish
+                # validation before completion ACKs. Neither needs a fake
+                # final-horizon R2R flag; use ordinary STOP after policy exit.
                 validation_enabled=(
                     controller.config.validation.enable
                     and controller.policy_status_manager.stop_reason is None
+                    and not controller.policy_status_manager.validation_drained
                 ),
                 training_finished=controller.policy_status_manager.training_finished(),
                 all_rollouts_ended=controller.rollout_status_manager.all_rollouts_ended(),
@@ -301,9 +317,8 @@ async def lifespan(app: FastAPI):
                 # it reaches every rollout via ``consume_command`` -- including
                 # a rank wedged on the weight-version gate that never
                 # re-fetches and so never observes the prompt-stream
-                # ``is_end``.  Validation runs are excluded: they keep the
-                # final weight sync and shut down via the existing R2R
-                # ``replica_should_stop`` broadcast.
+                # ``is_end``. Unsettled validation remains excluded; normal
+                # final-horizon runs also retain their existing R2R shutdown.
                 #
                 # The ``training_finished()`` guard distinguishes genuine
                 # end-of-job from a transient ``n_policy == 0`` during
@@ -374,19 +389,38 @@ async def lifespan(app: FastAPI):
                     # every rollout has checked out before self-terminating, so
                     # stragglers don't wedge on a dead controller and the final
                     # R2R broadcast isn't left with an orphaned peer.
-                    _await_rollout_checkout(controller, shutdown_event)
+                    await _await_rollout_checkout(controller, shutdown_event)
                     shutdown_event.set()
                     os.kill(os.getpid(), signal.SIGTERM)
                     break
 
-            if shutdown_event.wait(timeout=COSMOS_ROLLOUT_SCAN_INTERVAL):
-                break  # Exit early if shutdown signaled during sleep
+            await asyncio.sleep(COSMOS_ROLLOUT_SCAN_INTERVAL)
 
-    task = loop.run_in_executor(executor, monitor_replica_status)
-    yield
-    # Signal shutdown
-    shutdown_event.set()
-    await task
+    task = asyncio.create_task(monitor_replica_status())
+    task.add_done_callback(_observe_controller_monitor)
+    try:
+        yield
+    finally:
+        shutdown_event.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        from cosmos_rl.dispatcher.publication import ControllerPublisher
+
+        publisher = getattr(controller, "redis_controller", None)
+        if isinstance(publisher, ControllerPublisher):
+            await publisher.close()
+
+
+def _observe_controller_monitor(task):
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        # Losing the owner of reaping/STOP/accounting cannot leave a seemingly
+        # healthy controller serving requests against partially mutated state.
+        logger.critical("Controller monitor failed; terminating execution: %s", error)
+        os._exit(86)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -486,6 +520,8 @@ async def register(request: RegisterRequest):
         if request.role == Role.POLICY:
             _policy_replicas_were_registered = True
         return {"message": "Registered"}
+    except ValueError as e:
+        return JSONResponse(status_code=409, content={"message": str(e)})
     except Exception as e:
         import traceback
 
@@ -726,8 +762,108 @@ Rollout API
 
 @app.get(COSMOS_API_NEXT_PROMPT_SUFFIX)
 async def get_batched_prompt(
-    n: int, validation_step: Optional[int] = None, rank_in_mesh: Optional[int] = None
+    n: int,
+    validation_step: Optional[int] = None,
+    rank_in_mesh: Optional[int] = None,
+    validation_round_id: Optional[str] = None,
+    src_replica_name: Optional[str] = None,
+    fetch_sequence: Optional[int] = None,
+    src_global_rank: Optional[int] = None,
+    fetch_session_id: Optional[str] = None,
+    controller_execution_id: Optional[str] = None,
 ):
+    if (
+        validation_step is not None
+        and controller.config.train.train_policy.type != "sft"
+    ):
+        try:
+            if (
+                not validation_round_id
+                or src_replica_name is None
+                or fetch_sequence is None
+            ):
+                raise ValueError(
+                    "Validation fetch requires round and producer identity"
+                )
+            batch = controller.policy_status_manager.fetch_validation_prompts(
+                n,
+                validation_step,
+                rank_in_mesh,
+                validation_round_id,
+                src_replica_name,
+                fetch_sequence,
+            )
+        except (ValueError, RuntimeError) as error:
+            return JSONResponse(status_code=409, content={"error": str(error)})
+        return {"payloads_list": batch.payloads, "is_end": batch.is_end}
+    if validation_step is None and controller.config.train.train_policy.type != "sft":
+        execution_id = getattr(controller.config, "controller_execution_id", None)
+        if execution_id is not None and execution_id != controller_execution_id:
+            return JSONResponse(status_code=410, content={"error": "stale_execution"})
+        replica = controller.rollout_status_manager[src_replica_name]
+        if replica is None:
+            return JSONResponse(status_code=410, content={"error": "retired_source"})
+        atom = next(
+            (a for a in replica.atoms.values() if a.global_rank == src_global_rank),
+            None,
+        )
+        if (
+            atom is None
+            or not fetch_session_id
+            or atom.report_session_id != fetch_session_id
+        ):
+            return JSONResponse(status_code=409, content={"error": "unfenced_fetch"})
+        if type(n) is not int or n < 0:
+            return JSONResponse(
+                status_code=409, content={"error": "invalid_fetch_size"}
+            )
+        async with atom.rollout_fetch_lock, controller.life_cycle_lock:
+            if controller.rollout_status_manager[src_replica_name] is not replica:
+                return JSONResponse(
+                    status_code=410, content={"error": "retired_source"}
+                )
+            receipt = atom.rollout_fetch_receipt
+            try:
+                token, cached = receipt.begin(
+                    fetch_sequence,
+                    request_digest({"n": n, "rank_in_mesh": rank_in_mesh}),
+                )
+            except ValueError as error:
+                return JSONResponse(status_code=409, content={"error": str(error)})
+            except RuntimeError as error:
+                return JSONResponse(status_code=503, content={"error": str(error)})
+            if token is None:
+                return cached
+            try:
+                if controller.policy_status_manager.terminal_error is not None:
+                    raise RuntimeError("Controller accounting is already terminal")
+                if replica.status.ended:
+                    payloads_list, is_end = [], True
+                else:
+                    payloads_list, is_end = await controller.get_batched_prompt(
+                        n, None, rank_in_mesh
+                    )
+                    if controller.config.mode != "colocated":
+                        for payload in payloads_list:
+                            count = controller.config.rollout.n_generation
+                            payload.training_work_id = (
+                                replica.producer_reservations.issue(
+                                    payload.weight_version, count
+                                )
+                            )
+                            payload.training_completion_slots = list(range(count))
+                result = {
+                    "payloads_list": [
+                        payload.model_dump(mode="json") for payload in payloads_list
+                    ],
+                    "is_end": is_end,
+                }
+                receipt.commit(token, result)
+                return result
+            except BaseException as error:
+                receipt.fail(token)
+                controller.policy_status_manager.terminal_error = error
+                raise
     payloads_list, is_end = await controller.get_batched_prompt(
         n, validation_step, rank_in_mesh
     )
@@ -739,10 +875,16 @@ async def get_batched_prompt(
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list = extract_rollouts(request.payloads, True, is_validation=True)
-    controller.policy_status_manager.validation_report_validation_results(
-        request.validation_step, rollouts_list, controller.rollout_status_manager
-    )
+    try:
+        rollouts_list = extract_rollouts(request.payloads, True, is_validation=True)
+        controller.policy_status_manager.validation_report_validation_results(
+            request.validation_step,
+            rollouts_list,
+            controller.rollout_status_manager,
+            request=request,
+        )
+    except (ValueError, RuntimeError) as error:
+        return JSONResponse(status_code=409, content={"error": str(error)})
     return {"message": "Validation rollout put"}
 
 
@@ -753,6 +895,105 @@ async def put_rollout_group(rollout: RolloutRequest):
         # Reject before extracting payloads, handling end signals, touching
         # counters, or publishing cleanup into the new attempt's transports.
         return JSONResponse(status_code=410, content={"error": "stale_execution"})
+    replica = controller.rollout_status_manager[rollout.src_replica_name]
+    if replica is None:
+        return JSONResponse(status_code=410, content={"error": "retired_source"})
+    atom = next(
+        (
+            atom
+            for atom in replica.atoms.values()
+            if atom.global_rank == rollout.src_global_rank
+        ),
+        None,
+    )
+    if (
+        atom is None
+        or atom.rollout_reporter is False
+        or not atom.report_session_id
+        or atom.report_session_id != rollout.report_session_id
+        or rollout.report_sequence is None
+    ):
+        return JSONResponse(status_code=409, content={"error": "unfenced_report"})
+    # An HTTP retry can arrive while its disconnected predecessor is still
+    # awaiting admission's lifecycle lock. Serialize that source through ACK
+    # publication, then return its original result without repeating effects.
+    async with atom.rollout_report_lock, controller.life_cycle_lock:
+        if controller.rollout_status_manager[rollout.src_replica_name] is not replica:
+            return JSONResponse(status_code=410, content={"error": "retired_source"})
+        receipt = atom.rollout_report_receipt
+        try:
+            digest = request_digest(rollout.model_dump(mode="json"))
+            token, cached = receipt.begin(rollout.report_sequence, digest)
+        except ValueError as error:
+            return JSONResponse(status_code=409, content={"error": str(error)})
+        except RuntimeError as error:
+            return JSONResponse(status_code=503, content={"error": str(error)})
+        if token is None:
+            return cached
+        application_plan = training_plan = None
+        try:
+            if replica.status.ended or atom.rollout_reports_ended:
+                raise ValueError("Rollout report arrived after source completion")
+            if rollout.is_end and (
+                rollout.payloads
+                or rollout.completion_identities
+                or rollout.completion_failures
+                or rollout.training_rejections
+            ):
+                raise ValueError("End report cannot contain training outcomes")
+            # Shape/selection errors are deterministic rejections before any
+            # accounting mutation; preserve the original request digest above.
+            extracted = (
+                [] if rollout.is_end else extract_rollouts(rollout.payloads, False)
+            )
+            if not rollout.is_end and controller.config.mode != "colocated":
+                if controller.completion_admission is not None:
+                    application_plan = controller.completion_admission.prepare(
+                        controller,
+                        rollout,
+                        [item for group in extracted for item in group],
+                    )
+                training_plan = replica.producer_reservations.prepare_report(
+                    rollout,
+                    application_plan=application_plan,
+                    is_dapo=controller.config.train.train_policy.variant == "dapo",
+                )
+        except (ValueError, AssertionError, TypeError) as error:
+            result = JSONResponse(status_code=409, content={"error": str(error)})
+            receipt.commit(token, result)
+            return result
+        try:
+            if controller.policy_status_manager.terminal_error is not None:
+                raise RuntimeError("Controller accounting is already terminal")
+            result = await _apply_rollout_group(
+                rollout,
+                extracted=extracted,
+                application_plan=application_plan,
+                training_plan=training_plan,
+            )
+            if isinstance(result, JSONResponse) and result.status_code >= 400:
+                raise RuntimeError("Rollout settlement failed after admission began")
+            if training_plan is not None:
+                replica.producer_reservations.commit(training_plan.ownership)
+            receipt.commit(token, result)
+            if rollout.is_end:
+                atom.rollout_reports_ended = True
+            return result
+        except BaseException as error:
+            # An uncertain partial mutation cannot be retried or admitted as a
+            # fresh result. The independent controller monitor observes this.
+            receipt.fail(token)
+            controller.policy_status_manager.terminal_error = error
+            raise
+
+
+async def _apply_rollout_group(
+    rollout: RolloutRequest,
+    *,
+    extracted=None,
+    application_plan=None,
+    training_plan=None,
+):
     try:
         if rollout.is_end:
             logger.info(
@@ -766,6 +1007,10 @@ async def put_rollout_group(rollout: RolloutRequest):
                 stays_command_participant=rollout.stays_command_participant,
             )
             if replica_ended:
+                controller.rollout_status_manager.release_producer_reservations(
+                    controller.rollout_status_manager[rollout.src_replica_name],
+                    controller.policy_status_manager,
+                )
                 controller.policy_status_manager.on_rollout_is_end(
                     controller.rollout_status_manager
                 )
@@ -775,7 +1020,11 @@ async def put_rollout_group(rollout: RolloutRequest):
 
             return {"message": "Rollout end signal received"}
 
-        rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
+        rollouts_list = (
+            extract_rollouts(rollout.payloads, rollout.is_end)
+            if extracted is None
+            else extracted
+        )
         # Flatten immediately after extraction so terminal cleanup has concrete
         # payload references, but runs before any metric/filter mutation.
         rollouts = [
@@ -785,7 +1034,14 @@ async def put_rollout_group(rollout: RolloutRequest):
         ]
         policy_status = controller.policy_status_manager
         if getattr(controller, "completion_admission", None) is not None:
-            await controller.put_application_rollouts(rollout, rollouts)
+            await controller._put_application_rollouts_locked(
+                rollout,
+                rollouts,
+                plan=application_plan,
+                requested_versions=training_plan.requested_versions
+                if training_plan is not None
+                else None,
+            )
             return {"message": "Identified rollout report processed"}
         if rollout.completion_identities is not None or rollout.completion_failures:
             raise ValueError("Identified completions require completion_admission=True")
@@ -801,7 +1057,23 @@ async def put_rollout_group(rollout: RolloutRequest):
                 report_id=rollout.metrics.get(COMPLETION_ADMISSION_REPORT_ID_KEY),
                 training_step=admission_training_step,
             )
-        if "discarded_samples" in rollout.metrics:
+        if training_plan is not None:
+            # These coordinates, unlike generation versions or metric IDs,
+            # refer to the exact original capacity. DAPO metric settlement below
+            # is disabled because every rejected slot is already settled here.
+            for version, count in training_plan.rejected_version_counts:
+                policy_status._settle_samples_on_the_fly(
+                    count,
+                    "rollout_failure",
+                    weight_version=version,
+                    report_id=f"reservation:{rollout.report_session_id}:{rollout.report_sequence}:{version}",
+                )
+            if rollout.metrics.get("discarded_samples", 0):
+                policy_status.filter_records["rollout_failed"] = (
+                    policy_status.filter_records.get("rollout_failed", 0)
+                    + rollout.metrics["discarded_samples"]
+                )
+        elif "discarded_samples" in rollout.metrics:
             discarded_samples = policy_status._parse_non_negative_count(
                 rollout.metrics, "discarded_samples"
             )
@@ -824,13 +1096,15 @@ async def put_rollout_group(rollout: RolloutRequest):
             policy_status.cleanup_terminal_rollouts(
                 rollouts,
                 rollout.metrics,
-                is_dapo=is_dapo,
+                is_dapo=is_dapo and training_plan is None,
             )
             return {"message": "Terminal rollout cleaned"}
 
         # Update the statistics for dynamic sampling used for metrics collection
         if is_dapo:
-            policy_status.update_dynamic_sampling_statistics(rollout.metrics)
+            policy_status.update_dynamic_sampling_statistics(
+                rollout.metrics, settle=training_plan is None
+            )
         # Filter out outdated rollouts
         rollouts = policy_status.filter_outdated_rollouts(rollouts)
         if len(rollouts) > 0:
@@ -863,8 +1137,13 @@ async def train_ack(request: TrainAckRequest):
             profile_finished,
             report_data,
             controller.rollout_status_manager,
+            report_session_id=request.report_session_id,
+            src_global_rank=request.src_global_rank,
         )
         return {"message": "Ack completed"}
+    except ValueError as e:
+        # Deterministic mismatches must not be retried as an internal outage.
+        return JSONResponse(status_code=409, content={"message": str(e)})
     except Exception as e:
         import traceback
 

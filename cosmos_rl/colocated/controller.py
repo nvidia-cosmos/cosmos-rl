@@ -376,6 +376,8 @@ class ColocatedController(Controller):
                 weight_step=self.current_step,
                 total_steps=self.total_steps,
                 redis_handler=self.command_dispatcher,
+                validation_round_id=cmd.validation_round_id,
+                validation_protocol_version=cmd.validation_protocol_version,
             )
         return need_sync_weight
 

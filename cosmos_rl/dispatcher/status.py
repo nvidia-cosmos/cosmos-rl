@@ -16,6 +16,7 @@
 import time
 import math
 import threading
+import msgpack
 from functools import wraps
 from collections import OrderedDict
 from queue import Empty, Queue
@@ -29,6 +30,12 @@ from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.dispatcher.command as command
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
+from cosmos_rl.utils.redis_publication import PublicationPlan
+from cosmos_rl.dispatcher.dispatch import TrainingDispatch
+from cosmos_rl.dispatcher.validation_round import (
+    ValidationRound,
+    validation_report_digest,
+)
 from cosmos_rl.utils.payload_transport import PayloadTransportRegistry
 from cosmos_rl.utils.report.wandb_logger import (
     is_wandb_available,
@@ -285,6 +292,20 @@ def _serialize_policy_lifecycle(method):
     return wrapped
 
 
+def _terminal_dispatch_failure(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as error:
+            # Queue extraction/state sealing may already have happened. Do not
+            # turn an internal partial dispatch into a retriable HTTP request.
+            self.terminal_error = error
+            raise
+
+    return wrapped
+
+
 class PolicyStatusManager:
     """
     A class to manage the status of a policy.
@@ -328,6 +349,16 @@ class PolicyStatusManager:
         # Entries are keyed by the command step and consumed after its full
         # policy ACK set, keeping samples_on_the_fly accounting symmetric.
         self.dispatched_rollouts_by_step: Dict[int, int] = {}
+        self.training_dispatches: OrderedDict[int, TrainingDispatch] = OrderedDict()
+        self.sft_ack_groups: OrderedDict[tuple[bool, int], TrainingDispatch] = (
+            OrderedDict()
+        )
+        # Autonomous SFT has no controller-owned inter-step quiescent boundary.
+        # Seal the cohort before publishing its first mesh; never infer the
+        # participants of already-running work from membership at first ACK.
+        self.sft_cohort: Optional[Dict[str, Replica]] = None
+        self._sft_retired_step = {False: -1, True: -1}
+        self.report_data_list = []
 
         self.status = {}
 
@@ -344,6 +375,8 @@ class PolicyStatusManager:
 
         # Validation related
         self.val_report_data: Dict[int, List[Any]] = {}
+        self.validation_round: Optional[ValidationRound] = None
+        self._completed_validation_reports = OrderedDict()
 
         # Indicate whether on-policy rollout collection has completed for the current policy step
         self.on_policy_rollout_completed: bool = False
@@ -362,6 +395,7 @@ class PolicyStatusManager:
         self.completion_acks: set[str] = set()
         self.terminal_complete = False
         self.stop_reason: Optional[str] = None
+        self.terminal_error: Optional[Exception] = None
         self._stop_policy_recipients: set[str] = set()
         from cosmos_rl.dispatcher.step_boundary import StepBoundary
 
@@ -463,8 +497,20 @@ class PolicyStatusManager:
         Check if the training is finished.
         """
         total_steps = self.training_horizon()
-        return self.terminal_complete or (
-            self.current_step >= total_steps and total_steps > 0
+        if self.sft_cohort is not None:
+            final = self.sft_ack_groups.get((False, total_steps))
+            return (
+                self.terminal_error is None
+                and (self.terminal_complete or (final is not None and final.settled))
+                and all(group.settled for group in self.sft_ack_groups.values())
+            )
+        return (
+            self.terminal_error is None
+            and not self.dispatched_rollouts_by_step
+            and (
+                self.terminal_complete
+                or (self.current_step >= total_steps and total_steps > 0)
+            )
         )
 
     def training_horizon(self) -> int:
@@ -630,7 +676,14 @@ class PolicyStatusManager:
         if self.rollout_admission_closed():
             self.cleanup_buffered_rollouts()
             return
-        if not self.all_ready_or_reduced():
+        # READY/REDUCED describes current members, not the sealed recipient
+        # set of an issued update. Losing an unacknowledged participant cannot
+        # turn that update into a successful synthetic completion.
+        if self.dispatched_rollouts_by_step or not self.all_ready_or_reduced():
+            return
+        if self.data_fetcher.activated_val_iter is not None:
+            # Validation temporarily blocks training, not ownership of the
+            # accepted tail. Its final receipt resumes this same drain.
             return
 
         frozen_total = self.training_horizon()
@@ -640,8 +693,35 @@ class PolicyStatusManager:
             if self.current_step > previous_step:
                 return
 
+        if self.config.validation.enable:
+            round_ = self.validation_round
+            if (
+                round_ is None
+                or round_.step != self.current_step
+                or not round_.complete
+            ):
+                policies = self.get_all_atoms_arrived_replicas()
+                if not policies:
+                    return
+                self.trigger_weight_sync(
+                    policies[0],
+                    rollout_status_manager,
+                    self.current_step,
+                    frozen_total,
+                    force_validation=True,
+                )
+                return
+
         self.cleanup_buffered_rollouts()
-        if self.real_terminal_command_acked():
+        final_dispatch = self.training_dispatches.get(frozen_total)
+        validation_terminal_acked = (
+            self.config.validation.enable
+            and self.current_step == frozen_total
+            and final_dispatch is not None
+            and final_dispatch.total_steps == frozen_total
+            and final_dispatch.settled
+        )
+        if self.real_terminal_command_acked() or validation_terminal_acked:
             self.terminal_complete = True
             return
         self.trigger_training_complete()
@@ -651,11 +731,22 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> None:
         """Single entry for rollout HTTP ``is_end`` POST (not prompt fetch)."""
-        if self.config.validation.enable:
-            return
         if not rollout_status_manager.all_rollouts_ended():
             return
         self.finish_draining_phase(rollout_status_manager)
+
+    @property
+    def validation_drained(self) -> bool:
+        """Early validation completion permits ordinary STOP after policy exit."""
+        round_ = self.validation_round
+        return (
+            self.job_phase == JobPhase.DRAINING
+            and self.terminal_complete
+            and round_ is not None
+            and round_.step == self.current_step
+            and round_.complete
+            and self.data_fetcher.activated_val_iter is None
+        )
 
     def should_weight_sync_after_train_ack(
         self,
@@ -664,7 +755,7 @@ class PolicyStatusManager:
     ) -> bool:
         """Whether ``train_ack`` should schedule P2R/R2R for ``step``."""
         if self.job_phase == JobPhase.DRAINING and not (
-            self.stop_reason is not None
+            self.config.validation.enable
             and self.data_fetcher.activated_val_iter is not None
         ):
             return False
@@ -681,13 +772,13 @@ class PolicyStatusManager:
             # Validation runs can exhaust the training prompt stream (``is_end``)
             # before the final ``train_ack`` lands.  ``status.ended`` only means
             # "no more training prompts", not "validation + shutdown complete".
-            # Keep the final-step R2R so rollout receives ``validation_flag``
-            # and ``replica_should_stop``; suppressing it here wedged final
-            # validation at 0/N with the controller val dataloader activated.
+            # Keep every already-activated validation's R2R, including a
+            # periodic round that precedes the final accepted tail update.
+            # Suppressing it would strand the active sampler and the drain.
             if not (
                 self.config.validation.enable
                 and need_sync_weight
-                and step == self.total_steps
+                and self.data_fetcher.activated_val_iter is not None
             ):
                 return False
         if need_sync_weight:
@@ -767,14 +858,68 @@ class PolicyStatusManager:
             validation_enabled=self.config.validation.enable
         )
 
-    def _expected_validation_rollout_count(self) -> int:
-        val_datasize = getattr(self.data_fetcher, "val_datasize", 0)
-        if not val_datasize and getattr(self.data_fetcher, "val_dataloader", None):
-            val_datasize = len(self.data_fetcher.val_dataloader)
-        return val_datasize * self.config.validation.n_generation
+    @_serialize_policy_lifecycle
+    def prepare_validation_round(self, step, total_steps, replicas, *, force=False):
+        """Seal reporting ownership before publishing the validating command."""
+        if not self.config.validation.enable or step is None:
+            return None
+        if self.config.train.train_policy.type == "sft":
+            return None
+        if not (
+            force
+            or (
+                (step == 0 and self.config.validation.val_before_train)
+                or (step > 0 and step % self.config.validation.freq == 0)
+                or step == total_steps
+            )
+        ):
+            return None
+        reporters = set()
+        for replica in replicas:
+            ranks = {
+                atom.global_rank
+                for atom in replica.atoms.values()
+                if atom.validation_reporter is True
+            }
+            if not ranks:
+                raise ValueError("Validation replica did not register its reporters")
+            reporters.update((replica.name, rank) for rank in ranks)
+        previous = self.validation_round
+        if previous is not None:
+            if previous.step == step:
+                if previous.complete:
+                    return None
+                if previous.reporters != reporters:
+                    raise ValueError("Active validation cannot change its reporters")
+                return previous.round_id
+            if not previous.complete:
+                raise ValueError("Cannot replace an unfinished validation round")
+        if self.data_fetcher.activated_val_step not in (None, step):
+            raise ValueError("Validation sampler belongs to another step")
+        self.data_fetcher.validation_activate_dataloader(step)
+        self.validation_round = ValidationRound(
+            step, reporters, self.config.validation.n_generation
+        )
+        return self.validation_round.round_id
 
-    def _reported_validation_rollout_count(self, validation_step: int) -> int:
-        return sum(len(x) for x in self.val_report_data.get(validation_step, []))
+    @_serialize_policy_lifecycle
+    def fetch_validation_prompts(
+        self, n, step, rank_in_mesh, round_id, replica, sequence
+    ):
+        if n <= 0:
+            raise ValueError("Validation fetch size must be positive")
+        round_ = self.validation_round
+        if round_ is None or round_.step != step:
+            raise ValueError("No matching validation round")
+        return round_.fetch(
+            round_id,
+            replica,
+            sequence,
+            (n, rank_in_mesh),
+            lambda: self.data_fetcher.get_batched_prompt(
+                n, step, rank_in_mesh, weight_version=None
+            ),
+        )
 
     def get_status(self, name: str) -> PolicyStatus:
         """
@@ -871,7 +1016,29 @@ class PolicyStatusManager:
             logger.info(f"[Controller] Replica {replica_name} is stopping.")
             return
 
+        final = (
+            self.sft_ack_groups.get((False, self.training_horizon()))
+            if self.sft_cohort is not None
+            else self.training_dispatches.get(self.training_horizon())
+        )
+        if final is not None and replica_name in final.report_digests:
+            # A completed participant may leave before its peer's final
+            # report arrives. Retain its receipt and the original ACK set.
+            return
+        if self.sft_cohort is not None and replica_name in self.sft_cohort:
+            self._fail_sft_membership("a participant departed before its final ACK")
         valid_replicas = self.get_all_atoms_arrived_replicas()
+        if not valid_replicas:
+            self.terminal_error = RuntimeError(
+                "All policy replicas departed before training completed; "
+                "resume the job from a checkpoint (scale-to-zero rebootstrap is unsupported)"
+            )
+            raise self.terminal_error
+        if any(
+            not group.settled and replica_name in group.participants
+            for group in self.training_dispatches.values()
+        ):
+            self._fail_pending_policy_membership()
         if replica.in_mesh and len(valid_replicas) > 0:
             self.trigger_rebuild_mesh(valid_replicas)
 
@@ -888,12 +1055,34 @@ class PolicyStatusManager:
         """
         if self.stop_reason is not None:
             raise RuntimeError("Cannot register policy participants after request_stop")
+        if self.terminal_error is not None:
+            raise self.terminal_error
+        if (
+            config.train.train_policy.type == "sft"
+            and config.policy.parallelism.n_init_replicas > 1
+            and not atom.report_session_id
+        ):
+            raise ValueError("Multi-replica SFT requires a policy process session ID")
         replica = self[atom.replica_name]
+        if replica is None and self.dispatched_rollouts_by_step:
+            raise RuntimeError(
+                "Cannot join or replace policy participants during an unsettled update"
+            )
+        if self.sft_cohort is not None and (
+            replica is not self.sft_cohort.get(atom.replica_name)
+            or replica is None
+            or str(atom) not in replica.atoms
+        ):
+            raise RuntimeError(
+                "SFT membership is sealed; joining or replacing participants "
+                "requires restarting from a checkpoint"
+            )
         if replica is None:
             replica = Replica(atom.replica_name, Role.POLICY, [atom])
             self.policy_replicas[atom.replica_name] = replica
         else:
-            replica.arrive(atom)
+            if not replica.arrive(atom):
+                return replica
         atom.bind_replica(replica)
         current_policy_replica = replica
 
@@ -965,6 +1154,9 @@ class PolicyStatusManager:
                             weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                             total_steps=None,
                             redis_handler=self.redis_handler,
+                            validation_round_id=self.prepare_validation_round(
+                                self.current_step, None, valid_rollout_replicas
+                            ),
                         )
                     logger.info(
                         f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} via Policy registration"
@@ -981,12 +1173,48 @@ class PolicyStatusManager:
             )
         return replica
 
+    def _fail_sft_membership(self, reason: str):
+        self.terminal_error = RuntimeError(
+            f"SFT completion is uncertain: {reason}; the original ACK set is "
+            "retained as incomplete. Elastic recovery is unsupported; restart "
+            "from a checkpoint. Remaining workers may require the job timeout."
+        )
+        raise self.terminal_error
+
+    def _fail_pending_policy_membership(self):
+        self.terminal_error = RuntimeError(
+            "Policy membership changed during an unsettled update; completion "
+            "is uncertain and the original ACK set remains incomplete. "
+            "Restart from a checkpoint; elastic step recovery is unsupported."
+        )
+        raise self.terminal_error
+
+    @_serialize_policy_lifecycle
     def trigger_rebuild_mesh(self, valid_replicas: List[Replica]):
+        if self.dispatched_rollouts_by_step:
+            self._fail_pending_policy_membership()
         # Always tell the policy to rebuild mesh even there is only one policy replica
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
-        command.BuildMeshCommand.trigger(
-            sorted_valid_replicas, redis_handler=self.redis_handler
-        )
+        if (
+            self.config.train.train_policy.type == "sft"
+            and self.config.policy.parallelism.n_init_replicas > 1
+        ):
+            if self.sft_cohort is not None:
+                # Even identical names would replace the communicator while
+                # an autonomous optimizer step may still be using it.
+                self._fail_sft_membership("an active mesh rebuild was requested")
+            if not sorted_valid_replicas:
+                raise ValueError("Cannot publish an empty SFT mesh")
+            self.sft_cohort = {r.name: r for r in sorted_valid_replicas}
+        try:
+            command.BuildMeshCommand.trigger(
+                sorted_valid_replicas, redis_handler=self.redis_handler
+            )
+        except Exception as error:
+            if self.sft_cohort is not None:
+                # Publication may already have reached a subset of trainers.
+                self.terminal_error = error
+            raise
         self.recompute_total_steps()
         self.data_fetcher.set_policy_global_mesh_size(len(sorted_valid_replicas))
         self.rearrange_rollout_buffer_after_mesh_rebuild(sorted_valid_replicas)
@@ -1017,9 +1245,6 @@ class PolicyStatusManager:
     ):
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
 
-        if config.validation.enable and config.validation.val_before_train:
-            self.data_fetcher.validation_activate_dataloader(0)
-
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas
@@ -1027,6 +1252,8 @@ class PolicyStatusManager:
             # This is the case when all required replicas have arrived
 
             self.policy_init_done = True
+            if config.validation.enable and config.validation.val_before_train:
+                self.data_fetcher.validation_activate_dataloader(0)
             # Trigger mesh building (Typically only occurs during initialization)
 
             # we need buildmesh, event there is only one replica. (trigger HANccl buildmesh)
@@ -1067,9 +1294,12 @@ class PolicyStatusManager:
                 ):
                     self.data_fetcher.validation_activate_dataloader(self.current_step)
 
+                self.remain_samples_num -= (
+                    self.config.train.train_batch_per_replica * len(valid_replicas)
+                )
+                publications = []
                 for replica in valid_replicas:
-                    self.remain_samples_num -= self.config.train.train_batch_per_replica
-                    command.DataFetchCommand.trigger(
+                    fetch = command.DataFetchCommand.for_replica(
                         replica=replica,
                         items_count=self.config.train.train_batch_per_replica,
                         global_step=self.current_step,
@@ -1078,12 +1308,18 @@ class PolicyStatusManager:
                         remain_samples_num=self.remain_samples_num,
                         # Only `do_save` when checkpointing is enabled
                         do_save=False,
-                        redis_handler=self.redis_handler,
+                    )
+                    publications.append(
+                        (replica.name + "_command", "command", fetch.pack())
                     )
                     self.set_status(replica.name, PolicyStatus.RUNNING)
                     logger.info(
                         f"[Controller] Policy Replica {replica.name} is ready in colocated mode."
                     )
+                # No remote rollouts were reserved for this initial local step.
+                self.dispatched_rollouts_by_step[self.current_step] = 0
+                self._seal_training_dispatch(valid_replicas, self.total_steps, 0)
+                self.redis_handler.publish_plan(PublicationPlan.create(publications))
         elif (
             not self.policy_init_done
             and len(valid_replicas) < config.policy.parallelism.n_init_replicas
@@ -1126,37 +1362,83 @@ class PolicyStatusManager:
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
 
+    @_serialize_policy_lifecycle
     def validation_report_validation_results(
         self,
         validation_step: int,
         validation_results: List[List[Rollout]],
         rollout_status_manager: "RolloutStatusManager",
+        *,
+        request=None,
     ):
+        round_ = self.validation_round
+        if (
+            request is None
+            or not request.validation_round_id
+            or request.src_global_rank is None
+            or request.report_sequence is None
+        ):
+            raise ValueError("Validation report requires a matching round and reporter")
+        reporter = (request.src_replica_name, request.src_global_rank)
+        receipt = self._completed_validation_reports.get(reporter)
+        if receipt is not None and receipt[:3] == (
+            request.validation_round_id,
+            validation_step,
+            request.report_sequence,
+        ):
+            if receipt[3] != validation_report_digest(request.payloads, request.is_end):
+                raise ValueError("Completed validation retry changed its result")
+            return
+        if round_ is None or round_.step != validation_step:
+            raise ValueError("No matching validation round")
+        if len(validation_results) != len(request.payloads) or any(
+            len(group) != round_.generations for group in validation_results
+        ):
+            raise ValueError("Validation extraction lost issued generations")
+        if (
+            not round_.complete
+            and self.data_fetcher.activated_val_step != validation_step
+        ):
+            raise ValueError("Validation sampler no longer belongs to this round")
+        if not round_.report(
+            request.validation_round_id,
+            reporter,
+            request.report_sequence,
+            request.payloads,
+            request.is_end,
+        ):
+            return
         if validation_step not in self.val_report_data:
             self.val_report_data[validation_step] = []
 
         self.val_report_data[validation_step].extend(validation_results)
-        n_items_of_this_step = self._reported_validation_rollout_count(validation_step)
-
-        validation_finished = n_items_of_this_step == (
-            self._expected_validation_rollout_count()
-        )
+        validation_finished = round_.complete
 
         if self.data_fetcher.activated_val_tqdm:
-            self.data_fetcher.activated_val_tqdm.update(
-                n_items_of_this_step // self.config.validation.n_generation
-            )
+            self.data_fetcher.activated_val_tqdm.update(len(request.payloads))
         else:
             logger.error("[Controller] Validation tqdm is not activated")
         # Check if all rollout replicas have reported validation results
         if validation_finished and self.data_fetcher.activated_val_iter is not None:
+            # A lost final reply may outlive the start of the next round. Keep
+            # just the last terminal receipt per source, not its payload groups.
+            for source, (sequence, digest) in round_.completed_receipts().items():
+                self._completed_validation_reports[source] = (
+                    round_.round_id,
+                    round_.step,
+                    sequence,
+                    digest,
+                )
+                self._completed_validation_reports.move_to_end(source)
+            while len(self._completed_validation_reports) > _REPORT_DEDUP_WINDOW:
+                self._completed_validation_reports.popitem(last=False)
             # Validation is finished, trigger next step training
             self.data_fetcher.clear_validation_status()
 
             try:
-                all_rollouts_lists: List[List[Rollout]] = self.val_report_data[
+                all_rollouts_lists: List[List[Rollout]] = self.val_report_data.pop(
                     validation_step
-                ]
+                )
                 if all_rollouts_lists:
                     rewards = []
                     for rollouts in all_rollouts_lists:
@@ -1214,7 +1496,10 @@ class PolicyStatusManager:
 
             # The order is important, because the previous code block logs the previous step's validation results
             # while `try_trigger_data_fetch_and_training` will immediately report the next step's results
-            self.try_trigger_data_fetch_and_training()
+            if self.job_phase == JobPhase.DRAINING:
+                self.finish_draining_phase(rollout_status_manager)
+            else:
+                self.try_trigger_data_fetch_and_training()
 
     def total_pending_rollouts(self) -> int:
         """
@@ -1285,7 +1570,9 @@ class PolicyStatusManager:
         if count <= 0:
             return
         before = self.samples_on_the_fly
-        self.samples_on_the_fly = max(0, before - count)
+        if type(count) is not int or count > before:
+            raise ValueError("Rollout settlement exceeds outstanding reservations")
+        self.samples_on_the_fly = before - count
         _log_samples_on_the_fly_mutation(
             source,
             before,
@@ -1384,6 +1671,8 @@ class PolicyStatusManager:
         )
         if report_id in applied_ids:
             return 0
+        if type(count) is not int or count > self.samples_on_the_fly:
+            raise ValueError("Discard report exceeds outstanding reservations")
         applied_ids[report_id] = None
         if len(applied_ids) > _REPORT_DEDUP_WINDOW:
             applied_ids.popitem(last=False)
@@ -1553,7 +1842,9 @@ class PolicyStatusManager:
 
         return completion_tokens_count, n_samples
 
-    def update_dynamic_sampling_statistics(self, filter_records: Dict[str, int]):
+    def update_dynamic_sampling_statistics(
+        self, filter_records: Dict[str, int], *, settle=True
+    ):
         """
         Update the dynamic sampling statistics.
         """
@@ -1566,7 +1857,8 @@ class PolicyStatusManager:
         self.remain_samples_num -= filtered_count
         # Filtered DAPO generations have no payload and can never reach a
         # training ACK, so settle their prompt-side in-flight accounting here.
-        self._settle_samples_on_the_fly(filtered_count, "dapo_filter")
+        if settle:
+            self._settle_samples_on_the_fly(filtered_count, "dapo_filter")
 
     def update_completion_admission_statistics(
         self,
@@ -1788,11 +2080,12 @@ class PolicyStatusManager:
         train_step: int,
         total_steps: int,
         is_validation: bool = False,
+        *,
+        reports: List[Dict[str, Any]],
     ):
         try:
             report_data = {}
-            report_data = aggregate_report_data(self.report_data_list, report_data)
-            self.report_data_list = []
+            report_data = aggregate_report_data(reports, report_data)
             report_data_str = ", ".join([f"{k}: {v}" for k, v in report_data.items()])
             logger.debug(
                 f"[Controller] {'Validation' if is_validation else 'Train'} report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} data batch: {report_data_str}"
@@ -1814,22 +2107,20 @@ class PolicyStatusManager:
             for custom_logger_fn in self.custom_logger_fns:
                 # We add a separate try-except block to handle the error of custom logger function.
                 # This is to avoid the error of custom logger function affecting the fundamental logging system.
-                for custom_logger_fn in self.custom_logger_fns:
-                    try:
-                        custom_logger_fn(report_data, train_step)
-                    except Exception as e:
-                        logger.warning(
-                            f"[Controller] Error calling custom logger function: {e}"
-                        )
+                try:
+                    custom_logger_fn(report_data, train_step)
+                except Exception as e:
+                    logger.warning(
+                        f"[Controller] Error calling custom logger function: {e}"
+                    )
         except Exception as e:
             import traceback
 
             logger.warning(
                 f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
             )
-        for replica in self.get_all_atoms_arrived_replicas():
-            self.set_status(replica.name, PolicyStatus.RUNNING)
 
+    @_serialize_policy_lifecycle
     def sft_train_ack(
         self,
         replica_name: str,
@@ -1837,19 +2128,43 @@ class PolicyStatusManager:
         step: int,
         total_steps: int,
     ):
-        if "val/avg_loss" in report_data:
-            # This is a validation ack from SFT validation step
-            self.set_status(replica_name, PolicyStatus.VALIDATED)
-            if self.all_with_status([PolicyStatus.VALIDATED]):
-                # First validation ack received in this step
-                # Trigger validation report
-                self.sft_report_summary(
-                    train_step=step,
-                    total_steps=total_steps,
-                    is_validation=True,
+        if self.terminal_error is not None:
+            raise self.terminal_error
+        if self.sft_cohort is None:
+            raise ValueError("SFT ACK arrived before mesh publication")
+        if total_steps != self.training_horizon() or not 0 <= step <= total_steps:
+            raise ValueError("SFT ACK does not match the published training schedule")
+        if (
+            replica_name not in self.sft_cohort
+            or self.policy_replicas.get(replica_name)
+            is not self.sft_cohort[replica_name]
+        ):
+            raise ValueError("SFT ACK is not from the original mesh participant")
+        is_validation = "val/avg_loss" in report_data
+        key = (is_validation, step)
+        group = self.sft_ack_groups.get(key)
+        if group is None:
+            if step <= self._sft_retired_step[is_validation]:
+                raise ValueError("SFT ACK belongs to an expired report group")
+            while len(self.sft_ack_groups) >= _REPORT_DEDUP_WINDOW:
+                oldest = next(iter(self.sft_ack_groups))
+                if not self.sft_ack_groups[oldest].settled:
+                    self._fail_sft_membership("too many unsettled SFT ACK groups")
+                self.sft_ack_groups.popitem(last=False)
+                phase, retired_step = oldest
+                self._sft_retired_step[phase] = max(
+                    self._sft_retired_step[phase], retired_step
                 )
+            group = TrainingDispatch(
+                step,
+                total_steps,
+                frozenset(self.sft_cohort),
+                0,
+            )
+            self.sft_ack_groups[key] = group
+        if not group.acknowledge(replica_name, step, total_steps, report_data):
             return
-        if step > self.current_step:
+        if not is_validation and step > self.current_step:
             # Validation ACKs can overwrite REDUCED while other training ACKs
             # for the same step are still in flight. Advance from the worker's
             # completed step, never from these transient status flags.
@@ -1859,17 +2174,22 @@ class PolicyStatusManager:
                 or self.current_step == self.total_steps
             ):
                 self.data_fetcher.validation_activate_dataloader(self.current_step)
-        self.set_status(replica_name, PolicyStatus.REDUCED)
-        if self.all_reduced():
-            # All replicas have been reduced, trigger remain_samples_num update and report
-            self.remain_samples_num -= (
-                self.config.train.train_batch_per_replica
-            ) * len(self.get_all_atoms_arrived_replicas())
+        # SFT workers advance autonomously. Transient validation/training flags
+        # cannot represent several in-flight steps or determine their ACK sets.
+        if group.complete:
+            reports = group.settle()
+            if not is_validation:
+                self.remain_samples_num -= (
+                    self.config.train.train_batch_per_replica * len(group.participants)
+                )
             self.sft_report_summary(
                 train_step=step,
                 total_steps=total_steps,
+                is_validation=is_validation,
+                reports=reports,
             )
 
+    @_serialize_policy_lifecycle
     def train_ack(
         self,
         replica_name: str,
@@ -1878,9 +2198,27 @@ class PolicyStatusManager:
         profile_finished: bool,
         report_data: Dict[str, Any],
         rollout_status_manager: "RolloutStatusManager",
+        *,
+        report_session_id: Optional[str] = None,
+        src_global_rank: Optional[int] = None,
     ):
+        if self.terminal_error is not None:
+            raise self.terminal_error
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
+        if self.sft_cohort is not None:
+            participant = self.sft_cohort.get(replica_name)
+            if (
+                participant is None
+                or participant is not self[replica_name]
+                or not report_session_id
+                or not any(
+                    atom.report_session_id == report_session_id
+                    and atom.global_rank == src_global_rank
+                    for atom in participant.atoms.values()
+                )
+            ):
+                raise ValueError("SFT ACK is not from the original mesh participant")
 
         # Synthetic completion ACKs have their own persistent recipient set.
         # Record them before logging/reduction bookkeeping and before the
@@ -1888,10 +2226,6 @@ class PolicyStatusManager:
         if self.record_completion_ack(replica_name, step):
             self.set_status(replica_name, PolicyStatus.REDUCED)
             return
-
-        if not hasattr(self, "report_data_list"):
-            self.report_data_list = []
-        self.report_data_list.append(report_data)
 
         if self.config.train.train_policy.type == "sft":
             # For SFT with multiple replicas, we handle train_ack differently
@@ -1902,9 +2236,26 @@ class PolicyStatusManager:
                 total_steps,
             )
 
+        dispatch = self.training_dispatches.get(step)
+        if dispatch is None:
+            raise ValueError("Training ACK has no matching dispatched step")
+        if not dispatch.settled and (
+            self.dispatched_rollouts_by_step.get(step) != dispatch.rollout_count
+            or dispatch.rollout_count > self.samples_on_the_fly
+        ):
+            raise ValueError("Training ACK exceeds outstanding dispatch reservations")
+        if not dispatch.acknowledge(replica_name, step, total_steps, report_data):
+            return
         self.set_status(replica_name, PolicyStatus.REDUCED)
+        if profile_finished:
+            self[replica_name].sub_profiler_config.do_profile = False
 
-        if self.all_reduced():
+        if dispatch.complete:
+            reports = dispatch.settle()
+            # Scaling exemptions last only through the next completed update,
+            # not for the rest of this job after any historical departure.
+            self.replica_scaling_log.clear()
+            rollout_status_manager.replica_scaling_log.clear()
             # Admission metadata is step-scoped. Snapshot and clear it at the
             # step boundary even when logging is disabled or reporting fails.
             completion_admission_records = self._take_completion_admission_statistics(
@@ -1912,30 +2263,10 @@ class PolicyStatusManager:
             )
             _sotf_before = self.samples_on_the_fly
             # Settle exactly the rollout count recorded for this real command.
-            _missing_dispatch = object()
-            _dispatch_record = self.dispatched_rollouts_by_step.pop(
-                step, _missing_dispatch
-            )
-            _train_decrement = (
-                0 if _dispatch_record is _missing_dispatch else _dispatch_record
-            )
-            if _dispatch_record is _missing_dispatch and step not in (
-                self.total_steps,
-                self.total_steps - 1,
-            ):
-                # Unexpected: a real step had no dispatch record. Either the
-                # dispatch record was already consumed (double-ack) or a
-                # step number is mismatched.  Log loudly but do not crash;
-                # ``samples_on_the_fly`` stays balanced regardless.
-                logger.warning(
-                    "[Controller] train_ack for step=%d found no dispatch "
-                    "record (current_step=%d total_steps=%d).  "
-                    "Decrementing samples_on_the_fly by 0; this may "
-                    "indicate a double-ack or step-numbering bug.",
-                    step,
-                    self.current_step,
-                    self.total_steps,
-                )
+            _dispatch_record = self.dispatched_rollouts_by_step.pop(step)
+            if _dispatch_record != dispatch.rollout_count:
+                raise RuntimeError("Training dispatch accounting changed after sealing")
+            _train_decrement = dispatch.rollout_count
             self.samples_on_the_fly -= _train_decrement
             _log_samples_on_the_fly_mutation(
                 "train_ack",
@@ -1952,7 +2283,6 @@ class PolicyStatusManager:
             if (
                 getattr(self.config, "mode", None) != "colocated"
                 and not self.config.validation.enable
-                and _dispatch_record is not _missing_dispatch
                 and _train_decrement > 0
             ):
                 self.record_real_datafetch_acked(step, total_steps)
@@ -1965,57 +2295,41 @@ class PolicyStatusManager:
                 step, rollout_status_manager
             )
 
-            if profile_finished:
-                # Only reset the do_profile flag if the profile is finished
-                logger.debug(f"[Controller] Unset the profile mode of {replica_name}")
-                self[replica_name].sub_profiler_config.do_profile = False
-
+            if self.config.mode == "colocated":
+                for data in reports:
+                    self.update_dynamic_sampling_statistics(data)
+            # Per-step reports/counters do not depend on optional logger success.
+            filter_records, self.filter_records = self.filter_records, {}
             # Sum and report data
-            if self.config.logging.logger and not all(
-                [not data for data in self.report_data_list]
-            ):
+            if self.config.logging.logger and not all([not data for data in reports]):
                 try:
                     total_loss_avg = np.mean(
-                        [data["train/loss_avg"] for data in self.report_data_list]
+                        [data["train/loss_avg"] for data in reports]
                     )
                     total_loss_max = np.max(
-                        [data["train/loss_max"] for data in self.report_data_list]
+                        [data["train/loss_max"] for data in reports]
                     )
-                    total_learning_rate = self.report_data_list[0][
-                        "train/learning_rate"
-                    ]
+                    total_learning_rate = reports[0]["train/learning_rate"]
                     total_iter_time_avg = np.mean(
-                        [data["train/iteration_time"] for data in self.report_data_list]
+                        [data["train/iteration_time"] for data in reports]
                     )
                     # KL loss
                     total_kl_loss_avg = np.mean(
-                        [
-                            data.get("train/kl_loss_avg", 0)
-                            for data in self.report_data_list
-                        ]
+                        [data.get("train/kl_loss_avg", 0) for data in reports]
                     )
                     total_kl_loss_max = np.max(
-                        [
-                            data.get("train/kl_loss_max", 0)
-                            for data in self.report_data_list
-                        ]
+                        [data.get("train/kl_loss_max", 0) for data in reports]
                     )
                     total_grad_norm = np.mean(
-                        [
-                            data.get("train/grad_norm", 0)
-                            for data in self.report_data_list
-                        ]
+                        [data.get("train/grad_norm", 0) for data in reports]
                     )
                     total_entropy = np.mean(
-                        [data.get("train/entropy", 0) for data in self.report_data_list]
+                        [data.get("train/entropy", 0) for data in reports]
                     )
                     total_effective_entropy = np.mean(
-                        [
-                            data.get("train/effective_entropy", 0)
-                            for data in self.report_data_list
-                        ]
+                        [data.get("train/effective_entropy", 0) for data in reports]
                     )
-                    train_step = self.report_data_list[0]["train_step"]
+                    train_step = step
                     policy_report_data = {
                         "train/loss_avg": total_loss_avg,
                         "train/loss_max": total_loss_max,
@@ -2029,20 +2343,15 @@ class PolicyStatusManager:
                         "train/total_steps": total_steps,
                     }
                     policy_report_data = aggregate_report_data(
-                        self.report_data_list, policy_report_data
+                        reports, policy_report_data
                     )
                     policy_report_data.update(completion_admission_records)
-                    if self.config.mode == "colocated":
-                        for data in self.report_data_list:
-                            # Handle dynamic sampling statistics update in colocated mode
-                            self.update_dynamic_sampling_statistics(data)
-
-                    if len(self.filter_records) > 0:
+                    if len(filter_records) > 0:
                         total_samples_for_filtering = sum(
-                            v for v in self.filter_records.values()
+                            v for v in filter_records.values()
                         )
                         if total_samples_for_filtering > 0:
-                            for k, v in self.filter_records.items():
+                            for k, v in filter_records.items():
                                 policy_report_data.update(
                                     {
                                         f"rollout/{k}_ratio": v
@@ -2059,8 +2368,6 @@ class PolicyStatusManager:
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
-                    self.report_data_list = []
-
                     report_data_str = ", ".join(
                         [
                             f"{k}: {v}"
@@ -2119,11 +2426,10 @@ class PolicyStatusManager:
                         logger.info(
                             f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
-                        if len(self.filter_records) > 0:
+                        if len(filter_records) > 0:
                             logger.info(
-                                f"Dynamic sampling rewards distribution so far: {self.filter_records}."
+                                f"Dynamic sampling rewards distribution so far: {filter_records}."
                             )
-                    self.filter_records = {}
                     for custom_logger_fn in self.custom_logger_fns:
                         # We add a separate try-except block to handle the error of custom logger function.
                         # This is to avoid the error of custom logger function affecting the fundamental logging system.
@@ -2206,6 +2512,8 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
         current_step: int,
         total_steps: int,
+        *,
+        force_validation: bool = False,
     ):
         valid_rollout_replicas = self._weight_sync_rollout_targets(
             rollout_status_manager
@@ -2215,6 +2523,9 @@ class PolicyStatusManager:
         )
         if any_loaded_rollout_replica is None:
             return
+        validation_round_id = self.prepare_validation_round(
+            current_step, total_steps, valid_rollout_replicas, force=force_validation
+        )
         command.PolicyToRolloutUnicastCommand.trigger(
             src_replica=policy_replica,
             dst_replica=any_loaded_rollout_replica,
@@ -2231,6 +2542,7 @@ class PolicyStatusManager:
             weight_step=current_step,
             total_steps=total_steps,
             redis_handler=self.redis_handler,
+            validation_round_id=validation_round_id,
         )
 
         # Weight-sync coalescing: record this as the latest staged round.  It
@@ -2277,6 +2589,43 @@ class PolicyStatusManager:
             * len(self.get_all_atoms_arrived_replicas())
         )
 
+    def _revalidate_rollouts_before_dispatch(self):
+        """An admission-time queue estimate is not a use-time version fence.
+
+        Cohort changes and uneven rank-local queues can postpone already
+        accepted work. Recheck against the actual pre-update version before
+        sealing a batch; do not predict future steps or change allowed lag.
+        Called only when a complete batch could otherwise be dispatched.
+        """
+        allowed = getattr(
+            self.config.train.train_policy, "allowed_outdated_steps", None
+        )
+        if self.config.mode == "colocated" or allowed is None:
+            return
+        queues = (
+            self.rollout_buffer_per_rank
+            if self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+            else [self.rollout_buffer]
+        )
+        original, accepted = [], []
+        for queue in queues:
+            for _ in range(queue.qsize()):
+                rollout = queue.get_nowait()
+                original.append(rollout)
+                if self.current_step - rollout.weight_version <= allowed:
+                    accepted.append(rollout)
+                    queue.put(rollout)
+        discarded = len(original) - len(accepted)
+        if discarded:
+            # Like admission-time staleness filtering, this spends the old
+            # prompt budget rather than refilling an obsolete weight version.
+            self._settle_samples_on_the_fly(discarded, "filter_outdated")
+            self.remain_samples_num -= discarded
+            self.filter_records["outdated"] = (
+                self.filter_records.get("outdated", 0) + discarded
+            )
+            self._publish_payload_transport_cleanup(original, accepted)
+
     def check_checkpoint_saving(self, required_rollouts: int):
         # Decide whether to save checkpoint
         # First check if we need to save checkpoint based on epoch
@@ -2313,9 +2662,17 @@ class PolicyStatusManager:
         # Only `do_save` when checkpointing is enabled
         return do_save and self.config.train.ckpt.enable_checkpoint
 
+    @_serialize_policy_lifecycle
+    @_terminal_dispatch_failure
     def try_trigger_data_fetch_and_training(self):
+        if self.terminal_error is not None:
+            raise self.terminal_error
         if self.stop_reason is not None:
             self._try_complete_requested_stop()
+            return
+        if self.dispatched_rollouts_by_step:
+            # Live READY/REDUCED flags are not the sealed recipient set of
+            # already-issued work, including in ordinary RUNNING mode.
             return
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.data_fetcher.activated_val_iter is not None:
@@ -2338,7 +2695,11 @@ class PolicyStatusManager:
         )
 
         if all_ready_or_reduced:
+            self._revalidate_rollouts_before_dispatch()
+            if not self.rollouts_enough_for_one_step():
+                return
             rollouts_of_this_step: List[Rollout] = []
+            publications = []
             # Decrease the consumed rollouts number.
             self.remain_samples_num -= required_rollouts
 
@@ -2381,20 +2742,32 @@ class PolicyStatusManager:
                         sort_queue_by_prompt_idx(self.rollout_buffer_per_rank[index])
                         for _ in range(items_count):
                             rollout = self.rollout_buffer_per_rank[index].get()
-                            replica.put_rollout(rollout, self.redis_handler)
+                            publications.append(
+                                (
+                                    replica.name + "_rollout",
+                                    "rollout",
+                                    msgpack.packb(rollout.model_dump()),
+                                )
+                            )
                             rollouts_of_this_step.append(rollout)
                 else:
                     for _ in range(items_count):
                         for replica in arrived_replicas:
                             rollout = self.rollout_buffer.get()
-                            replica.put_rollout(rollout, self.redis_handler)
+                            publications.append(
+                                (
+                                    replica.name + "_rollout",
+                                    "rollout",
+                                    msgpack.packb(rollout.model_dump()),
+                                )
+                            )
                             rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             do_save = self.check_checkpoint_saving(required_rollouts)
 
             for replica in arrived_replicas:
-                command.DataFetchCommand.trigger(
+                fetch = command.DataFetchCommand.for_replica(
                     replica=replica,
                     items_count=items_count,
                     global_step=self.current_step,
@@ -2403,9 +2776,19 @@ class PolicyStatusManager:
                     remain_samples_num=self.remain_samples_num,
                     # do_save from `check_checkpoint_saving` indicates whether the replica should save checkpoint after this training step
                     do_save=do_save,
-                    redis_handler=self.redis_handler,
+                )
+                publications.append(
+                    (replica.name + "_command", "command", fetch.pack())
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)
+
+            self._seal_training_dispatch(
+                arrived_replicas, training_horizon, required_rollouts
+            )
+            # One immutable operation contains all payloads and commands. Redis
+            # retries the same identity after a lost reply; ambiguous partial
+            # publication poisons the handler instead of issuing another step.
+            self.redis_handler.publish_plan(PublicationPlan.create(publications))
 
             # Report the reward, length, etc.
             # These properties are already ready to be reported before being trained
@@ -2455,6 +2838,21 @@ class PolicyStatusManager:
                     report_data_list, report_data, prefix="train/"
                 )
                 self.train_report_data[self.current_step] = report_data
+
+    def _seal_training_dispatch(self, replicas, total_steps, rollout_count):
+        if self.current_step in self.training_dispatches:
+            raise ValueError("Training step already has a sealed dispatch")
+        self.training_dispatches[self.current_step] = TrainingDispatch(
+            self.current_step,
+            total_steps,
+            frozenset(replica.name for replica in replicas),
+            rollout_count,
+        )
+        while len(self.training_dispatches) > _REPORT_DEDUP_WINDOW:
+            oldest = next(iter(self.training_dispatches))
+            if not self.training_dispatches[oldest].settled:
+                raise RuntimeError("Too many unsettled training dispatches")
+            self.training_dispatches.popitem(last=False)
 
 
 class RolloutStatusManager:
@@ -2568,6 +2966,7 @@ class RolloutStatusManager:
         )
 
         replica = self.rollout_replicas.pop(replica_name)
+        self.release_producer_reservations(replica, policy_status_manager)
         self._ended_reporters.pop(replica_name, None)
         self._command_participant_ended_replicas.discard(replica_name)
         self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
@@ -2597,6 +2996,30 @@ class RolloutStatusManager:
                 replica_name,
             )
 
+        # Removing the last still-generating member can close the input set
+        # just like its final HTTP checkout. Re-evaluate only after publishing
+        # the survivor mesh; drain must still wait for every issued update's
+        # ACKs and retain the original checkpoint horizon. This does not settle
+        # accepted work owned by training or recover its remote payloads.
+        if self.all_rollouts_ended():
+            policy_status_manager.on_rollout_is_end(self)
+
+    @staticmethod
+    def release_producer_reservations(replica, policy_status_manager):
+        """Retire only unreported slots, never buffered/dispatched payloads."""
+        ledger = replica.producer_reservations
+        try:
+            for version, count in ledger.retire().items():
+                policy_status_manager.settle_discarded_samples(
+                    source_replica=replica.name,
+                    report_id=f"producer-retired:{ledger.incarnation}:{version}",
+                    count=count,
+                    weight_version=version,
+                )
+        except BaseException as error:
+            policy_status_manager.terminal_error = error
+            raise
+
     def register(
         self,
         atom: Atom,
@@ -2612,7 +3035,8 @@ class RolloutStatusManager:
             replica = Replica(atom.replica_name, Role.ROLLOUT, [atom])
             self.rollout_replicas[atom.replica_name] = replica
         else:
-            replica.arrive(atom)
+            if not replica.arrive(atom):
+                return replica
         atom.bind_replica(replica)
 
         # post register hook
@@ -2650,8 +3074,12 @@ class RolloutStatusManager:
         return {
             atom.global_rank
             for atom in replica.atoms.values()
-            if atom.tp_rank() == 0
-            and atom.pp_rank() == atom.group_size[MESH_NAMES.index("pp")] - 1
+            if (
+                atom.rollout_reporter
+                if atom.rollout_reporter is not None
+                else atom.tp_rank() == 0
+                and atom.pp_rank() == atom.group_size[MESH_NAMES.index("pp")] - 1
+            )
         }
 
     def get_safe_weight_sync_replicas(
@@ -2853,6 +3281,9 @@ class RolloutStatusManager:
                     weight_step=self.policy_status_manager.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
                     total_steps=None,
                     redis_handler=self.redis_handler,
+                    validation_round_id=policy_status_manager.prepare_validation_round(
+                        policy_status_manager.current_step, None, valid_replicas
+                    ),
                 )
         elif not self.rollout_init_done:
             assert len(valid_replicas) < config.rollout.parallelism.n_init_replicas

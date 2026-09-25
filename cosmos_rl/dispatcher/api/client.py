@@ -21,6 +21,8 @@ import os
 import re
 import requests
 import msgpack
+import threading
+from uuid import uuid4
 from functools import partial
 from typing import Dict, Any, List, Tuple, Optional
 from urllib.parse import urljoin
@@ -82,6 +84,15 @@ class APIClient(object):
     ):
         self.role = role
         self.controller_execution_id = controller_execution_id
+        self._report_session_id = uuid4().hex
+        self._report_sequence = 0
+        self._report_lock = threading.Lock()
+        self._report_failed = False
+        self._fetch_sequence = 0
+        self._fetch_lock = threading.Lock()
+        self._fetch_failed = False
+        self._registered_global_rank = None
+        self._registered_replica_name = None
 
         self.remote_ips = remote_ips
         self.remote_port = remote_port
@@ -193,7 +204,15 @@ class APIClient(object):
         global_rank: int,
         host_ip: str,
         host_name: str,
+        validation_reporter: Optional[bool] = None,
+        rollout_reporter: Optional[bool] = None,
     ):
+        if self._registered_replica_name not in (None, replica_name) or (
+            self._registered_global_rank not in (None, global_rank)
+        ):
+            raise ValueError("API client cannot change its registered source")
+        self._registered_replica_name = replica_name
+        self._registered_global_rank = global_rank
         try:
             make_request_with_retry(
                 partial(
@@ -207,6 +226,11 @@ class APIClient(object):
                         "global_rank": global_rank,
                         "host_ip": host_ip,
                         "host_name": host_name,
+                        "validation_reporter": validation_reporter,
+                        "rollout_reporter": rollout_reporter,
+                        "report_session_id": self._report_session_id
+                        if role in (Role.ROLLOUT, Role.POLICY)
+                        else None,
                     },
                 ),
                 self.get_alternative_urls(COSMOS_API_REGISTER_SUFFIX),
@@ -215,6 +239,54 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to register to controller: {e}")
             raise e
+
+    def delegate_rollout_reporting(self) -> dict:
+        """Transfer the unused fetch/report streams to a backend wrapper."""
+        with self._fetch_lock, self._report_lock:
+            if (
+                self.role != Role.ROLLOUT
+                or self._registered_replica_name is None
+                or self._registered_global_rank is None
+                or self._report_sequence != 0
+                or self._report_failed
+                or self._fetch_sequence != 0
+                or self._fetch_failed
+            ):
+                raise ValueError(
+                    "Only an unused registered rollout source can delegate"
+                )
+            self._report_failed = True
+            self._fetch_failed = True
+            return {
+                "replica_name": self._registered_replica_name,
+                "global_rank": self._registered_global_rank,
+                "report_session_id": self._report_session_id,
+                "controller_execution_id": self.controller_execution_id,
+            }
+
+    def adopt_rollout_reporting(self, source: dict) -> None:
+        """Bind once to the executor's source, without registering another atom."""
+        with self._fetch_lock, self._report_lock:
+            if (
+                self.role != Role.ROLLOUT
+                or self._registered_replica_name is not None
+                or self._report_sequence != 0
+                or self._report_failed
+                or self._fetch_sequence != 0
+                or self._fetch_failed
+                or not isinstance(source, dict)
+                or not isinstance(source.get("replica_name"), str)
+                or not source["replica_name"]
+                or type(source.get("global_rank")) is not int
+                or source["global_rank"] < 0
+                or not isinstance(source.get("report_session_id"), str)
+                or not source["report_session_id"]
+                or source.get("controller_execution_id") != self.controller_execution_id
+            ):
+                raise ValueError("Invalid or already bound delegated rollout source")
+            self._registered_replica_name = source["replica_name"]
+            self._registered_global_rank = source["global_rank"]
+            self._report_session_id = source["report_session_id"]
 
     def unregister(self, replica_name: str):
         # ``unregister`` is called on the shutdown path (handle_shutdown).
@@ -370,19 +442,18 @@ class APIClient(object):
             )
 
     def post_nccl_comm_error(self, replica_name: str, error: Exception):
+        # Failure reporting must not delay the worker's terminal/rebuild path.
+        # One bounded best-effort request; a lost response is not a reason to
+        # replay a failure notification through the operational retry schedule.
         try:
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"replica_name": replica_name, "error": str(error)},
-                ),
-                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX),
-                max_retries=self.max_retries,
+            response = requests.post(
+                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX)[0],
+                json={"replica_name": replica_name, "error": str(error)},
+                timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
             )
+            response.raise_for_status()
         except Exception as e:
-            raise RuntimeError(
-                f"[{self.role}] Failed in post nccl comm error to controller after retries {e}."
-            )
+            logger.warning("[%s] Could not report NCCL failure: %s", self.role, e)
 
     def post_clear_nccl_comm_store(self, unique_pair_name: str):
         try:
@@ -535,6 +606,8 @@ class APIClient(object):
                         "total_steps": total_steps,
                         "profile_finished": profile_finished,
                         "report_data": sanitize(report_data),
+                        "report_session_id": self._report_session_id,
+                        "src_global_rank": self._registered_global_rank,
                     },
                 ),
                 self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
@@ -599,31 +672,50 @@ class APIClient(object):
                 partial(
                     requests.post,
                     json=report.model_dump(),
+                    timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
                 ),
                 self.get_alternative_urls(COSMOS_API_VALIDATION_REPORT_SUFFIX),
                 max_retries=self.max_retries,
             )
         except Exception as e:
-            logger.error(
+            raise RuntimeError(
                 f"[Rollout] Failed in sending validation report to controller after retries {e}."
-            )
+            ) from e
 
     def get_next_prompt(
         self,
         batch_size: int,
         validation_step: Optional[int] = None,
         rank_in_mesh: Optional[int] = None,
+        *,
+        validation_round_id: Optional[str] = None,
+        src_replica_name: Optional[str] = None,
+        fetch_sequence: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], bool]:
+        if self.role == Role.ROLLOUT and validation_step is None:
+            return self._get_training_prompt(batch_size, rank_in_mesh)
         try:
             params = {
                 "n": batch_size,
                 "validation_step": validation_step,
                 "rank_in_mesh": rank_in_mesh,
             }
+            if validation_round_id is not None:
+                params.update(
+                    validation_round_id=validation_round_id,
+                    src_replica_name=src_replica_name,
+                    fetch_sequence=fetch_sequence,
+                )
+            request_options = (
+                {"timeout": constant.COSMOS_CONTROL_HTTP_TIMEOUT}
+                if validation_round_id is not None
+                else {}
+            )
             r = make_request_with_retry(
                 partial(
                     requests.get,
                     params=params,
+                    **request_options,
                 ),
                 self.get_alternative_urls(COSMOS_API_NEXT_PROMPT_SUFFIX),
                 max_retries=self.max_retries,
@@ -633,14 +725,88 @@ class APIClient(object):
             is_end = r["is_end"]
             return payloads, is_end
         except Exception as e:
+            if validation_round_id is not None:
+                raise RuntimeError("Validation fetch failed after retries") from e
             logger.error(
                 f"[Rollout] Failed in fetching next prompt from controller after retries {e}."
             )
             return [], False
 
+    @property
+    def training_fetch_failed(self) -> bool:
+        return self._fetch_failed
+
+    def _get_training_prompt(self, batch_size, rank_in_mesh):
+        with self._fetch_lock:
+            if self._fetch_failed:
+                raise RuntimeError("Training fetch failed; source cannot continue")
+            if self._registered_replica_name is None:
+                self._fetch_failed = True
+                raise ValueError("Training fetch requires its registered source")
+            params = {
+                "n": batch_size,
+                "rank_in_mesh": rank_in_mesh,
+                "src_replica_name": self._registered_replica_name,
+                "src_global_rank": self._registered_global_rank,
+                "fetch_session_id": self._report_session_id,
+                "fetch_sequence": self._fetch_sequence,
+                "controller_execution_id": self.controller_execution_id,
+            }
+            try:
+                response = make_request_with_retry(
+                    partial(
+                        requests.get,
+                        params=params,
+                        timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
+                    ),
+                    self.get_alternative_urls(COSMOS_API_NEXT_PROMPT_SUFFIX),
+                    max_retries=min(self.max_retries, 3),
+                    initial_delay=0.1,
+                    max_delay=0.5,
+                ).json()
+                payloads, is_end = response["payloads_list"], response["is_end"]
+                if not isinstance(payloads, list) or type(is_end) is not bool:
+                    raise ValueError("Invalid training fetch response")
+            except Exception as error:
+                self._fetch_failed = True
+                raise RuntimeError(
+                    "Training fetch failed after bounded HTTP attempts"
+                ) from error
+            self._fetch_sequence += 1
+            return payloads, is_end
+
     def post_rollout_completion(self, response: RolloutRequest) -> bool:
+        # A producer may report from more than one thread, but its mutation
+        # stream must stay ordered across retries and normal/terminal reports.
+        with self._report_lock:
+            if self._report_failed:
+                raise RuntimeError("Rollout reporting failed; source cannot continue")
+            if response.src_replica_name != self._registered_replica_name:
+                raise ValueError("Rollout report requires its registered source")
+            if response.src_global_rank not in (None, self._registered_global_rank):
+                raise ValueError(
+                    "Rollout report rank differs from its registered source"
+                )
+            if response.report_session_id is None:
+                response.report_session_id = self._report_session_id
+                response.report_sequence = self._report_sequence
+            if response.report_session_id != self._report_session_id:
+                raise ValueError("Rollout report belongs to another source incarnation")
+            if response.report_sequence is None:
+                raise ValueError("Rollout report is missing its sequence")
+            result = self._post_rollout_receipt(response)
+            if result:
+                self._report_sequence = max(
+                    self._report_sequence, response.report_sequence + 1
+                )
+            else:
+                self._report_failed = True
+            return result
+
+    def _post_rollout_receipt(self, response: RolloutRequest) -> bool:
         payload = response.model_dump()
         payload["controller_execution_id"] = self.controller_execution_id
+        payload["src_global_rank"] = self._registered_global_rank
 
         def check_response(result):
             # An old attempt cannot be retried into the current execution.
@@ -652,14 +818,17 @@ class APIClient(object):
                 partial(
                     requests.post,
                     json=payload,
+                    timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
                 ),
                 self.get_alternative_urls(COSMOS_API_ROLLOUT_SUFFIX),
-                max_retries=self.max_retries,
+                max_retries=min(self.max_retries, 3),
+                initial_delay=0.1,
+                max_delay=0.5,
                 response_parser=check_response,
             )
             return result.status_code != 410
         except Exception as e:
-            logger.error(
-                f"[Rollout] Failed in sending rollout completion to controller after retries {e}."
-            )
-            return False
+            self._report_failed = True
+            raise RuntimeError(
+                "Rollout report failed after bounded HTTP attempts"
+            ) from e

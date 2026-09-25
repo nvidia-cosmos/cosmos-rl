@@ -203,6 +203,7 @@ class LocalRewardCalculator:
                 RLPayload(
                     prompt=rollouts_group[0].prompt,
                     prompt_idx=rollouts_group[0].prompt_idx,
+                    validation_work_id=payloads[idx].validation_work_id,
                     conversation=rollouts_group[0].conversation,
                     completions=[rollout.completion for rollout in rollouts_group],
                     completed_conversations=[
