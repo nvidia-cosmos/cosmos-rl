@@ -51,6 +51,8 @@ def make_trainer(resume, failure=None):
             side_effect=failure, return_value={"total_steps": 20, "step": 2}
         ),
         _restore_checkpoint_reference=Mock(),
+        _restore_reference=Mock(),
+        use_reference_policy=False,
         model_load_from_hf=Mock(),
         build_optimizers=Mock(),
         set_model_train=Mock(),

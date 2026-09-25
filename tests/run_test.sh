@@ -111,6 +111,12 @@ run python -m pytest -q tests/test_checkpoint_immutable_step.py
 run python -m pytest -q tests/test_resume_selection_contract.py
 run python -m pytest -q tests/test_checkpoint_snapshot.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
+run python -m pytest -q tests/test_trainer_sample_alignment.py
+run python -m pytest -q tests/test_grpo_numerical_contract.py
+run python -m pytest -q tests/test_pipeline_objective_normalization.py
+run python -m pytest -q tests/test_grpo_pipeline_normalization.py
+run torchrun --standalone --nproc-per-node=2 tests/grpo_pipeline_canary.py --cpu
+run python -m pytest -q tests/test_dpo_reference_policy.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
 run python -m pytest -q tests/test_prefetch_completion_deadline.py
 run python -m pytest -q tests/test_training_payload_lifetime.py
@@ -127,6 +133,7 @@ fi
 run torchrun --standalone --nproc-per-node=2 tests/trainer_batching_canary.py --cpu
 run python tests/test_apex.py
 run python tests/test_cosmos_hf_precision.py
+run python -m pytest -q tests/test_context_parallel_comparison.py
 run /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
 run python tests/test_cache.py
 run python tests/test_comm.py
