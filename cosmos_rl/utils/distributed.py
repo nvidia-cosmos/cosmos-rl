@@ -23,6 +23,7 @@ from queue import Queue, Empty
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable, List
 from functools import partial
+from contextlib import contextmanager, nullcontext
 
 # Third party imports
 import torch
@@ -64,6 +65,25 @@ def get_device_info() -> tuple[str, torch.device]:
 cosmos_device_type, cosmos_device_module = get_device_info()
 
 
+class CollectiveOperationError(RuntimeError):
+    """Native completion is uncertain; the logical operation must not be replayed."""
+
+
+# A native error/abort is not proof that every device access has finished. Keep
+# its operands alive even if teardown drops the communicator; only process exit
+# releases this terminal quarantine. Healthy operations retain nothing here.
+_FAILED_COLLECTIVE_BUFFERS = []
+
+
+def collective_scope(comm):
+    """Pin an HA mesh across one logical update, including stream completion.
+
+    Other communicator adapters must provide their own stable group lifetime.
+    This is a local lock, not an extra distributed synchronization.
+    """
+    return getattr(comm, "operation_scope", nullcontext)()
+
+
 def init_distributed(cpu_enabled: bool = True):
     def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
@@ -89,6 +109,9 @@ def destroy_distributed():
         torch.distributed.destroy_process_group()
 
 
+_GRADIENT_BUCKET_BYTES = 200 * 1024 * 1024
+
+
 @torch.no_grad()
 def gradient_reduce_across_dp_replicas_(
     parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
@@ -100,7 +123,10 @@ def gradient_reduce_across_dp_replicas_(
 ):
     """
     Reduce parameter gradients across data parallel replicas.
-    TODO, we need make sure this function is atomic.
+    Every replica must pass the same ordered trainable parameter set. Missing
+    local gradients contribute zero; globally unused parameters remain None.
+    The native mesh is pinned across all buckets. An uncertain bucket failure
+    raises before the caller can commit its optimizer update; it is not replayed.
 
     Args:
         parameters: an iterable of Tensors or a single Tensor that will reduce gradients.
@@ -120,90 +146,84 @@ def gradient_reduce_across_dp_replicas_(
                 "strict gradient reduction requires ReduceOp.SUM so participant "
                 "and missing-gradient sentinels remain countable."
             )
-        _strict_gradient_reduce_across_dp_replicas_(
-            parameter_list,
-            comm,
-            expected_participants=expected_participants,
-        )
-        return
-    grads = [
-        parameter.grad for parameter in parameter_list if parameter.grad is not None
-    ]
-
-    # We only need to reduce DTensor's local grad, this is to avoid tensor.grad == nullptr
-    for i, g in enumerate(grads):
-        if isinstance(g, DTensor):
-            grads[i] = g.to_local()
-
-    # create bucket for all grads, we can allreduce them in one go
-    # NOTE: why we don't set DTensor as bucket view?
-    # This is becuase we can't be sure that the training framework
-    # never release grad, or clean grad by set None.
-    # Create temporary bucket is a more reliable solution.
-    buckets: dict[torch.dtype, list[torch.Tensor]] = {}
-    for g in grads:
-        if g.dtype not in buckets:
-            buckets[g.dtype] = []
-        buckets[g.dtype].append(g.view(-1))
-
-    # move all grad into one bucket
-    comm.wait_comm_ready()
-
-    for bucket in buckets.values():
-        BUCKET_SIZE = 200 * 1024 * 1024
-        sub_buckets = []
-        current_bucket = []
-        current_size = 0
-        for tensor in bucket:
-            n_bytes = tensor.numel() * tensor.element_size()
-            if current_size + n_bytes > BUCKET_SIZE:
-                current_bucket.append(tensor)
-                sub_buckets.append(current_bucket)
-                current_bucket = []
-                current_size = 0
-                continue
-            current_bucket.append(tensor)
-            current_size += n_bytes
-        if current_size > 0:
-            sub_buckets.append(current_bucket)
-        del current_bucket
-        del current_size
-
-        for sub_bucket in sub_buckets:
-            tmp_buffer = torch.cat(sub_bucket, dim=0).contiguous()
-            # Convert to float32 to keep precision
-            original_dtype = tmp_buffer.dtype
-            original_device = tmp_buffer.device
-            tmp_buffer = tmp_buffer.float()
-
-            # Make sure the buffer is on GPU before calling nccl allreduce
-            if tmp_buffer.device == torch.device("cpu"):
-                tmp_buffer = tmp_buffer.cuda()
-
-            # TODO a risk here, when comm is rebuilt, the reduce result will be wrong.
-            # For the first time to build mesh, we set a longer timeout (30 minutes) to avoid lost some slower replicas
-            timeout_ms = get_nccl_timeout_ms()
-            if gradient_reduce_across_dp_replicas_.first_invoke:
-                timeout_ms = 30 * 60 * 1000
-                gradient_reduce_across_dp_replicas_.first_invoke = False
-
-            comm.allreduce(
-                tmp_buffer,
-                tmp_buffer,
-                reduce_op,
-                timeout_ms=timeout_ms,
+        with collective_scope(comm):
+            _strict_gradient_reduce_across_dp_replicas_(
+                parameter_list,
+                comm,
+                expected_participants=expected_participants,
             )
-            tmp_buffer = tmp_buffer.to(original_dtype).to(original_device)
-
-            # copy the result back to original grad
-            offset = 0
-            for g in sub_bucket:
-                size = g.numel()
-                g.copy_(tmp_buffer[offset : offset + size].view_as(g))
-                offset += size
-                assert offset <= tmp_buffer.numel(), (
-                    "offset should be equal to total size"
+        return
+    if reduce_op not in (dist.ReduceOp.AVG, dist.ReduceOp.SUM):
+        raise ValueError("Gradient reduction supports AVG or SUM")
+    # Bucket identity depends on parameters, never the rank-local used subset.
+    # Frozen parameters cannot participate in autograd and need no placeholder.
+    buckets = {}
+    for parameter in parameter_list:
+        if parameter.requires_grad:
+            buckets.setdefault(parameter.dtype, []).append(parameter)
+    with collective_scope(comm):
+        comm.wait_comm_ready()
+        for parameters_by_dtype in buckets.values():
+            bucket, size = [], 0
+            for parameter in parameters_by_dtype:
+                local = (
+                    parameter.to_local()
+                    if isinstance(parameter, DTensor)
+                    else parameter
                 )
+                # Include one FP32 used flag per parameter in the same collective.
+                nbytes = (local.numel() + 1) * 4
+                if bucket and size + nbytes > _GRADIENT_BUCKET_BYTES:
+                    _reduce_gradient_bucket(bucket, comm, reduce_op)
+                    bucket, size = [], 0
+                bucket.append(parameter)
+                size += nbytes
+            if bucket:
+                _reduce_gradient_bucket(bucket, comm, reduce_op)
+
+
+def _reduce_gradient_bucket(parameters, comm, reduce_op):
+    gradients = []
+    for parameter in parameters:
+        local = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+        gradient = parameter.grad
+        if isinstance(gradient, DTensor):
+            gradient = gradient.to_local()
+        gradients.append(torch.zeros_like(local) if gradient is None else gradient)
+    device = gradients[0].device
+    packed = torch.cat(
+        [gradient.reshape(-1).float() for gradient in gradients]
+        + [
+            torch.tensor(
+                [parameter.grad is not None for parameter in parameters],
+                dtype=torch.float32,
+                device=device,
+            )
+        ]
+    )
+    if packed.device.type == "cpu":
+        packed = packed.cuda()
+    timeout_ms = get_nccl_timeout_ms()
+    if gradient_reduce_across_dp_replicas_.first_invoke:
+        timeout_ms = 30 * 60 * 1000
+        gradient_reduce_across_dp_replicas_.first_invoke = False
+    comm.allreduce(packed, packed, reduce_op, timeout_ms=timeout_ms)
+    # Flags share the existing gradient collective: no new synchronization
+    # round. Preserve None when every peer was unused, including weight decay
+    # and momentum semantics in the optimizer.
+    used = packed[-len(parameters) :].gt(0).cpu().tolist()
+    packed = packed.to(device)
+    offset = 0
+    for parameter, local_gradient, globally_used in zip(parameters, gradients, used):
+        size = local_gradient.numel()
+        if globally_used:
+            if parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
+            destination = parameter.grad
+            if isinstance(destination, DTensor):
+                destination = destination.to_local()
+            destination.copy_(packed[offset : offset + size].view_as(destination))
+        offset += size
 
 
 def _strict_gradient_reduce_across_dp_replicas_(
@@ -260,8 +280,8 @@ def _strict_gradient_reduce_across_dp_replicas_(
     if packed_gradients.device == torch.device("cpu") and expected_participants > 1:
         packed_gradients = packed_gradients.cuda()
 
-    # Keep the send buffer immutable so a retried in-place collective cannot
-    # reuse partially reduced values from an earlier failed attempt.
+    # Keep sent input separate from receive storage. This does not authorize
+    # replay after unknown completion; native HA failures remain terminal.
     comm.allreduce(
         packed_gradients.clone(),
         packed_gradients,
@@ -552,8 +572,9 @@ class HighAvailabilitylNccl:
         self.replica_name = replica_name
         self.global_rank = global_rank
         self.api_client = api_client
-        # max retry times for nccl op after nccl comm is rebuilt
+        # Retry readiness only. An issued native operation is never replayed.
         self.max_retry = 3
+        self._collective_error = None
         self.default_timeout_ms = get_nccl_timeout_ms()
 
         # The nccl group info
@@ -562,7 +583,7 @@ class HighAvailabilitylNccl:
         self.replica_name_to_rank: Dict[str, int] = {}
 
         # For background thread
-        self.build_mesh_lock = threading.Lock()
+        self.build_mesh_lock = threading.RLock()
         self.shutdown_event = threading.Event()
         self.is_single_peer = threading.Event()
         self.is_single_peer.clear()
@@ -635,6 +656,10 @@ class HighAvailabilitylNccl:
                 self.comm_idx = -1
 
     def __execute_build_mesh(self, cmd: BuildMeshCommand) -> bool:
+        if getattr(self, "_collective_error", None) is not None:
+            # A new native communicator cannot repair a partially completed
+            # training operation or make peers agree on its commit boundary.
+            return
         logger.debug(
             f"{self.__log_prefix()} build mesh with {cmd.replica_name_to_rank}"
         )
@@ -715,57 +740,98 @@ class HighAvailabilitylNccl:
         operations = tuple(operations)
         if not operations:
             return
-        if self.is_single_peer.is_set():
-            # single peer, no need to do nccl op
-            return
+        self._raise_if_collective_failed()
         if self.max_retry < 1:
             raise RuntimeError(
                 f"{self.__log_prefix()} nccl op '{func.__name__}' has invalid "
                 f"max_retry={self.max_retry}; expected at least one attempt."
             )
 
+        timeout_ms = timeout_ms if timeout_ms is not None else self.default_timeout_ms
         last_error = None
         for attempt in range(1, self.max_retry + 1):
             try:
-                timeout_ms = (
-                    timeout_ms if timeout_ms is not None else self.default_timeout_ms
-                )
                 self.wait_comm_ready(timeout=timeout_ms / 1000)
-                with (
-                    nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms),
-                    self.build_mesh_lock,
-                ):
-                    for kwargs in operations:
-                        func(
-                            comm_idx=self.comm_idx,
-                            timeout_ms=timeout_ms,
-                            **kwargs,
-                        )
-
-                return
-            except Exception as e:
+            except TimeoutError as e:
+                # Nothing was issued, so waiting for readiness again cannot
+                # replay a completed operation or reuse partially reduced data.
                 last_error = e
-                # mark the communicator is not ready
-                self.is_comm_ready.clear()
-
-                # report the error to the controller
-                # the communicator will destroy before buildmesh
+                self._report_collective_error(e)
+                continue
+            with self.build_mesh_lock:
+                self._raise_if_collective_failed()
+                # A rebuild can win the lock between the readiness wait and us.
+                if not self.is_comm_ready.is_set():
+                    continue
+                if self.is_single_peer.is_set():
+                    if func is nccl_allreduce:
+                        for kwargs in operations:
+                            kwargs["recvbuff"].copy_(kwargs["sendbuff"])
+                    return
                 try:
-                    self.api_client.post_nccl_comm_error(self.replica_name, e)
-                except Exception:
-                    logger.exception(
-                        "%s failed to report nccl error to the controller",
-                        self.__log_prefix(),
-                    )
-                logger.error(
-                    f"{self.__log_prefix()} recovering batch of {len(operations)} "
-                    f"nccl op(s) '{func.__name__}' after attempt "
-                    f"{attempt}/{self.max_retry}: {e}"
-                )
+                    # Keep the mesh pinned through the watchdog's stream wait,
+                    # not just while calls are being enqueued.
+                    deadline = time.monotonic() + timeout_ms / 1000
+                    with nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms):
+                        for kwargs in operations:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError(
+                                    "Collective operation deadline elapsed before issue"
+                                )
+                            func(
+                                comm_idx=self.comm_idx,
+                                timeout_ms=min(timeout_ms, math.ceil(remaining * 1000)),
+                                **kwargs,
+                            )
+                            # Native success (or an already-ready CUDA event)
+                            # is not permission to commit after our deadline.
+                            # In particular, a delayed peer can return success
+                            # even after another rank has aborted its operation.
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    "Collective operation completed after its deadline"
+                                )
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Collective stream completed after its deadline"
+                        )
+                except BaseException as error:
+                    _FAILED_COLLECTIVE_BUFFERS.append(operations)
+                    self._collective_error = error
+                    self.is_comm_ready.clear()
+                    if not isinstance(error, Exception):
+                        raise
+                    self._report_collective_error(error)
+                    self._raise_if_collective_failed()
+                return
         raise RuntimeError(
-            f"{self.__log_prefix()} nccl op '{func.__name__}' failed after "
-            f"{self.max_retry} attempts."
+            f"{self.__log_prefix()} nccl readiness failed after {self.max_retry} attempts."
         ) from last_error
+
+    def _report_collective_error(self, error):
+        try:
+            self.api_client.post_nccl_comm_error(self.replica_name, error)
+        except Exception:
+            logger.exception("%s failed to report nccl error", self.__log_prefix())
+
+    def _raise_if_collective_failed(self):
+        error = getattr(self, "_collective_error", None)
+        if error is not None:
+            raise CollectiveOperationError(
+                f"{self.__log_prefix()} native collective completion is uncertain; "
+                "the operation was not replayed and this communicator is unusable."
+            ) from error
+
+    @contextmanager
+    def operation_scope(self):
+        """Hold membership stable across all collectives in a logical operation."""
+        self.wait_comm_ready()
+        with self.build_mesh_lock:
+            self._raise_if_collective_failed()
+            if not self.is_comm_ready.is_set():
+                raise RuntimeError("Collective mesh changed before operation entry")
+            yield
 
     def destroy_nccl_comm(self):
         self.cmd_queue.put(self.DESTROY_CMD)
@@ -782,7 +848,10 @@ class HighAvailabilitylNccl:
         Check if the nccl comm is ready.
         This is non-blocking check, user should ensure the nccl op won't be skipped.
         """
-        return self.is_comm_ready.is_set()
+        return (
+            getattr(self, "_collective_error", None) is None
+            and self.is_comm_ready.is_set()
+        )
 
     def wait_comm_ready(self, timeout: float = 0):
         """
@@ -791,6 +860,7 @@ class HighAvailabilitylNccl:
         Args:
             timeout (float): The timeout in seconds.
         """
+        self._raise_if_collective_failed()
         start_time = time.time()
 
         if timeout == 0:
@@ -805,6 +875,7 @@ class HighAvailabilitylNccl:
             timeout = self.default_timeout_ms / 1000
 
         done = self.is_comm_ready.wait(timeout=timeout)
+        self._raise_if_collective_failed()
         if not done:
             raise TimeoutError(
                 f"{self.__log_prefix()} wait for nccl comm ready timeout, current time: {time.time()}, start time: {start_time}, timeout: {timeout}"
@@ -849,12 +920,13 @@ class HighAvailabilitylNccl:
         tensors = tuple(tensors)
         if not tensors:
             return
-        src_rank = self.get_replica_rank(src_replica)
-        self.__do_nccl_ops_with_retry(
-            func=nccl_broadcast,
-            timeout_ms=timeout_ms,
-            operations=({"tensor": tensor, "rank": src_rank} for tensor in tensors),
-        )
+        with self.operation_scope():
+            src_rank = self.replica_name_to_rank[src_replica]
+            self.__do_nccl_ops_with_retry(
+                func=nccl_broadcast,
+                timeout_ms=timeout_ms,
+                operations=({"tensor": tensor, "rank": src_rank} for tensor in tensors),
+            )
 
     def allreduce(
         self,
@@ -883,12 +955,13 @@ class HighAvailabilitylNccl:
         tensors = tuple(tensors)
         if not tensors:
             return
-        dst_rank = self.get_replica_rank(dst_replica)
-        self.__do_nccl_ops_with_retry(
-            func=nccl_send,
-            timeout_ms=timeout_ms,
-            operations=({"tensor": tensor, "peer": dst_rank} for tensor in tensors),
-        )
+        with self.operation_scope():
+            dst_rank = self.replica_name_to_rank[dst_replica]
+            self.__do_nccl_ops_with_retry(
+                func=nccl_send,
+                timeout_ms=timeout_ms,
+                operations=({"tensor": tensor, "peer": dst_rank} for tensor in tensors),
+            )
 
     def recv(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
         self.recv_batch((tensor,), src_replica, timeout_ms)
@@ -902,12 +975,13 @@ class HighAvailabilitylNccl:
         tensors = tuple(tensors)
         if not tensors:
             return
-        src_rank = self.get_replica_rank(src_replica)
-        self.__do_nccl_ops_with_retry(
-            func=nccl_recv,
-            timeout_ms=timeout_ms,
-            operations=({"tensor": tensor, "peer": src_rank} for tensor in tensors),
-        )
+        with self.operation_scope():
+            src_rank = self.replica_name_to_rank[src_replica]
+            self.__do_nccl_ops_with_retry(
+                func=nccl_recv,
+                timeout_ms=timeout_ms,
+                operations=({"tensor": tensor, "peer": src_rank} for tensor in tensors),
+            )
 
 
 class DistKVStore:
@@ -1017,7 +1091,6 @@ class DistKVStore:
         __last_key = f"#BROADCAST-{self.counter - 1}"
         __last_key_dones = [f"{__last_key}-done-{i}" for i in range(self.world_size)]
 
-        error_raised = False
         cmd = None
         while self.shutdown_event is None or not self.shutdown_event.is_set():
             try:
@@ -1036,14 +1109,13 @@ class DistKVStore:
                     # Only log error when the rank is the source rank
                     # Else it is normal if there is no command to broadcast
                     logger.error(f"Failed to broadcast command: {e}")
-                error_raised = True
                 continue
-            finally:
-                if not error_raised:
-                    if self.rank == src:
-                        self.local_store.delete_key(__last_key)
-                        for _d in __last_key_dones:
-                            self.local_store.delete_key(_d)
-                    self.counter += 1
-                    break
+            # Only a successful delivery advances the cursor. A prior failed
+            # attempt must not turn this successful one into another retry.
+            if self.rank == src:
+                self.local_store.delete_key(__last_key)
+                for _d in __last_key_dones:
+                    self.local_store.delete_key(_d)
+            self.counter += 1
+            break
         return cmd

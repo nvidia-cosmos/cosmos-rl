@@ -214,6 +214,19 @@ class VLADataPacker(DataPacker):
             old_log_probs.to(device),
         )
 
+    def policy_logprob_masks(self, policy_input, max_chunks, *, device=None):
+        """Build the training mask without collating observations or actions."""
+        num_actions_chunk, action_dim, _ = _get_vla_constants()
+        finish_step = policy_input.finish_step
+        pad_steps = max_chunks * num_actions_chunk - finish_step
+        return torch.cat(
+            (
+                torch.ones((finish_step, action_dim), dtype=torch.long, device=device),
+                torch.zeros((pad_steps, action_dim), dtype=torch.long, device=device),
+            ),
+            dim=0,
+        ).reshape(max_chunks, num_actions_chunk * action_dim)
+
     def policy_collate_fn(
         self,
         policy_input: Any,
@@ -234,10 +247,6 @@ class VLADataPacker(DataPacker):
         responses = policy_input.responses
         pixel_values = policy_input.pixel_values
         old_log_probs = policy_input.old_log_probs
-
-        finish_step = policy_input.finish_step
-        max_steps = max_chunks * NUM_ACTIONS_CHUNK
-        pad_steps = max_steps - finish_step
 
         num_chunks = input_ids.shape[0]
         pad_chunks = max_chunks - num_chunks
@@ -294,13 +303,9 @@ class VLADataPacker(DataPacker):
                 ),
                 dim=0,
             )
-            logprob_masks = torch.cat(
-                (
-                    torch.ones((finish_step, ACTION_DIM), dtype=torch.long),
-                    torch.zeros((pad_steps, ACTION_DIM), dtype=torch.long),
-                ),
-                dim=0,
-            ).reshape(max_chunks, NUM_ACTIONS_CHUNK * ACTION_DIM)
+            logprob_masks = self.policy_logprob_masks(
+                policy_input, max_chunks, device=input_ids.device
+            )
 
         return {
             "input_ids": input_ids,

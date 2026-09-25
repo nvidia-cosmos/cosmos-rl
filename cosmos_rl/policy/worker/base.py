@@ -104,7 +104,6 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         policy_type = self.config.train.train_policy.type
         train_batch_per_replica = self.config.train.train_batch_per_replica
         dp_shard_size = self.config.policy.parallelism.dp_shard_size
-        error_msg = f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by dp_shard_size({dp_shard_size})"
         mini_batch = self.config.train.train_policy.mini_batch
         trainer_type = getattr(self.config.train.train_policy, "trainer_type", None)
         trainer_cls = (
@@ -154,11 +153,16 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             )
             return
         if policy_type == "grpo":
-            error_msg += f" * mini_batch({mini_batch})"
             assert dp_shard_size == self.parallel_dims.dp_shard
             assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-            assert train_batch_per_replica % (dp_shard_size * mini_batch) == 0, (
-                error_msg
+            collection_dp_size = dp_shard_size * self.parallel_dims.dp_replicate
+            # Collection is divided across the full DP mesh, not only its
+            # sharded dimension. Preserve the existing fixed-minibatch rule
+            # per DP worker and reject before queues/native training exist.
+            assert train_batch_per_replica % (collection_dp_size * mini_batch) == 0, (
+                f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} "
+                f"must be divisible by data-parallel size({collection_dp_size}) "
+                f"* mini_batch({mini_batch})"
             )
         else:
             # TODO(jiaxinc): Optimize this:

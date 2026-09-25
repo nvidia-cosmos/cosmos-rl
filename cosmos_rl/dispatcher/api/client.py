@@ -370,19 +370,20 @@ class APIClient(object):
             )
 
     def post_nccl_comm_error(self, replica_name: str, error: Exception):
+        # Error reporting must not hold the failed collective/mesh lock through
+        # the operational retry chain. The caller still owns the failure outcome
+        # if the controller is unavailable or rejects this best-effort report.
         try:
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"replica_name": replica_name, "error": str(error)},
-                ),
-                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX),
-                max_retries=self.max_retries,
+            response = requests.post(
+                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX)[0],
+                json={"replica_name": replica_name, "error": str(error)},
+                timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
             )
+            response.raise_for_status()
         except Exception as e:
             raise RuntimeError(
-                f"[{self.role}] Failed in post nccl comm error to controller after retries {e}."
-            )
+                f"[{self.role}] Failed to report nccl comm error to controller: {e}."
+            ) from e
 
     def post_clear_nccl_comm_store(self, unique_pair_name: str):
         try:
