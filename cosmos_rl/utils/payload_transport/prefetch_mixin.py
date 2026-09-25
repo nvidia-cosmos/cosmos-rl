@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from concurrent.futures import Future
 from collections import deque
 from cosmos_rl.utils.transport_failure import fail_transport, TransportUnusableError
@@ -87,6 +88,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
+from cosmos_rl.utils.payload_transport.receive_memory import (
+    ReceiveMemoryError,
+    ReceivedBatch,
+)
 from cosmos_rl.utils.trace import get_trace_time
 
 
@@ -143,6 +148,7 @@ class PrefetchDataPackerMixin:
 
         This is not recovery from native CUDA/NCCL failure. A timed-out close
         prevents reattachment; the worker owner must surface the failure.
+        Consumer-owned receive leases still require explicit final-reader release.
         """
         from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
 
@@ -157,18 +163,25 @@ class PrefetchDataPackerMixin:
         operation.close(timeout)
 
     def _close_transport_owned(self) -> None:
+        self._raise_if_prefetch_deadline_expired()
         strategy = self._transport_strategy
         if strategy is not None:
             strategy.before_join()
         thread = self._prefetch_thread
         if thread is not None and thread.ident is not None:
             thread.join()
+        self._raise_if_prefetch_deadline_expired()
         self._prefetch_thread = None
         use_lock = getattr(self, "_transport_use_lock", threading.RLock())
         with use_lock:
             if strategy is not None:
                 strategy.shutdown()
-        self._prefetch_cache = {}
+        self._finish_prefetch_shutdown()
+        # Closing the backend is not the final use of consumer-owned views.
+        # Keep their lease reachable for release_prefetch(streams=...) even
+        # after the backend and its unconsumed receive queues have closed.
+        if not isinstance(self._prefetch_cache, ReceivedBatch):
+            self._prefetch_cache = {}
         self._prefetch_buffer = None
         self._prefetch_rollouts = None
         self._prefetch_pending = False
@@ -213,12 +226,23 @@ class PrefetchDataPackerMixin:
             )
         self._prefetch_thread = None
 
+        if (
+            isinstance(self._prefetch_cache, ReceivedBatch)
+            and not self._prefetch_cache.released
+        ):
+            raise ReceiveMemoryError(
+                "Release the previous consumer batch before restarting prefetch"
+            )
+        self._raise_if_prefetch_failed()
         self._prefetch_cache = {}
         self._preparation_local = threading.local()
         self._prepared_prefetch_future = None
+        self._prepared_prefetch_lease = None
         self._prefetch_outstanding = deque()
         self._prefetch_deadline_lock = threading.Lock()
         self._prefetch_timers = {}
+        self._prefetch_terminal_owners = []
+        self._prefetch_deadline_expired = False
         self._prefetch_request_queue = queue.Queue()
         self._prefetch_result_queue = queue.Queue()
         self._prefetch_shutdown = threading.Event()
@@ -278,7 +302,9 @@ class PrefetchDataPackerMixin:
         if before_join is None and self._transport_strategy is not None:
             before_join = self._transport_strategy.before_join
 
-        if before_join is not None:
+        if before_join is not None and not getattr(
+            self, "_prefetch_deadline_expired", False
+        ):
             try:
                 before_join()
             except Exception as exc:  # pragma: no cover - teardown best-effort
@@ -300,11 +326,44 @@ class PrefetchDataPackerMixin:
                 )
             else:
                 self._prefetch_thread = None
-                with self._prefetch_deadline_lock:
-                    for timer in self._prefetch_timers.values():
-                        timer.cancel()
-                    self._prefetch_timers.clear()
+        if thread is None or not thread.is_alive():
+            self._finish_prefetch_shutdown()
         self._prefetch_enabled = False
+
+    def _finish_prefetch_shutdown(self) -> None:
+        """Abandon unconsumed work only after the prefetch worker has exited."""
+        if getattr(self, "_prefetch_deadline_expired", False):
+            # A fatal callback never returns in production. Even if another
+            # thread attempts close before exit, do not release terminal leases.
+            return
+        deadline_lock = getattr(self, "_prefetch_deadline_lock", None)
+        if deadline_lock is not None:
+            with deadline_lock:
+                for timer in self._prefetch_timers.values():
+                    timer.cancel()
+                self._prefetch_timers.clear()
+        pending = getattr(self, "_prepared_prefetch_future", None)
+        if pending is not None:
+            pending.cancel()
+        if self._prefetch_result_queue is not None:
+            while True:
+                try:
+                    item = self._prefetch_result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                _, result, _ = item
+                if isinstance(result, ReceivedBatch):
+                    try:
+                        result.release()
+                    except Exception:
+                        # An event failure cannot silently drop ownership.
+                        self._prefetch_result_queue.put(item)
+                        raise
+        lease = getattr(self, "_prepared_prefetch_lease", None)
+        if lease is not None:
+            lease.release()
+            self._prepared_prefetch_lease = None
+        self._prepared_prefetch_future = None
 
     # ------------------------------------------------------------------
     # Subclass hooks (override in transport-specific mixin)
@@ -446,23 +505,51 @@ class PrefetchDataPackerMixin:
         if self._prefetch_failure is not None:
             raise TimeoutError(self._prefetch_failure)
 
+    def _raise_if_prefetch_deadline_expired(self) -> None:
+        if getattr(self, "_prefetch_deadline_expired", False):
+            raise TransportUnusableError(self._prefetch_failure)
+
     def _expire_prefetch(self, batch_id: int, timeout: float) -> None:
         # This lock protects only Python bookkeeping, never transport work.
         # Completion and expiration compete here; exactly one wins.
         with self._prefetch_deadline_lock:
-            if self._prefetch_timers.pop(batch_id, None) is None:
+            timer = self._prefetch_timers.get(batch_id)
+            if timer is None:
                 return
             if self._prefetch_failure is not None:
                 return
-            self._prefetch_failure = (
-                f"prefetch batch {batch_id} exceeded {timeout}s; background fetch "
-                "may still own transport locks; fallback and reuse disabled"
+            delay = self._prefetch_remaining(timer)
+            if delay > 0:
+                replacement = self._new_prefetch_timer(batch_id, delay, timeout)
+                replacement._prefetch_deadline = timer._prefetch_deadline
+                self._prefetch_timers[batch_id] = replacement
+                replacement.start()
+                return
+            self._seal_prefetch_timeout(batch_id, timer)
+        self._notify_prefetch_timeout(batch_id)
+
+    def _prefetch_remaining(self, timer):
+        budget = getattr(self._transport_strategy, "_receive_budget", None)
+        if budget is not None:
+            return budget.watchdog_delay(
+                timer._prefetch_deadline, timer._prefetch_timeout
             )
-            # Retain CUDA-backed objects on the fatal path: dropping their last
-            # references here could itself enter allocator/native cleanup.
-            if self._transport_strategy is None:
-                self._prefetch_cache = {}
-            self._prefetch_shutdown.set()
+        return timer._prefetch_deadline - time.monotonic()
+
+    def _seal_prefetch_timeout(self, batch_id, timer):
+        """Called under the deadline lock; never enters transport cleanup."""
+        self._prefetch_timers.pop(batch_id)
+        timer.cancel()
+        self._prefetch_failure = (
+            f"prefetch batch {batch_id} exceeded {timer._prefetch_timeout}s; "
+            "background fetch may still own transport locks; fallback and reuse disabled"
+        )
+        self._prefetch_deadline_expired = True
+        if self._transport_strategy is None:
+            self._prefetch_cache = {}
+        self._prefetch_shutdown.set()
+
+    def _notify_prefetch_timeout(self, batch_id):
         try:
             if self._transport_strategy is not None:
                 # No backend has proved this outstanding operation completed.
@@ -473,16 +560,45 @@ class PrefetchDataPackerMixin:
             # Legacy strategy-less packers retain their terminal exception path.
             self._prefetch_result_queue.put((batch_id, {}, 0.0))
 
+    def _complete_prefetch(self, batch_id, *owners):
+        """Seal completion against the clock, not timer-thread scheduling.
+
+        A starved timer must not let late completion cancel the watchdog and
+        publish success. Proven consumer-backpressure extensions still apply.
+        """
+        expired = False
+        with self._prefetch_deadline_lock:
+            timer = self._prefetch_timers.get(batch_id)
+            if self._prefetch_failure is None and timer is not None:
+                if self._prefetch_remaining(timer) <= 0:
+                    self._seal_prefetch_timeout(batch_id, timer)
+                    expired = True
+                else:
+                    self._prefetch_timers.pop(batch_id)
+                    timer.cancel()
+            failed = self._prefetch_failure is not None
+            if failed:
+                # Fatal callbacks do not return in production. Also keep these
+                # references if the timer has sealed failure but not exited yet.
+                self._prefetch_terminal_owners.extend(owners)
+        if expired:
+            self._notify_prefetch_timeout(batch_id)
+        return not failed
+
+    def _new_prefetch_timer(self, batch_id, delay, timeout):
+        timer = threading.Timer(delay, self._expire_prefetch, args=(batch_id, timeout))
+        timer.daemon = True
+        timer._prefetch_deadline = time.monotonic() + timeout
+        timer._prefetch_timeout = timeout
+        return timer
+
     def _arm_prefetch_deadline(self) -> int:
         """Share submission-time protection across fetch and prepared fetch."""
         batch_id = self._prefetch_batch_id
         self._prefetch_batch_id += 1
-        timer = threading.Timer(
-            self._prefetch_timeout_s,
-            self._expire_prefetch,
-            args=(batch_id, self._prefetch_timeout_s),
+        timer = self._new_prefetch_timer(
+            batch_id, self._prefetch_timeout_s, self._prefetch_timeout_s
         )
-        timer.daemon = True
         with self._prefetch_deadline_lock:
             self._raise_if_prefetch_failed()
             self._prefetch_timers[batch_id] = timer
@@ -501,12 +617,27 @@ class PrefetchDataPackerMixin:
             if getattr(self, "_transport_close_operation", None) is not None:
                 raise RuntimeError("Payload transport is closing or closed")
             return
+        if self._prefetch_failure is not None:
+            raise ReceiveMemoryError(self._prefetch_failure)
         tasks = self._filter_prefetch_tasks(rollouts)
         if not tasks:
             return
         batch_id = self._arm_prefetch_deadline()
         self._prefetch_outstanding.append(batch_id)
         self._prefetch_request_queue.put((batch_id, tasks))
+
+    def release_prefetch(self, *, streams=()) -> None:
+        """Release the current cache after ALL final readers (including views).
+
+        Drop consumer-owned aliases before calling. Supply every non-current
+        CUDA stream that read these tensors; release waits for recorded events.
+        Call before collecting the next batch when its admission needs this space.
+        Repeated reads remain valid until this explicit final-use boundary.
+        """
+        cache = self._prefetch_cache
+        if isinstance(cache, ReceivedBatch):
+            cache.release(streams=streams)
+        self._prefetch_cache = {}
 
     def start_prepared_prefetch(self, rollouts, prepare):
         """Fetch and CPU-prepare one owned batch on the existing prefetch thread.
@@ -528,16 +659,34 @@ class PrefetchDataPackerMixin:
             )
         tasks = self._filter_prefetch_tasks(rollouts)
         future = Future()
+        future._prefetch_handoff = threading.Event()
         batch_id = self._arm_prefetch_deadline()
         self._prepared_prefetch_future = future
         self._prefetch_request_queue.put((batch_id, tasks, prepare, future))
         return future
 
     def release_prepared_prefetch(self, future):
+        self._raise_if_prefetch_failed()
         if future is not self._prepared_prefetch_future:
             raise ValueError("Prepared prefetch ownership mismatch")
         if not future.done():
             raise RuntimeError("Cannot release an unfinished prepared prefetch")
+        if not future._prefetch_handoff.wait(self._prefetch_timeout_s):
+            raise TimeoutError("Prepared worker has not relinquished its aliases")
+        lease = self._prepared_prefetch_lease
+        if lease is not None:
+            # Consuming the preparation future transfers ownership; it does NOT
+            # establish final use of payload aliases retained by prepared data.
+            if (
+                isinstance(self._prefetch_cache, ReceivedBatch)
+                and not self._prefetch_cache.released
+            ):
+                raise ReceiveMemoryError(
+                    "Release the previous consumer batch before collecting prepared data"
+                )
+            lease.claim_consumer()
+            self._prefetch_cache = lease
+            self._prepared_prefetch_lease = None
         self._prepared_prefetch_future = None
 
     def wait_prefetch(self) -> None:
@@ -557,12 +706,22 @@ class PrefetchDataPackerMixin:
         self._raise_if_prefetch_failed()
         if not self._prefetch_enabled or self._prefetch_result_queue is None:
             return
+        if (
+            isinstance(self._prefetch_cache, ReceivedBatch)
+            and not self._prefetch_cache.released
+        ):
+            raise ReceiveMemoryError(
+                "Call release_prefetch after final use before collecting the next batch"
+            )
         if not self._prefetch_outstanding:
             return
         batch_id, results, fetch_ms = self._prefetch_result_queue.get()
         self._raise_if_prefetch_failed()
         self._prefetch_outstanding.popleft()
 
+        if isinstance(results, ReceiveMemoryError):
+            self._prefetch_failure = f"{results}; shut down the packer before retrying"
+            raise ReceiveMemoryError(self._prefetch_failure)
         if isinstance(results, dict) and "_error" in results:
             logger.warning(
                 "[PrefetchDataPackerMixin] batch %d prefetch error: %s",
@@ -571,6 +730,8 @@ class PrefetchDataPackerMixin:
             )
             self._prefetch_cache = {}
         else:
+            if isinstance(results, ReceivedBatch):
+                results.claim_consumer()
             self._prefetch_cache = results
 
         self._prefetch_step_count += 1
@@ -579,7 +740,7 @@ class PrefetchDataPackerMixin:
         except Exception as exc:  # pragma: no cover - hook bug shouldn't crash trainer
             logger.warning(
                 "[PrefetchDataPackerMixin] _on_prefetch_complete raised %s; continuing",
-                exc,
+                str(exc),
             )
 
     # --- Deferred-wait / early-ack -------------------------------------
@@ -649,6 +810,12 @@ class PrefetchDataPackerMixin:
                 if len(request) == 4:
                     batch_id, tasks, prepare, future = request
                     if not future.set_running_or_notify_cancel():
+                        with self._prefetch_deadline_lock:
+                            timer = self._prefetch_timers.pop(batch_id, None)
+                            if timer is not None:
+                                timer.cancel()
+                        future._prefetch_handoff.set()
+                        del future, prepare, request
                         continue
                     result, preparation_error = None, None
                     try:
@@ -657,22 +824,33 @@ class PrefetchDataPackerMixin:
                         self._preparation_local.cache = (
                             self._fetch_batch(tasks) if tasks else {}
                         )
+                        if isinstance(self._preparation_local.cache, ReceivedBatch):
+                            self._prepared_prefetch_lease = (
+                                self._preparation_local.cache
+                            )
                         result = prepare()
                     except TransportUnusableError as error:
                         fail_transport(str(error))
                     except BaseException as error:
                         preparation_error = error
-                    with self._prefetch_deadline_lock:
-                        timer = self._prefetch_timers.pop(batch_id, None)
-                        if timer is not None:
-                            timer.cancel()
-                        if self._prefetch_failure is not None:
-                            preparation_error = TimeoutError(self._prefetch_failure)
+                    if not self._complete_prefetch(
+                        batch_id,
+                        result,
+                        getattr(self._preparation_local, "cache", None),
+                        future,
+                    ):
+                        preparation_error = TimeoutError(self._prefetch_failure)
                     if preparation_error is not None:
                         future.set_exception(preparation_error)
                     else:
                         future.set_result(result)
+                    handoff = future._prefetch_handoff
                     self._preparation_local.__dict__.clear()
+                    # Future/consumer now owns the prepared output. A worker
+                    # local must not keep aliases alive after explicit release.
+                    del result, preparation_error, future, prepare, request
+                    handoff.set()
+                    del handoff
                     continue
 
                 batch_id, tasks = request
@@ -689,17 +867,31 @@ class PrefetchDataPackerMixin:
                         batch_id,
                         err,
                     )
-                    results = {"_error": err}
+                    results = (
+                        ReceiveMemoryError(err)
+                        if isinstance(e, ReceiveMemoryError)
+                        or getattr(self._transport_strategy, "_receive_budget", None)
+                        is not None
+                        else {"_error": err}
+                    )
                 fetch_end = get_trace_time()
 
-                with self._prefetch_deadline_lock:
-                    timer = self._prefetch_timers.pop(batch_id, None)
-                    if timer is not None:
-                        timer.cancel()
-                    if self._prefetch_failure is None:
-                        self._prefetch_result_queue.put(
-                            (batch_id, results, fetch_end - fetch_start)
-                        )
+                completed = self._complete_prefetch(batch_id, results)
+                if not completed:
+                    # Retained by the terminal owner, never released or reused.
+                    del results
+                    continue
+                if self._prefetch_shutdown.is_set() and isinstance(
+                    results, ReceivedBatch
+                ):
+                    results.release()
+                elif self._prefetch_failure is None:
+                    self._prefetch_result_queue.put(
+                        (batch_id, results, fetch_end - fetch_start)
+                    )
+                # The queue/cache now owns this result. Keeping the worker local
+                # would retain the previous decoded batch throughout the next fetch.
+                del results
         except Exception as e:  # pragma: no cover - worker-thread crash
             logger.error("[PrefetchDataPackerMixin] worker loop error: %s", e)
         finally:
@@ -730,7 +922,10 @@ class PrefetchDataPackerMixin:
             local = getattr(self, "_preparation_local", None)
             cache = getattr(local, "cache", self._prefetch_cache)
             resolved = cache.get(cache_key)
-            if resolved is None:
+            known_rejection = (
+                isinstance(cache, ReceivedBatch) and cache_key in cache.rejected_keys
+            )
+            if resolved is None and not known_rejection:
                 resolved = self._sync_fetch(rollout_output)
             if resolved is not None:
                 return super().get_policy_input(
