@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+import inspect
 from typing import Callable
 
 import torch
@@ -23,9 +24,7 @@ from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     get_schedule_class,
 )
-from torch.distributed.pipelining.stage import (
-    PipelineStage,
-)
+from cosmos_rl.patch import PipelineStage
 from cosmos_rl.utils.logging import logger
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -210,6 +209,7 @@ def build_pipeline_schedule(
     model_parts: list[nn.Module],
     device: torch.device,
     loss_fn: Callable[..., torch.Tensor] | None,
+    scale_grads: bool | None = None,
     # has_backward: bool,
 ) -> _PipelineSchedule:
     """
@@ -230,6 +230,8 @@ def build_pipeline_schedule(
         device (torch.device): The device to use for the model parts.
         loss_fn (Callable): The loss function to use for training and validation.
             Set this to None for generation.
+        scale_grads (bool | None): Override schedule gradient scaling when the
+            trainer owns normalization. None preserves the schedule's default.
         # has_backward (bool): Whether the pipeline schedule executes the backward
             pass as well.
 
@@ -280,11 +282,76 @@ def build_pipeline_schedule(
             f"of stages ({num_total_stages}) which may result in significant pipeline bubbles."
         )
 
+    scaling_kwargs = {}
+    if (
+        scale_grads is not None
+        and "scale_grads" in inspect.signature(schedule_class.__init__).parameters
+    ):
+        scaling_kwargs["scale_grads"] = scale_grads
     schedule = schedule_class(
         stages[0] if is_single_stage_schedule else stages,
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+        **scaling_kwargs,
         # has_backward=has_backward,
     )
 
+    # Rebuilding stage communication metadata is required when a later GRPO
+    # minibatch has a different number of rows. Keep only construction inputs,
+    # not a cache of schedules/activation buffers for every observed shape.
+    schedule._cosmos_build_kwargs = dict(
+        pp_mesh=pp_mesh,
+        batch_size=batch_size,
+        num_stages=num_stages,
+        schedule_str=schedule_str,
+        microbatch_size=microbatch_size,
+        model_parts=model_parts,
+        device=device,
+        loss_fn=loss_fn,
+        scale_grads=scale_grads,
+    )
+    schedule._cosmos_last_stage_model = next(
+        (
+            part
+            for index, part in zip(stage_ids, model_parts)
+            if index == num_stages - 1
+        ),
+        None,
+    )
+
     return schedule
+
+
+def resize_pipeline_schedule(schedule, batch_size: int, microbatch_size: int):
+    """Use every row of a GRPO minibatch without stale stage/chunk dimensions.
+
+    A short/non-divisible tail uses smaller equal-sized chunks. The native
+    schedule still validates its own stage/chunk-count restrictions. Call only
+    between completed steps and with matching batch dimensions on PP peers.
+    """
+    if batch_size <= 0 or microbatch_size <= 0:
+        raise ValueError("Pipeline batch and microbatch sizes must be positive")
+    options = getattr(schedule, "_cosmos_build_kwargs", None)
+    if options is None:
+        raise ValueError(
+            "Resizable pipeline schedules must use build_pipeline_schedule"
+        )
+    actual_microbatch = math.gcd(batch_size, microbatch_size)
+    # A short tail can still contain enough rows for all stages, even when
+    # the configured chunk size would leave too few chunks. Do not pad or drop
+    # examples: fall back to one row per chunk and retain native validation for
+    # genuinely unsupported stage/chunk counts.
+    if batch_size // actual_microbatch < options["num_stages"]:
+        actual_microbatch = 1
+    if (
+        options["batch_size"] != batch_size
+        or options["microbatch_size"] != actual_microbatch
+    ):
+        schedule = build_pipeline_schedule(
+            **{
+                **options,
+                "batch_size": batch_size,
+                "microbatch_size": actual_microbatch,
+            }
+        )
+    return schedule, actual_microbatch

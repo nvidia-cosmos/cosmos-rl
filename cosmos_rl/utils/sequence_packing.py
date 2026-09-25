@@ -79,6 +79,7 @@ def pack_sequences_info_collect(
     label_ids: Optional[torch.Tensor] = None,
     ignore_label_id: int = -100,
     seq_len_multiple: int = 1,
+    logprob_masks: Optional[torch.Tensor] = None,
 ):
     """
     Collect valid length at each batch information used for sequence packing.
@@ -88,6 +89,8 @@ def pack_sequences_info_collect(
     label_ids: the padded label ids in [batch, seq_len] used for supervised fine-tuning loss calculation.
     ignore_label_id: the token id used for ignoring certain labels during loss calculation.
     seq_len_multiple: the value which the processed seq_len must be multiple of.
+    logprob_masks: optional logit-position mask. Every selected position must
+        retain its next-token target, including EOS when EOS equals padding.
 
     Return:
     A Dictionary including tensor "valid_input_len" which is a list of actual sequence length in the batch.
@@ -98,6 +101,14 @@ def pack_sequences_info_collect(
         device = input_ids.device
         # Create mask: True where not padding
         valid_input_len = compute_valid_lengths(input_ids, pad_token_id)
+        if logprob_masks is not None:
+            if logprob_masks.shape != input_ids.shape:
+                raise ValueError("Logprob masks and input IDs must have the same shape")
+            if logprob_masks[:, -1].any():
+                raise ValueError("The final input position has no next-token target")
+            target_end = compute_valid_lengths(logprob_masks.bool(), False)
+            target_end = torch.where(target_end > 0, target_end + 1, target_end)
+            valid_input_len = torch.maximum(valid_input_len, target_end)
         if label_ids is not None:
             assert input_ids.shape == label_ids.shape, (
                 "Input IDs and label IDs must have the same shape"
@@ -355,6 +366,12 @@ def pack_sequences_for_logprobs(
             input_ids_batch_dim,
         )
         args_dict["logprob_masks"] = packed_logprob_masks
+        # Model packing changes the physical batch to one row, not the loss's
+        # sequence identities. These are masked-token, not attention boundaries.
+        masked_lengths = logprob_masks.sum(dim=input_ids_seq_dim, dtype=torch.int32)
+        args_dict["logprob_cu_seqlens"] = torch.cat(
+            [masked_lengths.new_zeros(1), masked_lengths.cumsum(0, dtype=torch.int32)]
+        )
         valid_input_len = valid_input_len.tolist()
         if advantages is not None:
             concatenated_advantages = [

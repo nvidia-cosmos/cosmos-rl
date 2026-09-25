@@ -2376,7 +2376,7 @@ def run_gspo_test():
         ret = GRPOTrainer.all_reduce_states(self, inter_policy_nccl)
         if not hasattr(self, "test_hooked_cnt"):
             self.test_hooked_cnt = 0
-        for old in self.old_per_token_logps:
+        for old in self.old_per_token_logps.values():
             assert (
                 old.shape[0]
                 == length[self.test_hooked_cnt] + length[self.test_hooked_cnt + 1]

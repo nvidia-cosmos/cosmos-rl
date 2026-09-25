@@ -519,6 +519,11 @@ class GrpoConfig(BaseModel):
         "training speed, but may be numerically unstable for long training runs.",
     )
 
+    dpo_reference_policy: bool = Field(
+        default=False,
+        description="Opt into frozen-reference DPO log-ratios. The default preserves the existing reference-free preference objective. The frozen initial policy is checkpointed; resuming this mode requires its reference state.",
+    )
+
     unbiased_kl_estimate: bool = Field(
         default=False,
         description=(
