@@ -97,7 +97,17 @@ run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_sft_ack_progress.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
+run python -m pytest -q tests/test_prefetch_completion_deadline.py
+run python -m pytest -q tests/test_training_payload_lifetime.py
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
+run python -m pytest -q tests/test_receive_memory.py tests/test_receive_memory_cuda.py
+run python -m pytest -q tests/test_receive_rejection_outcomes.py
+if python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() >= 2 else 1)'; then
+    run torchrun --standalone --nproc-per-node=2 tests/receive_outcome_canary.py
+else
+    echo "SKIP: receive outcome canary requires two CUDA devices"
+    SKIPPED+=("tests/receive_outcome_canary.py [requires two CUDA devices]")
+fi
 run torchrun --standalone --nproc-per-node=2 tests/trainer_batching_canary.py --cpu
 run python tests/test_apex.py
 run python tests/test_cosmos_hf_precision.py
