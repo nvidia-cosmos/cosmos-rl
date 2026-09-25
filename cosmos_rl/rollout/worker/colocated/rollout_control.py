@@ -117,7 +117,6 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
 
     @torch.no_grad()
     def rollout_for_one_minor_step(self):

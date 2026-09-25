@@ -579,6 +579,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
             return data_loader
 
+        full_epoch_steps = None
         if self.config.train.resume and self.train_step > 0:
             """
             Note: Here both shuffle and no shuffle samplers are supported for deterministic resuming.
@@ -613,6 +614,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 total_steps_per_epoch = len(
                     get_train_data_loader(self.train_sampler, self.train_batch_sampler)
                 )
+                full_epoch_steps = total_steps_per_epoch
                 data_loader_bias = self.train_step % total_steps_per_epoch
                 data_loader_bias *= self.config.train.train_batch_per_replica
                 logger.info(
@@ -673,6 +675,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         ):
             # Use custom data loader if provided by dataset
             self.train_data_loader = train_dataset.dataset.data_loader
+            full_epoch_steps = len(self.train_data_loader)
         else:
             self.train_data_loader = get_train_data_loader(
                 self.train_sampler, self.train_batch_sampler
@@ -738,10 +741,13 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
-            # Use save_freq_in_epoch to calculate the save frequency in priority
+            # A loader item is already one rank-local optimizer step; DP sharding
+            # happened in the sampler. Resume skipping must not shorten an epoch.
+            if full_epoch_steps is None:
+                full_epoch_steps = len(self.train_data_loader)
             self._save_freq = (
-                self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
-            ) // self.dp_world_size
+                self.config.train.ckpt.save_freq_in_epoch * full_epoch_steps
+            )
             logger.info(
                 f"Checkpoint will be saved every {self._save_freq} steps, which is approximately every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
             )
@@ -1091,16 +1097,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
     def handle_shutdown(self):
         # handle the ckpt saving
         logger.info("Handling shutdown...")
-        if (
-            hasattr(self.trainer, "upload_thread")
-            and self.trainer.upload_thread is not None
-        ):
-            logger.info("[Policy] Waiting for upload thread to finish...")
-            self.trainer.upload_thread.join()
-            logger.info("[Policy] Upload thread finished.")
-            self.trainer.upload_thread = None
+        from cosmos_rl.utils.model_export import finish_checkpoint_writes
 
-        self.unregister_from_controller()
+        try:
+            finish_checkpoint_writes(self.trainer)
+        finally:
+            self.unregister_from_controller()
 
     def destroy_worker(self):
         destroy_distributed()

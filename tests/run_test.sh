@@ -95,8 +95,20 @@ run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl
 # run tests
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_sft_ack_progress.py
+run python -m pytest -q tests/test_simulator_shutdown.py tests/test_vla_shutdown.py
+run python -m pytest -q tests/test_rollout_heartbeat_shutdown.py
+run python -m pytest -q tests/test_vla_weight_converter.py
+run python -m pytest -q tests/test_optimizer_unused_resume.py
+run python -m pytest -q tests/test_scheduler_continuity.py
+run python -m pytest -q tests/test_reference_reset_continuity.py
+run python -m pytest -q tests/test_colocated_first_checkpoint.py
+run python -m pytest -q tests/test_vla_optional_simulator.py
+run python -m pytest -q tests/test_checkpoint_discovery.py
+run python -m pytest -q tests/test_resume_selection_contract.py
+run python -m pytest -q tests/test_checkpoint_snapshot.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
+run python -m pytest -q tests/test_model_export_lifecycle.py
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
 run torchrun --standalone --nproc-per-node=2 tests/trainer_batching_canary.py --cpu
 run python tests/test_apex.py

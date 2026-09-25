@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import re
 import json
@@ -23,6 +24,7 @@ import numpy as np
 import concurrent.futures as futures
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.s3_utils import upload_file_to_s3
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -73,12 +75,13 @@ class CheckpointMananger:
             if self.save_mode == "async":
                 self.executor = futures.ThreadPoolExecutor(max_workers=4)
         self.pre_save_futures = []
+        self.selected_checkpoint_path = None
         if self._is_master_rank():
             self.saved_ckpt_step_dirs = sorted(
                 self._get_all_saved_ckpt_step_dirs(),
                 key=_step_dir_sort_key,
             )
-            self._prune_corrupted_ckpts()
+            self._filter_owned_ckpts()
             # Load best score from file if exists (persists across resumes)
             self.best_score, self.best_ckpt_abs_dir = self._load_best_score()
         if "save_checkpoint_hook" in hook_fns:
@@ -97,20 +100,25 @@ class CheckpointMananger:
             and is_master_rank(self.parallel_dims, self.global_rank)
         )
 
-    def _prune_corrupted_ckpts(self):
-        """Prune corrupted checkpoints."""
-        # Create a list of directories to remove (avoid modifying list while iterating)
-        dirs_to_remove = []
-        for ckpt_dir in self.saved_ckpt_step_dirs:
-            policy_path = os.path.join(ckpt_dir, "policy")
-            if not self.ckpt_path_check(policy_path):
-                dirs_to_remove.append(ckpt_dir)
+    def _filter_owned_ckpts(self):
+        """Discovery is read-only; retention only owns this run's checkpoints.
 
-        # Remove corrupted checkpoints
-        for ckpt_dir in dirs_to_remove:
-            self._delete_checkpoint(ckpt_dir)
-            self.saved_ckpt_step_dirs.remove(ckpt_dir)
-            logger.info(f"Pruned corrupted checkpoint: {ckpt_dir}")
+        A missing marker can indicate an active writer or another topology,
+        not corruption. Never delete a directory merely because discovery
+        cannot load it. Cross-run candidates remain available to resume through
+        get_latest_ckpt_paths(), but are not eligible for max_keep deletion.
+        """
+        owned_dirs = []
+        output_dir = os.path.realpath(self.ckpt_output_dir)
+        for ckpt_dir in self.saved_ckpt_step_dirs:
+            if os.path.dirname(os.path.realpath(ckpt_dir)) != output_dir:
+                continue
+            if os.path.islink(ckpt_dir):
+                continue
+            policy_path = os.path.join(ckpt_dir, "policy")
+            if self.ckpt_path_check(policy_path):
+                owned_dirs.append(ckpt_dir)
+        self.saved_ckpt_step_dirs = owned_dirs
 
     def _get_num_saving_ranks(self) -> int:
         """
@@ -183,7 +191,11 @@ class CheckpointMananger:
         saved_ckpt_step_dirs = []
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = self._root_output_dir
-            timestamps = os.listdir(root_output_dir)
+            try:
+                timestamps = os.listdir(root_output_dir)
+            except FileNotFoundError:
+                # A never-created output root is an ordinary discovery miss.
+                return []
             timestamps.sort()
 
             for timestamp in timestamps:
@@ -399,21 +411,47 @@ class CheckpointMananger:
                 extra_info = torch.load(f, weights_only=False, map_location="cpu")
             return extra_info
         else:
-            logger.warning(f"Extra info file {extra_info_path} does not exist.")
-            return {}
+            raise FileNotFoundError(
+                f"Checkpoint metadata is missing: {extra_info_path}"
+            )
 
     def offload_state_dict_cpu(self, state_dict: dict):
-        state_dict_cpu = {}
-        for key, value in state_dict.items():
+        """Own all snapshot storage before handing it to the async writer.
+
+        The caller must hold its training/sampling snapshot boundary while this
+        runs. This isolates later mutations; it cannot make concurrently changing
+        model, optimizer, and application state a coherent checkpoint.
+        """
+
+        def snapshot(value):
             if isinstance(value, torch.Tensor):
-                if value.is_meta:
-                    continue
-                state_dict_cpu[key] = value.cpu()
-            elif isinstance(value, dict):
-                state_dict_cpu[key] = self.offload_state_dict_cpu(value)
-            else:
-                state_dict_cpu[key] = value
-        return state_dict_cpu
+                # .cpu() aliases an already-CPU tensor (including Adam's step).
+                # A blocking copy also completes CUDA staging before training
+                # can reuse the source storage. Detach avoids retaining graphs.
+                return value.detach().to(device="cpu", copy=True)
+            if isinstance(value, dict):
+                result = copy.copy(value)
+                result.clear()
+                for key, child in value.items():
+                    # Preserve the existing omission of nonresident parameters.
+                    if isinstance(child, torch.Tensor) and child.is_meta:
+                        continue
+                    result[copy.deepcopy(key)] = snapshot(child)
+                # Module state_dict OrderedDicts carry versioning metadata.
+                if hasattr(value, "__dict__"):
+                    result.__dict__ = snapshot(value.__dict__)
+                return result
+            if isinstance(value, list):
+                return [snapshot(child) for child in value]
+            if isinstance(value, tuple):
+                children = [snapshot(child) for child in value]
+                if hasattr(value, "_fields"):
+                    return type(value)(*children)
+                return tuple(children)
+            # Includes NumPy RNG arrays and mutable application metadata.
+            return copy.deepcopy(value)
+
+        return snapshot(state_dict)
 
     def _wait_for_pending_async_saves(self) -> None:
         """Wait for pending saves and propagate any background failure."""
@@ -445,14 +483,12 @@ class CheckpointMananger:
         """
         if self.save_mode != "async" or not hasattr(self, "executor"):
             return
-        if self.pre_save_futures:
-            for future in futures.as_completed(self.pre_save_futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Async checkpoint save/upload failed: {e}")
-            self.pre_save_futures = []
-        self.executor.shutdown(wait=True)
+        # Observe failures after joining every writer. A failed final save must
+        # not be logged and converted into a successful training exit.
+        try:
+            self._wait_for_pending_async_saves()
+        finally:
+            self.executor.shutdown(wait=True)
 
     def save_checkpoint(
         self,
@@ -553,7 +589,7 @@ class CheckpointMananger:
                 with open(marker_path, "w") as f:
                     f.write("")
 
-            # offload the state dict to CPU
+            # Freeze every component before submitting any background writer.
             model_state_dict_cpu = self.offload_state_dict_cpu(state_dict)
             optimizer_state_dict_cpu = self.offload_state_dict_cpu(
                 optimizer.state_dict()
@@ -644,6 +680,7 @@ class CheckpointMananger:
             List[str]
         ] = None,  # dotted module paths for each PP stage
     ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
+        self.selected_checkpoint_path = None
         extra_vars = {}
         base_paths: List[str] = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
@@ -651,6 +688,7 @@ class CheckpointMananger:
             try:
                 logger.info(f"Trying to load checkpoint from {base_path}...")
                 if self.ckpt_path_check(base_path):
+                    self.selected_checkpoint_path = os.path.abspath(base_path)
                     logger.info(
                         f"Cosmos checkpoint found at {self.config.train.resume}. Resuming..."
                     )
@@ -733,12 +771,14 @@ class CheckpointMananger:
                 import traceback
 
                 logger.error(
-                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint...\n{traceback.format_exc()}"
+                    f"Error loading selected checkpoint from {base_path}: {e}; continuation is unsafe.\n{traceback.format_exc()}"
                 )
+                raise
 
-        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
+        raise NoCheckpointFound(f"No complete checkpoint found at {base_paths}")
 
     def load_extra_info_from_checkpoint(self):
+        self.selected_checkpoint_path = None
         extra_vars = {}
         base_paths = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
@@ -747,6 +787,7 @@ class CheckpointMananger:
             try:
                 is_ckpt_path = self.ckpt_path_check(base_path)
                 if is_ckpt_path:
+                    self.selected_checkpoint_path = os.path.abspath(base_path)
                     logger.info(
                         f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
                     )
@@ -763,14 +804,13 @@ class CheckpointMananger:
                         f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
                     )
                     return extra_vars
-                else:
-                    raise FileNotFoundError(f"No checkpoint found at {base_path}")
             except Exception as e:
                 logger.error(
-                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                    f"Error loading selected checkpoint from {base_path}: {e}; continuation is unsafe."
                 )
+                raise
 
-        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
+        raise NoCheckpointFound(f"No complete checkpoint found at {base_paths}")
 
     def save_check(self, step: int, **kwargs):
         if self._is_master_rank():

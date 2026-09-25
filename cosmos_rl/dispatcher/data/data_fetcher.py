@@ -40,6 +40,7 @@ from cosmos_rl.dispatcher.data.resume import (
     ControllerResumeMetadata,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound
 from cosmos_rl.utils.util import split_train_n_val_dataset
 
 
@@ -277,12 +278,18 @@ class ControllerDataFetcher(DataFetcherBase):
                     PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
             elif self.config.train.resume:
                 try:
-                    # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
-                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
                     self.ckpt_manager = CheckpointMananger(self.config)
                     self.ckpt_extra_info = (
                         self.ckpt_manager.load_extra_info_from_checkpoint()
                     )
+                    # Workers must restore this selection, not independently
+                    # discover an older/newer checkpoint or start from scratch.
+                    self.config.train.resume = (
+                        self.ckpt_manager.selected_checkpoint_path
+                    )
+                    # Only a successful resume replaces the initial reference
+                    # weights. An automatic discovery miss is a fresh run.
+                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
                     remain_samples_num = self.ckpt_extra_info.get(
                         "remain_samples_num", remain_samples_num
                     )
@@ -352,13 +359,12 @@ class ControllerDataFetcher(DataFetcherBase):
                                 else 1
                             ),
                         )
-                except Exception as e:
-                    import traceback
-
-                    traceback.print_exc()
-                    logger.error(
-                        f"[DataFetcher] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
-                    )
+                except NoCheckpointFound:
+                    if isinstance(self.config.train.resume, str):
+                        raise
+                    self.config.train.resume = False
+                    self.ckpt_extra_info = {}
+                    logger.info("No committed checkpoint found; starting a new run.")
 
             if hasattr(self.train_sampler, "set_epoch"):
                 # Here the epoch from 1 to total epoch count, not start from 0

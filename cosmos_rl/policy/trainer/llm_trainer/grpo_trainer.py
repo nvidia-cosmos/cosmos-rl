@@ -34,6 +34,7 @@ from cosmos_rl.policy.trainer.optm import (
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound
 from cosmos_rl.utils.util import (
     compute_mfu,
     setup_tokenizer,
@@ -940,6 +941,57 @@ class GRPOTrainer(LLMTrainer):
     def should_export_checkpoint(self, *, is_final: bool) -> bool:
         return is_final or self.config.train.ckpt.export_safetensors
 
+    def _reference_model_state(self):
+        if self.parallel_dims.pp_enabled:
+            state = {}
+            for part, prefix in zip(
+                self.model_parts, self.model_module_path, strict=True
+            ):
+                for key, value in part.state_dict().items():
+                    name = f"{prefix}.{key}" if prefix else key
+                    if name in state:
+                        raise ValueError(f"Duplicate pipeline reference state: {name}")
+                    state[name] = value
+            return state
+        return self.model.state_dict()
+
+    def _restore_checkpoint_reference(self, checkpoint):
+        enabled = self.config.train.train_policy.kl_beta != 0.0
+        saved_enabled = checkpoint.pop("grpo_reference_enabled", enabled)
+        if saved_enabled != enabled:
+            raise ValueError("GRPO reference-policy mode differs from checkpoint")
+        reference = checkpoint.pop("grpo_reference_state", None)
+        reset_step = checkpoint.pop("grpo_reference_reset_step", 0)
+        if not enabled:
+            return
+        if reference is None:
+            interval = self.config.train.train_policy.reference_reset_interval
+            if interval and interval > 0 and checkpoint.get("step", 0) >= interval:
+                raise ValueError(
+                    "Checkpoint predates reference-state persistence but a reference reset "
+                    "may have occurred; cannot reliably resume"
+                )
+            # Legacy checkpoints before any reset can use the initial HF
+            # reference loaded above. Never pretend this reconstructs a reset.
+            return
+        state = self._reference_model_state()
+        if not isinstance(reference, dict) or reference.keys() != state.keys():
+            raise ValueError("Checkpoint is missing complete GRPO reference state")
+        for key, value in state.items():
+            saved = reference[key]
+            if (
+                not isinstance(saved, torch.Tensor)
+                or saved.shape != value.shape
+                or saved.dtype != value.dtype
+            ):
+                raise ValueError(f"GRPO reference metadata mismatch: {key}")
+        if not isinstance(reset_step, int) or not 0 <= reset_step <= checkpoint.get(
+            "step", 0
+        ):
+            raise ValueError("Invalid checkpoint reference-reset step")
+        self.reference_state_dict = reference
+        self.reference_reset_step = reset_step
+
     def save_checkpoint(
         self,
         current_step: int,
@@ -964,13 +1016,22 @@ class GRPOTrainer(LLMTrainer):
             )
         logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
         self.ckpt_manager.save_checkpoint(
-            model=self.model,
+            model=self._reference_model_state()
+            if self.parallel_dims.pp_enabled
+            else self.model,
             optimizer=self.optimizers,
             scheduler=self.lr_schedulers,
             step=current_step,
             total_steps=total_steps,
             remain_samples_num=remain_samples_num,
             is_final=is_final,
+            grpo_reference_enabled=self.config.train.train_policy.kl_beta != 0.0,
+            grpo_reference_state=(
+                self.reference_state_dict
+                if self.config.train.train_policy.kl_beta != 0.0
+                else None
+            ),
+            grpo_reference_reset_step=getattr(self, "reference_reset_step", 0),
         )
         self.ckpt_manager.save_check(step=current_step)
 
@@ -1913,22 +1974,31 @@ class GRPOTrainer(LLMTrainer):
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
 
-        # Only step lr scheduler when all the mini-batches are processed
-        self.lr_schedulers.step()
+        GRPOTrainer._finish_training_batch(
+            self,
+            current_step,
+            total_steps,
+            remain_samples_num,
+            save=is_master_replica and do_save_checkpoint,
+        )
 
-        # checkpointing
-        if is_master_replica and (do_save_checkpoint):
+        self.clear_teacher_result_cache()
+        return report_data
+
+    def _finish_training_batch(
+        self, current_step, total_steps, remain_samples_num, *, save
+    ):
+        # Only advance the scheduler once every mini-batch is processed. Save
+        # the next update's state, including any reference/optimizer reset.
+        self.lr_schedulers.step()
+        self.reference_reset(current_step)
+        if save:
             self.save_checkpoint(
                 current_step=current_step,
                 total_steps=total_steps,
                 remain_samples_num=remain_samples_num,
                 is_final=current_step == total_steps,
             )
-
-        self.reference_reset(current_step)
-
-        self.clear_teacher_result_cache()
-        return report_data
 
     def reference_reset(self, current_step: int):
         if (
@@ -1944,34 +2014,47 @@ class GRPOTrainer(LLMTrainer):
                     f"[Policy] Resetting reference model at step {current_step} with interval {self.config.train.train_policy.reference_reset_interval}"
                 )
                 # Update the state dict of hf model so that it can be used for KL-divergence calculation
-                state_dict = self.model.state_dict()
+                state_dict = self._reference_model_state()
                 for key, value in state_dict.items():
                     assert key in self.reference_state_dict, (
                         f"Key {key} not found in reference state dict"
                     )
-                    self.reference_state_dict[key] = value.detach().cpu()
+                    self.reference_state_dict[key] = value.detach().to(
+                        device="cpu", copy=True
+                    )
+                self.reference_reset_step = current_step
                 if self.config.train.train_policy.reset_optimizer_with_reference:
                     logger.info("[Policy] Resetting optimizer.")
                     self.build_optimizers()
 
                     # Re-pair the new optimizers with the lr schedulers since the optimizer instances have been renewed
                     for new_optimizer_list, new_lr_scheduler_list in zip(
-                        self.optimizers.optimizers, self.lr_schedulers.schedulers
+                        self.optimizers.optimizers,
+                        self.lr_schedulers.schedulers,
+                        strict=True,
                     ):
                         assert len(new_optimizer_list) == len(new_lr_scheduler_list), (
                             "The number of new optimizers and new lr schedulers must be the same"
                         )
                         for new_optimizer, new_lr_scheduler in zip(
-                            new_optimizer_list, new_lr_scheduler_list
+                            new_optimizer_list, new_lr_scheduler_list, strict=True
                         ):
                             new_lr_scheduler.optimizer = new_optimizer
+                            for group, base_lr, current_lr in zip(
+                                new_optimizer.param_groups,
+                                new_lr_scheduler.base_lrs,
+                                new_lr_scheduler.get_last_lr(),
+                                strict=True,
+                            ):
+                                group["initial_lr"] = base_lr
+                                group["lr"] = current_lr
 
     @torch.no_grad()
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
         if kl_beta != 0.0:
             with torch.cuda.stream(self.train_stream):
-                model_state_dict = self.model.state_dict()
+                model_state_dict = self._reference_model_state()
                 reference_state_dict = self.reference_state_dict
                 for key, value in model_state_dict.items():
                     # clone the reference state dict to avoid inplace operation
@@ -2046,9 +2129,12 @@ class GRPOTrainer(LLMTrainer):
             model_loaded = True
             # Clone the state dict of hf model so that it can be used for KL-divergence calculation
             self.reference_state_dict = {}
-            state_dict = self.model.state_dict()
+            state_dict = self._reference_model_state()
             for key, value in state_dict.items():
-                self.reference_state_dict[key] = value.detach().cpu()
+                self.reference_state_dict[key] = value.detach().to(
+                    device="cpu", copy=True
+                )
+            self.reference_reset_step = 0
 
         ckpt_extra_info = {}
         if self.config.train.resume:
@@ -2057,19 +2143,20 @@ class GRPOTrainer(LLMTrainer):
                 ckpt_extra_info = self.model_resume_from_checkpoint()
                 model_loaded = True
                 logger.info("[Policy] Model loaded from checkpoint.")
-            except Exception as e:
-                if isinstance(e, FileNotFoundError):
-                    logger.info(
-                        f"[Policy] Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
-                    )
-                else:
-                    logger.error(
-                        f"[Policy] Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
-                    )
+            except NoCheckpointFound:
+                if isinstance(self.config.train.resume, str):
+                    # An explicit checkpoint must restore completely. Falling
+                    # back would combine fresh weights with resumed counters.
+                    raise
+                logger.info("No committed checkpoint found; starting from HuggingFace.")
                 if not model_loaded:
                     self.model_load_from_hf()
                     logger.info("[Policy] Model loaded from HuggingFace.")
                     model_loaded = True
+            else:
+                # Metadata errors after a successful restore must not enter
+                # the legacy automatic fresh-weight fallback above.
+                self._restore_checkpoint_reference(ckpt_extra_info)
         elif not model_loaded:
             logger.info("[Policy] Resume not set. Trying to load from HuggingFace...")
             self.model_load_from_hf()

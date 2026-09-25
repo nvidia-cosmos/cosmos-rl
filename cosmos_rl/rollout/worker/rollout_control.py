@@ -109,6 +109,13 @@ _TEARDOWN_DRAIN_TIMEOUT_S = float(os.getenv("COSMOS_TEARDOWN_DRAIN_TIMEOUT_S", "
 _LEGACY_PREFETCH_HOOK_WARNED = False
 
 
+def _begin_shutdown_heartbeat_grace(worker):
+    """Arm once before any owned teardown; later cleanup must not renew it."""
+    deadline = getattr(worker, "_heartbeat_shutdown_deadline", None)
+    if deadline is not None and deadline.value == 0:
+        deadline.value = time.monotonic() + max(1.0, constant.COSMOS_HEARTBEAT_TIMEOUT)
+
+
 def _warn_legacy_prefetch_hook_once() -> None:
     """One-shot warning for backends that still define
     ``enqueue_prefetch_payloads`` directly on their ``RolloutBase``
@@ -461,8 +468,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
                 )
                 self.shutdown_signal.set()
-            if not self.shutdown_mp_signal.is_set():
-                self.shutdown_mp_signal.set()
+            # Clean shutdown is still live while releasing owned resources.
+            # Never restart a heartbeat already stopped by a terminal WST fault.
+            _begin_shutdown_heartbeat_grace(self)
             # All joins below MUST be bounded.  Worker teardown blocking
             # on an unresponsive controller or a wedged daemon would
             # otherwise turn into multi-minute scheduler-timeout hangs
@@ -504,32 +512,31 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     )
                 self.teacher_interact_thread = None
                 logger.info("[Rollout] handle_shutdown: teacher-interact thread joined")
-            if self.scheduler is not None:
-                self.scheduler.stop(wait=False)
-                self.scheduler = None
-
-            if self.heartbeat_thread is not None:
-                logger.info("[Rollout] handle_shutdown: joining heartbeat process")
-                self.heartbeat_thread.join(timeout=_JOIN_TIMEOUT_S)
-                if self.heartbeat_thread.is_alive():
-                    logger.warning(
-                        "[Rollout] heartbeat process did not exit within "
-                        "%.1fs of shutdown_signal; continuing teardown "
-                        "(PR_SET_PDEATHSIG will reap it on process exit)",
-                        _JOIN_TIMEOUT_S,
-                    )
-                self.heartbeat_thread = None
-                logger.info("[Rollout] handle_shutdown: heartbeat process joined")
-            logger.info(
-                "[Teardown] %s: handle_shutdown daemons joined; "
-                "calling unregister_from_controller",
-                self.replica_name,
-            )
-            self.unregister_from_controller()
-            logger.info(
-                "[Teardown] %s: unregister_from_controller returned",
-                self.replica_name,
-            )
+            try:
+                if self.scheduler is not None:
+                    self.scheduler.stop(wait=False)
+                    self.scheduler = None
+                else:
+                    # The scheduler owns async engine shutdown; synchronous
+                    # engines also own resources such as simulator children.
+                    self.rollout.shutdown()
+            finally:
+                # Engine failure must not skip unregister, nor be mistaken for
+                # successful teardown. Propagate it after essential cleanup.
+                try:
+                    # The API makes one bounded best-effort request, no retries.
+                    self.unregister_from_controller()
+                finally:
+                    self.shutdown_mp_signal.set()
+                    if self.heartbeat_thread is not None:
+                        self.heartbeat_thread.join(timeout=_JOIN_TIMEOUT_S)
+                        if self.heartbeat_thread.is_alive():
+                            logger.warning(
+                                "[Rollout] heartbeat did not exit within %.1fs; "
+                                "parent-death cleanup remains armed",
+                                _JOIN_TIMEOUT_S,
+                            )
+                        self.heartbeat_thread = None
 
     def get_underlying_model(self):
         """
@@ -554,6 +561,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if wst is not None:
             fenced = wst.fence()
             if not fenced:
+                # Unknown native completion is not a clean draining worker.
+                self.shutdown_mp_signal.set()
                 logger.error(
                     "[ABNORMAL teardown] WeightSyncThread fence failed for %s; "
                     "continuing shutdown after the bounded abort path",
@@ -564,7 +573,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.replica_name,
         )
         self.shutdown_signal.set()
-        self.shutdown_mp_signal.set()
 
     @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
@@ -1704,7 +1712,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if self.validation_flag.is_set():
                     self.do_validation()
                 self.shutdown_signal.set()
-                self.shutdown_mp_signal.set()
 
         # In async mode the WST's _execute_r2r calls set_weight_synced
         # after the broadcast actually completes.  Calling it here would
@@ -2150,6 +2157,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         try:
             self._main_loop_impl()
         finally:
+            _begin_shutdown_heartbeat_grace(self)
             # Stop the UCXX output server *before* any NCCL teardown/abort.
             # The rollout backend (e.g. rl-gym's ModularRolloutWorker via
             # UCXXRolloutMixin) serves this replica's generated output to the

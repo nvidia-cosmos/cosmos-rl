@@ -230,6 +230,36 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 for k, v in state_dict.items()
                 if k.startswith(f"idx-{i}-")
             }
+            # Adam initializes state lazily. A fused optimizer can have state
+            # for only the parameters that received gradients, while PyTorch's
+            # flattened restore expects state for every trainable parameter.
+            saved_params = {
+                k[len("state.") :].rsplit(".", 1)[0]
+                for k in current_state_dict
+                if k.startswith("state.")
+            }
+            grouped_params = {
+                k[len("param_groups.") :].rsplit(".", 1)[0]
+                for k in current_state_dict
+                if k.startswith("param_groups.")
+            }
+            missing_params = grouped_params - saved_params
+            if missing_params:
+                template = get_optimizer_state_dict(
+                    mp, opt, options=StateDictOptions(flatten_optimizer_state_dict=True)
+                )
+                for key, value in template.items():
+                    if (
+                        key.startswith("state.")
+                        and key[len("state.") :].rsplit(".", 1)[0] in missing_params
+                    ):
+                        # The template takes a zero-LR step to create slots;
+                        # reset its step counter too, so first use is step 1.
+                        current_state_dict[key] = (
+                            torch.zeros_like(value)
+                            if isinstance(value, torch.Tensor)
+                            else type(value)(0)
+                        )
             set_optimizer_state_dict(mp, opt, current_state_dict)
 
     def _post_init(
@@ -495,6 +525,26 @@ class LRSchedulersContainer(Stateful):
             }
             for scheduler in scheduler_list:
                 scheduler.load_state_dict(copy.deepcopy(current_state_dict))
+                # LambdaLR construction writes lambda(0) into the optimizer.
+                # Its load_state_dict only restores scheduler metadata, leaving
+                # the next optimizer step at that initial LR unless we apply
+                # the restored epoch with this scheduler's current horizon.
+                lrs = [
+                    base_lr * lr_lambda(scheduler.last_epoch)
+                    for base_lr, lr_lambda in zip(
+                        scheduler.base_lrs, scheduler.lr_lambdas, strict=True
+                    )
+                ]
+                for group, lr in zip(
+                    scheduler.optimizer.param_groups, lrs, strict=True
+                ):
+                    if isinstance(group["lr"], torch.Tensor):
+                        group["lr"].fill_(lr)
+                    else:
+                        group["lr"] = lr
+                scheduler._last_lr = [
+                    group["lr"] for group in scheduler.optimizer.param_groups
+                ]
 
 
 def build_lr_schedulers(

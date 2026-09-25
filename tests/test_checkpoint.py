@@ -21,6 +21,7 @@ import tempfile
 import threading
 import unittest
 from concurrent import futures
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -224,7 +225,7 @@ class TestCheckpointManager(unittest.TestCase):
         Scenario:
         - max_keep = 3
         - Steps 100, 200, step 100 is best
-        - resume from previous session
+        - reopen the same run's output directory
         - save step 300 with worse score, step 100 still the best
         - When step 400 is added, step 100 still the best, step 200 (second oldest)
           should be deleted.
@@ -245,8 +246,10 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save_check(100, val_score=0.3)  # Best score
 
         # Save step 200 with worse score
-        # Second training session (resume)
-        output_dir = os.path.join(self.test_dir, self.timestamp2)
+        manager.save_checkpoint(model, optimizer, scheduler, step=200, total_steps=1000)
+        manager.save_check(200, val_score=0.5)
+
+        # Reopen the owning run; discovery of other runs must not adopt retention.
         config2 = create_test_config(output_dir=output_dir, resume=True, max_keep=3)
         manager = CheckpointMananger(
             config2, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
@@ -375,12 +378,18 @@ class TestCheckpointManager(unittest.TestCase):
             global_rank=0,
         )
 
-        model = {"unpicklable": (item for item in ())}
+        model = SimpleModel()
         parameter = torch.nn.Parameter(torch.zeros(1))
         optimizer = torch.optim.Adam([parameter], lr=0.001)
 
         try:
-            with self.assertRaises(Exception):
+            with (
+                patch(
+                    "cosmos_rl.utils.checkpoint.torch.save",
+                    side_effect=OSError("write failed"),
+                ),
+                self.assertRaisesRegex(OSError, "write failed"),
+            ):
                 manager.save_checkpoint(
                     model,
                     optimizer,
@@ -390,7 +399,8 @@ class TestCheckpointManager(unittest.TestCase):
                     is_final=True,
                 )
         finally:
-            manager.finalize()
+            with self.assertRaisesRegex(OSError, "write failed"):
+                manager.finalize()
 
     def test_async_rewrite_waits_for_prior_failure_before_writing(self):
         """A failed prior save must abort a rewrite before files are replaced."""
@@ -406,13 +416,17 @@ class TestCheckpointManager(unittest.TestCase):
         parameter = torch.nn.Parameter(torch.zeros(1))
         optimizer = torch.optim.Adam([parameter], lr=0.001)
 
-        manager.save_checkpoint(
-            {"unpicklable": (item for item in ())},
-            optimizer,
-            SimpleScheduler(),
-            step=100,
-            total_steps=100,
-        )
+        with patch(
+            "cosmos_rl.utils.checkpoint.torch.save", side_effect=OSError("write failed")
+        ):
+            manager.save_checkpoint(
+                SimpleModel(),
+                optimizer,
+                SimpleScheduler(),
+                step=100,
+                total_steps=100,
+            )
+            futures.wait(manager.pre_save_futures)
         config_path = os.path.join(
             output_dir, "checkpoints", "step_100", "policy", "cosmos_config"
         )
@@ -421,7 +435,7 @@ class TestCheckpointManager(unittest.TestCase):
             config_file.write(sentinel)
 
         try:
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(OSError, "write failed"):
                 manager.save_checkpoint(
                     SimpleModel(),
                     optimizer,
@@ -433,7 +447,8 @@ class TestCheckpointManager(unittest.TestCase):
             with open(config_path, "r") as config_file:
                 self.assertEqual(config_file.read(), sentinel)
         finally:
-            manager.finalize()
+            with self.assertRaisesRegex(OSError, "write failed"):
+                manager.finalize()
 
     def test_invalidation_waits_for_prior_async_marker(self):
         """Invalidation must remove a marker written by an older async save."""
@@ -1154,14 +1169,14 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(ckpt_path, ".rank_0_complete")))
         self.assertFalse(os.path.exists(os.path.join(ckpt_path, ".rank_1_complete")))
 
-    def test_prune_corrupted_checkpoints(self):
-        """Test that _prune_corrupted_checkpoints removes incomplete checkpoints.
+    def test_discovery_leaves_incomplete_checkpoints_intact(self):
+        """Discovery is read-only and retention is scoped to the current run.
 
         Scenario:
         - Save checkpoints at step 100, 200, 300
         - Corrupt checkpoint at step 200 by removing the complete marker
         - Resume with new manager
-        - Verify step 200 was pruned from saved_step_dirs
+        - Verify discovery leaves all files intact, without adopting retention
         """
         parallel_dims = create_test_parallel_dims()
 
@@ -1201,26 +1216,23 @@ class TestCheckpointManager(unittest.TestCase):
         complete_marker = os.path.join(step_200_path, "policy", ".rank_0_complete")
         os.remove(complete_marker)
 
-        # Resume with a new manager - this should prune corrupted checkpoints during init
+        # Resume with a new manager; an absent marker does not authorize deletion.
         output_dir2 = os.path.join(self.test_dir, self.timestamp2)
         config2 = create_test_config(output_dir=output_dir2, resume=True, max_keep=5)
         manager2 = CheckpointMananger(
             config2, parallel_dims=parallel_dims, global_rank=0, metric="val_loss"
         )
 
-        # Verify step 200 was pruned (directory deleted)
-        self.assertFalse(os.path.exists(step_200_path))
+        # This could be an active writer, not a corrupted checkpoint.
+        self.assertTrue(os.path.exists(step_200_path))
 
         # Verify step 100 and 300 still exist
         self.assertTrue(os.path.exists(step_100_path))
         self.assertTrue(os.path.exists(step_300_path))
 
-        # Verify saved_step_dirs only contains step 100 and 300
-        saved_steps = [os.path.basename(d) for d in manager2.saved_ckpt_step_dirs]
-        self.assertEqual(len(manager2.saved_ckpt_step_dirs), 2)
-        self.assertIn("step_100", saved_steps)
-        self.assertIn("step_300", saved_steps)
-        self.assertNotIn("step_200", saved_steps)
+        # Another run's checkpoints are discoverable but not owned for retention.
+        self.assertEqual(manager2.saved_ckpt_step_dirs, [])
+        self.assertEqual(len(manager2.get_latest_ckpt_paths()), 3)
 
     def test_best_ckpt_corrupted_resets_to_default(self):
         """Test that if best checkpoint is corrupted, init resets best_score to default and best_ckpt_abs_dir to None.
@@ -1281,8 +1293,8 @@ class TestCheckpointManager(unittest.TestCase):
         # Verify best_ckpt_abs_dir is None
         self.assertIsNone(manager2.best_ckpt_abs_dir)
 
-        # Verify the corrupted checkpoint was pruned
-        self.assertFalse(os.path.exists(step_200_path))
+        # Invalid best metadata is ignored without deleting another run's files.
+        self.assertTrue(os.path.exists(step_200_path))
 
         # Verify step 100 still exists
         step_100_path = os.path.join(
