@@ -29,6 +29,7 @@ the peers from paying the 120 s barrier timeout plus a full
 """
 
 import unittest
+import threading
 from unittest import mock
 
 from cosmos_rl.rollout.worker import weight_sync as ws
@@ -93,6 +94,10 @@ class FakeWorker:
     def __init__(self, replica_name="rollout-a", buffer_version=1):
         self.replica_name = replica_name
         self._buffer_version = buffer_version
+        self._buffer_lock = threading.Lock()
+        self._buffer_writing = False
+        self._buffer_write_failed = False
+        self._buffer_adopt_event = None
         self._r2r_redis = FakeRedis()
         self._r2r_barrier_prefix = "cosmos:r2r"
         self._r2r_world_size = 3
@@ -174,15 +179,10 @@ class TestTheSourceRefusesToBroadcastWeightsItDoesNotHave(unittest.TestCase):
         )
 
 
-class TestASingleMemberRoundIsNotCancelled(unittest.TestCase):
-    """One replica broadcasts to nobody, so there is no peer to protect.
+class TestASingleMemberRoundRequiresSeededWeights(unittest.TestCase):
+    """A no-op collective cannot manufacture a received/adopted policy version."""
 
-    ``_execute_r2r`` skips both the barrier and the collective when the
-    recipient set has one member; cancelling there would break a legitimate
-    round -- it only bumps the local version and validation bookkeeping.
-    """
-
-    def test_lone_replica_with_an_empty_buffer_still_proceeds(self):
+    def test_lone_replica_with_an_empty_buffer_cannot_publish_a_version(self):
         worker = FakeWorker(buffer_version=0)
         worker.current_weight_version = 0
         worker.state = mock.MagicMock()
@@ -200,10 +200,11 @@ class TestASingleMemberRoundIsNotCancelled(unittest.TestCase):
             mock.patch.object(ws, "do_nccl_broadcast_grouped") as broadcast,
             mock.patch("torch.cuda.Event"),
         ):
-            thread._execute_r2r(command)
+            with self.assertRaises(ws.R2RAborted):
+                thread._execute_r2r(command)
         barrier.assert_not_called()
         broadcast.assert_not_called()
-        self.assertEqual(worker._buffer_version, 1)
+        self.assertEqual(worker._buffer_version, 0)
 
 
 class TestNoNcclWorkIsLaunchedForACancelledRound(unittest.TestCase):

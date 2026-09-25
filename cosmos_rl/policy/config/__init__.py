@@ -1394,7 +1394,7 @@ class MultiTurnRolloutConfig(BaseModel):
         default=None, description="The path to the custom chat template in chat."
     )
     max_assistant_turns: int = Field(
-        default=5, description="Max assistant turn count for multi-turn rollout."
+        default=5, gt=0, description="Max assistant turn count for multi-turn rollout."
     )
     add_generation_prompt: bool = Field(
         default=True,
@@ -2105,6 +2105,12 @@ class Config(BaseModel):
             self.train.transfer_dtype = self.train.master_dtype
 
         if self.distillation.enable:
+            if self.rollout.multi_turn_config.enable:
+                raise ValueError(
+                    "Multi-turn distillation is not supported: teacher requests "
+                    "do not preserve per-trajectory conversation context and "
+                    "token alignment. Disable distillation or multi-turn rollout."
+                )
             self.train.train_policy.rollout_as_token_ids = True
             logger.info(
                 "Distillation is enabled, so rollout_as_token_ids is set to True."

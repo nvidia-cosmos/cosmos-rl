@@ -395,11 +395,14 @@ class RolloutGenerationMixin:
     # ------------------------------------------------------------------
 
     def submit_setup(self, payloads: Sequence[Any]) -> None:
-        """Schedule :meth:`_prepare_sample` for each payload.
+        """Schedule training :meth:`_prepare_sample` for each payload.
 
         Called from the rollout worker's ``_prefetch_loop`` thread after
         it puts a batch on the prompt queue.  No-op when prefetch is
         disabled or :meth:`setup_generation` was never called.
+
+        This queue uses the training preparation context. Validation prepares
+        inline and cannot consume these futures, even for an equal prompt index.
 
         Resubmissions: if a key is already pending or done, the new
         request replaces it.  This handles the rare cancellation /
@@ -566,7 +569,10 @@ class RolloutGenerationMixin:
         wait_count = 0
         for payload in payloads:
             future: Optional[Future] = None
-            if prefetch:
+            if prefetch and not is_validation:
+                # submit_setup binds training context and prepares with
+                # is_validation=False. An equal index in the validation
+                # dataset is not the same work; leave its training future intact.
                 key = self._payload_key(payload)
                 with self._setup_futures_lock:
                     future = self._setup_futures.pop(key, None)

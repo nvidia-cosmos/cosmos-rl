@@ -19,6 +19,11 @@ from cosmos_rl.dispatcher.data.schema import ConversationType
 
 
 class RolloutResult(BaseModel):
+    # Oldest adopted version used by this generation. In inference-sync mode
+    # later forwards may use newer versions; this is a conservative staleness
+    # bound, not an assertion that every token used one immutable policy.
+    weight_version: Optional[int] = None
+
     # The input prompt for the completions
     prompt: Optional[Union[str, ConversationType, Any]] = None
 

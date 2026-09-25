@@ -249,6 +249,10 @@ def test_default_sync_r2r_route_packs_only_trainable_tensors() -> None:
         trainable_only=True,
     )
 
+    fixture = worker
+    worker = object.__new__(DisaggregatedRolloutControlWorker)
+    worker.__dict__.update(vars(fixture))
+
     with (
         patch.object(torch.cuda, "stream", side_effect=lambda _stream: nullcontext()),
         patch.object(weight_sync, "nccl_broadcast") as broadcast,

@@ -17,9 +17,10 @@ import asyncio
 import torch
 import threading
 from typing import List, Optional, Set, Callable
-from queue import Queue
+from queue import Empty, Queue
 from dataclasses import dataclass
 from contextlib import contextmanager
+from functools import partial
 import time
 
 from cosmos_rl.dispatcher.data import RLPayload
@@ -46,6 +47,7 @@ class CompletedRollout:
     idx: int
     payload: RLPayload
     result: RolloutResult
+    is_validation: bool = False
 
 
 class RolloutTaskScheduler:
@@ -61,9 +63,8 @@ class RolloutTaskScheduler:
     - Provides get() method to retrieve completed results
 
     Thread Safety:
-    - Uses threading.Event() for _running and _paused flags to ensure thread-safe state management
-    - Prevents memory visibility issues across threads
-    - All state changes are atomic and immediately visible to worker thread
+    - A condition protects admission, active-task registration and pause ownership.
+    - A draining pause waits for scheduler tasks, not backend device completion.
 
     Key Features:
     - Producer-consumer pattern with Queue for thread-safe communication
@@ -100,7 +101,7 @@ class RolloutTaskScheduler:
 
     # Pause during critical operations (e.g., weight synchronization)
     with scheduler.paused(wait_for_active_tasks=True):
-        # All active tasks completed, safe to update weights
+        # All scheduler tasks completed; also fence backend device work before writes.
         sync_weights()
         # Scheduler automatically resumes after this block
 
@@ -196,6 +197,7 @@ class RolloutTaskScheduler:
         max_concurrent_requests: int = 10,
         stream: Optional[torch.cuda.Stream] = None,
         check_interval: float = 0.1,
+        val_data_packer: Optional[DataPacker] = None,
     ):
         """
         Initialize the RolloutTaskScheduler.
@@ -206,9 +208,13 @@ class RolloutTaskScheduler:
             max_concurrent_requests: Maximum number of concurrent generation requests
             stream: CUDA stream for generation (optional)
             check_interval: Interval (in seconds) to check task_queue when empty
+            val_data_packer: Validation packer; defaults to the training packer
         """
         self.rollout_engine = rollout_engine
         self.data_packer = data_packer
+        self.val_data_packer = (
+            data_packer if val_data_packer is None else val_data_packer
+        )
         self.max_concurrent_requests = max_concurrent_requests
         self.stream = stream
         self.check_interval = check_interval
@@ -220,6 +226,9 @@ class RolloutTaskScheduler:
         # Track running state
         self._running = threading.Event()
         self._paused = threading.Event()
+        self._admission = threading.Condition()
+        self._manual_pause = False
+        self._pause_owners = 0
         self._worker_thread = (
             None  # Thread object when running in thread mode (start())
         )
@@ -282,49 +291,60 @@ class RolloutTaskScheduler:
             results = await self.rollout_engine.rollout_generation(
                 payloads=[task.payload],
                 stream=self.stream,
-                data_packer=self.data_packer,
+                data_packer=self.val_data_packer
+                if task.is_validation
+                else self.data_packer,
                 data_fetcher=None,  # data should already be loaded in the task
                 is_validation=task.is_validation,
             )
 
-            if results and len(results) > 0:
+            if results and len(results) != 1:
+                raise ValueError("Expected exactly one result for one rollout task")
+            if results:
                 # because we only put one payload into the rollout engine, so the results is a list with one element
                 result = results[0]
-                completed = CompletedRollout(
-                    idx=task.idx, payload=task.payload, result=result
-                )
-
-                # Put the completed result into the queue
-                self.complete_queue.put(completed)
-
-                self.total_processed += 1
-                logger.debug(
-                    f"[RolloutTaskScheduler] Completed generation for payload "
-                    f"({self.total_processed} total processed)"
-                )
-
-                return completed
             else:
                 logger.warning(
                     "[RolloutTaskScheduler] Generation returned empty results"
                 )
-                return self._report_identified_failure(task)
+                result = RolloutResult(completions=[])
 
+        except asyncio.CancelledError:
+            # Cancellation is a terminal outcome for this accepted prompt too.
+            # Return normally so the done callback cannot publish it twice.
+            result = RolloutResult(completions=[])
         except Exception as e:
             logger.error(f"[RolloutTaskScheduler] Error during generation: {str(e)}")
             import traceback
 
             traceback.print_exc()
-            return self._report_identified_failure(task)
+            result = RolloutResult(completions=[])
 
-    def _report_identified_failure(self, task):
-        if task.payload.completion_sequences is None:
-            return None
+        # Publication failures are not generation failures: never publish a
+        # second terminal result while handling an error from this step.
+        return self._publish_terminal(task, result)
+
+    def _publish_terminal(self, task, result):
         completed = CompletedRollout(
-            task.idx, task.payload, RolloutResult(completions=[])
+            task.idx, task.payload, result, is_validation=task.is_validation
         )
         self.complete_queue.put(completed)
+        self.total_processed += 1
         return completed
+
+    def _task_finished(self, rollout_task, task):
+        try:
+            if task.cancelled():
+                # A task cancelled before its first coroutine instruction never
+                # enters _generate_single's exception handler.
+                self._publish_terminal(rollout_task, RolloutResult(completions=[]))
+            elif task.exception() is not None:
+                logger.error("[RolloutTaskScheduler] Task failed: %s", task.exception())
+        finally:
+            with self._admission:
+                self._active_tasks.discard(task)
+                self.task_queue.task_done()
+                self._admission.notify_all()
 
     async def _worker_loop(self):
         """
@@ -338,40 +358,23 @@ class RolloutTaskScheduler:
         logger.info("[RolloutTaskScheduler] Worker loop started")
 
         while self._running.is_set():
-            # Check and clean up completed tasks
-            completed_tasks = {task for task in self._active_tasks if task.done()}
-            for task in completed_tasks:
-                self._active_tasks.remove(task)
-                # Retrieve any exceptions
-                try:
-                    await task
-                except Exception as e:
-                    logger.error(
-                        f"[RolloutTaskScheduler] Task failed with exception: {e}"
-                    )
-
-            # Try to start new tasks if we have capacity and not paused
-            if not self._paused.is_set():
-                while (
-                    len(self._active_tasks) < self.max_concurrent_requests
-                    and not self.task_queue.empty()
-                ):
-                    try:
-                        # Get rollout task from task queue (non-blocking)
-                        rollout_task = self.task_queue.get_nowait()
-
-                        # Create and start a new generation task
-                        task = asyncio.create_task(self._generate_single(rollout_task))
-                        self._active_tasks.add(task)
-
-                        logger.debug(
-                            f"[RolloutTaskScheduler] Started new task "
-                            f"(active: {len(self._active_tasks)}/{self.max_concurrent_requests})"
-                        )
-
-                    except Exception:
-                        # Queue is empty or other error
+            while True:
+                # A pause must cover the entire dequeue/registration boundary.
+                # Recheck between admissions so a busy queue cannot bypass it.
+                with self._admission:
+                    if (
+                        self._paused.is_set()
+                        or not self._running.is_set()
+                        or len(self._active_tasks) >= self.max_concurrent_requests
+                    ):
                         break
+                    try:
+                        rollout_task = self.task_queue.get_nowait()
+                    except Empty:
+                        break
+                    task = asyncio.create_task(self._generate_single(rollout_task))
+                    self._active_tasks.add(task)
+                    task.add_done_callback(partial(self._task_finished, rollout_task))
 
             # Sleep briefly before next iteration
             await asyncio.sleep(self.check_interval)
@@ -382,6 +385,16 @@ class RolloutTaskScheduler:
                 f"[RolloutTaskScheduler] Waiting for {len(self._active_tasks)} tasks to complete..."
             )
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
+
+        # Stopping admission must not silently lose tasks already accepted but
+        # not launched. Their caller still owns the terminal reporting step.
+        while True:
+            try:
+                pending = self.task_queue.get_nowait()
+            except Empty:
+                break
+            self._publish_terminal(pending, RolloutResult(completions=[]))
+            self.task_queue.task_done()
 
         logger.info("[RolloutTaskScheduler] Worker loop stopped")
 
@@ -425,7 +438,9 @@ class RolloutTaskScheduler:
             self._running.set()
             self._loop.run_until_complete(self._worker_loop())
         finally:
-            self._running.clear()
+            with self._admission:
+                self._running.clear()
+                self._admission.notify_all()
 
             # Cancel all remaining tasks before closing the loop to prevent "Task was destroyed but it is pending" errors
             try:
@@ -510,7 +525,9 @@ class RolloutTaskScheduler:
             return
 
         logger.info("[RolloutTaskScheduler] Stopping background worker...")
-        self._running.clear()
+        with self._admission:
+            self._running.clear()
+            self._admission.notify_all()
 
         if wait and self._worker_thread:
             self._worker_thread.join(timeout=10)
@@ -572,7 +589,9 @@ class RolloutTaskScheduler:
 
         logger.info("[RolloutTaskScheduler] Stopping background worker...")
 
-        self._running.clear()
+        with self._admission:
+            self._running.clear()
+            self._admission.notify_all()
         if wait and self._worker_task:
             await self._worker_task
 
@@ -608,37 +627,29 @@ class RolloutTaskScheduler:
         Currently running tasks will continue to completion, but no new tasks
         will be started until resume() is called.
         """
-        if not self._running.is_set():
-            logger.warning(
-                "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
-            )
-            return
-
-        if self._paused.is_set():
-            logger.warning("[RolloutTaskScheduler] Scheduler is already paused")
-            return
-
-        self._paused.set()
-        logger.debug(
-            "[RolloutTaskScheduler] Scheduler paused (active tasks will continue)"
-        )
+        with self._admission:
+            if not self._running.is_set():
+                logger.warning(
+                    "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
+                )
+                return
+            self._manual_pause = True
+            self._update_pause_state()
 
     def resume(self):
         """
-        Resume the scheduler to continue processing tasks from task_queue.
+        Release the manual pause. Active pause contexts retain their ownership.
         """
-        if not self._running.is_set():
-            logger.warning(
-                "[RolloutTaskScheduler] Cannot resume: scheduler is not running"
-            )
-            return
+        with self._admission:
+            self._manual_pause = False
+            self._update_pause_state()
 
-        if not self._paused.is_set():
-            logger.warning("[RolloutTaskScheduler] Scheduler is not paused")
-            return
-
-        self._paused.clear()
-        logger.debug("[RolloutTaskScheduler] Scheduler resumed")
+    def _update_pause_state(self):
+        """Caller holds _admission; only the final owner resumes admission."""
+        if self._manual_pause or self._pause_owners:
+            self._paused.set()
+        else:
+            self._paused.clear()
 
     def is_paused(self) -> bool:
         """
@@ -656,8 +667,10 @@ class RolloutTaskScheduler:
         """
         Context manager to temporarily pause the scheduler.
 
-        Automatically resumes the scheduler when exiting the context,
-        even if an exception occurs.
+        Releases this context's pause when exiting, even after an exception.
+        Other contexts and manual pauses remain effective. Nested draining
+        contexts still wait for active work. This is an admission barrier, not
+        writer mutual exclusion or a backend device fence.
 
         Args:
             wait_for_active_tasks: If True, wait for active tasks to complete before yielding
@@ -673,46 +686,46 @@ class RolloutTaskScheduler:
             ```
 
         Raises:
-            RuntimeError: If scheduler is not running
+            RuntimeError: If stopped, or a draining wait would block its own loop
             TimeoutError: If waiting for active tasks times out
         """
-        if not self._running.is_set():
-            raise RuntimeError(
-                "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
-            )
-
-        was_already_paused = self._paused.is_set()
-
-        try:
-            # Pause if not already paused
-            if not was_already_paused:
-                self._paused.set()
-                logger.info("[RolloutTaskScheduler] Scheduler paused (context manager)")
-
-                # Wait for active tasks to complete if requested
-                if wait_for_active_tasks:
-                    start_time = time.time()
-                    while len(self._active_tasks) > 0:
-                        if timeout is not None and (time.time() - start_time) > timeout:
-                            raise TimeoutError(
-                                f"[RolloutTaskScheduler] Timeout waiting for {len(self._active_tasks)} active tasks"
-                            )
-                        time.sleep(0.1)
-                        logger.debug(
-                            f"[RolloutTaskScheduler] Waiting for {len(self._active_tasks)} active tasks to complete"
-                        )
-                    logger.info("[RolloutTaskScheduler] All active tasks completed")
-
-            # Yield control to the context block
-            yield self
-
-        finally:
-            # Resume only if we paused it (not if it was already paused)
-            if not was_already_paused and self._paused.is_set():
-                self._paused.clear()
-                logger.info(
-                    "[RolloutTaskScheduler] Scheduler resumed (context manager)"
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._admission:
+            if not self._running.is_set():
+                raise RuntimeError(
+                    "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
                 )
+            self._pause_owners += 1
+            self._update_pause_state()
+        try:
+            if wait_for_active_tasks:
+                with self._admission:
+                    try:
+                        current_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        current_loop = None
+                    while self._active_tasks:
+                        if current_loop is not None and current_loop is self._loop:
+                            raise RuntimeError(
+                                "Cannot drain scheduler tasks from their own event loop"
+                            )
+                        if not self._running.is_set():
+                            raise RuntimeError("Scheduler stopped while pausing")
+                        remaining = (
+                            None if deadline is None else deadline - time.monotonic()
+                        )
+                        if remaining is not None and remaining <= 0:
+                            raise TimeoutError(
+                                f"Timeout waiting for {len(self._active_tasks)} active tasks"
+                            )
+                        self._admission.wait(timeout=remaining)
+                    if not self._running.is_set():
+                        raise RuntimeError("Scheduler stopped while pausing")
+            yield self
+        finally:
+            with self._admission:
+                self._pause_owners -= 1
+                self._update_pause_state()
 
     def get(
         self, block: bool = True, timeout: Optional[float] = None
@@ -784,8 +797,7 @@ class RolloutTaskScheduler:
         """
         return (
             self.is_running()
-            and len(self._active_tasks) == 0
-            and self.task_queue.empty()
+            and self.is_all_tasks_completed()
             and self.complete_queue.empty()
         )
 
@@ -805,7 +817,11 @@ class RolloutTaskScheduler:
         Returns:
             True if task queue is empty and there are no active tasks
         """
-        return self.task_queue.empty() and len(self._active_tasks) == 0
+        # Queue ownership spans dequeue -> active registration -> terminal
+        # publication. Inspecting the queue and active set separately can miss
+        # a task in the gap and falsely declare the phase drained.
+        with self.task_queue.mutex:
+            return self.task_queue.unfinished_tasks == 0
 
     async def wait_all_tasks_completed(self):
         """

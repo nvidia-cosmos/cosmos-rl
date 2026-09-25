@@ -386,7 +386,7 @@ class TestInstallInferenceSync:
 
         servicer = SimpleNamespace(policy_fn=original_fn)
         rollout = SimpleNamespace(_servicer=servicer)
-        worker = SimpleNamespace(rollout=rollout)
+        worker = SimpleNamespace(rollout=rollout, inference_stream=None)
 
         install_inference_sync(worker)
 
@@ -402,7 +402,7 @@ class TestInstallInferenceSync:
 
         servicer = SimpleNamespace(policy_fn=original_fn)
         rollout = SimpleNamespace(_servicer=servicer)
-        worker = SimpleNamespace(rollout=rollout)
+        worker = SimpleNamespace(rollout=rollout, inference_stream=None)
 
         install_inference_sync(worker)
 

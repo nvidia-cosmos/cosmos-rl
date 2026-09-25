@@ -315,10 +315,10 @@ class TestPrefetchLoopSubmitSetupWiring(unittest.TestCase):
         )
 
     def test_prompt_fetch_end_set_on_loop_exit_via_finally(self) -> None:
-        """Defensive: even if the loop exits unexpectedly (e.g. an
-        unhandled bug, or shutdown without is_end), ``prompt_fetch_end``
-        must be set so ``main_loop`` doesn't wait forever for a
-        producer that died.
+        """A clean shutdown without is_end still closes the producer.
+
+        Unexpected failures have a separate retained-error contract below;
+        they must not be mistaken for successful dataset exhaustion.
         """
         recorder: List[List[dict]] = []
         # Empty api_responses + shutdown immediately -> loop sets
@@ -532,6 +532,96 @@ class TestSingleProducerModeIsLive(unittest.TestCase):
             with self.subTest(prefetch=prefetch, world_size=ws):
                 w = self._make_minimal_worker(prefetch_rollout=prefetch, world_size=ws)
                 self.assertEqual(w._single_producer_mode, expected)
+
+
+class TestPrefetchTerminalOwnership(unittest.TestCase):
+    def worker(self, responses=()):
+        return _make_worker_for_prefetch(
+            api_responses=list(responses), submit_setup_recorder=[]
+        )
+
+    def test_invalid_final_or_nonfinal_payload_is_not_clean_exhaustion(self):
+        for is_end in (False, True):
+            with self.subTest(is_end=is_end):
+                worker = self.worker([([{"prompt_idx": "invalid"}], is_end)])
+                with self.assertRaises(Exception) as failed:
+                    worker._prefetch_loop()
+                self.assertFalse(worker.state.prompt_fetch_end())
+                self.assertTrue(worker._prompt_queue.empty())
+                with self.assertRaisesRegex(
+                    RuntimeError, "prompt producer failed"
+                ) as observed:
+                    worker._raise_prefetch_error()
+                self.assertIs(observed.exception.__cause__, failed.exception)
+
+    def test_context_setup_failure_is_retained(self):
+        worker = self.worker()
+        worker._bind_prefetch_context_once = MagicMock(side_effect=ValueError("setup"))
+        with self.assertRaisesRegex(ValueError, "setup"):
+            worker._prefetch_loop()
+        self.assertFalse(worker.state.prompt_fetch_end())
+        self.assertIsInstance(worker._prefetch_error, ValueError)
+
+    def test_final_payload_is_queued_before_end_is_published(self):
+        worker = self.worker([([_make_payload_dict(1)], True)])
+
+        def submit(payloads):
+            self.assertFalse(worker.state.prompt_fetch_end())
+            self.assertTrue(worker._prompt_queue.empty())
+            self.assertEqual([p.prompt_idx for p in payloads], [1])
+
+        worker._submit_prefetch_setup = submit
+        worker._prefetch_loop()
+        self.assertTrue(worker.state.prompt_fetch_end())
+        self.assertEqual([p.prompt_idx for p in worker._prompt_queue.get_nowait()], [1])
+        self.assertEqual(worker.api_client.get_next_prompt.call_count, 1)
+
+    def test_throttle_backoff_is_shutdown_interruptible(self):
+        worker = self.worker([([], False)] * 4)
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            self.assertFalse(worker.state.prompt_fetch_end())
+            if len(waits) == 4:
+                worker.shutdown_signal.set()
+            return worker.shutdown_signal.is_set()
+
+        worker.shutdown_signal.wait = wait
+        worker._prefetch_loop()
+        self.assertEqual(waits, [0.05] * 4)
+        self.assertEqual(worker.api_client.get_next_prompt.call_count, 4)
+
+    def test_request_failure_backoff_is_shutdown_interruptible(self):
+        worker = self.worker()
+        worker.api_client.get_next_prompt.side_effect = RuntimeError(
+            "HTTP retries exhausted"
+        )
+        worker.shutdown_signal.wait = MagicMock(
+            side_effect=lambda timeout: worker.shutdown_signal.set()
+        )
+        worker._prefetch_loop()
+        worker.shutdown_signal.wait.assert_called_once_with(timeout=0.5)
+        self.assertIsNone(getattr(worker, "_prefetch_error", None))
+
+    def test_main_loop_observes_producer_failure_even_during_shutdown(self):
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                worker = self.worker()
+                worker.config.rollout = SimpleNamespace(
+                    prefetch_rollout=True, async_r2r_sync="disabled"
+                )
+                worker.parallel_dims = SimpleNamespace(world_size=1)
+                worker._prefetch_error = ValueError("invalid payload")
+                worker.consume_command = MagicMock()
+                if shutdown:
+                    worker.shutdown_signal.set()
+                with self.assertRaisesRegex(
+                    RuntimeError, "prompt producer failed"
+                ) as observed:
+                    worker._main_loop_impl()
+                self.assertIs(observed.exception.__cause__, worker._prefetch_error)
+                worker.consume_command.assert_not_called()
 
 
 if __name__ == "__main__":

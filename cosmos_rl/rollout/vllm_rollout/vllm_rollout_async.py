@@ -79,6 +79,10 @@ class VLLMColocateWorkerExtension:
         with set_current_vllm_config(self.vllm_config):
             apply_fp8_linear_patch(self._get_model())
 
+    def synchronize_generation(self):
+        """Acknowledge device completion in the process that executes forwards."""
+        torch.cuda.synchronize()
+
     def simplify_process_weights_after_loading(self):
         """
         Simplify the process weights after loading to quantize the weight of linear only in `rowwise` mode.
@@ -302,7 +306,15 @@ class vLLMRolloutAsync(vLLMRollout):
                     )
                     for child_idx in range(n_generation)
                 ]
-                results = await asyncio.gather(*tasks)
+                # One failed completion must not leave siblings generating
+                # after this prompt is reported terminal (or validation starts).
+                # Keep the existing all-or-nothing prompt result, but drain all
+                # children before propagating the first error. Outer cancellation
+                # still cancels and awaits the whole gather.
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
                 completions = [result for result in results if result is not None]
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
@@ -316,6 +328,25 @@ class vLLMRolloutAsync(vLLMRollout):
                 completions=completions,
             )
         ]
+
+    def synchronize_generation(self, timeout: float):
+        if not self._engine_initialized.is_set():
+            raise RuntimeError("Cannot fence an uninitialized rollout engine")
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is self._engine_event_loop:
+            raise RuntimeError("Cannot block the rollout engine's own event loop")
+        # Submitted after drained requests (including their abort messages), the
+        # RPC acknowledges CUDA completion in every backend worker process.
+        # Keep an uncertain RPC owned on timeout; do not cancel native work.
+        self._generation_fence_future = asyncio.run_coroutine_threadsafe(
+            self.rollout_engine.collective_rpc("synchronize_generation"),
+            self._engine_event_loop,
+        )
+        self._generation_fence_future.result(timeout=timeout)
+        self._generation_fence_future = None
 
     def get_underlying_model(self):
         """
