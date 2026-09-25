@@ -300,10 +300,7 @@ def test_uncertain_receive_retains_pins_storage_and_budget(monkeypatch, failure)
     elif failure == "wait":
         monkeypatch.setattr(nccl, "wait_event", fail)
     else:
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(
-            torch.cuda, "current_stream", lambda *args: mock.Mock(synchronize=fail)
-        )
+        monkeypatch.setattr(nccl, "record_event", lambda *args: mock.Mock(query=fail))
 
     budget, cache = receiver._receive_budget, receiver._comm_cache
     with pytest.raises(TransportUnusableError):
@@ -321,9 +318,7 @@ def test_failed_decode_completion_retains_allocated_tensor_storages(monkeypatch)
     receiver, raw_refs, _ = make_receiver(monkeypatch)
     monkeypatch.setattr(nccl, "_FAILED_RECEIVE_OWNERS", [])
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    synchronize = mock.Mock(
-        side_effect=[None, RuntimeError("decode completion failed")]
-    )
+    synchronize = mock.Mock(side_effect=RuntimeError("decode completion failed"))
     monkeypatch.setattr(
         torch.cuda, "current_stream", lambda *args: mock.Mock(synchronize=synchronize)
     )

@@ -460,7 +460,10 @@ class PrefetchDataPackerMixin:
                 raise RuntimeError("Payload transport is closing or closed")
             strategy = self._transport_strategy
             if strategy is not None:
-                return strategy.sync_fetch(rollout_output)
+                try:
+                    return strategy.sync_fetch(rollout_output)
+                except TransportUnusableError as error:
+                    fail_transport(str(error))
             return None
 
     def _on_prefetch_complete(

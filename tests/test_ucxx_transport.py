@@ -644,10 +644,15 @@ class TestResetUCXXContext(unittest.TestCase):
 
     def _invoke(self, fake_ucxx):
         from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer
+        from cosmos_rl.utils.payload_transport.ucxx import operation
 
         with (
             mock.patch.object(ucxx_buffer, "UCXX_AVAILABLE", True),
             mock.patch.object(ucxx_buffer, "ucxx", fake_ucxx),
+            mock.patch.object(ucxx_buffer, "_CONTEXT_OWNERS", {}),
+            mock.patch.object(ucxx_buffer, "_CONTEXT_FAILURE", None),
+            mock.patch.object(operation, "fail_transport", mock.Mock()),
+            mock.patch.object(operation, "_TERMINAL_OPERATIONS", []),
         ):
             ucxx_buffer.reset_ucxx_context()
 
@@ -727,21 +732,26 @@ class TestResetUCXXContext(unittest.TestCase):
         )
         self.assertEqual(events[-1], "reset")
 
-    def test_drain_is_noop_on_ucxx_build_without_cancel_api(self):
-        # Older/leaner ucxx builds may not expose cancel_inflight_requests; the
-        # drain must degrade silently to the prior stop-then-reset behaviour.
+    def test_untracked_context_without_drain_proof_is_terminal(self):
+        from cosmos_rl.utils.transport_failure import TransportUnusableError
+
+        # Managed owners use observed request completion. An untracked context
+        # cannot assume that proof or silently skip unavailable native queries.
         events = []
         worker = mock.Mock(spec=["stop_progress_thread"])  # no cancel_* / size api
         worker.stop_progress_thread.side_effect = lambda: events.append("stop")
         fake_ucxx = mock.Mock()
         fake_ucxx.reset.side_effect = lambda: events.append("reset")
         fake_ucxx.core = SimpleNamespace(_ctx=SimpleNamespace(worker=worker))
-        self._invoke(fake_ucxx)
-        worker.stop_progress_thread.assert_called_once_with()
-        fake_ucxx.reset.assert_called_once_with()
-        self.assertEqual(events, ["stop", "reset"])
+        with self.assertRaises(TransportUnusableError):
+            self._invoke(fake_ucxx)
+        worker.stop_progress_thread.assert_not_called()
+        fake_ucxx.reset.assert_not_called()
+        self.assertEqual(events, [])
 
     def test_progress_thread_stopped_even_when_reset_raises(self):
+        from cosmos_rl.utils.transport_failure import TransportUnusableError
+
         # reset() raises while an Endpoint/Listener still references the
         # context.  That is now non-fatal: the progress thread was already
         # stopped beforehand, so the crash-causing thread is gone regardless.
@@ -759,7 +769,8 @@ class TestResetUCXXContext(unittest.TestCase):
             raise RuntimeError("Trying to reset UCX but not all Endpoints closed")
 
         fake_ucxx.reset.side_effect = _reset_then_raise
-        self._invoke(fake_ucxx)
+        with self.assertRaises(TransportUnusableError):
+            self._invoke(fake_ucxx)
         worker.cancel_inflight_requests.assert_called_once()
         worker.stop_progress_thread.assert_called_once_with()
         fake_ucxx.reset.assert_called_once_with()
@@ -796,6 +807,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
         from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXClient
 
         self.client = UCXXClient()
+        self.addCleanup(lambda: __import__("asyncio").run(self.client.close()))
         # Tiny schema so ``_acquire_pinned`` allocates a few bytes.
         self.schema = [TensorSpec(shape=(4,), dtype=np.float32, name="x")]
         self.ports = [13620, 13621, 13622, 13623]
@@ -1084,6 +1096,7 @@ class TestUCXXClientPoolStaleEviction(unittest.TestCase):
         from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXClient
 
         self.client = UCXXClient()
+        self.addCleanup(lambda: __import__("asyncio").run(self.client.close()))
         self.worker_ip = "127.0.0.1"
         self.port = 13700
 
@@ -1103,6 +1116,7 @@ class TestUCXXClientPoolStaleEviction(unittest.TestCase):
 
         class _MockEndpoint:
             def __init__(self_inner):
+                self_inner._ep = SimpleNamespace(raise_on_error=mock.Mock())
                 self_inner.name = name
                 self_inner.closed = False
                 self_inner.send_calls = 0

@@ -16,6 +16,33 @@ from cosmos_rl.utils.pynccl_wrapper import ncclResultEnum
 class TestRawCallTimeout(unittest.TestCase):
     """A raw host call that never returns must still hit the task timeout."""
 
+    def test_returned_raw_call_does_not_wait_for_stalled_abort(self):
+        raw_return, abort_entered, abort_return = (threading.Event() for _ in range(3))
+
+        def functor():
+            assert raw_return.wait(3)
+            return Mock()
+
+        def abort(_idx):
+            abort_entered.set()
+            assert abort_return.wait(3)
+
+        task = pynccl._Task(functor, 50, 7)
+        worker = threading.Thread(target=pynccl.run_task, args=(task,))
+        with patch.object(pynccl, "_safe_abort", abort):
+            try:
+                worker.start()
+                assert abort_entered.wait(2)
+                raw_return.set()
+                assert task.done.wait(0.5), (
+                    "native abort held the result-publication lock"
+                )
+                assert task.timed_out.is_set()
+            finally:
+                raw_return.set()
+                abort_return.set()
+                worker.join(3)
+
     def _blocking_task(self, timeout_ms: int, comm_idx):
         """Build a task whose functor blocks until the abort releases it."""
         released = threading.Event()

@@ -25,8 +25,9 @@ UCXX/SHM.  Responsibilities:
   buffer, record a compute-stream ready-event, register the buffer, and
   return dict metadata (plus the ``nccl:<id>`` completion string).
 * the serve loop — a **bounded sender-thread pool** drains a per-pair FIFO
-  of accepted requests with ``nccl_send`` on a per-process transfer stream,
-  so a slow peer head-of-line-blocks only its own pair, not all pairs.
+  of accepted requests with ``nccl_send`` on a per-process transfer stream.
+  Different pairs can progress concurrently on the host, but shared CUDA
+  streams/resources do not provide dead-peer failure isolation.
 * the cleanup subscriber — frees GPU buffers when the controller discards
   the rollout (``nccl_cleanup`` channel).
 
@@ -47,9 +48,10 @@ Concurrency model (from the pynccl review)
 pynccl P2P runs inline on the caller thread as CUDA-stream-async enqueues;
 an ``ncclSend`` only *completes* once the peer posts the matching recv.  A
 single serve thread that syncs per-send would head-of-line-block every
-pair, so requests are dispatched to a bounded thread pool and each send
-carries a finite ``timeout_ms``; a transient failure quarantines the pair
-via the comm cache rather than wedging the worker.
+pair, so requests are dispatched to a bounded thread pool. An accepted operation
+keeps its original deadline through queueing, native setup and device completion.
+Unknown native completion is terminal and retains operands; cache invalidation
+does not prove safe recovery or permit replay of an accepted send.
 """
 
 from __future__ import annotations
@@ -67,6 +69,11 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.transport_failure import (
+    TransportDeadline,
+    TransportUnusableError,
+    fail_transport,
+)
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
     SendBufferEntry,
     SendBufferRegistry,
@@ -164,6 +171,13 @@ class _PendingSend:
     uid_key: Any
     receiver_replica: Any
     transfer_id: str
+    operation: Any = None
+    resp_key: Optional[str] = None
+
+
+# A failed native enqueue may still hold raw pointers. Process-lifetime owners
+# are deliberate: neither timeout nor abort proves device completion.
+_FAILED_SEND_OWNERS = []
 
 
 class NCCLRolloutMixin:
@@ -561,10 +575,13 @@ class NCCLRolloutMixin:
             # builds (empty vs real) -> 600s watchdog hang, so ask the receiver
             # to re-initiate with a freshly minted + published UID instead.
             needs_build = cache.get(pair) is None
-            have_uid = (
-                bool(rv.read_uid(uid_key)) if (needs_build and uid_key) else False
-            )
-            renegotiate = needs_build and not have_uid
+            uid = msg.get("uid_chars")
+            if uid is None and uid_key:
+                uid = rv.read_uid(uid_key)
+            # Capture the value, even on warm reuse, so a peer's fresh UID can
+            # invalidate a stale cached communicator. Never re-read after ack.
+            uid = tuple(uid or ())
+            renegotiate = needs_build and not uid
         except Exception as e:
             registry.abandon_inflight(entry)  # release lease: never reached _send
             logger.warning(
@@ -581,8 +598,31 @@ class NCCLRolloutMixin:
         # only correct if our sends leave in the same order we accepted them.
         # This handler runs on the single pub/sub listener thread, so appending
         # to the pair's FIFO here fixes that order; a pool task drains it.
-        if resp_key:
-            rv.respond(resp_key=resp_key, status=TransferStatus.ACCEPTED)
+        try:
+            if not resp_key or not rv.respond(
+                resp_key=resp_key, status=TransferStatus.ACCEPTED
+            ):
+                registry.abandon_inflight(entry)
+                return
+        except Exception:
+            registry.abandon_inflight(entry)
+            self._report_send_outcome(resp_key, TransferStatus.FAILED)
+            raise
+        remaining = (
+            float(req_deadline) - time.time()
+            if req_deadline is not None
+            else self._nccl_send_timeout_ms / 1000
+        )
+        operation = None
+        try:
+            operation = TransportDeadline(remaining, f"send {transfer_id}")
+            rv.watch_operation(resp_key, operation)
+        except BaseException:
+            registry.abandon_inflight(entry)
+            self._report_send_outcome(resp_key, TransferStatus.FAILED)
+            if operation is not None:
+                operation.close()
+            raise
 
         # Hand ONLY the blocking transfer to the bounded pool.  The lease taken
         # by acquire() above now outlives this function, so every outcome has to
@@ -601,9 +641,11 @@ class NCCLRolloutMixin:
             _PendingSend(
                 entry=entry,
                 receiver_rank=receiver_rank,
-                uid_key=uid_key,
+                uid_key=uid,
                 receiver_replica=receiver_replica,
                 transfer_id=transfer_id,
+                operation=operation,
+                resp_key=resp_key,
             ),
         )
 
@@ -700,6 +742,8 @@ class NCCLRolloutMixin:
                         pending.uid_key,
                         pending.receiver_replica,
                         pending.transfer_id,
+                        operation=pending.operation,
+                        resp_key=pending.resp_key,
                     )
                 except Exception as e:  # pragma: no cover - defensive
                     # _send already balanced this entry's lease, so do NOT
@@ -738,6 +782,9 @@ class NCCLRolloutMixin:
         registry = self._nccl_registry
         if registry is not None:
             registry.abandon_inflight(pending.entry)
+        self._report_send_outcome(pending.resp_key, TransferStatus.FAILED)
+        if pending.operation is not None:
+            pending.operation.close()
         logger.warning(
             "[NCCLRolloutMixin] dropping accepted send %s (%s); aborting pair %s "
             "so both halves rebuild rather than run one transfer out of step",
@@ -767,6 +814,9 @@ class NCCLRolloutMixin:
         for pending in orphans:
             if registry is not None:
                 registry.abandon_inflight(pending.entry)
+            self._report_send_outcome(pending.resp_key, TransferStatus.FAILED)
+            if pending.operation is not None:
+                pending.operation.close()
         if orphans:
             logger.debug(
                 "[NCCLRolloutMixin] released %d queued send(s) at teardown",
@@ -780,27 +830,47 @@ class NCCLRolloutMixin:
         uid_key: Any,
         receiver_replica: Any,
         transfer_id: str,
+        *,
+        operation=None,
+        resp_key=None,
     ) -> None:
         """Run one queued send, quarantining its pair if it fails."""
         try:
-            self._send(entry, receiver_rank, uid_key, receiver_replica)
+            self._send(
+                entry, receiver_rank, uid_key, receiver_replica, operation=operation
+            )
+            self._report_send_outcome(resp_key, TransferStatus.COMPLETE)
+        except TransportUnusableError as e:
+            self._report_send_outcome(resp_key, TransferStatus.FAILED)
+            fail_transport(str(e))
         except Exception as e:
+            self._report_send_outcome(resp_key, TransferStatus.FAILED)
             # _send already released the lease in its own finally -- do NOT
             # abandon here (would double-decrement).  Just quarantine the pair.
             cache = self._nccl_comm_cache
-            health_key = (self._nccl_rollout_idx, self._nccl_sender_rank)
+            pair = _producer_pair_key(
+                self._nccl_sender_rank, receiver_replica, receiver_rank
+            )
             logger.warning(
                 "[NCCLRolloutMixin] send failed for %s: %s; quarantining %s",
                 transfer_id,
                 e,
-                health_key,
+                pair,
             )
             if cache is not None:
-                cache.quarantine(
-                    _producer_pair_key(
-                        self._nccl_sender_rank, receiver_replica, receiver_rank
-                    )
-                )
+                cache.quarantine(pair)
+        finally:
+            if operation is not None:
+                operation.close()
+
+    def _report_send_outcome(self, resp_key, status):
+        if resp_key:
+            try:
+                self._nccl_rendezvous.respond(resp_key=resp_key, status=status)
+            except Exception:
+                # The receiver also owns the original deadline. Notification
+                # failure cannot extend it or authorize replay.
+                logger.exception("Failed to publish terminal payload outcome")
 
     def _send(
         self,
@@ -808,6 +878,8 @@ class NCCLRolloutMixin:
         receiver_rank: int,
         uid_key: Any,
         receiver_replica: Any = None,
+        *,
+        operation=None,
     ) -> None:
         """Build/reuse the pair comm and enqueue the standalone ``nccl_send``."""
         # The caller (_handle_request) has already LEASED this entry via
@@ -819,10 +891,17 @@ class NCCLRolloutMixin:
         # can leak the lease.
         registry = self._nccl_registry
         recorded = False
+        native_issued = False
+        completed = False
+        comm_idx = None
+        stream = None
+        owned_deadline = operation is None
+        operation = operation or TransportDeadline(
+            self._nccl_send_timeout_ms / 1000, "payload send"
+        )
         try:
             from cosmos_rl.utils import pynccl
 
-            rv = self._nccl_rendezvous
             cache = self._nccl_comm_cache
             # This runs on an executor thread; bind it to our GPU so comm
             # creation and the send target the right device (CUDA current
@@ -831,16 +910,21 @@ class NCCLRolloutMixin:
             pair = _producer_pair_key(
                 self._nccl_sender_rank, receiver_replica, receiver_rank
             )
-            uid = rv.read_uid(uid_key) if uid_key else None
+            uid = uid_key
             # LEASE the comm rather than just fetching it: the launch below holds
             # this comm_idx across the whole collective, so an unpinned entry
             # could be picked as the LRU eviction victim by a concurrent build
             # for a different pair and aborted mid-send.  The pin gates eviction
             # only -- a quarantine abort still fires, which is what unwedges a
             # stuck send.
-            with cache.leased(
-                pair, uid_chars=uid or [], local_rank=SENDER_LOCAL_RANK
-            ) as comm_idx:
+            comm_idx = cache.get_or_create(
+                pair,
+                uid_chars=uid or [],
+                local_rank=SENDER_LOCAL_RANK,
+                pin=True,
+                deadline=operation,
+            )
+            if comm_idx is not None:
                 # Serialize the actual NCCL launch on this producer's GPU.  NCCL
                 # requires deterministic single-threaded host launch ordering
                 # across communicators on one device; the sender pool otherwise
@@ -855,12 +939,13 @@ class NCCLRolloutMixin:
                 # happens on the stream after release), so the lock stays fast
                 # and cannot deadlock on the peer's recv.
                 with self._nccl_send_lock:
+                    operation.remaining_ms()
                     stream = (
                         self._nccl_streams.acquire() if self._nccl_streams else None
                     )
                     # Do not send until the trajectory tensor is actually produced.
                     wait_event(stream, entry.ready_event)
-                    pynccl.nccl_group_start(comm_idx)
+                    native_issued = True
                     # Finite timeout so a send whose peer has departed (e.g. the
                     # policy replica tore down first at job end) aborts via
                     # pynccl's watchdog instead of wedging the sender thread
@@ -871,23 +956,37 @@ class NCCLRolloutMixin:
                         RECEIVER_LOCAL_RANK,
                         comm_idx,
                         stream=stream,
-                        timeout_ms=self._nccl_send_timeout_ms,
+                        timeout_ms=operation.remaining_ms(),
                     )
-                    pynccl.nccl_group_end(comm_idx)
+                    # A single point-to-point operation does not need a group.
+                    # Omitting it also removes a half-open group on exceptions.
                     registry_done = record_event(stream)
-                    # Keep the buffer alive until this send completes.  The
-                    # registry reaps it once every recorded event fires
-                    # (delivery), or on cleanup / capacity pressure -- and
-                    # _on_buffer_free waits before releasing so the storage is
-                    # never reused while NCCL reads it.
-                    registry.add_done_event(entry, registry_done)
-                    recorded = True
+                operation.wait_event(registry_done)
+                completed = True
+                # Release only after confirmed device completion, including
+                # the communicator eviction pin and registry's payload lease.
+                registry.add_done_event(entry, registry_done)
+                recorded = True
+        except BaseException as error:
+            if native_issued and not completed:
+                _FAILED_SEND_OWNERS.append(
+                    (entry, cache, pair, comm_idx, stream, operation)
+                )
+                raise TransportUnusableError(
+                    "Payload send completion unknown; native operands retained"
+                ) from error
+            raise
         finally:
-            if not recorded:
+            uncertain = native_issued and not completed
+            if not recorded and not uncertain:
                 # Send never recorded an event (comm-build or launch failure) ->
                 # release the acquire() lease so a dropped send never pins the
                 # buffer forever.
                 registry.abandon_inflight(entry)
+            if comm_idx is not None and not uncertain:
+                cache.unpin(pair)
+            if owned_deadline:
+                operation.close()
 
     # ------------------------------------------------------------------
     # Cleanup subscriber
@@ -1073,7 +1172,7 @@ class NCCLRolloutMixin:
         #    ``shutdown(wait=True)`` would deadlock -- we'd wait for the very
         #    sends that only the abort can unwedge.
         if self._nccl_comm_cache is not None:
-            self._nccl_comm_cache.abort_all()
+            self._nccl_comm_cache.close()
         # 3. Join senders before releasing their buffers. The caller's deadline
         # bounds waiting on this entire operation, including native abort.
         executor = getattr(self, "_nccl_executor", None)

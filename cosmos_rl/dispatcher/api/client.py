@@ -20,6 +20,7 @@ API client for the dispatcher.
 import os
 import re
 import requests
+import time
 import msgpack
 from functools import partial
 from typing import Dict, Any, List, Tuple, Optional
@@ -45,6 +46,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_UNREGISTER_SUFFIX,
     COSMOS_API_HEARTBEAT_SUFFIX,
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
+    COSMOS_API_P2R_READY_SUFFIX,
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
     COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX,
     COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
@@ -332,6 +334,50 @@ class APIClient(object):
             raise RuntimeError(
                 f"[{self.role}] Failed in get ipc_addr for mesh key {mesh_key} from controller after retries {e}."
             )
+
+    def wait_p2r_ready(self, declaration: dict):
+        """Poll command-scoped readiness before any native operation.
+
+        One monotonic budget covers HTTP retries. The published wall-clock
+        deadline also lets the controller reject expired late arrivals.
+        """
+        deadline = time.monotonic() + max(0, declaration["expires_at"] - time.time())
+        urls = self.get_alternative_urls(COSMOS_API_P2R_READY_SUFFIX)
+        error = None
+        while True:
+            for url in urls:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "P2R readiness expired before native transfer"
+                    ) from error
+                try:
+                    response = requests.post(
+                        url, json=declaration, timeout=min(2.0, remaining)
+                    )
+                    # A missing route/malformed request is not a retryable peer delay.
+                    if 400 <= response.status_code < 500:
+                        response.raise_for_status()
+                    response.raise_for_status()
+                    result = response.json()
+                except requests.HTTPError as exc:
+                    if (
+                        exc.response is not None
+                        and 400 <= exc.response.status_code < 500
+                    ):
+                        raise
+                    error = exc
+                    continue
+                except (requests.RequestException, ValueError) as exc:
+                    error = exc
+                    continue
+                if result.get("state") == "failed":
+                    raise RuntimeError(f"P2R readiness failed: {result.get('error')}")
+                if result.get("state") == "ready":
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("P2R readiness completed after deadline")
+                    return result
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
     def post_nccl_comm_initiator(self, unique_pair_name: str, nccl_uuid: List[int]):
         base64_nccl_group_id = list_to_b64(nccl_uuid)

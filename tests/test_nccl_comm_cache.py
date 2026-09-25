@@ -23,6 +23,7 @@ CUDA context.
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
 
@@ -393,6 +394,114 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(len(builder.calls), 6)
         # Never more than max_concurrent_init builds in flight at once.
         self.assertLessEqual(builder.peak_concurrent, 2)
+
+
+class TestBuildInvalidation(unittest.TestCase):
+    def test_late_build_is_aborted_and_never_published(self):
+        for invalidate in (
+            "abort",
+            "abort_endpoint",
+            "abort_all",
+            "quarantine",
+            "close",
+        ):
+            with self.subTest(invalidate=invalidate):
+                entered, finish = threading.Event(), threading.Event()
+                aborted = []
+                pair = ("producer", 0, 1)
+
+                def build(uid, rank):
+                    entered.set()
+                    self.assertTrue(finish.wait(3))
+                    return 42
+
+                cache = CommCache(build_fn=build, abort_fn=aborted.append)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        cache.get_or_create, pair, uid_chars=[1], local_rank=1, pin=True
+                    )
+                    try:
+                        self.assertTrue(entered.wait(3))
+                        if invalidate == "abort":
+                            cache.abort(pair)
+                        elif invalidate == "abort_endpoint":
+                            cache.abort_endpoint(("producer", 0))
+                        elif invalidate == "quarantine":
+                            cache.quarantine(("producer", 0))
+                        elif invalidate == "close":
+                            cache.close()
+                        else:
+                            cache.abort_all()
+                    finally:
+                        finish.set()
+                    with self.assertRaisesRegex(RuntimeError, "after invalidation"):
+                        future.result(timeout=3)
+                self.assertEqual(aborted, [42])
+                self.assertIsNone(cache.get(pair))
+                self.assertEqual(cache.pinned_count(pair), 0)
+                if invalidate == "close":
+                    with self.assertRaisesRegex(RuntimeError, "cache is closed"):
+                        cache.get_or_create(pair, uid_chars=[2], local_rank=1)
+
+    def test_unrelated_endpoint_invalidation_does_not_cancel_build(self):
+        entered, finish = threading.Event(), threading.Event()
+        aborted = []
+
+        def build(uid, rank):
+            entered.set()
+            self.assertTrue(finish.wait(3))
+            return 43
+
+        cache = CommCache(build_fn=build, abort_fn=aborted.append)
+        pair = ("live", 0, 1)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(cache.get_or_create, pair, uid_chars=[1], local_rank=1)
+            try:
+                self.assertTrue(entered.wait(3))
+                cache.abort_endpoint(("departed", 0))
+            finally:
+                finish.set()
+            self.assertEqual(future.result(timeout=3), 43)
+        self.assertEqual(aborted, [])
+        self.assertEqual(cache.get(pair), 43)
+
+    def test_call_queued_on_pair_lock_cannot_rebuild_invalidated_attempt(self):
+        entered, finish, queued = (threading.Event() for _ in range(3))
+        calls, aborted = [], []
+        pair = ("producer", 0, 1)
+
+        def build(uid, rank):
+            calls.append(uid)
+            entered.set()
+            self.assertTrue(finish.wait(3))
+            return 44
+
+        cache = CommCache(build_fn=build, abort_fn=aborted.append)
+        original_pair_lock = cache._pair_lock
+
+        def pair_lock(key):
+            if entered.is_set():
+                queued.set()
+            return original_pair_lock(key)
+
+        cache._pair_lock = pair_lock
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(cache.get_or_create, pair, uid_chars=[1], local_rank=1)
+            self.assertTrue(entered.wait(3))
+            second = pool.submit(cache.get_or_create, pair, uid_chars=[1], local_rank=1)
+            try:
+                self.assertTrue(queued.wait(3))
+                cache.abort_all()
+            finally:
+                finish.set()
+            for future in (first, second):
+                with self.assertRaisesRegex(RuntimeError, "invalidat"):
+                    future.result(timeout=3)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(aborted, [44])
+        # A subsequent caller is a new generation, not the cancelled attempt.
+        self.assertEqual(cache.get_or_create(pair, uid_chars=[2], local_rank=1), 44)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

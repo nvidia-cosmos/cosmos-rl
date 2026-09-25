@@ -59,6 +59,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional, Sequence
 
 import torch
+from contextlib import nullcontext
 from torch.distributed.tensor import DTensor
 
 from cosmos_rl.utils.logging import logger
@@ -66,8 +67,7 @@ from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
     nccl_abort_all,
     nccl_broadcast,
-    nccl_group_end,
-    nccl_group_start,
+    nccl_group,
 )
 from cosmos_rl.utils.tensor_packing import (
     iter_tensor_byte_buckets,
@@ -565,41 +565,28 @@ class WeightSyncThread:
     def reset_for_rebuild(self) -> bool:
         """Quiesce pending work and clear latched failure ahead of a rebuild.
 
-        Returns whether a latched failure had to be cleared.
-
-        A mesh rebuild is the RECOVERY from a replica departing, so a failure
-        caused by that departure must not veto it. Without this, one lost
-        replica is fatal to every survivor:
-
-        * the departing peer makes an in-flight R2R raise, latching
-          ``_task_failed``;
-        * ``fence()`` therefore returns False and latches ``_fence_failed``;
-        * ``_fence_failed`` short-circuits every later ``fence()`` *before* the
-          drain, so the rebuild is refused without even trying;
-        * ``build_global_mesh`` treats that as fatal and the survivor dies,
-          which triggers another rebuild for the next survivor, and so on.
-
-        The flags are cleared BEFORE draining, because the short-circuit would
-        otherwise make this report failure without doing any work. If the drain
-        itself then fails, ``fence()`` has already aborted NCCL -- the old
-        communicator is gone, which is precisely the state a rebuild wants --
-        so the flags are cleared again and the caller proceeds.
+        Returns whether a completed prior failure was cleared. Clearing the
+        latch first permits a real queue/stream drain instead of short-circuiting
+        on that old failure. A failed new drain is terminal for this rebuild:
+        aborting a communicator does not join a host task or prove that it can
+        no longer issue CUDA work. Never publish a new mesh over uncertain work.
         """
         had_failure = bool(
             getattr(self, "_fence_failed", False)
             or getattr(self, "_task_failed", False)
         )
         self._clear_latched_failure()
-        if not self.fence():
-            logger.warning(
-                "[WeightSyncThread] %s: work did not drain cleanly before the "
-                "mesh rebuild; NCCL has been aborted and the stale work is "
-                "being discarded. The rebuild replaces the communicator that "
-                "work targeted, so it cannot be completed.",
-                self._worker.replica_name,
+        try:
+            drained = self.fence()
+        except BaseException:
+            self._fence_failed = True
+            raise
+        if not drained:
+            self._fence_failed = True
+            raise RuntimeError(
+                f"WeightSyncThread[{self._worker.replica_name}] cannot quiesce "
+                "old work before mesh rebuild; refusing to clear its failure"
             )
-            had_failure = True
-            self._clear_latched_failure()
         return had_failure
 
     def _clear_latched_failure(self) -> None:
@@ -1254,12 +1241,9 @@ def do_nccl_broadcast_tensors(
                     if not is_src:
                         unpack_tensors_from_buffer(payload, bucket)
             else:
-                if group_unpacked:
-                    nccl_group_start(comm_idx)
-                for transfer_tensor in transfer_tensors:
-                    nccl_broadcast(transfer_tensor, src_rank, comm_idx)
-                if group_unpacked:
-                    nccl_group_end(comm_idx)
+                with nccl_group(comm_idx) if group_unpacked else nullcontext():
+                    for transfer_tensor in transfer_tensors:
+                        nccl_broadcast(transfer_tensor, src_rank, comm_idx)
             for param, recv_tensor in non_contig:
                 param.copy_(recv_tensor)
     return len(transfer_source), bytes_broadcast

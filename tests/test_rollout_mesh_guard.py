@@ -545,8 +545,8 @@ class TestReplicaLossDoesNotCascade:
     * build_global_mesh raised, killing the survivor, which triggered the next
       rebuild, which killed the next survivor.
 
-    The rebuild is the recovery. It must not be vetoed by the failure it
-    exists to recover from.
+    A completed prior failure must not veto recovery. A failed new drain is
+    different: abort alone does not prove that old host/device work stopped.
     """
 
     def _worker_with_failed_sync(self):
@@ -556,7 +556,7 @@ class TestReplicaLossDoesNotCascade:
         worker._weight_sync_thread = wst
         return worker, wst
 
-    def test_a_failed_fence_does_not_kill_the_survivor(self):
+    def test_a_completed_prior_failure_does_not_kill_the_survivor(self):
         worker, wst = self._worker_with_failed_sync()
 
         with (
@@ -645,9 +645,8 @@ class TestResetForRebuildClearsTheLatch:
 
         assert seen == {"fence_failed": False, "task_failed": False}
 
-    def test_a_failing_drain_still_leaves_the_thread_usable(self):
-        # fence() aborts NCCL on its timeout paths, so the old communicator is
-        # already dead. Staying latched would only refuse the next rebuild too.
+    def test_a_failing_drain_remains_latched(self):
+        # An abort request does not prove the old host/device work has stopped.
         from cosmos_rl.rollout.worker.weight_sync import WeightSyncThread
 
         wst = self._thread()
@@ -660,10 +659,10 @@ class TestResetForRebuildClearsTheLatch:
             return False
 
         with patch.object(WeightSyncThread, "fence", _failing_fence):
-            had_failure = wst.reset_for_rebuild()
+            with pytest.raises(RuntimeError, match="quiesce"):
+                wst.reset_for_rebuild()
 
-        assert had_failure is True
-        assert wst._fence_failed is False
+        assert wst._fence_failed is True
         assert wst._task_failed is False
 
 

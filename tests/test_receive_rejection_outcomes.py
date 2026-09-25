@@ -9,6 +9,7 @@ import pytest
 
 from test_receive_memory import make_receiver, refs_for
 from cosmos_rl.utils.payload_transport.nccl import strategy as nccl
+from cosmos_rl.utils.payload_transport.nccl.rendezvous import RendezvousResult
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 from cosmos_rl.utils.payload_transport.receive_memory import ReceiveMemoryError
 from cosmos_rl.utils.trajectory import serialize_schema
@@ -43,7 +44,7 @@ def test_known_rejection_skips_without_unleased_refetch(monkeypatch, outcome, pr
     ref = wire_ref(refs_for([3])[0][1])
     if outcome == "missing":
         receiver._rendezvous = SimpleNamespace(
-            initiate=lambda **kwargs: SimpleNamespace(
+            initiate=lambda **kwargs: RendezvousResult(
                 status=nccl.TransferStatus.MISSING
             )
         )
@@ -112,7 +113,7 @@ def test_mixed_received_and_rejected_batch_keeps_lease_and_clears_outcomes(
     receiver, _, _ = make_receiver(monkeypatch)
     receive = receiver._rendezvous_one
     receiver._rendezvous = SimpleNamespace(
-        initiate=lambda **kwargs: SimpleNamespace(status=nccl.TransferStatus.MISSING)
+        initiate=lambda **kwargs: RendezvousResult(status=nccl.TransferStatus.MISSING)
     )
     missing = MethodType(nccl.NCCLTransportStrategy._rendezvous_one, receiver)
     receiver._rendezvous_one = lambda ref, pynccl: (

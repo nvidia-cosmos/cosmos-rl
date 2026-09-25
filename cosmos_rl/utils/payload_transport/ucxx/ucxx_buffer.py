@@ -34,6 +34,7 @@ with an import error in random places.
 
 import asyncio
 import collections
+import math
 import os
 import threading
 import time
@@ -44,6 +45,8 @@ import numpy as np
 import torch
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.payload_transport.rotation import HealthSkipList
+from cosmos_rl.utils.payload_transport.ucxx.operation import UCXXOperation
+from cosmos_rl.utils.transport_failure import TransportUnusableError
 from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
     BufferConfig,
     BufferMetrics,
@@ -56,11 +59,14 @@ from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
 # Package: pip install ucxx-cu12 (for CUDA 12)
 try:
     import ucxx
+    from ucxx.exceptions import UCXConnectionResetError
 
     UCXX_AVAILABLE = True
+    _COMPLETED_PEER_DISCONNECT = (UCXConnectionResetError,)
 except ImportError:
     ucxx = None
     UCXX_AVAILABLE = False
+    _COMPLETED_PEER_DISCONNECT = ()
     logger.warning(
         "[UCXXBuffer] ucxx not available. Install with: pip install ucxx-cu12. "
         "Cross-node UCXX will not work."
@@ -68,155 +74,138 @@ except ImportError:
 
 
 def _drain_inflight_requests(worker, timeout_s: float = 8.0) -> None:
-    """Cancel + drain all in-flight UCXX requests **while the progress thread
-    is still running**, so every request-completion callback fires now, with a
-    healthy interpreter.
+    """Require observable cancellation completion for an untracked context.
 
-    This is the fix for the residual post-"Server stopped" SIGSEGV seen on long
-    runs (~1% of rollout teardowns).  Per the ucxx docs, ``~Worker()`` /
-    ``~Endpoint()`` call ``cancelInflightRequests()`` during destruction, and
-    "we can't release the GIL when the garbage collector runs and destroys the
-    object."  So if any UCP request is still in flight when ``ucxx.reset()`` (or
-    interpreter finalization) garbage-collects the UCXX objects, the C++
-    progress thread dispatches that request's Python completion callback while
-    the collector holds the GIL / is tearing down the request->future dict ->
-    use-after-free (observed backtrace: ``WorkerProgressThread`` -> ucp callback
-    -> ``PyDict_GetItemWithError``).  At end-of-data there *are* in-flight reads
-    (the policy's last output fetches, logged as "Request canceled"), and more
-    of them on long runs -- which is why only the long matrix tripped it.
-
-    The documented teardown contract is: schedule cancellation, then progress
-    the worker until ``getCancelingSize()`` reaches 0.  The progress thread is
-    still alive here, so it does the progressing; we just wait (bounded) for the
-    canceling set to drain before the caller stops the thread and resets.
-
-    All calls are ``getattr``-guarded: on a ucxx build without these methods this
-    degrades to the prior behaviour (no worse than before).
+    Keep progress running until the native cancellation count reaches zero.
+    Python UCXX 0.50/0.51 lacks this count API, so this fallback must fail closed
+    there. Managed owners instead retire their own endpoints and request waiters
+    before releasing the final context lease. Neither an elapsed delay nor the
+    number of cancellation requests submitted proves native completion.
     """
     cancel = getattr(worker, "cancel_inflight_requests", None)
-    if cancel is None:
-        return
-    try:
-        n = cancel()
-    except Exception:
-        logger.exception("[UCXXBuffer] cancel_inflight_requests failed")
-        return
-
     get_canceling_size = getattr(worker, "get_canceling_size", None)
-    if get_canceling_size is not None:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            try:
-                if get_canceling_size() == 0:
-                    break
-            except Exception:
-                break
-            time.sleep(0.01)
-    else:
-        # No introspection available; give the live progress thread a beat to
-        # dispatch the scheduled cancellations before it is stopped.
-        time.sleep(0.2)
+    if not callable(cancel) or not callable(get_canceling_size):
+        raise RuntimeError("UCXX cannot prove native cancellation drain")
+    n = cancel()
+    deadline = time.monotonic() + timeout_s
+    while True:
+        pending = get_canceling_size()
+        if type(pending) is not int or pending < 0:
+            raise RuntimeError("UCXX returned an invalid native cancellation count")
+        if pending == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("UCXX native cancellation drain timed out")
+        time.sleep(0.01)
     logger.info("[UCXXBuffer] Drained in-flight UCXX requests (scheduled cancel=%s)", n)
 
 
-def reset_ucxx_context() -> None:
-    """Tear down the process-global UCXX context, stopping its progress thread.
+_CONTEXT_LOCK = threading.RLock()
+_CONTEXT_OWNERS = {}
+_CONTEXT_FAILURE = None
 
-    UCXX runs in its default ``thread`` progress mode, where
-    ``ApplicationContext`` starts a C++ ``WorkerProgressThread`` (inside
-    ``ucxx::Worker``) that calls ``ucp_worker_progress`` in the background.
-    That thread keeps running until the worker is explicitly told to stop it --
-    ``stop_server`` closes the listeners and joins the asyncio loops, but the
-    global context (and therefore the progress thread) lives on.  Left running,
-    the progress thread dispatches into Python objects that the interpreter is
-    finalizing at shutdown (``PyObject_GC_UnTrack`` in the frame) ->
-    use-after-free -> a rare SIGSEGV logged *after* "Server stopped".
 
-    The critical ordering is three steps, all *before* any GC pass:
-    (1) drain in-flight requests (``_drain_inflight_requests``) while the
-    progress thread is still alive, so every request-completion callback fires
-    now; (2) stop the progress thread; (3) ``ucxx.reset()``.  Steps (1) and (2)
-    together are what make (3) safe.
+def _mark_context_failed(reason):
+    global _CONTEXT_FAILURE
+    _CONTEXT_FAILURE = reason
 
-    Stopping the thread first (without (1)) is *not* sufficient: a UCP request
-    left in flight is cancelled by ``~Worker()``/``~Endpoint()`` during the
-    ``gc.collect()`` that ``ucxx.reset()`` (and interpreter finalization)
-    trigger, and the ucxx docs are explicit that the GIL cannot be released
-    while the collector destroys those objects -- so the progress thread
-    dispatches the request's Python callback into a half-torn-down
-    request->future dict (observed backtrace: ``WorkerProgressThread`` -> ucp
-    callback -> ``PyDict_GetItemWithError`` -> SIGSEGV).  ``reset()`` alone is
-    worse still: it stops the thread only *as a side effect* of GC finalizing
-    the ``ApplicationContext`` (``ThreadMode.__del__`` ->
-    ``stop_progress_thread()``), so the thread is racing
-    ``PyObject_GC_UnTrack`` on the very objects being collected.  Draining and
-    then stopping the thread up front needs no cooperation from any still-open
-    endpoint, so it is robust even when an endpoint is stuck.
 
-    ``ucxx.reset()`` then destroys the (now-quiescent) context for full hygiene.
-    It still raises if an Endpoint/Listener lingers (a stuck handler /
-    half-closed client), but that is now harmless -- the crash-causing thread is
-    already stopped -- so we just log it.
-
-    No-op when UCXX is unavailable or was never initialised in this process, and
-    idempotent (a second call sees no context; ``stop_progress_thread`` is itself
-    idempotent).
-    """
-    if not UCXX_AVAILABLE or ucxx is None:
-        return
-
-    # Reach the live context without *creating* one (``ucxx`` exposes the
-    # ``_get_ctx`` helper, but it would instantiate a fresh ApplicationContext
-    # just to tear it down).  ``ucxx.core`` is bound as an attribute of the
-    # package the moment ``import ucxx`` runs (its ``__init__`` does
-    # ``from .core import *``), so attribute access is reliable and avoids a
-    # redundant import.
-    ucxx_core = getattr(ucxx, "core", None)
-    if ucxx_core is None:
-        return
-    ctx = getattr(ucxx_core, "_ctx", None)
-    if ctx is None:
-        return
-
-    # Capture the worker before anything can null ``_ctx`` (``ucxx.reset()``
-    # nulls it before it may raise).  This handle is what lets us stop the
-    # progress thread regardless of endpoint state.
-    worker = getattr(ctx, "worker", None)
-    ctx = None  # drop the extra reference so it cannot itself defeat reset()
-
-    # 1) Drain in-flight requests while the progress thread is STILL running,
-    #    so no request-completion callback is left to fire into a finalizing
-    #    interpreter once we stop the thread / reset (the ~Worker()/~Endpoint()
-    #    GC path -- see _drain_inflight_requests).
-    if worker is not None:
-        _drain_inflight_requests(worker)
-
-    # 2) Stop the C++ progress thread synchronously, BEFORE any gc pass.  With
-    #    the requests already drained, no concurrent ``ucp_worker_progress``
-    #    callback can race object teardown.
-    if worker is not None:
-        try:
-            worker.stop_progress_thread()
-            logger.info("[UCXXBuffer] UCXX worker progress thread stopped")
-        except Exception:
-            logger.exception("[UCXXBuffer] Failed to stop UCXX worker progress thread")
-    else:
-        logger.warning(
-            "[UCXXBuffer] No UCXX worker handle captured; progress thread "
-            "could not be stopped explicitly"
-        )
-
-    # 3) Destroy the now-quiescent global context for full resource hygiene.
-    #    Safe because the progress thread is already joined; a raise here (an
-    #    endpoint/listener still referenced) no longer implies a live thread.
+def _acquire_ucxx_context(owner):
+    """Lease the global worker, including idle pooled endpoints, until close."""
+    operation = UCXXOperation(
+        30.0, "UCXX context admission", owners=(owner,), on_failure=_mark_context_failed
+    )
     try:
-        ucxx.reset()
-        logger.info("[UCXXBuffer] UCXX context reset")
-    except Exception as e:
-        logger.warning(
-            f"[UCXXBuffer] ucxx.reset() did not fully tear down ({e}); "
-            "progress thread already stopped, so this is non-fatal"
+        with _CONTEXT_LOCK:
+            if _CONTEXT_FAILURE is not None:
+                raise TransportUnusableError(_CONTEXT_FAILURE)
+            if id(owner) not in _CONTEXT_OWNERS:
+                try:
+                    ucxx.init()
+                except RuntimeError as error:
+                    if "already initiated" not in str(error):
+                        raise
+                _CONTEXT_OWNERS[id(owner)] = owner
+        operation.complete()
+    except BaseException as error:
+        operation.fail(f"context admission uncertain: {error}")
+
+
+def _release_ucxx_context(owner):
+    # Call only after every native endpoint/request belonging to this owner
+    # has been retired. Admission cannot race last-owner reset.
+    with _CONTEXT_LOCK:
+        if id(owner) not in _CONTEXT_OWNERS:
+            return
+        del _CONTEXT_OWNERS[id(owner)]
+        _reset_ucxx_context(owned_quiescence=True)
+
+
+def reset_ucxx_context() -> None:
+    """Reset only the last owner's proven-idle worker, with a terminal budget."""
+    _reset_ucxx_context(owned_quiescence=False)
+
+
+def _reset_ucxx_context(*, owned_quiescence):
+    with _CONTEXT_LOCK:
+        if _CONTEXT_FAILURE is not None:
+            raise TransportUnusableError(_CONTEXT_FAILURE)
+        if _CONTEXT_OWNERS:
+            return
+        if not UCXX_AVAILABLE or ucxx is None:
+            return
+        ctx = getattr(getattr(ucxx, "core", None), "_ctx", None)
+        if ctx is None:
+            return
+        worker = getattr(ctx, "worker", None)
+        operation = UCXXOperation(
+            30.0,
+            "UCXX final context drain",
+            owners=(ctx, worker),
+            on_failure=_mark_context_failed,
         )
+        try:
+            if worker is None:
+                raise RuntimeError("UCXX context has no observable worker")
+            # Python UCXX 0.50/0.51 does not expose get_canceling_size. Managed
+            # owners instead observe every request waiter and check retained
+            # native endpoint close status before surrendering their lease.
+            # An untracked context cannot use that proof or a timing heuristic.
+            if not owned_quiescence:
+                _drain_inflight_requests(worker)
+            worker.stop_progress_thread()
+            # Native callbacks have drained and the progress thread joined.
+            # Drop our context reference so reset's reference check can work.
+            operation.owners[:] = [worker]
+            ctx = None
+            ucxx.reset()
+            operation.complete()
+        except BaseException as error:
+            operation.fail(f"final context teardown uncertain: {error}")
+
+
+async def _close_endpoint_owned(endpoint, operation):
+    """Retain and check native close status; Python close can hide timeouts."""
+    native = getattr(endpoint, "_ep", None)
+    if native is None:
+        if endpoint.closed:
+            return
+        operation.fail("UCXX endpoint has no observable native close handle")
+    operation.owners.extend((endpoint, native))
+    try:
+        # close_blocking logs timeouts and returns; Python close then drops its
+        # native handle. Keep that handle and inspect its status after return.
+        # The owner must also await its retained request waiters before release.
+        await operation.wait(endpoint.close)
+        try:
+            native.raise_on_error()
+        except _COMPLETED_PEER_DISCONNECT:
+            # An idle pooled connection may already have been closed by its
+            # peer. This does not waive the owner's retained-request drain.
+            # In particular, endpoint-timeout is NOT a clean close status.
+            pass
+    except BaseException as error:
+        operation.fail(f"native endpoint close uncertain: {error}")
 
 
 class StaleSlotError(RuntimeError):
@@ -295,8 +284,12 @@ class UCXXBufferConfig:
     # UCXX server config
     port: int = 13337
     n_server_threads: int = 4
+    # One accepted status + payload send, including native completion.
+    send_timeout: float = 30.0
 
     def __post_init__(self):
+        if not math.isfinite(self.send_timeout) or self.send_timeout <= 0:
+            raise ValueError("UCXX producer send timeout must be finite and positive")
         if self.schema is None:
             self.schema = []
 
@@ -360,6 +353,7 @@ class UCXXBuffer:
         self._server_threads: List[threading.Thread] = []
         self._server_loops: List[Optional[asyncio.AbstractEventLoop]] = []
         self._shutdown_flag = threading.Event()
+        self._server_failure = None
         self._active_endpoints: List[Any] = []
         self._endpoints_lock = threading.Lock()
         self._server_ready_count = 0
@@ -393,7 +387,7 @@ class UCXXBuffer:
         """Start N UCXX listeners on consecutive ports in background threads.
 
         This method is synchronous and blocks until all server threads are
-        ready.  Each thread gets its own asyncio event loop and UCX worker.
+        ready. Each thread has its own event loop and shares the leased worker.
 
         Args:
             timeout: Timeout in seconds to wait for all threads to start.
@@ -411,6 +405,7 @@ class UCXXBuffer:
             logger.warning("[UCXXBuffer] Server already running")
             return
 
+        _acquire_ucxx_context(self)
         self._shutdown_flag.clear()
         self._server_ready_count = 0
         self._server_ready_event.clear()
@@ -453,6 +448,7 @@ class UCXXBuffer:
                 "total_read_ms": 0.0,
                 "total_send_ms": 0.0,
             }
+        uncertain = False
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -460,38 +456,42 @@ class UCXXBuffer:
 
             loop.run_until_complete(self._async_server_main(thread_idx, port))
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"[UCXXBuffer] Server loop error (thread {thread_idx}): {e}")
             import traceback
 
             traceback.print_exc()
+            if (
+                self._listeners[thread_idx] is not None
+                or self._handler_tasks_per_thread[thread_idx]
+            ):
+                uncertain = True
+                operation = UCXXOperation(
+                    30.0,
+                    "UCXX server loop failure",
+                    owners=(self, self._server_loops[thread_idx]),
+                    on_failure=lambda reason: setattr(self, "_server_failure", reason),
+                )
+                operation.fail(f"server loop exited before native retirement: {e}")
         finally:
             loop = self._server_loops[thread_idx]
-            if loop:
+            if loop and not uncertain:
                 loop.close()
                 self._server_loops[thread_idx] = None
 
     async def _async_server_main(self, thread_idx: int, port: int) -> None:
         """Async main function for one server thread.
 
-        Each thread has its own event loop and UCX worker so that
-        concurrent sends don't block each other (eliminates head-of-line
-        blocking).
+        Each thread has its own event loop. All share the leased process-global
+        UCXX worker; stopping one server must not reset another owner's worker.
         """
-        try:
-            ucxx.init()
-        except RuntimeError as e:
-            if "already initiated" not in str(e):
-                logger.error(f"[UCXXBuffer] Failed to init UCXX: {e}")
-                return
-
         handler_tasks = self._handler_tasks_per_thread[thread_idx]
 
-        def _dispatch(endpoint):
-            task = asyncio.get_event_loop().create_task(
-                self._handle_connection(endpoint)
-            )
-            handler_tasks.append(task)
+        async def _dispatch(endpoint):
+            # Keep UCXX's active-client accounting live through retirement.
+            # Each endpoint is closed only on its originating event loop.
+            handler_tasks.append(asyncio.current_task())
+            await self._handle_connection(endpoint)
 
         last_err: Optional[Exception] = None
         bound_port = port
@@ -551,33 +551,29 @@ class UCXXBuffer:
             # bounded shutdown latency and effectively zero idle CPU.
             await asyncio.sleep(0.05)
 
-        with self._endpoints_lock:
-            endpoints_to_close = list(self._active_endpoints)
-            self._active_endpoints.clear()
-        for ep in endpoints_to_close:
-            try:
-                await ep.close()
-            except Exception:
-                pass
-
-        for task in handler_tasks:
-            if not task.done():
-                task.cancel()
-        if handler_tasks:
-            await asyncio.gather(*handler_tasks, return_exceptions=True)
-        handler_tasks.clear()
+        drain = UCXXOperation(
+            self.config.send_timeout + 30.0,
+            "UCXX server loop drain",
+            owners=(self, listener, handler_tasks),
+        )
+        try:
+            listener.close()
+            # Let already-enqueued connection callbacks enter before checking
+            # UCXX's counter (which also owns incomplete handshakes).
+            await asyncio.sleep(0)
+            while listener.active_clients or any(not t.done() for t in handler_tasks):
+                drain.deadline.remaining_ms()
+                await asyncio.sleep(0.05)
+            drain.complete()
+            handler_tasks.clear()
+            self._listeners[thread_idx] = None
+        except BaseException as error:
+            drain.fail(f"server loop retirement uncertain: {error}")
 
     _HANDLER_RECV_TIMEOUT = 5.0  # seconds per recv wait cycle
     _HANDLER_MAX_IDLE_CYCLES = 24  # exit after 24 × 5s = 120s idle
-    # NB: deliberately no per-send timeout.  ``endpoint.send()`` blocks
-    # on UCX flow control as well as on transport health, so an
-    # absolute send-time cap conflates "trainer is slow to drain" (a
-    # legitimate consequence of prefetch-style consumer scheduling)
-    # with "trainer half-closed mid-transfer" (the case we'd want to
-    # abort).  Client-side per-call rotation + 5s read_timeout already
-    # bounds wedge cost to ~5s of trainer-side latency, and
-    # ``_HANDLER_RECV_TIMEOUT`` + ``_HANDLER_MAX_IDLE_CYCLES`` already
-    # evict idle handlers.
+    # Idle connections are distinct from accepted slot sends. Once a slot is
+    # borrowed, config.send_timeout bounds both sends and native completion.
     _PORT_RETRY_ATTEMPTS = 10
 
     async def _handle_connection(self, endpoint) -> None:
@@ -590,26 +586,33 @@ class UCXXBuffer:
            ``2`` = error).
         3. On status=0, send the entire raw SHM slot buffer.
 
-        The handler is the *unique owner* of the slot's ``READING ->
-        FREE`` (success) or ``READING -> READY`` (failure) transition
-        for this read attempt -- there is no shared cross-chunk state
-        to corrupt.  This is the structural property the prior
-        multi-chunk ``_SlotReadGuard`` design tried (and failed) to
-        provide via reference counting.
+        A completed send releases the slot. Cancellation/error after accepting
+        the slot is terminal and retains the borrowed storage: Python task
+        cancellation alone is not proof that native readers have finished.
         """
         logger.debug("[UCXXBuffer] New connection from trainer")
         with self._endpoints_lock:
             self._active_endpoints.append(endpoint)
 
-        idle_cycles = 0
+        pending_recv = None
+        slot_buf = None
+        uncertain = False
         try:
             while not self._shutdown_flag.is_set():
                 try:
                     slot_buf = np.empty(1, dtype=np.int64)
-                    await asyncio.wait_for(
-                        endpoint.recv(slot_buf), timeout=self._HANDLER_RECV_TIMEOUT
+                    pending_recv = asyncio.ensure_future(endpoint.recv(slot_buf))
+                    idle_end = time.monotonic() + (
+                        self._HANDLER_RECV_TIMEOUT * self._HANDLER_MAX_IDLE_CYCLES
                     )
-                    idle_cycles = 0
+                    while not pending_recv.done():
+                        if self._shutdown_flag.is_set() or time.monotonic() >= idle_end:
+                            return
+                        # Poll one retained request; do not cancel/reissue it
+                        # every idle interval and discard its receive storage.
+                        await asyncio.wait((pending_recv,), timeout=0.05)
+                    pending_recv.result()
+                    pending_recv = None
                     t_recv_done = time.perf_counter()
                     slot = int(slot_buf[0])
 
@@ -626,7 +629,9 @@ class UCXXBuffer:
                     try:
                         raw_buf = self._buffer.read_raw(slot)
                     except SlotError as e:
-                        await endpoint.send(np.array([1], dtype=np.uint8))
+                        await self._send_control(
+                            endpoint, [np.array([1], dtype=np.uint8)]
+                        )
                         write_idx, _, entry_count = self._buffer._read_header()
                         logger.warning(
                             f"[UCXXBuffer] StaleSlot slot={slot} err='{e}' "
@@ -635,28 +640,27 @@ class UCXXBuffer:
                         )
                         continue
 
-                    # ``read_raw`` succeeded -> slot is now in READING
-                    # state, owned by this handler until we either
-                    # mark_consumed (success) or release_reading
-                    # (failure).  Both outcomes happen exactly once.
+                    # Keep the shared-memory slot and endpoint alive until both
+                    # native sends finish, or until terminal process exit.
                     t_read_done = time.perf_counter()
                     sent_ok = False
+                    operation = UCXXOperation(
+                        self.config.send_timeout,
+                        f"UCXX producer slot {slot}",
+                        owners=(self, self._buffer, endpoint, raw_buf),
+                    )
                     try:
-                        await endpoint.send(np.array([0], dtype=np.uint8))
-                        await endpoint.send(raw_buf)
+                        await operation.wait(
+                            endpoint.send, np.array([0], dtype=np.uint8)
+                        )
+                        await operation.wait(endpoint.send, raw_buf)
+                        operation.complete()
                         sent_ok = True
-                    except Exception as e:
-                        # Best-effort error report to the client; the
-                        # ``finally`` block does the slot-state cleanup
-                        # so it runs whether or not the error report
-                        # itself succeeds.
-                        await self._send_error_response(endpoint, e)
-                        logger.warning(f"[UCXXBuffer] Send error for slot {slot}: {e}")
-                    finally:
-                        if sent_ok:
-                            self._buffer.mark_consumed(slot)
-                        else:
-                            self._buffer.release_reading(slot)
+                    except BaseException as error:
+                        operation.fail(
+                            f"producer send completion uncertain: {type(error).__name__}: {error}"
+                        )
+                    self._buffer.mark_consumed(slot)
 
                     if sent_ok:
                         t_send_done = time.perf_counter()
@@ -688,15 +692,8 @@ class UCXXBuffer:
                             m["total_read_ms"] += read_ms
                             m["total_send_ms"] += send_ms
 
-                except asyncio.TimeoutError:
-                    idle_cycles += 1
-                    if idle_cycles >= self._HANDLER_MAX_IDLE_CYCLES:
-                        logger.debug(
-                            f"[UCXXBuffer] Handler idle for "
-                            f"{idle_cycles * self._HANDLER_RECV_TIMEOUT:.0f}s, closing"
-                        )
-                        break
-                    continue
+                except TransportUnusableError:
+                    raise
                 except Exception as e:
                     # Connection closed by client is expected
                     if "canceled" in str(e).lower() or "reset" in str(e).lower():
@@ -704,40 +701,86 @@ class UCXXBuffer:
                     else:
                         logger.warning(f"[UCXXBuffer] Connection error: {e}")
                     break
+        except TransportUnusableError:
+            uncertain = True
+            raise
+        except asyncio.CancelledError:
+            uncertain = True
+            operation = UCXXOperation(
+                30.0,
+                "UCXX handler cancellation",
+                owners=(self, endpoint, slot_buf, pending_recv),
+            )
+            operation.fail("handler cancelled before native retirement")
         finally:
-            with self._endpoints_lock:
-                if endpoint in self._active_endpoints:
+            if not uncertain:
+                retirement = UCXXOperation(
+                    30.0,
+                    "UCXX producer endpoint retirement",
+                    owners=(self, endpoint, slot_buf, pending_recv),
+                )
+                await _close_endpoint_owned(endpoint, retirement)
+                if pending_recv is not None:
+                    # Native close cancels an idle header. Observe the retained
+                    # waiter finishing before releasing its buffer or loop.
+                    async def observe():
+                        return await asyncio.gather(
+                            pending_recv, return_exceptions=True
+                        )
+
+                    await retirement.wait(observe)
+                retirement.complete()
+                with self._endpoints_lock:
                     self._active_endpoints.remove(endpoint)
 
     async def _send_error_response(self, endpoint, exc: BaseException) -> None:
-        """Best-effort status=2 + (msg_len, msg) error report to the client.
+        """Send a clean protocol rejection while owning all native operands."""
+        error_msg = str(exc).encode("utf-8")
+        await self._send_control(
+            endpoint,
+            [
+                np.array([2], dtype=np.uint8),
+                np.array([len(error_msg)], dtype=np.int32),
+                np.frombuffer(error_msg, dtype=np.uint8),
+            ],
+        )
 
-        Failure to deliver the report is silent: the client is in some
-        unknown state, and this handler's job is just to avoid pinning
-        on a doomed transfer.  Slot-state cleanup is the caller's
-        responsibility (the handler's ``finally`` calls
-        ``release_reading`` / ``mark_consumed`` exactly once).
-        """
+    async def _send_control(self, endpoint, arrays):
+        operation = UCXXOperation(
+            self.config.send_timeout,
+            "UCXX producer control send",
+            owners=(self, endpoint, *arrays),
+        )
         try:
-            await endpoint.send(np.array([2], dtype=np.uint8))
-            error_msg = str(exc).encode("utf-8")
-            msg_len = np.array([len(error_msg)], dtype=np.int32)
-            await endpoint.send(msg_len)
-            await endpoint.send(np.frombuffer(error_msg, dtype=np.uint8))
-        except Exception:
-            pass
+            for array in arrays:
+                await operation.wait(endpoint.send, array)
+            operation.complete()
+        except BaseException as error:
+            operation.fail(f"control send completion uncertain: {error}")
 
     def stop_server(self, timeout: float = 5.0) -> None:
         """Stop all UCXX server threads and wait for them to finish.
 
         Args:
-            timeout: Timeout in seconds to wait for each server thread to stop.
+            timeout: One finite budget for all server threads to stop.
         """
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                "UCXX server shutdown timeout must be finite and nonnegative"
+            )
+        if getattr(self, "_server_failure", None) is not None:
+            raise TransportUnusableError(self._server_failure)
+        operation = UCXXOperation(
+            max(0.01, timeout),
+            "UCXX producer shutdown",
+            owners=(self,),
+            on_failure=lambda reason: setattr(self, "_server_failure", reason),
+        )
         self._shutdown_flag.set()
-
+        deadline = time.monotonic() + timeout
         for t in self._server_threads:
             if t is not None and t.is_alive():
-                t.join(timeout=timeout)
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
                 if t.is_alive():
                     logger.warning(
                         f"[UCXXBuffer] Server thread {t.name} did not stop cleanly"
@@ -746,18 +789,19 @@ class UCXXBuffer:
         if any(t is not None and t.is_alive() for t in self._server_threads):
             # The loops still own endpoints and may be reading shared memory.
             # Retain all references and prohibit the caller from freeing it.
-            raise TimeoutError("UCXX server threads remain active after shutdown")
+            operation.fail("UCXX server threads remain active after shutdown")
 
-        for listener in self._listeners:
-            if listener is not None:
-                try:
-                    listener.close()
-                except Exception:
-                    pass
+        if (
+            any(listener is not None for listener in self._listeners)
+            or self._active_endpoints
+        ):
+            operation.fail("UCXX server exited without proving endpoint retirement")
 
+        operation.complete()
         self._listeners.clear()
         self._server_threads.clear()
         self._ports.clear()
+        _release_ucxx_context(self)
         logger.info("[UCXXBuffer] Server stopped")
 
     def get_server_metrics(self) -> Dict[str, Dict[str, float]]:
@@ -871,6 +915,8 @@ class UCXXBuffer:
 
     def close(self) -> None:
         """Close buffer (doesn't unlink shared memory)."""
+        if id(self) in _CONTEXT_OWNERS:
+            raise RuntimeError("UCXX server still owns shared-memory storage")
         self._buffer.close()
 
     def unlink(self) -> None:
@@ -878,7 +924,10 @@ class UCXXBuffer:
         self._buffer.unlink()
 
     def __del__(self):
-        self.close()
+        # Explicit shutdown owns native retirement. A finalizer must never
+        # release a slot that a live server may still be sending.
+        if id(self) not in _CONTEXT_OWNERS and hasattr(self, "_buffer"):
+            self.close()
 
 
 class UCXXClient:
@@ -908,6 +957,9 @@ class UCXXClient:
 
         self._pool: Dict[tuple, collections.deque] = {}
         self._pool_size = 2
+        self._failure = None
+        self._closing = False
+        self._operations = set()
         self._rr_counter = 0
         self._rr_lock = threading.Lock()
 
@@ -926,11 +978,7 @@ class UCXXClient:
         self._pinned_pool: collections.deque = collections.deque()
         self._pinned_buf_size: int = 0
 
-        try:
-            ucxx.init()
-        except RuntimeError as e:
-            if "already initiated" not in str(e):
-                raise
+        _acquire_ucxx_context(self)
 
     def _healthy_ports(self, worker_ip: str, ports: List[int]) -> List[int]:
         """Filter ``ports`` to the subset not currently quarantined.
@@ -976,8 +1024,18 @@ class UCXXClient:
 
     def return_pinned(self, buf: torch.Tensor) -> None:
         """Return a pinned buffer to the pool for reuse."""
+        self._check_open()
         if len(self._pinned_pool) < self._PINNED_POOL_MAX:
             self._pinned_pool.append(buf)
+
+    def _check_open(self):
+        if self._failure is not None:
+            raise TransportUnusableError(self._failure)
+        if self._closing:
+            raise RuntimeError("UCXX client is closing or closed")
+
+    def _mark_failed(self, reason):
+        self._failure = reason
 
     async def _read_slot(
         self,
@@ -990,10 +1048,26 @@ class UCXXClient:
         """Fetch the entire slot payload from one server thread on ``port``.
 
         Single-chunk protocol -- one connection, one ``send([slot])``,
-        one ``recv(status)``, one ``recv(payload)``.  ``timeout`` bounds
-        each individual ``send`` / ``recv`` await.  See
-        :meth:`UCXXClient.read` for the rationale on the 5 s default.
+        one ``recv(status)``, one ``recv(payload)``. One deadline covers
+        connection, protocol, native completion and endpoint retirement. A
+        timed-out/cancelled native task stays owned and is never retried.
         """
+        self._check_open()
+        operation = UCXXOperation(
+            timeout,
+            f"UCXX read {worker_ip}:{port} slot={slot}",
+            owners=(self, recv_buf),
+            on_failure=self._mark_failed,
+        )
+        self._operations.add(operation)
+        try:
+            await self._read_slot_owned(worker_ip, port, slot, recv_buf, operation)
+        finally:
+            if operation.failure is None:
+                operation.complete()
+                self._operations.remove(operation)
+
+    async def _read_slot_owned(self, worker_ip, port, slot, recv_buf, operation):
         key = (worker_ip, port)
         pool = self._pool.get(key)
         endpoint = None
@@ -1013,28 +1087,27 @@ class UCXXClient:
                 if now - last_use <= _POOL_ENDPOINT_MAX_AGE_S:
                     endpoint = candidate
                     break
-                # Aged out -- close and try the next one.  Failures
-                # here are silent because the endpoint is being
-                # discarded anyway.
+                # No request is active on a pooled endpoint. Still retain it
+                # until close returns; a pending close is not safe to abandon.
+                operation.owners.append(candidate)
                 try:
-                    await candidate.close()
-                except Exception:
-                    pass
+                    await _close_endpoint_owned(candidate, operation)
+                except BaseException as error:
+                    operation.fail(f"retired endpoint close uncertain: {error}")
         if endpoint is None:
-            endpoint = await asyncio.wait_for(
-                ucxx.create_endpoint(worker_ip, port), timeout=timeout
-            )
+            endpoint = await operation.wait(ucxx.create_endpoint, worker_ip, port)
+        operation.owners.append(endpoint)
 
         ok = False
         try:
             slot_arr = np.array([slot], dtype=np.int64)
-            await asyncio.wait_for(endpoint.send(slot_arr), timeout=timeout)
+            await operation.wait(endpoint.send, slot_arr)
 
             status = np.empty(1, dtype=np.uint8)
-            await asyncio.wait_for(endpoint.recv(status), timeout=timeout)
+            await operation.wait(endpoint.recv, status)
 
             if status[0] == 0:
-                await asyncio.wait_for(endpoint.recv(recv_buf), timeout=timeout)
+                await operation.wait(endpoint.recv, recv_buf)
                 ok = True
             elif status[0] == 1:
                 # Stale slot is a clean protocol-level "no" -- the
@@ -1044,16 +1117,22 @@ class UCXXClient:
                 raise StaleSlotError(f"Slot {slot} unavailable (stale reference)")
             elif status[0] == 2:
                 msg_len = np.empty(1, dtype=np.int32)
-                await asyncio.wait_for(endpoint.recv(msg_len), timeout=timeout)
+                await operation.wait(endpoint.recv, msg_len)
+                if not 0 <= int(msg_len[0]) <= 65536:
+                    raise ValueError("UCXX remote error message exceeds protocol limit")
                 msg_buf = np.empty(int(msg_len[0]), dtype=np.uint8)
-                await asyncio.wait_for(endpoint.recv(msg_buf), timeout=timeout)
+                await operation.wait(endpoint.recv, msg_buf)
                 raise RuntimeError(
                     f"Remote read failed: {msg_buf.tobytes().decode('utf-8')}"
                 )
             else:
                 raise RuntimeError(f"Unknown response status: {status[0]}")
         finally:
-            if ok:
+            if operation.failure is not None:
+                # No cancellation, close, pool return, or storage release on an
+                # uncertain completion path. The watchdog terminates this worker.
+                pass
+            elif ok:
                 ep_pool = self._pool.setdefault(key, collections.deque())
                 if len(ep_pool) < self._pool_size:
                     # Stamp last-use so the next checkout can age
@@ -1062,15 +1141,9 @@ class UCXXClient:
                     endpoint._pool_last_use = time.monotonic()
                     ep_pool.append(endpoint)
                 else:
-                    try:
-                        await endpoint.close()
-                    except Exception:
-                        pass
+                    await _close_endpoint_owned(endpoint, operation)
             else:
-                try:
-                    await endpoint.close()
-                except Exception:
-                    pass
+                await _close_endpoint_owned(endpoint, operation)
 
     async def read(
         self,
@@ -1095,27 +1168,42 @@ class UCXXClient:
            robin counter so traffic spreads evenly across all healthy
            server threads instead of always hammering
            ``available_ports[0]``.  Pure load balancing.
-        2. *On-failure fallback.*  If a read fails with a transport-
-           class error (timeout, endpoint reset, etc. -- see
+        2. *On-failure fallback.*  If a read completes with a transport-
+           class error (endpoint reset, etc. -- see
            :data:`_PORT_ROTATABLE_ERRORS`), the offending port is
            quarantined for :data:`_PORT_QUARANTINE_SEC` and we retry
-           once on the next port in rotation.  A single wedged server
-           thread therefore costs one timeout's worth of latency, not
-           the whole job.  Non-transport errors (stale slot, server-
-           side protocol error) propagate immediately.
+           once on the next port in rotation. A pending native request at the
+           deadline is terminal, not a recoverable timeout: cancelling a Python
+           future does not establish native completion. Clean stale-slot/server
+           rejections propagate immediately without retry.
 
         ``timeout`` defaults to 5 s -- p99 happy-path read of a ~500
         MB slot is ~1 s on RDMA / shared memory, so 5 s is ample
-        headroom.  Larger values just delay rotation onto a healthy
-        port when one server thread wedges.
+        headroom. The budget applies to the entire attempt, not each await.
 
         Returns a dict of tensor name -> numpy view into a pinned CPU
         buffer.  The pinned backing tensor is stored under the
         ``_pinned_buf`` key and must be returned to the pool via
         :meth:`return_pinned` after the caller has copied data to GPU.
         """
+        self._check_open()
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("UCXX operation timeout must be finite and positive")
         if not schema:
             raise ValueError("Schema required for zero-pack protocol")
+        names = set()
+        for spec in schema:
+            if (
+                not spec.name
+                or spec.name == "_pinned_buf"
+                or spec.name in names
+                or spec.dtype.hasobject
+                or spec.dtype.itemsize <= 0
+                or any(type(dim) is not int or dim < 0 for dim in spec.shape)
+                or spec.nbytes != math.prod(spec.shape) * spec.dtype.itemsize
+            ):
+                raise ValueError("Invalid UCXX payload schema")
+            names.add(spec.name)
 
         # Health-aware rotation: skip ports that recently emitted a
         # transport-class failure (see :meth:`_healthy_ports`).
@@ -1184,11 +1272,28 @@ class UCXXClient:
 
     async def close(self) -> None:
         """Drain and close all pooled endpoints."""
+        self._closing = True
+        if self._failure is not None:
+            raise TransportUnusableError(self._failure)
+        if self._operations:
+            # The strategy joins fetchers before close. Do not cancel them here.
+            raise RuntimeError("UCXX client still owns active native operations")
         for key in list(self._pool):
             pool = self._pool[key]
             while pool:
                 # Keep the failed endpoint and the rest of the pool owned.
                 # A close failure is not permission to drop live references.
-                await pool[0].close()
+                operation = UCXXOperation(
+                    30.0,
+                    "UCXX client endpoint close",
+                    owners=(self, pool[0]),
+                    on_failure=self._mark_failed,
+                )
+                try:
+                    await _close_endpoint_owned(pool[0], operation)
+                    operation.complete()
+                except BaseException as error:
+                    operation.fail(f"client close uncertain: {error}")
                 pool.popleft()
             del self._pool[key]
+        _release_ucxx_context(self)

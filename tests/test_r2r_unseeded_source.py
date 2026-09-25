@@ -425,7 +425,8 @@ class TestP2ROutcomeIsRecordedSeparatelyFromTheStickyFlag(unittest.TestCase):
 class TestTheP2RDrainDoesNotReportSuccessAfterAborting(unittest.TestCase):
     """A drain that had to abort every communicator is not a completed sync.
 
-    ``bounded_drain_or_abort`` returns False only after ``nccl_abort_all``.
+    ``bounded_drain_or_abort`` returns False after a timeout/abort or when a
+    CUDA event cannot prove completion.
     The P2R call site used to discard that, so the policy reported the sync as
     successful and returned to a main loop with no communicators: it never
     unregistered, the controller never saw a dead policy, and the job held its

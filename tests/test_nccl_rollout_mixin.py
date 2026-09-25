@@ -44,12 +44,22 @@ from cosmos_rl.utils.trajectory import (
 class _FakeRendezvous:
     def __init__(self):
         self.replies = []
+        self.outcomes = []
 
     def respond(self, *, resp_key, status):
-        self.replies.append((resp_key, status))
+        target = (
+            self.outcomes
+            if status in (TransferStatus.COMPLETE, TransferStatus.FAILED)
+            else self.replies
+        )
+        target.append((resp_key, status))
+        return True
 
     def read_uid(self, uid_key):
         return [1, 2, 3]
+
+    def watch_operation(self, key, operation):
+        pass
 
 
 class _InlineExecutor:
@@ -158,7 +168,7 @@ class TestHandleRequest(unittest.TestCase):
             "0:present", torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
         )
         sent = []
-        p._send = lambda entry, rr, uk, rrep=None: sent.append(
+        p._send = lambda entry, rr, uk, rrep=None, **kwargs: sent.append(
             (entry.transfer_id, rr, uk, rrep)
         )
 
@@ -174,7 +184,7 @@ class TestHandleRequest(unittest.TestCase):
         # ACCEPTED must be sent before the (stubbed) send runs.
         self.assertEqual(p._nccl_rendezvous.replies, [("rk", TransferStatus.ACCEPTED)])
         # receiver_replica from the request is threaded through to the send.
-        self.assertEqual(sent, [("0:present", 1, "uk", "policy-A")])
+        self.assertEqual(sent, [("0:present", 1, (1, 2, 3), "policy-A")])
 
     def test_expired_request_is_dropped(self):
         # Bilateral cancellation: a request whose receiver deadline has passed
@@ -207,7 +217,9 @@ class TestHandleRequest(unittest.TestCase):
             "0:x", torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
         )
         sent = []
-        p._send = lambda entry, rr, uk, rrep=None: sent.append(entry.transfer_id)
+        p._send = lambda entry, rr, uk, rrep=None, **kwargs: sent.append(
+            entry.transfer_id
+        )
         p._handle_request(
             {
                 "transfer_id": "0:x",
@@ -364,7 +376,7 @@ class TestRenegotiation(unittest.TestCase):
             "0:x", torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
         )
         sent = []
-        p._send = lambda entry, rr, uk, rrep=None: sent.append((rr, rrep))
+        p._send = lambda entry, rr, uk, rrep=None, **kwargs: sent.append((rr, rrep))
         p._handle_request(
             {
                 "transfer_id": "0:x",
@@ -405,7 +417,7 @@ class TestRenegotiation(unittest.TestCase):
         self.assertEqual(sent, [])  # no doomed empty-UID send
         self.assertEqual(p._nccl_registry.get("0:x").inflight, 0)  # lease released
 
-    def test_uid_toctou_between_precheck_and_build_fails_fast(self):
+    def test_uid_survives_expiry_between_acceptance_and_build(self):
         # UID readable at the pre-ACCEPTED precheck but gone by the time _send
         # builds (expired / overwritten): the comm-cache empty-UID guard must
         # fail FAST (release lease + quarantine) instead of wedging 600s in
@@ -423,25 +435,27 @@ class TestRenegotiation(unittest.TestCase):
         p._nccl_registry.register(
             "0:x", torch.zeros(p._nccl_entry_size, dtype=torch.uint8)
         )
-        p._handle_request(
-            {
-                "transfer_id": "0:x",
-                "resp_key": "rk",
-                "receiver_rank": 1,
-                "receiver_replica": "pol",
-                "uid_key": "uk",
-            }
-        )
-        self.assertEqual(built, [])  # guard fired before build_fn ran
+        with mock.patch("cosmos_rl.utils.pynccl.nccl_send"):
+            p._handle_request(
+                {
+                    "transfer_id": "0:x",
+                    "resp_key": "rk",
+                    "receiver_rank": 1,
+                    "receiver_replica": "pol",
+                    "uid_key": "uk",
+                }
+            )
+        self.assertEqual(built, [(1, 2, 3)])
+        self.assertEqual(next(reads), [])  # never re-read the expiring Redis key
         self.assertEqual(p._nccl_registry.get("0:x").inflight, 0)  # lease released
 
 
 class TestSendLaunchSerialized(unittest.TestCase):
-    """The producer's NCCL launch (group_start -> send -> group_end) must be
+    """The producer's standalone NCCL send launch must be
     serialized across the sender-thread pool -- concurrent multi-comm launches
     on one GPU deadlock natively at N_POLICY>=2 (Codex root cause)."""
 
-    def test_concurrent_sends_do_not_overlap_group(self):
+    def test_concurrent_sends_do_not_overlap_launch(self):
         import cosmos_rl.utils.payload_transport.nccl.mixins as mixins_mod
         from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
             SendBufferEntry,
@@ -454,7 +468,12 @@ class TestSendLaunchSerialized(unittest.TestCase):
                 self.leased_pairs = []
 
             def get_or_create(self, pair, **kw):
+                assert kw["pin"]
+                self.leased_pairs.append(pair)
                 return 1
+
+            def unpin(self, pair):
+                pass
 
             @contextlib.contextmanager
             def leased(self, pair, **kw):
@@ -475,7 +494,9 @@ class TestSendLaunchSerialized(unittest.TestCase):
                 st["peak"] = max(st["peak"], st["in_group"])
 
         def g_send(*a, **k):
+            g_start(None)
             time.sleep(0.02)  # hold the launch open to expose interleaving
+            g_end(None)
 
         def g_end(c):
             with lk:
@@ -486,7 +507,7 @@ class TestSendLaunchSerialized(unittest.TestCase):
 
         with (
             mock.patch.object(mixins_mod, "wait_event", lambda s, e: None),
-            mock.patch.object(mixins_mod, "record_event", lambda s: object()),
+            mock.patch.object(mixins_mod, "record_event", lambda s: None),
             mock.patch("cosmos_rl.utils.pynccl.nccl_group_start", g_start),
             mock.patch("cosmos_rl.utils.pynccl.nccl_send", g_send),
             mock.patch("cosmos_rl.utils.pynccl.nccl_group_end", g_end),
@@ -498,13 +519,37 @@ class TestSendLaunchSerialized(unittest.TestCase):
             tA.join()
             tB.join()
 
-        # Never two threads inside a group at once -> launches serialized.
+        # Never two threads inside the native send at once.
         self.assertEqual(st["peak"], 1)
         # The send must LEASE the comm (pin it against LRU eviction), not just
         # fetch it.  Without this assertion the fake's get_or_create would keep
         # a reverted `cache.get_or_create(...)` green.
         self.assertEqual(len(p._nccl_comm_cache.leased_pairs), 2)
         self.assertEqual(st["in_group"], 0)
+
+
+class TestProducerFailureDiagnostics(unittest.TestCase):
+    def test_prenative_failure_logs_the_actual_receiver_pair(self):
+        from cosmos_rl.utils.payload_transport.nccl import mixins
+        from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
+            SendBufferEntry,
+        )
+
+        producer = _make_producer()
+        producer._send = mock.Mock(side_effect=ValueError("injected setup failure"))
+        producer._nccl_comm_cache.quarantine = mock.Mock()
+        entry = SendBufferEntry("0:diagnostic", buffer=object())
+        with mock.patch.object(mixins.logger, "warning") as warning:
+            producer._send_and_quarantine_on_failure(
+                entry, 3, [1], "policy-b", entry.transfer_id, resp_key="response"
+            )
+        expected_pair = (0, "policy-b", 3)
+        producer._nccl_comm_cache.quarantine.assert_called_once_with(expected_pair)
+        self.assertEqual(warning.call_args.args[-1], expected_pair)
+        self.assertEqual(
+            producer._nccl_rendezvous.outcomes,
+            [("response", TransferStatus.FAILED)],
+        )
 
 
 class TestOnBufferFree(unittest.TestCase):

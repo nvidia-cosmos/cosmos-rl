@@ -20,6 +20,8 @@ import subprocess
 import sys
 
 from subprocess_helpers import wait_all_or_fail
+from p2r_test_support import P2RReadinessServer
+from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from multiprocessing import shared_memory
 import numpy as np
 from launch_test_worker import POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE
@@ -54,8 +56,18 @@ class TestPolicyToRollout(unittest.TestCase):
         )
         uid_array[-1] = 0
         trainable_param_sync_str = "True" if trainable_param_sync else "False"
+        readiness = None
 
         try:
+            readiness = P2RReadinessServer(
+                PolicyToRolloutUnicastCommand(
+                    "policy",
+                    "rollout",
+                    POLICY_WORLD_SIZE,
+                    ROLLOUT_WORLD_SIZE,
+                    trainable_only=trainable_param_sync,
+                )
+            )
             # Create the Python command for torchrun
             policy_cmd = [
                 "torchrun",
@@ -92,6 +104,7 @@ class TestPolicyToRollout(unittest.TestCase):
                 trainable_param_sync_str,
             ]
             policy_env = dict(os.environ)
+            policy_env.update(readiness.environment())
             policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
             policy_env.pop("COSMOS_P2R_NCCL_GROUP_SIZE", None)
             policy_env.update(
@@ -111,6 +124,7 @@ class TestPolicyToRollout(unittest.TestCase):
                 env=policy_env,
             )
             rollout_env = dict(os.environ)
+            rollout_env.update(readiness.environment())
             rollout_env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
             rollout_env.pop("COSMOS_P2R_NCCL_GROUP_SIZE", None)
             rollout_env.update(
@@ -135,7 +149,10 @@ class TestPolicyToRollout(unittest.TestCase):
                 timeout_s=600,
                 context="policy_to_rollout_wieght_sync",
             )
+            readiness.assert_all_ready()
         finally:
+            if readiness is not None:
+                readiness.close()
             # Clean up shared memory
             try:
                 shm.close()

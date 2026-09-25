@@ -96,6 +96,7 @@ from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
 import multiprocessing as mp
 from cosmos_rl.dispatcher.replica import Rollout
 from cosmos_rl.collective.collective import P2RCollectiveManager
+from p2r_test_support import p2r_test_client, p2r_test_command
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -363,7 +364,7 @@ class TestPolicyWorker:
             replica_name=self.replica_name,
             parallel_dims=self.parallel_dims,
             config=self.config,
-            api_client=None,
+            api_client=p2r_test_client(Role.POLICY),
             role=Role.POLICY,
         )
         self.p2r_collective_manager.unique_ids_cache = rollouts_comm
@@ -464,7 +465,7 @@ class TestRollout:
             replica_name=self.replica_name,
             parallel_dims=self.parallel_dims,
             config=self.config,
-            api_client=None,
+            api_client=p2r_test_client(Role.ROLLOUT),
             role=Role.ROLLOUT,
         )
         self.p2r_collective_manager.unique_ids_cache = policies_comm
@@ -630,13 +631,8 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_s
     # Attach to shared memory
     shm = shared_memory.SharedMemory(name=shm_name)
 
-    command = PolicyToRolloutUnicastCommand(
-        policy_name,
-        rollout_name,
-        POLICY_WORLD_SIZE,
-        ROLLOUT_WORLD_SIZE,
-        trainable_only=trainable_param_sync,
-    )
+    command = p2r_test_command()
+    assert command.trainable_only == trainable_param_sync
 
     try:
         if rank == 0:
@@ -686,13 +682,8 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank, trainable_param
     # Attach to shared memory
     shm = shared_memory.SharedMemory(name=shm_name)
 
-    command = PolicyToRolloutUnicastCommand(
-        policy_name,
-        rollout_name,
-        POLICY_WORLD_SIZE,
-        ROLLOUT_WORLD_SIZE,
-        trainable_only=trainable_param_sync,
-    )
+    command = p2r_test_command()
+    assert command.trainable_only == trainable_param_sync
 
     try:
         # Get NCCL UID from shared memory

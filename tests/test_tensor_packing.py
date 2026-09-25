@@ -115,8 +115,7 @@ def test_production_r2r_packing_round_trips_and_reduces_collectives() -> None:
     with (
         patch.object(torch.cuda, "stream", side_effect=lambda _stream: nullcontext()),
         patch.object(weight_sync, "nccl_broadcast", side_effect=fake_broadcast),
-        patch.object(weight_sync, "nccl_group_start"),
-        patch.object(weight_sync, "nccl_group_end"),
+        patch.object(weight_sync, "nccl_group", side_effect=lambda _: nullcontext()),
     ):
         weight_sync.do_nccl_broadcast_grouped(source, "rollout-0", None)
         receiving = True
@@ -135,14 +134,14 @@ def test_r2r_packing_is_disabled_by_default() -> None:
     with (
         patch.object(torch.cuda, "stream", side_effect=lambda _stream: nullcontext()),
         patch.object(weight_sync, "nccl_broadcast") as broadcast,
-        patch.object(weight_sync, "nccl_group_start") as group_start,
-        patch.object(weight_sync, "nccl_group_end") as group_end,
+        patch.object(
+            weight_sync, "nccl_group", side_effect=lambda _: nullcontext()
+        ) as group,
     ):
         weight_sync.do_nccl_broadcast_grouped(worker, "rollout-0", None)
 
     assert broadcast.call_count == len(tensors)
-    group_start.assert_called_once_with(1)
-    group_end.assert_called_once_with(1)
+    group.assert_called_once_with(1)
     assert not hasattr(worker, "_r2r_sync_packed_buffer")
 
 
@@ -153,8 +152,9 @@ def test_selected_r2r_default_off_preserves_per_tensor_broadcasts() -> None:
     with (
         patch.object(torch.cuda, "stream", side_effect=lambda _stream: nullcontext()),
         patch.object(weight_sync, "nccl_broadcast") as broadcast,
-        patch.object(weight_sync, "nccl_group_start") as group_start,
-        patch.object(weight_sync, "nccl_group_end") as group_end,
+        patch.object(
+            weight_sync, "nccl_group", side_effect=lambda _: nullcontext()
+        ) as group,
     ):
         weight_sync.do_nccl_broadcast_tensors(
             worker,
@@ -166,8 +166,7 @@ def test_selected_r2r_default_off_preserves_per_tensor_broadcasts() -> None:
         )
 
     assert broadcast.call_count == len(tensors)
-    group_start.assert_not_called()
-    group_end.assert_not_called()
+    group.assert_not_called()
     assert not hasattr(worker, "_r2r_sync_packed_buffer")
 
 
@@ -252,8 +251,9 @@ def test_default_sync_r2r_route_packs_only_trainable_tensors() -> None:
     with (
         patch.object(torch.cuda, "stream", side_effect=lambda _stream: nullcontext()),
         patch.object(weight_sync, "nccl_broadcast") as broadcast,
-        patch.object(weight_sync, "nccl_group_start") as group_start,
-        patch.object(weight_sync, "nccl_group_end") as group_end,
+        patch.object(
+            weight_sync, "nccl_group", side_effect=lambda _: nullcontext()
+        ) as group,
     ):
         DisaggregatedRolloutControlWorker.broadcast_to_all_rollout_replica(
             worker, command
@@ -263,6 +263,5 @@ def test_default_sync_r2r_route_packs_only_trainable_tensors() -> None:
     payload = broadcast.call_args.args[0]
     assert payload.dtype == torch.uint8
     assert payload.numel() == 2 * tensors["trainable_a"].nbytes
-    group_start.assert_not_called()
-    group_end.assert_not_called()
+    group.assert_not_called()
     assert worker.r2r_synced_trainable_params_cnt == 2
