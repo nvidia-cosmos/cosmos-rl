@@ -29,7 +29,7 @@ def _communicator(rank: int, comm_idx: int) -> HighAvailabilitylNccl:
     communicator.is_single_peer = threading.Event()
     communicator.is_comm_ready = threading.Event()
     communicator.is_comm_ready.set()
-    communicator.build_mesh_lock = threading.Lock()
+    communicator.build_mesh_lock = threading.RLock()
     communicator.api_client = SimpleNamespace(post_nccl_comm_error=lambda *_: None)
     return communicator
 

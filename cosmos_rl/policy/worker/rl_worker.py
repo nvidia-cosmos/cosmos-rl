@@ -956,23 +956,12 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         rollouts = [[]]
         scattered_rollouts = [[] for _ in range(self.world_size)]
-        from cosmos_rl.policy.trainer.batching import ExpandedSampleBatching
-
-        if (
-            isinstance(
-                getattr(getattr(self, "trainer", None), "batching_contract", None),
-                ExpandedSampleBatching,
-            )
-            and self.replica_batch_for_this_step % self.dp_world_size
-        ):
+        if self.replica_batch_for_this_step % self.dp_world_size:
             raise ValueError(
-                "Expanded rollout collection count must be divisible by the "
+                "Rollout collection count must be divisible by the "
                 "data-parallel size; refusing to silently round down dispatch"
             )
-        batch_for_this_step = (
-            self.replica_batch_for_this_step // self.dp_world_size * self.dp_world_size
-        )
-        assert batch_for_this_step % self.dp_world_size == 0
+        batch_for_this_step = self.replica_batch_for_this_step
 
         if self.config.train.train_policy.uncentralized_training:
             for _ in range(batch_for_this_step // self.dp_world_size):

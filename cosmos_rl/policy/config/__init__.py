@@ -1717,6 +1717,10 @@ class LoggingConfig(BaseModel):
 
 
 class VLAConfig(BaseModel):
+    objective_weighting: Optional[Literal["sample", "episode"]] = Field(
+        default=None,
+        description="Opt-in GRPO objective: equal action-chunk samples or nonempty episodes. Unset preserves each trainer's existing loss normalization.",
+    )
     vla_type: str = Field(
         default="openvla-oft",
         description="VLA type: openvla-oft, openvla, or cosmos-policy",

@@ -205,6 +205,25 @@ class PI05DataPacker(BaseDataPacker):
     def policy_compute_max_len(self, *args, **kwargs):
         return 512
 
+    def policy_logprob_masks(self, policy_input, max_chunks, *, device=None):
+        """Build the unchanged action mask without padding the trajectory."""
+        action_chunk = int(policy_input.old_log_probs.shape[1])
+        action_env_dim = int(policy_input.old_log_probs.shape[2])
+        max_steps = int(max_chunks * action_chunk)
+        valid_steps = int(max(0, min(int(policy_input.finish_step), max_steps)))
+        pad_steps = int(max_steps - valid_steps)
+        return torch.cat(
+            (
+                torch.ones(
+                    (valid_steps, action_env_dim), dtype=torch.float32, device=device
+                ),
+                torch.zeros(
+                    (pad_steps, action_env_dim), dtype=torch.float32, device=device
+                ),
+            ),
+            dim=0,
+        ).reshape(max_chunks, action_chunk * action_env_dim)
+
     def policy_collate_fn(self, policy_input: Any, max_chunks: int) -> Dict[str, Any]:
         chains = policy_input.chains
         denoise_inds = policy_input.denoise_inds
@@ -214,7 +233,6 @@ class PI05DataPacker(BaseDataPacker):
         tokenized_prompt = policy_input.tokenized_prompt
         tokenized_prompt_mask = policy_input.tokenized_prompt_mask
         old_log_probs = policy_input.old_log_probs
-        finish_step = int(policy_input.finish_step)
 
         num_chunks = int(chains.shape[0])
         pad_chunks = int(max_chunks - num_chunks)
@@ -308,27 +326,9 @@ class PI05DataPacker(BaseDataPacker):
             dim=0,
         )
 
-        action_chunk = int(old_log_probs.shape[1])
-        action_env_dim = int(old_log_probs.shape[2])
-        max_steps = int(max_chunks * action_chunk)
-        valid_steps = int(max(0, min(finish_step, max_steps)))
-        pad_steps = int(max_steps - valid_steps)
-
-        logprob_masks = torch.cat(
-            (
-                torch.ones(
-                    (valid_steps, action_env_dim),
-                    dtype=torch.float32,
-                    device=chains.device,
-                ),
-                torch.zeros(
-                    (pad_steps, action_env_dim),
-                    dtype=torch.float32,
-                    device=chains.device,
-                ),
-            ),
-            dim=0,
-        ).reshape(max_chunks, action_chunk * action_env_dim)
+        logprob_masks = self.policy_logprob_masks(
+            policy_input, max_chunks, device=chains.device
+        )
 
         return {
             "chains": chains,
