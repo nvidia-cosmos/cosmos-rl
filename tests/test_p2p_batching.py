@@ -30,7 +30,7 @@ def _communicator(*, max_retry: int = 3) -> dist_utils.HighAvailabilitylNccl:
     communicator.is_single_peer = threading.Event()
     communicator.is_comm_ready = threading.Event()
     communicator.is_comm_ready.set()
-    communicator.build_mesh_lock = threading.Lock()
+    communicator.build_mesh_lock = threading.RLock()
     communicator.api_client = SimpleNamespace(post_nccl_comm_error=lambda *_: None)
     communicator.wait_comm_ready = lambda timeout=0: None
     return communicator
@@ -73,7 +73,7 @@ def test_p2p_batch_uses_one_ha_window_and_preserves_order(
     assert watchdog_calls == 1
 
 
-def test_p2p_batch_retry_replays_the_whole_ordered_batch(
+def test_p2p_batch_failure_does_not_replay_already_posted_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     communicator = _communicator(max_retry=2)
@@ -99,9 +99,10 @@ def test_p2p_batch_retry_replays_the_whole_ordered_batch(
         lambda **_kwargs: nullcontext(),
     )
 
-    communicator.send_batch(tensors, "policy-1")
+    with pytest.raises(dist_utils.CollectiveOperationError, match="not replayed"):
+        communicator.send_batch(tensors, "policy-1")
 
-    assert raw_calls == [tensors[0], tensors[1], *tensors]
+    assert raw_calls == [tensors[0], tensors[1]]
     assert len(reports) == 1
 
 
