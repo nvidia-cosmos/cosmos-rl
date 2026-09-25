@@ -266,9 +266,12 @@ def test_preparation_deadline_is_terminal_and_retains_running_ownership(trainer)
         assert trainer._prepared_training_batch is not None
         with pytest.raises(RuntimeError, match="one unconsumed"):
             prefetch_training_batch(trainer, [])
+        # Future.result's consumer timeout and the independent watchdog run
+        # on different threads. Keep preparation blocked until the watchdog
+        # has sealed failure; releasing it first races with its completion.
+        assert trainer.data_packer._prefetch_shutdown.wait(2)
     finally:
         release.set()
-    assert trainer.data_packer._prefetch_shutdown.wait(2)
     with pytest.raises(TimeoutError):
         run_training_step(trainer, rollouts=[])
     with pytest.raises(TimeoutError):

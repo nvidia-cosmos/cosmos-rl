@@ -126,7 +126,8 @@ class LLMTrainer(Trainer):
             # Apply parallelism to the model
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`
-            # `pp_scheduler_val` is used only for `sft`, since `RLHF` does not require policy model via validation
+            # `pp_scheduler_val` is forward-only: SFT validation or GRPO
+            # reference/old-policy logprob collection.
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )

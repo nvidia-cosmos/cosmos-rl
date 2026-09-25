@@ -96,6 +96,12 @@ run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_sft_ack_progress.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
+run python -m pytest -q tests/test_trainer_sample_alignment.py
+run python -m pytest -q tests/test_grpo_numerical_contract.py
+run python -m pytest -q tests/test_pipeline_objective_normalization.py
+run python -m pytest -q tests/test_grpo_pipeline_normalization.py
+run torchrun --standalone --nproc-per-node=2 tests/grpo_pipeline_canary.py --cpu
+run python -m pytest -q tests/test_dpo_reference_policy.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
 run torchrun --standalone --nproc-per-node=2 tests/trainer_batching_canary.py --cpu

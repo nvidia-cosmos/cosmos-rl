@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from typing import Tuple, Optional, List, Dict, Any, Callable, Union
+import inspect
 import torch
 import torch.nn as nn
 import torch.distributed.pipelining
@@ -180,6 +181,24 @@ def step_func(self, *args, target=None, losses: Optional[List] = None, **kwargs)
     losses: a list to store the losses for each microbatch.
     """
 
+    if self._has_backward and not torch.is_grad_enabled():
+        raise RuntimeError("Training pipeline step requires gradients to be enabled")
+    if not hasattr(self, "_stage_owner_token"):
+        self._stage_owner_token = object()
+    if getattr(self, "_stage_initialized", False) and (
+        getattr(self._stage, "_cosmos_schedule_owner", None)
+        is not self._stage_owner_token
+        or self._stage.has_backward != self._has_backward
+    ):
+        # Validation can rebuild the shared stage with different chunk counts
+        # and non-gradient receive buffers. Its infrastructure is not reusable
+        # merely because this training schedule once initialized the stage.
+        clear_stage(self)
+    self._stage._cosmos_schedule_owner = self._stage_owner_token
+    # Training and validation can share a stage. Recent PyTorch sets this in
+    # step(), not construction; our dynamic-shape override must do so too.
+    self._stage.has_backward = self._has_backward
+
     # Clean per iteration
     self._stage.clear_runtime_states()
 
@@ -250,9 +269,7 @@ class ScheduleGPipe(OriginalScheduleGPipe):
     def step(self, *args, target=None, losses: Optional[List] = None, **kwargs):
         # training schedule and validation schedule share the same stage, so we need to clear
         # the stage before the first step
-        if self.first_call and (
-            len(self._stage.inputs_meta) or len(self._stage._outputs_meta)
-        ):
+        if self.first_call and (self._stage.inputs_meta or self._stage._outputs_meta):
             self._clear_stage()
             self.first_call = False
 
@@ -261,7 +278,11 @@ class ScheduleGPipe(OriginalScheduleGPipe):
 
 class Schedule1F1B(OriginalSchedule1F1B):
     def __init__(self, *args, **kwargs):
-        if "scale_grads" not in kwargs and torch.__version__ >= "2.7.0":
+        if (
+            "scale_grads" not in kwargs
+            and "scale_grads"
+            in inspect.signature(OriginalSchedule1F1B.__init__).parameters
+        ):
             # Loss scale is enabled by default in torch 2.7.0
             # We scale the grads manually in this codebase
             kwargs["scale_grads"] = False
@@ -298,11 +319,44 @@ class PipelineStage(OriginalPipelineStage):
         else:
             self.patched = False
 
+    def _get_init_p2p_neighbors_ops(self):
+        # Some PyTorch releases create a floating-point receive tensor but an
+        # integer send tensor for this one-element warmup. Gloo aborts on the
+        # byte-count mismatch; both sides must use the same wire representation.
+        ops = super()._get_init_p2p_neighbors_ops()
+        for op in ops:
+            op.tensor = op.tensor.to(dtype=torch.int64)
+        return ops
+
     def backward_one_chunk(self, *args, **kwargs):
+        if not self.has_backward:
+            # Forward-only schedules still contain backward actions in older
+            # PyTorch releases; no backward infrastructure exists in this mode.
+            return
         if self.patched:
             return self.cosmos_backward_one_chunk(*args, **kwargs)
         else:
             return super().backward_one_chunk(*args, **kwargs)
+
+    def backward_weight_one_chunk(self, *args, **kwargs):
+        if self.has_backward:
+            return super().backward_weight_one_chunk(*args, **kwargs)
+
+    def get_bwd_recv_ops(self, *args, **kwargs):
+        if not self.has_backward:
+            return []
+        return super().get_bwd_recv_ops(*args, **kwargs)
+
+    def get_bwd_send_ops(self, *args, **kwargs):
+        if not self.has_backward:
+            # Older stages check backward chunk metadata BEFORE checking this
+            # flag. Forward-only stages deliberately never allocate that state.
+            return []
+        return super().get_bwd_send_ops(*args, **kwargs)
+
+    def scale_grads(self, *args, **kwargs):
+        if self.has_backward:
+            return super().scale_grads(*args, **kwargs)
 
     def _reconstruct_forward_infra(
         self,

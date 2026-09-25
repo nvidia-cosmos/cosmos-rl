@@ -56,6 +56,7 @@ def async_safe_ce(
     target_packing_mask: Optional[torch.Tensor] = None,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    normalization_tokens: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> torch.Tensor:
     if output_packing_mask is not None:
@@ -71,7 +72,8 @@ def async_safe_ce(
         target = target[target_packing_mask].contiguous().view(-1)
     else:
         target = target[:, 1:].contiguous().view(-1)
-    if cp_group is not None and cp_group.size() > 1:
+    cp_local_mean = cp_group is not None and cp_group.size() > 1
+    if cp_local_mean and normalization_tokens is None:
         # Fallback to unbalance loss
         loss = (
             ce_impl(
@@ -96,10 +98,15 @@ def async_safe_ce(
         )
 
         # Compute all token numbers across dp-world
-        n_valid_tokens = (target != ignore_index).sum()
+        n_valid_tokens = (
+            (target != ignore_index).sum()
+            if normalization_tokens is None
+            else normalization_tokens
+        )
         num_dp_workers = 1
-        if dp_group is not None:
-            torch.distributed.all_reduce(n_valid_tokens, group=dp_group)
+        if dp_group is not None and not cp_local_mean:
+            if normalization_tokens is None:
+                torch.distributed.all_reduce(n_valid_tokens, group=dp_group)
             num_dp_workers = torch.distributed.get_world_size(group=dp_group)
 
         loss = (
@@ -311,6 +318,10 @@ class SFTTrainer(LLMTrainer):
                 # - Last stage computes loss and initiates backward pass
                 # - Intermediate stages only receive activations from previous stage
                 targets, losses = (labels, []) if pp_last_stage else (None, None)
+                if pp_last_stage:
+                    self._prepare_pp_loss(
+                        labels, loss_scaling_factor=1.0 / len(mini_batch_begin_idxs)
+                    )
 
                 pp_data_batch_args = []
                 if pp_first_stage:
@@ -324,7 +335,7 @@ class SFTTrainer(LLMTrainer):
                     seq_len_multiple=self.seq_len_multiple,
                 )
                 ce_loss = (
-                    torch.mean(torch.stack(losses)).to(self.device)
+                    torch.stack(losses).sum().to(self.device)
                     if pp_last_stage
                     else torch.tensor([-1.0], device=self.device)
                 )
@@ -819,21 +830,38 @@ class SFTTrainer(LLMTrainer):
         self.set_model_train()
         return ckpt_total_steps, train_step, ckpt_extra_vars
 
+    def _prepare_pp_loss(self, labels, *, loss_scaling_factor):
+        # Match the EXISTING non-PP mean for this whole minibatch. Averaging
+        # microbatch means would change sample influence when lengths differ.
+        tokens = (labels[:, 1:] != -100).sum()
+        cp_local_mean = (
+            self.parallel_dims.cp_enabled
+            and self.parallel_dims.mesh["cp"].get_group().size() > 1
+        )
+        if (
+            not cp_local_mean
+            and self.config.train.train_policy.balance_dp_token
+            and self.parallel_dims.dp_shard_enabled
+        ):
+            torch.distributed.all_reduce(
+                tokens, group=self.parallel_dims.mesh["dp_shard"].get_group()
+            )
+        self._pp_loss_tokens = tokens
+        self._pp_loss_scaling_factor = loss_scaling_factor
+
+    def _pp_loss(self, output, target, **kwargs):
+        if getattr(self, "_pp_loss_tokens", None) is None:
+            raise RuntimeError("Pipeline loss requires whole-minibatch preparation")
+        return async_safe_ce(
+            output,
+            target,
+            normalization_tokens=self._pp_loss_tokens,
+            loss_scaling_factor=self._pp_loss_scaling_factor,
+            **kwargs,
+        )
+
     @property
     def pp_loss_fn(self):
-        # calculate the loss scaling factor
-        mini_batch_size = max(self.config.train.train_policy.mini_batch or 1, 1)
-        mini_batch_size = min(
-            mini_batch_size, self.config.train.train_batch_per_replica
-        )
-        loss_scaling_factor = (
-            mini_batch_size / self.config.train.train_batch_per_replica
-        )
-        if self.config.train.train_policy.enable_dp_load_balancing:
-            loss_scaling_factor = (
-                1.0
-                / self.config.train.train_policy.load_balanced_batches_per_optimizer_step
-            )
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:
@@ -846,9 +874,9 @@ class SFTTrainer(LLMTrainer):
 
         return torch.compile(
             partial(
-                async_safe_ce,
+                SFTTrainer._pp_loss,
+                self,
                 ce_impl=CrossEntropyLoss(),
-                loss_scaling_factor=loss_scaling_factor,
                 dp_group=dp_group
                 if self.config.train.train_policy.balance_dp_token
                 else None,

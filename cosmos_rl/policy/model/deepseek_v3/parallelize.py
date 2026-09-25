@@ -15,6 +15,7 @@
 
 
 import functools
+import math
 import os
 from typing import Callable, Optional
 
@@ -353,27 +354,45 @@ def parallelize(
             num_dense_layers=num_dense_layers,
         )
         num_stages = len(splits) - 1
-
+        is_sft = config.train.train_policy.type == "sft"
+        train_batch_size = min(
+            max(
+                config.train.train_policy.mini_batch
+                or (1 if is_sft else config.train.train_batch_per_replica),
+                1,
+            ),
+            config.train.train_batch_per_replica,
+        )
+        microbatch_size = config.policy.parallelism.pp_micro_batch_size
+        if not is_sft:
+            microbatch_size = math.gcd(train_batch_size, microbatch_size)
+            if train_batch_size // microbatch_size < num_stages:
+                microbatch_size = 1
         pp_scheduler = build_pipeline_schedule(
             pp_mesh=pp_mesh,
-            batch_size=config.train.train_batch_per_replica,
+            batch_size=train_batch_size,
             num_stages=num_stages,
             schedule_str=parallel_dims.pp_schedule,
-            microbatch_size=config.policy.parallelism.pp_micro_batch_size,
+            microbatch_size=microbatch_size,
             model_parts=model_parts,
             device=device,
             loss_fn=pp_loss_fn,
+            scale_grads=False,
         )
-        pp_scheduler_val = build_pipeline_schedule(
-            pp_mesh=pp_mesh,
-            batch_size=config.train.train_batch_per_replica,
-            num_stages=num_stages,
-            schedule_str=parallel_dims.pp_schedule,
-            microbatch_size=config.policy.parallelism.pp_micro_batch_size,
-            model_parts=model_parts,
-            device=device,
-            loss_fn=pp_loss_fn,
-        )
+        pp_scheduler_val = None
+        if not is_sft or config.validation.enable:
+            pp_scheduler_val = build_pipeline_schedule(
+                pp_mesh=pp_mesh,
+                batch_size=(
+                    config.validation.batch_size if is_sft else train_batch_size
+                ),
+                num_stages=num_stages,
+                schedule_str=parallel_dims.pp_schedule,
+                microbatch_size=microbatch_size,
+                model_parts=model_parts,
+                device=device,
+                loss_fn=None,
+            )
         return pp_scheduler, pp_scheduler_val
 
     return None, None

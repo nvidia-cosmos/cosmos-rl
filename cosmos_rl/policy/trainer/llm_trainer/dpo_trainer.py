@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # DPO (Direct Preference Optimization) Trainer.
-# Supports TRL-style loss combinations as in MPO paper:
+# Supports preference/quality/SFT loss combinations. By default these are
+# reference-free (not canonical reference-based DPO or TRL's running-baseline BCO).
+# train.train_policy.dpo_reference_policy opts into frozen-reference log-ratios:
 #   - sigmoid: preference loss -log(sigmoid(β * (log π(chosen) - log π(rejected))))
 #   - bco_pair: quality loss -logsigmoid(β*chosen) - logsigmoid(-β*rejected)
 #   - sft: cross-entropy on chosen response tokens
@@ -17,6 +19,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from functools import partial
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -35,11 +38,21 @@ def dpo_loss(
     chosen_logps: torch.Tensor,  # [batch_size]
     rejected_logps: torch.Tensor,  # [batch_size]
     beta: float = 0.1,
+    *,
+    reference_chosen_logps: Optional[torch.Tensor] = None,
+    reference_rejected_logps: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    DPO loss: -log(sigmoid(β * (log π(chosen) - log π(rejected))))
+    Preference loss; supplying both frozen references selects standard DPO.
     """
-    logits = beta * (chosen_logps - rejected_logps)
+    if (reference_chosen_logps is None) != (reference_rejected_logps is None):
+        raise ValueError("Both DPO reference log-probabilities are required")
+    logits = chosen_logps - rejected_logps
+    if reference_chosen_logps is not None:
+        logits = logits - (
+            reference_chosen_logps.detach() - reference_rejected_logps.detach()
+        )
+    logits = beta * logits
     loss = -F.logsigmoid(logits).mean()
     return loss
 
@@ -92,6 +105,105 @@ class DPOTrainer(LLMTrainer):
         if len(self.loss_weights) != len(self.loss_types):
             self.loss_weights = [1.0] * len(self.loss_types)
         self.enable_dp_load_balancing = False
+        self.use_reference_policy = config.train.train_policy.dpo_reference_policy
+        self.reference_state_dict = {}
+
+    def _capture_reference(self):
+        # Always copy, including CPU-offloaded tensors. A detached CPU tensor
+        # alone can alias the live policy and cease to be a frozen reference.
+        self.reference_state_dict = {
+            key: value.detach().to(device="cpu", copy=True)
+            for key, value in self.model.state_dict().items()
+        }
+
+    def _restore_reference(self, checkpoint):
+        saved_mode = checkpoint.pop("dpo_reference_policy", False)
+        reference = checkpoint.pop("dpo_reference_state", None)
+        if saved_mode != self.use_reference_policy:
+            raise ValueError("DPO reference-policy mode differs from checkpoint")
+        if not self.use_reference_policy:
+            return
+        state = self.model.state_dict()
+        if not isinstance(reference, dict) or reference.keys() != state.keys():
+            raise ValueError("DPO checkpoint is missing a complete frozen reference")
+        for key, value in state.items():
+            saved = reference[key]
+            if (
+                not isinstance(saved, torch.Tensor)
+                or saved.shape != value.shape
+                or saved.dtype != value.dtype
+            ):
+                raise ValueError(f"DPO checkpoint reference metadata mismatch: {key}")
+        self.reference_state_dict = reference
+
+    @contextmanager
+    def _reference_forward(self):
+        """Temporarily install frozen weights before building the policy graph.
+
+        Restore weights, buffers, module modes and RNG even if reference forward
+        raises. No reference tensors acquire gradients or optimizer state.
+        """
+        state = self.model.state_dict()
+        if self.reference_state_dict.keys() != state.keys():
+            raise RuntimeError("DPO frozen reference has not been initialized")
+        policy = {
+            key: value.detach().to(device="cpu", copy=True)
+            for key, value in state.items()
+        }
+        modes = [(module, module.training) for module in self.model.modules()]
+        devices = [self.device] if self.device.type == "cuda" else []
+        with torch.no_grad(), torch.random.fork_rng(devices=devices):
+            try:
+                for key, value in state.items():
+                    value.copy_(self.reference_state_dict[key])
+                self.model.eval()
+                yield
+            finally:
+                # FSDP can replace a shard's storage during its first forward
+                # (for example, padding an uneven shard). Restore through the
+                # module's load hooks, not the detached pre-forward state_dict
+                # views. The hooks also reshard a root kept unsharded in forward.
+                self.model.load_state_dict(policy, strict=True)
+                for module, training in modes:
+                    module.training = training
+
+    def checkpointing(
+        self,
+        total_steps,
+        train_step,
+        save_freq,
+        is_last_step=False,
+        pp_last_stage=False,
+        val_score=None,
+        do_save=False,
+        **kwargs,
+    ):
+        # The SFT worker owns the checkpoint boundary after validation. DPO
+        # must implement that hook; saving inside step_training would miss a
+        # requested early final checkpoint and publish before validation.
+        if not self.config.train.ckpt.enable_checkpoint:
+            return
+        if not (
+            is_last_step
+            or do_save
+            or (save_freq > 0 and train_step > 0 and train_step % save_freq == 0)
+        ):
+            return
+        if self.parallel_dims.dp_replicate_coord[0] == 0:
+            self.ckpt_manager.save_checkpoint(
+                model=self.model,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=train_step,
+                total_steps=total_steps,
+                is_final=is_last_step,
+                dpo_reference_policy=self.use_reference_policy,
+                dpo_reference_state=self.reference_state_dict
+                if self.use_reference_policy
+                else None,
+                **kwargs,
+            )
+            self.ckpt_manager.save_check(step=train_step, val_score=val_score)
 
     def load_model(self):
         """Load model weights from checkpoint if available. Required by SFTPolicyWorker.build_runner."""
@@ -107,6 +219,10 @@ class DPOTrainer(LLMTrainer):
                     ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
                     train_step = ckpt_extra_vars.get("step", 0)
                 except Exception as e:
+                    if self.use_reference_policy:
+                        raise RuntimeError(
+                            "Cannot resume reference-based DPO; refusing a fresh-policy fallback"
+                        ) from e
                     logger.error(
                         f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                     )
@@ -119,8 +235,14 @@ class DPOTrainer(LLMTrainer):
                         self.device,
                         revision=self.config.policy.model_revision,
                     )
+                else:
+                    # Outside the legacy fallback handler: a changed/missing
+                    # algorithm state is never a valid fresh initialization.
+                    self._restore_reference(ckpt_extra_vars)
             else:
                 self.model_load_from_hf()
+                if self.use_reference_policy:
+                    self._capture_reference()
 
         if self.parallel_dims.dp_replicate_enabled:
             if self.config.train.resume:
@@ -153,6 +275,7 @@ class DPOTrainer(LLMTrainer):
                 is_send=self.parallel_dims.dp_replicate_coord[0] == 0,
                 send_hook=send_recv_hook,
                 recv_hook=send_recv_hook,
+                has_reference_model=self.use_reference_policy,
             )
             logger.info(
                 f"Synchronized {len_params} parameters across data parallel replicas."
@@ -177,16 +300,23 @@ class DPOTrainer(LLMTrainer):
             else:
                 raise ValueError("DPO batch needs logprob_masks or label_ids")
 
+        # Packers mark response TARGET positions. compute_logprobs selects
+        # LOGIT positions and scores the following token, so shift exactly once.
+        # No prediction at the final input position has an in-batch target.
+        prediction_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        prediction_mask[:, :-1] = logprob_masks[:, 1:].bool()
         logps, cu_seqlens, _ = util.compute_logprobs(
             input_ids,
-            logprob_masks,
+            prediction_mask,
             logits,
             is_full_logits=True,
         )
 
         # Sum log probs per sequence
         bsz = input_ids.shape[0]
-        per_seq_logps = logps.new_zeros(bsz)
+        # Keep an all-empty response batch connected to the policy graph so
+        # backward contributes zero instead of failing on a detached constant.
+        per_seq_logps = logps.sum() * logps.new_zeros(bsz)
         for i in range(bsz):
             start, end = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
             if end > start:
@@ -265,6 +395,21 @@ class DPOTrainer(LLMTrainer):
             position_ids, _, _ = self.model.get_position_ids(**combined_batch)
             combined_batch["position_ids"] = position_ids
 
+        bsz = chosen_batch["input_ids"].shape[0]
+        reference_chosen, reference_rejected = None, None
+        if getattr(self, "use_reference_policy", False):
+            # Do this BEFORE the differentiable forward. Swapping parameter
+            # storage after it would invalidate tensors saved for backward.
+            with self._reference_forward():
+                reference_output = self.model(**combined_batch)
+                reference_chosen = self._compute_logprobs_and_sum(
+                    chosen_batch, reference_output.logits[:bsz]
+                )
+                reference_rejected = self._compute_logprobs_and_sum(
+                    rejected_batch, reference_output.logits[bsz:]
+                )
+                del reference_output
+
         with self.act_offloading_ctx_manager:
             output = self.model(**combined_batch)
 
@@ -281,12 +426,21 @@ class DPOTrainer(LLMTrainer):
         for loss_type, weight in zip(self.loss_types, self.loss_weights, strict=False):
             if loss_type == "sigmoid":
                 total_loss = total_loss + weight * dpo_loss(
-                    chosen_logps, rejected_logps, self.beta
+                    chosen_logps,
+                    rejected_logps,
+                    self.beta,
+                    reference_chosen_logps=reference_chosen,
+                    reference_rejected_logps=reference_rejected,
                 )
             elif loss_type == "bco_pair":
-                # TRL bco_pair: -logsigmoid(β*chosen) - logsigmoid(-β*rejected) for quality
+                # Preserve the legacy zero-baseline pairwise quality loss.
+                # The opt-in mode anchors rewards to the frozen reference;
+                # this does not introduce TRL's running reward baseline.
                 chosen_rewards = self.beta * chosen_logps
                 rejected_rewards = self.beta * rejected_logps
+                if reference_chosen is not None:
+                    chosen_rewards = chosen_rewards - self.beta * reference_chosen
+                    rejected_rewards = rejected_rewards - self.beta * reference_rejected
                 bco = (
                     -F.logsigmoid(chosen_rewards) - F.logsigmoid(-rejected_rewards)
                 ).mean()
