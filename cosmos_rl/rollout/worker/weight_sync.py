@@ -55,6 +55,7 @@ import os
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from enum import Enum
 from typing import TYPE_CHECKING, Optional, Sequence
 
@@ -184,19 +185,53 @@ def get_broadcast_all_params(worker) -> bool:
 
 
 def create_buffer_model(worker, device=None) -> None:
-    """Create a parameter-only buffer by cloning live model state_dict."""
+    """Clone backing storages once, preserving tied and overlapping state views."""
     model = worker.rollout.get_underlying_model()
     target_device = device or next(model.parameters()).device
     buffer_sd: dict[str, torch.Tensor] = {}
+    storages = {}
     for name, param in model.state_dict().items():
-        buffer_sd[name] = param.detach().clone().to(target_device)
+        if (
+            not isinstance(param, torch.Tensor)
+            or isinstance(param, DTensor)
+            or param.layout != torch.strided
+            or param.is_quantized
+            or param.is_conj()
+            or param.is_neg()
+        ):
+            raise ValueError(
+                f"Async weight buffer requires plain strided tensors: {name}"
+            )
+        storage = param.untyped_storage()
+        # _cdata identifies zero-byte storages too; data_ptr() alone does not.
+        key = (param.device, storage._cdata)
+        if key not in storages:
+            raw = torch.empty(0, dtype=torch.uint8, device=param.device).set_(
+                storage, 0, (storage.nbytes(),), (1,)
+            )
+            storages[key] = raw.to(device=target_device, copy=True)
+        buffer_sd[name] = torch.empty(0, dtype=param.dtype, device=target_device).set_(
+            storages[key].untyped_storage(),
+            param.storage_offset(),
+            param.size(),
+            param.stride(),
+        )
     worker._buffer_state_dict = buffer_sd
-    # Monotonic counters: _buffer_version is bumped by WeightSyncThread,
-    # _buffer_synced_version by sync_buffer_to_live on the main thread.
-    # CPython GIL guarantees atomic int reads/writes, so no lock is needed.
+    # Version publication and copy scheduling share a short CPU lock. Device
+    # storage ownership is ordered separately in both directions by CUDA events.
+    worker._buffer_lock = threading.Lock()
+    worker._buffer_writing = False
+    worker._buffer_write_failed = False
+    worker._buffer_adopt_event = None
+    if torch.device(target_device).type == "cuda":
+        # Initial device-to-device clones are asynchronous too. A first writer
+        # must not race those copies merely because no adoption happened yet.
+        worker._buffer_adopt_event = torch.cuda.Event()
+        worker._buffer_adopt_event.record(torch.cuda.current_stream(target_device))
+    worker._buffer_weight_version = getattr(worker, "current_weight_version", 0)
     worker._buffer_version = 0
     worker._buffer_synced_version = 0
-    total_bytes = sum(t.nelement() * t.element_size() for t in buffer_sd.values())
+    total_bytes = sum(t.numel() for t in storages.values())
     logger.info(
         "[WeightSync] Created buffer model: %d tensors, %.1f MB on %s",
         len(buffer_sd),
@@ -241,17 +276,16 @@ def _rebuild_over_buffer(view_tensor, sd, buffer_sd, storage_to_sd_keys):
             and view_offset == live_base.storage_offset()
         ):
             return buffer_base
-        # Otherwise rebuild the view over the clone.  The clone's storage
-        # starts at offset zero, so rebase the view's offset against the
-        # base; strides only transfer when the clone preserved the base's
-        # layout, and the rebuilt view must stay inside the base's extent.
-        relative_offset = view_offset - live_base.storage_offset()
+        # Preserve absolute offsets for storage-preserving clones, and still
+        # support a rebased standalone clone supplied by legacy callers.
+        relative_offset = (
+            buffer_base.storage_offset() + view_offset - live_base.storage_offset()
+        )
         if (
             relative_offset >= 0
             and live_base.stride() == buffer_base.stride()
-            and buffer_base.storage_offset() == 0
             and relative_offset + _storage_extent(view_tensor)
-            <= _storage_extent(live_base)
+            <= buffer_base.untyped_storage().nbytes() // buffer_base.element_size()
         ):
             return torch.as_strided(
                 buffer_base,
@@ -336,10 +370,12 @@ def sync_buffer_to_live(worker) -> None:
     validation or shutdown — those are handled by
     ``process_wst_deferred_actions`` on the main thread.
 
-    Non-blocking on CPU.  inference_stream.wait_event(last_event) ensures
-    the GPU-side copy executes after the most recently completed write on
-    the weight-sync stream.
+    Never waits for a writer/barrier on CPU: keep the previous live version while
+    the buffer is owned by a transfer. A completed adoption event also gates the
+    next buffer write, so it cannot overwrite storage still being read here.
     """
+    if getattr(worker, "_buffer_write_failed", False):
+        raise RuntimeError("Cannot adopt a buffer after a failed weight transfer")
     buf_ver = getattr(worker, "_buffer_version", 0)
     synced_ver = getattr(worker, "_buffer_synced_version", 0)
     if buf_ver <= synced_ver:
@@ -355,6 +391,28 @@ def sync_buffer_to_live(worker) -> None:
             )
         return
 
+    if not worker._buffer_lock.acquire(blocking=False):
+        return
+    try:
+        if worker._buffer_write_failed:
+            raise RuntimeError("Cannot adopt a buffer after a failed weight transfer")
+        if worker._buffer_writing:
+            return
+        _schedule_buffer_adoption(worker)
+    except BaseException:
+        worker._buffer_write_failed = True
+        _fail_the_job(worker)
+        raise
+    finally:
+        worker._buffer_lock.release()
+
+
+def _schedule_buffer_adoption(worker) -> None:
+    """Called with the publication lock; no peer waits or synchronization here."""
+    buf_ver = worker._buffer_version
+    synced_ver = worker._buffer_synced_version
+    if buf_ver <= synced_ver:
+        return
     worker._sync_noop_cnt = 0
     wst: WeightSyncThread | None = getattr(worker, "_weight_sync_thread", None)
     has_event = wst is not None and wst._last_event is not None
@@ -374,7 +432,11 @@ def sync_buffer_to_live(worker) -> None:
         for name in live_sd:
             if name in buffer_sd:
                 live_sd[name].copy_(buffer_sd[name])
+        adopted = torch.cuda.Event()
+        adopted.record(inf_stream)
+    worker._buffer_adopt_event = adopted
     worker._buffer_synced_version = buf_ver
+    worker.current_weight_version = worker._buffer_weight_version
     elapsed_ms = (time.monotonic() - t0) * 1000
     # ``superseded`` = buffer versions transferred since the last adopt but
     # jumped over here (never adopted into the live model) -> wasted NCCL
@@ -393,10 +455,10 @@ def sync_buffer_to_live(worker) -> None:
 
 
 def process_wst_deferred_actions(worker) -> None:
-    """Handle validation and shutdown flags set by the WeightSyncThread.
+    """Handle validation/shutdown deferred by the WST or sync command callbacks.
 
     Must be called on the main thread only (never from inference
-    callbacks).  The WST sets lightweight flags when it completes a
+    callbacks). Weight-sync handlers set lightweight flags after a
     broadcast that requires validation or shutdown; this function
     reacts to those flags.
     """
@@ -692,26 +754,53 @@ class WeightSyncThread:
         """Run the P2R receive on the WST's CUDA stream."""
         t0 = time.monotonic()
         try:
-            self._worker._execute_p2r_recv(command, self._stream)
+            with self._buffer_write(command.weight_step):
+                self._worker._execute_p2r_recv(command, self._stream)
         except BaseException:
             self._p2r_failed = True
             raise
         self._p2r_failed = False
 
-        self._last_event = torch.cuda.Event()
-        self._last_event.record(self._stream)
-        self._worker._buffer_version += 1
         self._executed += 1
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
             "[WeightSyncThread] P2R done (step=%s, ver=%s, %.1f ms, "
             "qdepth_after=%d, executed=%d)",
             command.weight_step,
-            self._worker.current_weight_version,
+            self._worker._buffer_weight_version,
             elapsed_ms,
             self._queue.qsize(),
             self._executed,
         )
+
+    @contextmanager
+    def _buffer_write(self, weight_step):
+        worker = self._worker
+        with worker._buffer_lock:
+            if worker._buffer_write_failed or worker._buffer_writing:
+                raise RuntimeError("Weight buffer is unavailable for transfer")
+            worker._buffer_writing = True
+            adopted = worker._buffer_adopt_event
+        try:
+            if adopted is not None:
+                self._stream.wait_event(adopted)
+            yield
+            ready = torch.cuda.Event()
+            ready.record(self._stream)
+            with worker._buffer_lock:
+                self._last_event = ready
+                if weight_step is not None:
+                    worker._buffer_weight_version = weight_step
+                worker._buffer_version += 1
+                worker._buffer_writing = False
+        except BaseException:
+            with worker._buffer_lock:
+                # Native writes may still be outstanding. Do not publish or
+                # reuse this partially written buffer after any uncertain failure.
+                worker._buffer_write_failed = True
+                worker._buffer_writing = False
+            _fail_the_job(worker)
+            raise
 
     def _assert_seeded_before_broadcast(self, command, weight_step) -> None:
         """Cancel the round unless this replica can legitimately be the source.
@@ -783,11 +872,9 @@ class WeightSyncThread:
         # barrier participant count so it stays in lockstep as replicas finish.
         expected_world_size = len(getattr(command, "dst_replica_names", None) or [])
 
-        # Only meaningful when weights actually leave this replica.  A
-        # single-member round broadcasts nothing (see the branch below), so
-        # there is no peer to protect and nothing to cancel.
-        if expected_world_size > 1:
-            self._assert_seeded_before_broadcast(command, weight_step)
+        # A one-member round also must not label an unseeded model as a newly
+        # received version merely because it has no NCCL peers.
+        self._assert_seeded_before_broadcast(command, weight_step)
 
         if expected_world_size > 1 and not r2r_barrier(
             worker,
@@ -800,24 +887,21 @@ class WeightSyncThread:
             )
             return
         t0 = time.monotonic()
-        if expected_world_size <= 1:
-            # BuildMesh intentionally creates no NCCL communicator for one
-            # replica. P2R already populated its buffer; retain R2R's version
-            # and validation bookkeeping without touching a stale communicator.
-            transferred_cnt, bytes_broadcast = 0, 0
-        else:
-            transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
-                worker,
-                command.src_replica_name,
-                self._stream,
-            )
-        self._last_event = torch.cuda.Event()
-        self._last_event.record(self._stream)
-        worker._buffer_version += 1
+        with self._buffer_write(weight_step):
+            if expected_world_size <= 1:
+                # One-member rounds have no NCCL communicator.
+                transferred_cnt, bytes_broadcast = 0, 0
+            else:
+                transferred_cnt, bytes_broadcast = do_nccl_broadcast_grouped(
+                    worker,
+                    command.src_replica_name,
+                    self._stream,
+                )
+        # WST R2R always transfers the full state dictionary, even if the
+        # command requested trainable-only weights. Publish the frozen-state
+        # receipt only after the buffer write succeeds, never on cancellation.
+        worker.non_trainable_params_received = True
         self._executed += 1
-
-        if weight_step is not None:
-            worker.current_weight_version = weight_step
 
         if weight_step is not None and weight_step >= 0:
             cfg = worker.config
@@ -854,7 +938,7 @@ class WeightSyncThread:
             bytes_broadcast / (1024 * 1024),
             elapsed_ms,
             weight_step,
-            worker.current_weight_version,
+            worker._buffer_weight_version,
             self._queue.qsize(),
             self._executed,
         )
@@ -1305,6 +1389,8 @@ def ensure_wst(worker) -> WeightSyncThread:
     Safe to call multiple times.  After this returns the WST is running
     and all P2R / R2R commands can be enqueued to it.
     """
+    if worker.parallel_dims.world_size != 1:
+        raise ValueError("async_r2r_sync requires one rank per rollout replica")
     if not hasattr(worker, "_buffer_state_dict"):
         create_buffer_model(worker)
     if hasattr(worker, "weight_inplace_view_map") and not getattr(
@@ -1355,7 +1441,10 @@ def install_inference_sync(worker) -> None:
                 getattr(worker, "_buffer_version", -1),
                 getattr(worker, "_buffer_synced_version", -1),
             )
-        return original_policy_fn(observation)
+        # The copy and every forward consuming it must use the same ordered
+        # stream. Custom auxiliary streams need their own final-reader contract.
+        with torch.cuda.stream(worker.inference_stream):
+            return original_policy_fn(observation)
 
     servicer.policy_fn = _synced_policy_fn
     logger.info(

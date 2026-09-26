@@ -28,6 +28,11 @@ from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
 class RolloutBase(ABC):
+    # Opt in only when skipping an empty DP slice cannot omit a collective
+    # required by another slice's forward pass. Unknown and sharded backends
+    # remain unsupported; this does not promise neutral-input forward support.
+    supports_empty_dp_batches = False
+
     def __init__(
         self,
         config: CosmosConfig,
@@ -101,6 +106,15 @@ class RolloutBase(ABC):
             model: The underlying model instance.
         """
         raise NotImplementedError("get_underlying_model is not implemented yet.")
+
+    def synchronize_generation(self, timeout: float):
+        """Fence backend device reads after async request admission/drain stops.
+
+        Async backends must implement this before sharing live weights with a
+        writer. Completing a Python request, including cancellation, is not a
+        device fence. Synchronous backends do not use this async-only contract.
+        """
+        raise NotImplementedError("Async backend has no generation device fence")
 
     def set_underlying_model(self, model: torch.nn.Module):
         """

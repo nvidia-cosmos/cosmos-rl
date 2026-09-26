@@ -1062,6 +1062,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         ended = SimpleNamespace(status=SimpleNamespace(ended=True), start_time=1.0)
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
+            data_fetcher=SimpleNamespace(activated_val_iter=object()),
             total_steps=2,
             config=SimpleNamespace(
                 train=SimpleNamespace(sync_weight_interval=1),
@@ -1086,6 +1087,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         ended = SimpleNamespace(status=SimpleNamespace(ended=True), start_time=1.0)
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
+            data_fetcher=SimpleNamespace(activated_val_iter=None),
             total_steps=2,
             config=SimpleNamespace(
                 train=SimpleNamespace(sync_weight_interval=1),
@@ -1101,6 +1103,47 @@ class TestJobPhaseWeightSync(unittest.TestCase):
             PolicyStatusManager.should_weight_sync_after_train_ack.__get__(psm)
         )
         self.assertFalse(psm.should_weight_sync_after_train_ack(1, rsm))
+
+    def test_active_validation_sync_after_prompt_exhaustion(self):
+        # Exhausting training prompts must not strand an active validation
+        # sampler, even before the final step or without an explicit stop.
+        for phase in (JobPhase.RUNNING, JobPhase.DRAINING):
+            for step in (1, 2):
+                for targets in ([object()], []):
+                    with self.subTest(phase=phase, step=step, targets=bool(targets)):
+                        psm = object.__new__(PolicyStatusManager)
+                        psm.job_phase = phase
+                        psm.stop_reason = None
+                        psm.total_steps = 2
+                        psm.config = SimpleNamespace(
+                            train=SimpleNamespace(sync_weight_interval=1),
+                            validation=SimpleNamespace(enable=True, freq=1),
+                        )
+                        psm.data_fetcher = SimpleNamespace(activated_val_iter=object())
+                        rsm = SimpleNamespace(
+                            all_rollouts_ended=lambda: True,
+                            get_safe_weight_sync_replicas=lambda **kwargs: targets,
+                        )
+                        self.assertEqual(
+                            psm.should_weight_sync_after_train_ack(step, rsm),
+                            bool(targets),
+                        )
+
+    def test_inactive_validation_does_not_restart_drained_rollouts(self):
+        for phase in (JobPhase.RUNNING, JobPhase.DRAINING):
+            for step in (1, 2):
+                with self.subTest(phase=phase, step=step):
+                    psm = object.__new__(PolicyStatusManager)
+                    psm.job_phase = phase
+                    psm.stop_reason = None
+                    psm.total_steps = 2
+                    psm.config = SimpleNamespace(
+                        train=SimpleNamespace(sync_weight_interval=1),
+                        validation=SimpleNamespace(enable=True, freq=1),
+                    )
+                    psm.data_fetcher = SimpleNamespace(activated_val_iter=None)
+                    rsm = SimpleNamespace(all_rollouts_ended=lambda: True)
+                    self.assertFalse(psm.should_weight_sync_after_train_ack(step, rsm))
 
 
 class TestJobPhaseValidationBypass(unittest.TestCase):

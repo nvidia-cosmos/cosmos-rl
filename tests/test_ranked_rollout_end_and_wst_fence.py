@@ -383,8 +383,12 @@ def test_one_member_async_r2r_updates_version_without_nccl():
     )
     worker = SimpleNamespace(
         replica_name="rollout-0",
-        _buffer_version=0,
+        _buffer_version=1,
         current_weight_version=0,
+        _buffer_lock=threading.Lock(),
+        _buffer_writing=False,
+        _buffer_write_failed=False,
+        _buffer_adopt_event=None,
         state=state,
         config=SimpleNamespace(
             validation=SimpleNamespace(
@@ -415,7 +419,8 @@ def test_one_member_async_r2r_updates_version_without_nccl():
 
     broadcast.assert_not_called()
     event.return_value.record.assert_called_once_with(wst._stream)
-    assert worker.current_weight_version == 3
+    assert worker.current_weight_version == 0
+    assert worker._buffer_weight_version == 3
     state.set_weight_synced.assert_called_once_with()
 
 

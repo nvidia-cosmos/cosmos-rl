@@ -416,6 +416,12 @@ class TestPolicyWorker:
 
 
 class TestRollout:
+    # Use the production entrypoint's context even in this synchronous harness.
+    # With no scheduler it is a no-op; async fencing remains covered separately.
+    _paused_async_live_weights = (
+        DisaggregatedRolloutControlWorker._paused_async_live_weights
+    )
+
     def __init__(
         self, name, rollout_world_size, policies_comm, freeze_params: bool = False
     ):

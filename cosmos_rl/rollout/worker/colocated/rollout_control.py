@@ -25,7 +25,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
 )
 from cosmos_rl.utils import constant
-from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.rollout.prompt_batch import required_weight_version
 from cosmos_rl.colocated.utils import CommandDispatcher
 from typing import Type
 
@@ -132,14 +132,17 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         if self._prompt_queue.empty():
             return no_more_prompts, 0
         # Check if the prompt is valid for the current weight version
-        first_payload: RLPayload = self._prompt_queue.queue[0][0]
+        batch_version = required_weight_version(self._prompt_queue.queue[0])
         is_valid_prompt_for_current_weight_version = (
-            first_payload.weight_version <= self.current_weight_version
+            batch_version <= self.current_weight_version
         )
         if not is_valid_prompt_for_current_weight_version:
             # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
             return no_more_prompts, 0
 
+        if not self._prompt_queue.queue[0]:
+            self._prompt_queue.get_nowait()
+            return no_more_prompts, 0
         _, valid_results = self.one_step_generation()
         return no_more_prompts, len(valid_results)
 

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import pickle
-from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
 import subprocess
@@ -161,14 +160,12 @@ def test_non_reporting_rank_never_enqueues_masked_results():
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_async_generation_failure_returns_reserved_payload(raises):
-    scheduler = object.__new__(RolloutTaskScheduler)
-    scheduler.rollout_engine = SimpleNamespace(
+    engine = SimpleNamespace(
         rollout_generation=AsyncMock(
             side_effect=RuntimeError("fault") if raises else None, return_value=[]
         )
     )
-    scheduler.stream = scheduler.data_packer = None
-    scheduler.complete_queue = Queue()
+    scheduler = RolloutTaskScheduler(engine, None)
     payload = RLPayload(completion_sequences=[12, 13], weight_version=9)
     result = asyncio.run(scheduler._generate_single(RolloutTask(1, payload)))
     assert result is scheduler.complete_queue.get_nowait()
