@@ -401,6 +401,9 @@ class TestTriggerWeightSyncTopology(unittest.TestCase):
             validation=SimpleNamespace(enable=validation_enabled)
         )
         mgr.policy_atoms_in_replica = 1
+        # This fixture tests transport recipient selection; round sealing has
+        # its own real sampler/registration tests.
+        mgr.prepare_validation_round = MagicMock(return_value="validation-round")
         mgr.redis_handler = object()
         policy_replica = _replica("policy-0", ended=False, start_time=0)
         rollout_mgr = _RolloutMgrStub(replicas, ranked_ended)
@@ -454,6 +457,9 @@ class TestTriggerWeightSyncTopology(unittest.TestCase):
         r2r.assert_called_once()
         self.assertIs(p2r.call_args.kwargs["dst_replica"], ended)
         self.assertEqual(r2r.call_args.kwargs["dst_replicas"], [ended])
+        self.assertEqual(
+            r2r.call_args.kwargs["validation_round_id"], "validation-round"
+        )
 
     def test_no_ended_unchanged_behavior(self):
         """No ended replicas, validation off -> all replicas synced
@@ -723,7 +729,9 @@ class TestRolloutCheckoutGate(unittest.TestCase):
             and all(r.status.ended for r in rsm.rollout_replicas.values())
         )
         return SimpleNamespace(
-            rollout_status_manager=rsm, policy_status_manager=object()
+            rollout_status_manager=rsm,
+            policy_status_manager=object(),
+            life_cycle_lock=asyncio.Lock(),
         )
 
     def test_returns_true_when_all_already_ended(self):
@@ -732,8 +740,10 @@ class TestRolloutCheckoutGate(unittest.TestCase):
         ctrl = self._controller([True, True, True])
         ev = threading.Event()
         self.assertTrue(
-            run_web_panel._await_rollout_checkout(
-                ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+            asyncio.run(
+                run_web_panel._await_rollout_checkout(
+                    ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+                )
             )
         )
         # All ended up front -> never had to pump life-status.
@@ -745,8 +755,10 @@ class TestRolloutCheckoutGate(unittest.TestCase):
         ctrl = self._controller([])
         ev = threading.Event()
         self.assertTrue(
-            run_web_panel._await_rollout_checkout(
-                ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+            asyncio.run(
+                run_web_panel._await_rollout_checkout(
+                    ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+                )
             )
         )
         ctrl.rollout_status_manager.maintain_life_status.assert_not_called()
@@ -764,8 +776,10 @@ class TestRolloutCheckoutGate(unittest.TestCase):
         rsm.maintain_life_status.side_effect = _flip
         ev = threading.Event()
         self.assertTrue(
-            run_web_panel._await_rollout_checkout(
-                ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+            asyncio.run(
+                run_web_panel._await_rollout_checkout(
+                    ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+                )
             )
         )
         rsm.maintain_life_status.assert_called()
@@ -777,8 +791,10 @@ class TestRolloutCheckoutGate(unittest.TestCase):
         ev = threading.Event()
         # Deadline in the past -> forces the abnormal-path return without hanging.
         self.assertFalse(
-            run_web_panel._await_rollout_checkout(
-                ctrl, ev, timeout_s=0.0, scan_interval_s=0.01
+            asyncio.run(
+                run_web_panel._await_rollout_checkout(
+                    ctrl, ev, timeout_s=0.0, scan_interval_s=0.01
+                )
             )
         )
 
@@ -789,18 +805,25 @@ class TestRolloutCheckoutGate(unittest.TestCase):
         ev = threading.Event()
         ev.set()  # already signaled -> wait() returns True immediately
         self.assertFalse(
-            run_web_panel._await_rollout_checkout(
-                ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+            asyncio.run(
+                run_web_panel._await_rollout_checkout(
+                    ctrl, ev, timeout_s=5.0, scan_interval_s=0.01
+                )
             )
         )
 
 
 class TestFinalValidationCompletion(unittest.TestCase):
     def test_validation_report_completion_clears_controller_state(self):
+        from cosmos_rl.dispatcher.data.schema import RLPayload
+        from cosmos_rl.dispatcher.protocol import ValidationReportRequest
+        from cosmos_rl.dispatcher.validation_round import ValidationRound
+
         data_fetcher = SimpleNamespace(
             val_datasize=2,
             val_dataloader=None,
             activated_val_iter=object(),
+            activated_val_step=2,
             activated_val_tqdm=SimpleNamespace(update=MagicMock()),
         )
 
@@ -811,25 +834,34 @@ class TestFinalValidationCompletion(unittest.TestCase):
         data_fetcher.clear_validation_status = MagicMock(
             side_effect=_clear_validation_status
         )
-        psm = SimpleNamespace(
-            val_report_data={},
-            data_fetcher=data_fetcher,
-            config=SimpleNamespace(
-                validation=SimpleNamespace(n_generation=1),
-                logging=SimpleNamespace(logger=[]),
+        psm = PolicyStatusManager()
+        psm.data_fetcher = data_fetcher
+        psm.config = SimpleNamespace(
+            validation=SimpleNamespace(n_generation=1),
+            logging=SimpleNamespace(logger=[]),
+        )
+        psm.total_steps = 2
+        psm.custom_logger_fns = []
+        psm.try_trigger_data_fetch_and_training = MagicMock()
+        round_ = psm.validation_round = ValidationRound(2, {("rollout", 0)}, 1)
+        batch = round_.fetch(
+            round_.round_id,
+            "rollout",
+            0,
+            (2, None),
+            lambda: (
+                [RLPayload(prompt_idx=i, rewards=[float(i)]) for i in range(2)],
+                True,
             ),
-            total_steps=2,
-            custom_logger_fns=[],
-            try_trigger_data_fetch_and_training=MagicMock(),
         )
-        psm._expected_validation_rollout_count = (
-            PolicyStatusManager._expected_validation_rollout_count.__get__(psm)
-        )
-        psm._reported_validation_rollout_count = (
-            PolicyStatusManager._reported_validation_rollout_count.__get__(psm)
-        )
-        psm.validation_report_validation_results = (
-            PolicyStatusManager.validation_report_validation_results.__get__(psm)
+        request = ValidationReportRequest(
+            src_replica_name="rollout",
+            src_global_rank=0,
+            validation_step=2,
+            validation_round_id=round_.round_id,
+            report_sequence=0,
+            payloads=list(batch.payloads),
+            is_end=True,
         )
         rollouts = [
             SimpleNamespace(reward=1.0, report_metrics=None),
@@ -838,8 +870,9 @@ class TestFinalValidationCompletion(unittest.TestCase):
         with patch("cosmos_rl.dispatcher.status.logger.info") as info:
             psm.validation_report_validation_results(
                 validation_step=2,
-                validation_results=[rollouts],
+                validation_results=[[rollout] for rollout in rollouts],
                 rollout_status_manager=SimpleNamespace(),
+                request=request,
             )
         data_fetcher.clear_validation_status.assert_called_once()
         self.assertIsNone(data_fetcher.activated_val_iter)
@@ -1063,6 +1096,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
             total_steps=2,
+            data_fetcher=SimpleNamespace(activated_val_iter=object()),
             config=SimpleNamespace(
                 train=SimpleNamespace(sync_weight_interval=1),
                 validation=SimpleNamespace(enable=True, freq=1),
@@ -1087,6 +1121,7 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
             total_steps=2,
+            data_fetcher=SimpleNamespace(activated_val_iter=None),
             config=SimpleNamespace(
                 train=SimpleNamespace(sync_weight_interval=1),
                 validation=SimpleNamespace(enable=True, freq=1),
@@ -1103,8 +1138,8 @@ class TestJobPhaseWeightSync(unittest.TestCase):
         self.assertFalse(psm.should_weight_sync_after_train_ack(1, rsm))
 
 
-class TestJobPhaseValidationBypass(unittest.TestCase):
-    def test_on_rollout_is_end_noop_when_validation_enabled(self):
+class TestJobPhaseValidationDrain(unittest.TestCase):
+    def test_on_rollout_is_end_waits_for_all_validation_workers(self):
         psm = SimpleNamespace(
             job_phase=JobPhase.RUNNING,
             config=SimpleNamespace(validation=SimpleNamespace(enable=True)),
@@ -1116,7 +1151,7 @@ class TestJobPhaseValidationBypass(unittest.TestCase):
             ),
         )
         psm.on_rollout_is_end = PolicyStatusManager.on_rollout_is_end.__get__(psm)
-        psm.on_rollout_is_end(SimpleNamespace())
+        psm.on_rollout_is_end(SimpleNamespace(all_rollouts_ended=lambda: False))
         self.assertEqual(psm.job_phase, JobPhase.RUNNING)
 
 

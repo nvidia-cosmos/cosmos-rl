@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from cosmos_rl.dispatcher.data.schema import Rollout
+from cosmos_rl.dispatcher.data.schema import Rollout, TrainingCompletionIdentity
 
 
 class CompletionIdentity(BaseModel):
@@ -19,6 +19,7 @@ class CompletionIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     sequence: int = Field(ge=0, strict=True)
     weight_version: int = Field(ge=0, strict=True)
+    reservation: TrainingCompletionIdentity | None = None
 
 
 class CompletionDisposition(BaseModel):
@@ -60,6 +61,9 @@ class SourceWindow:
     capacity: int = 4096
     highest: int = -1
     versions: dict[int, int] = field(default_factory=dict)
+    reservations: dict[int, TrainingCompletionIdentity | None] = field(
+        default_factory=dict
+    )
     failed_without_payload: set[int] = field(default_factory=set)
 
     def __post_init__(self):
@@ -80,6 +84,13 @@ class SourceWindow:
             previous = self.versions.get(identity.sequence)
             if previous is not None and previous != identity.weight_version:
                 raise ValueError("Completion identity changed its originating version")
+            if (
+                previous is not None
+                and self.reservations.get(identity.sequence) != identity.reservation
+            ):
+                raise ValueError(
+                    "Completion identity changed its controller reservation"
+                )
             result.append(previous is None)
         # A single report must not expire one of its own identities on commit.
         highest = max([self.highest, *sequences])
@@ -91,6 +102,7 @@ class SourceWindow:
         self.unseen(identities)
         for identity in identities:
             self.versions[identity.sequence] = identity.weight_version
+            self.reservations[identity.sequence] = identity.reservation
             self.highest = max(self.highest, identity.sequence)
         floor = self.highest - self.capacity + 1
         self.versions = {
@@ -99,3 +111,8 @@ class SourceWindow:
             if sequence >= floor
         }
         self.failed_without_payload.intersection_update(self.versions)
+        self.reservations = {
+            sequence: reservation
+            for sequence, reservation in self.reservations.items()
+            if sequence in self.versions
+        }

@@ -52,7 +52,7 @@ def _rollout_worker(
 
 def test_empty_non_text_result_reports_reserved_samples():
     worker = _rollout_worker(n_generation=2)
-    payload = SimpleNamespace(prompt_idx=7)
+    payload = RLPayload(prompt_idx=7)
 
     valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
         [RolloutResult(completions=[])],
@@ -74,9 +74,7 @@ def test_empty_non_text_result_reports_reserved_samples():
 def test_empty_outer_result_reports_every_consumed_prompt():
     worker = _rollout_worker(n_generation=4)
     worker._prompt_queue = Queue()
-    worker._prompt_queue.put(
-        [SimpleNamespace(prompt_idx=0), SimpleNamespace(prompt_idx=1)]
-    )
+    worker._prompt_queue.put([RLPayload(prompt_idx=0), RLPayload(prompt_idx=1)])
     worker._call_rollout_generation = MagicMock(return_value=[])
     worker.inference_stream = None
     worker.data_packer = None
@@ -93,7 +91,7 @@ def test_non_reporting_rank_does_not_report_discard():
 
     worker._filter_valid_rollout_results_and_report(
         [RolloutResult(completions=[])],
-        [SimpleNamespace(prompt_idx=0)],
+        [RLPayload(prompt_idx=0)],
     )
 
     worker.api_client.post_rollout_completion.assert_not_called()
@@ -104,7 +102,7 @@ def test_colocated_worker_does_not_report_discarded_samples():
 
     valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
         [RolloutResult(completions=[])],
-        [SimpleNamespace(prompt_idx=0)],
+        [RLPayload(prompt_idx=0)],
     )
 
     assert valid_payloads == []
@@ -253,12 +251,10 @@ def test_on_policy_prompt_fetch_uses_same_weight_after_partial_admission():
 def test_http_discard_report_settles_before_normal_admission():
     from cosmos_rl.dispatcher import run_web_panel
 
-    policy_status = SimpleNamespace(
-        _parse_non_negative_count=PolicyStatusManager._parse_non_negative_count,
-        settle_discarded_samples=MagicMock(return_value=4),
-        rollout_admission_closed=lambda: False,
-        filter_outdated_rollouts=lambda rollouts: rollouts,
-    )
+    policy_status = PolicyStatusManager()
+    policy_status.samples_on_the_fly = 4
+    policy_status.rollout_admission_closed = lambda: False
+    policy_status.filter_outdated_rollouts = lambda rollouts: rollouts
     fake_controller = SimpleNamespace(
         policy_status_manager=policy_status,
         config=SimpleNamespace(
@@ -276,18 +272,16 @@ def test_http_discard_report_settles_before_normal_admission():
         },
     )
 
+    from rollout_receipt_fixture import install_report_source
+
+    request = install_report_source(fake_controller, request)
     with patch.object(run_web_panel, "controller", fake_controller):
         response = asyncio.run(run_web_panel.put_rollout_group(request))
 
     assert response == {"message": "Rollout put"}
-    policy_status.settle_discarded_samples.assert_called_once_with(
-        source_replica="rollout-0",
-        report_id="report-1",
-        count=4,
-        weight_version=None,
-    )
+    assert policy_status.samples_on_the_fly == 0
     fake_controller.register_discarded_samples_for_refill.assert_called_once_with(
-        None, 4, "report-1"
+        0, 4, "reservation:fixture-session:0:0"
     )
     fake_controller.put_rollouts.assert_awaited_once_with([])
 
@@ -327,6 +321,9 @@ def test_http_admission_retry_is_idempotent_for_metrics_settlement_and_refill():
         metrics=metrics,
     )
 
+    from rollout_receipt_fixture import install_report_source
+
+    request = install_report_source(fake_controller, request)
     with patch.object(run_web_panel, "controller", fake_controller):
         asyncio.run(run_web_panel.put_rollout_group(request))
         asyncio.run(run_web_panel.put_rollout_group(request))
@@ -339,7 +336,7 @@ def test_http_admission_retry_is_idempotent_for_metrics_settlement_and_refill():
     }
     assert policy_status.samples_on_the_fly == 4
     fake_controller.register_discarded_samples_for_refill.assert_called_once_with(
-        3, 1, "stable-admission-report"
+        3, 1, "reservation:fixture-session:0:3"
     )
 
 
@@ -402,6 +399,9 @@ def test_http_admission_discard_refills_strict_on_policy_step_at_same_weight():
         ),
     )
 
+    from rollout_receipt_fixture import install_report_source
+
+    request = install_report_source(controller, request)
     with patch.object(run_web_panel, "controller", controller):
         asyncio.run(run_web_panel.put_rollout_group(request))
     replacement_payloads, is_end = asyncio.run(controller._get_batched_prompt_impl(1))

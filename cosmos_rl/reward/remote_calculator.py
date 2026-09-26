@@ -457,6 +457,10 @@ class RemoteRewardCalculator:
                 selected_payload = RLPayload(
                     prompt=payload.prompt,
                     prompt_idx=payload.prompt_idx,
+                    validation_work_id=payload.validation_work_id,
+                    training_work_id=payload.training_work_id,
+                    training_completion_slots=payload.training_completion_slots,
+                    training_rejected_slots=list(payload.training_rejected_slots),
                     completions=payload.completions,
                     extra_info=payload.extra_info,
                 )

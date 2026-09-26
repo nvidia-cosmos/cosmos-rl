@@ -825,12 +825,19 @@ class WeightSyncThread:
             is_periodic = weight_step > 0 and weight_step % cfg.validation.freq == 0
             is_final = weight_step == command.total_steps
             should_do_validation = cfg.validation.enable and (
-                is_initial or is_periodic or is_final
+                is_initial
+                or is_periodic
+                or is_final
+                or bool(getattr(command, "validation_round_id", None))
             )
             if should_do_validation:
                 worker.current_step = weight_step
-                worker.validation_flag.set()
-                worker._pending_validation_step = weight_step
+                from cosmos_rl.rollout.validation import validation_round_for_command
+
+                worker.validation_round_id = validation_round_for_command(command)
+                if worker.validation_round_id is not None:
+                    worker.validation_flag.set()
+                    worker._pending_validation_step = weight_step
 
         if command.replica_should_stop():
             worker._pending_shutdown = True

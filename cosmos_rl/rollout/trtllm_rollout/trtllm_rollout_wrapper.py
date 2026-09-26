@@ -17,7 +17,7 @@ import torch
 import atexit
 import threading
 import time
-from queue import Queue
+from queue import Queue, Empty
 from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
 import multiprocessing as mp
@@ -37,7 +37,8 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.trtllm_rollout import patch_trtllm  # noqa: F401
 ####
 
-from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
+from cosmos_rl.dispatcher.protocol import RolloutRequest
+from cosmos_rl.rollout.validation import ValidationSession
 from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
 
@@ -145,6 +146,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.shutdown_signal = threading.Event()
         self.shutdown_mp_signal = mp.Event()
         self.validation_event = threading.Event()
+        self._lifecycle_commands = Queue()
 
         self.life_control_thread: Optional[threading.Thread] = None
         self.rollout_wrapper_event = threading.Event()
@@ -208,6 +210,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             if payloads is not None:
                 if is_validation:
                     break
+                reservation_payloads = list(payloads)
                 payloads, metadata = consume_completion_admission_metrics(payloads)
                 metadata = prepare_completion_admission_report(metadata, step)
                 for i in range(len(payloads)):
@@ -233,6 +236,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     metrics=metadata,
                     is_end=False,
                 )
+                from cosmos_rl.reward.reservations import attach_training_rejections
+
+                attach_training_rejections(response, reservation_payloads)
                 self.api_client.post_rollout_completion(response)
             elif not block or empty:
                 break
@@ -246,7 +252,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         is_end = False
 
         if prompt_queue.empty():
-            payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+            if kwargs.get("validation_step") is not None:
+                payloads, is_end = self._validation_session.fetch(
+                    batch_size, rank_in_mesh=kwargs.get("rank_in_mesh")
+                )
+            else:
+                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
             if self.config.train.local_dataset:
                 is_validation = kwargs.get("validation_step", None) is not None
                 for payload in payloads:
@@ -292,31 +303,42 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         )
         return self._rollout_end_acknowledged
 
+    def bind_report_source(self, source):
+        self.api_client.adopt_rollout_reporting(source)
+        self.replica_name = source["replica_name"]
+        self._is_registered = True
+
     @torch.no_grad()
     def main_loop(self):
         assert not self.rollout.rollout_config.multi_turn_config.enable, (
             "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
         )
-        while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
+        while (source := self.cosmos_replica_name_queue.get()) is not None:
             while not self.rollout_wrapper_event.is_set():
                 # this means that inside trtllmwoker, the weight is not synced yet.
                 pass
             # Main process will be blocked here until the trtllm worker has all done the registration.
             # So the worker processes has done the registration.
+            self.bind_report_source(source)
             logger.info(
-                f"[Rollout] Got replica name: {replica_name} from trtllm WorkerProcess"
+                f"[Rollout] Bound registered report source: {self.replica_name} from trtllm WorkerProcess"
             )
-            self.replica_name = (
-                replica_name  # retrieve the replica name from trtllm worker.
-            )
-            # Mock the result of `register_to_controller`
-            self._is_registered = True
             break
 
         while not self.shutdown_signal.is_set():
+            self.consume_lifecycle_instruction()
+            if self.shutdown_signal.is_set():
+                break
             # 1. check if we have to do validation first
             if self.validation_event.is_set():
                 # validation
+                self._validation_session = ValidationSession(
+                    self.api_client,
+                    self.validation_round_id,
+                    self.validation_step,
+                    self.replica_name,
+                    0,
+                )
                 validation_queue = Queue()
                 validation_results = []
                 prompt_payloads: List[Any] = []
@@ -343,44 +365,53 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     if is_end:
                         break
 
-                    validation_payloads = []
-                    for old_payload, result in zip(prompt_payloads, validation_results):
-                        apply_rollout_result_to_payload(
-                            old_payload,
-                            result,
-                            include_completed_conversations=(
-                                result.completed_conversations is not None
-                            ),
-                        )
-                        validation_payloads.append(old_payload)
+                # Complete collection before rewarding/reporting it once. A
+                # final fetch may carry payloads as well as the end signal;
+                # reporting inside the loop drops that final batch and replays
+                # every earlier prefix on subsequent iterations.
+                validation_payloads = []
+                for old_payload, result in zip(prompt_payloads, validation_results):
+                    apply_rollout_result_to_payload(
+                        old_payload,
+                        result,
+                        include_completed_conversations=(
+                            result.completed_conversations is not None
+                        ),
+                    )
+                    validation_payloads.append(old_payload)
 
-                    self.reward_dispatcher.enqueue_rewards_cal(
-                        validation_payloads, True, self.validation_step
-                    )
-                    payloads, is_validation, current_step, empty = self.report_rollouts(
-                        block=True
-                    )
-                    assert (
-                        is_validation and payloads is not None or payloads is None
-                    ) and not empty, (
+                self.reward_dispatcher.enqueue_rewards_cal(
+                    validation_payloads, True, self.validation_step
+                )
+                payloads, is_validation, current_step, empty = self.report_rollouts(
+                    block=True
+                )
+                assert (
+                    is_validation and payloads is not None or payloads is None
+                ) and (not empty or not validation_payloads), (
+                    "Validation report should be handled in the broadcast command."
+                )
+                while not empty:
+                    assert is_validation or payloads is None, (
                         "Validation report should be handled in the broadcast command."
                     )
-                    while not empty:
-                        assert is_validation or payloads is None, (
-                            "Validation report should be handled in the broadcast command."
-                        )
-                        if payloads is not None:
-                            response = ValidationReportRequest(
-                                src_replica_name=self.replica_name,
-                                validation_step=current_step,
-                                payloads=payloads,
-                                is_end=True,
+                    if payloads is not None:
+                        if current_step != self._validation_session.step:
+                            raise ValueError(
+                                "Validation reward belongs to another step"
                             )
-                            self.api_client.post_validation_report(response)
-                        payloads, is_validation, current_step, empty = (
-                            self.reward_dispatcher.dequeue_rewards_cal()
-                        )
+                        self._validation_session.report(payloads)
+                    payloads, is_validation, current_step, empty = (
+                        self.reward_dispatcher.dequeue_rewards_cal()
+                    )
+                self._validation_session.report([], is_end=True)
+                self._completed_validation_round_id = self.validation_round_id
+                self._completed_validation_step = self.validation_step
                 self.validation_event.clear()
+                # Process an already-queued final STOP or next round before
+                # starting another generation batch. Only this loop changes
+                # active validation identity; the IPC thread cannot overwrite it.
+                continue
 
             _, is_validation, _, _ = self.report_rollouts()
             assert not is_validation, (
@@ -414,6 +445,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             else:
                 logger.debug(f"[Rollout] Rollout Generation for {self.replica_name}")
                 payloads: List[RLPayload] = self._prompt_queue.get()
+                reserved_payloads = list(payloads)
                 logger.debug(f"[Rollout] generate start for prompts: {payloads}")
 
                 generated = self.rollout.rollout_generation(
@@ -457,11 +489,20 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                                 valid_indices.append(j)
                         # Skip the output if there is one or zero non-empty completions
                         if len(valid_indices) > 1:
+                            from cosmos_rl.reward.reservations import (
+                                select_training_slots,
+                            )
+
+                            payloads[i] = select_training_slots(
+                                payloads[i], valid_indices
+                            )
                             valid_results.append(
                                 select_rollout_result_completions(result, valid_indices)
                             )
                         else:
                             prompt_indices_to_remove.append(i)
+                else:
+                    prompt_indices_to_remove = list(range(len(payloads)))
                 if len(prompt_indices_to_remove):
                     payloads = [
                         payload
@@ -470,6 +511,19 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     ]
                     assert len(payloads) == len(valid_results), (
                         "[Rollout] len(prompts) must be the same as len(valid_results) after removing empty completions"
+                    )
+
+                from cosmos_rl.reward.reservations import discarded_training_slots
+
+                rejected = discarded_training_slots(reserved_payloads, payloads)
+                if rejected:
+                    self.api_client.post_rollout_completion(
+                        RolloutRequest(
+                            src_replica_name=self.replica_name,
+                            payloads=[],
+                            training_rejections=rejected,
+                            metrics={"discarded_samples": len(rejected)},
+                        )
                     )
 
                 logger.debug("[Rollout] generate end!")
@@ -502,17 +556,36 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
-    def life_control_loop(self):
-        while inst := self.cosmos_weight_sync_queue.get():
+    def consume_lifecycle_instruction(self):
+        """Apply validation/STOP in order, outside active generation/rewards."""
+        if self.validation_event.is_set():
+            return
+        while True:
+            try:
+                inst = self._lifecycle_commands.get_nowait()
+            except Empty:
+                return
             if isinstance(inst, ShutdownInstruction):
-                logger.info(
-                    f"[Rollout] Received shutdown instruction of {self.replica_name}, setting shutdown signal"
-                )
                 self.shutdown_signal.set()
                 self.shutdown_mp_signal.set()
-            elif isinstance(inst, ValidationInstruction):
-                self.validation_event.set()
-                self.validation_step = inst.validation_step
+                return
+            if not inst.validation_round_id:
+                raise ValueError("Validation instruction has no round identity")
+            if inst.validation_round_id == getattr(
+                self, "_completed_validation_round_id", None
+            ):
+                if inst.validation_step != self._completed_validation_step:
+                    raise ValueError("Validation retry changed its step")
+                continue
+            self.validation_step = inst.validation_step
+            self.validation_round_id = inst.validation_round_id
+            self.validation_event.set()
+            return
+
+    def life_control_loop(self):
+        while inst := self.cosmos_weight_sync_queue.get():
+            if isinstance(inst, (ShutdownInstruction, ValidationInstruction)):
+                self._lifecycle_commands.put(inst)
             elif isinstance(inst, RolloutWrapperInstruction):
                 if not self.rollout_wrapper_event.is_set():
                     self.rollout_wrapper_event.set()

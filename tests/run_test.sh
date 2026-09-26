@@ -93,8 +93,12 @@ run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
 
 # run tests
+run python -m pytest -q tests/test_slurm_ci_job.py
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_sft_ack_progress.py
+run python -m pytest -q tests/test_sft_membership.py
+run python -m pytest -q tests/test_dispatch_staleness.py
+run python -m pytest -q tests/test_running_dispatch_barrier.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
@@ -181,6 +185,27 @@ run python tests/test_gym_example.py
 # Pytest-style CPU suites; install pytest in case the image lacks it.
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
+run python -m pytest -q tests/test_dispatch_fetch_bounds.py
+run python -m pytest -q tests/test_dispatch_failure_reporting.py
+run python -m pytest -q tests/test_dispatch_publication.py
+run python -m pytest -q tests/test_dispatch_accounting.py
+run python -m pytest -q tests/test_dispatch_lifecycle.py
+run python -m pytest -q tests/test_dispatch_exhaustion.py
+run python -m pytest -q tests/test_dispatch_regressions.py
+run python -m pytest -q tests/test_validation_round.py
+run python -m pytest -q tests/test_validation_drain.py
+run python -m pytest -q tests/test_ordered_receipt.py
+run python -m pytest -q tests/test_producer_reservations.py
+for reservation_case in healthy departure lost-fetch lost-report strict-refill; do
+    run torchrun --standalone --nproc-per-node=2 tests/producer_reservation_canary.py \
+        --case "$reservation_case" --device cpu \
+        --expected-package-root "$(python -c 'from pathlib import Path; import cosmos_rl; print(Path(cosmos_rl.__file__).resolve().parent)' | tail -1)"
+done
+run python -m pytest -q tests/test_rollout_report_receipts.py
+run python -m pytest -q tests/test_training_fetch_receipts.py
+run python -m pytest -q tests/test_validation_delivery_contract.py
+run python -m pytest -q tests/test_validation_http_receipts.py
+run python -m pytest -q tests/test_trt_validation_delivery.py
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract

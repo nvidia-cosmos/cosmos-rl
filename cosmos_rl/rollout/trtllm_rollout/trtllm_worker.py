@@ -158,7 +158,9 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
                 dist.barrier()
                 if self.global_rank == 0:
                     # only the rank 0 could notify the main process.
-                    self.cosmos_replica_name_queue.put(self.replica_name)
+                    self.cosmos_replica_name_queue.put(
+                        self.api_client.delegate_rollout_reporting()
+                    )
 
         TrtLLMRolloutWorker.init_count += 1
 
@@ -583,14 +585,21 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                     self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
         current_step = broadcast_command.weight_step
-        if current_step is not None and current_step > 0:
-            should_do_validation = self.config.validation.enable and (
-                current_step % self.config.validation.freq == 0
-                or current_step == broadcast_command.total_steps
+        if current_step is not None and current_step >= 0:
+            from cosmos_rl.rollout.validation import validation_round_for_command
+
+            validation_round_id = (
+                validation_round_for_command(broadcast_command)
+                if self.config.validation.enable
+                else None
             )
-            if should_do_validation:
+            if self.global_rank == 0 and validation_round_id is not None:
                 self.cosmos_weight_sync_queue.put(
-                    ValidationInstruction(current_step, broadcast_command.total_steps)
+                    ValidationInstruction(
+                        current_step,
+                        broadcast_command.total_steps,
+                        validation_round_id,
+                    )
                 )
 
         if broadcast_command.replica_should_stop():

@@ -24,6 +24,7 @@ from cosmos_rl.dispatcher.command import (
     PolicyToRolloutUnicastCommand,
     RolloutToRolloutBroadcastCommand,
 )
+from cosmos_rl.rollout.validation import validation_round_for_command
 from cosmos_rl.utils import constant
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.colocated.utils import CommandDispatcher
@@ -42,7 +43,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         DisaggregatedRolloutControlWorker.rollout_command_handler_registry
     )
 
-    def _report_discarded_samples(self, count: int) -> None:
+    def _report_discarded_samples(
+        self, count: int, weight_version=None, *, training_rejections=None
+    ) -> None:
         """Skip remote capacity accounting because colocated scheduling observes its local queue."""
 
     def set_command_dispatcher(self, dispatcher: CommandDispatcher):
@@ -103,13 +106,20 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             is_final_validation = current_step == broadcast_command.total_steps
 
             should_do_validation = self.config.validation.enable and (
-                is_initial_validation or is_periodic_validation or is_final_validation
+                is_initial_validation
+                or is_periodic_validation
+                or is_final_validation
+                or bool(getattr(broadcast_command, "validation_round_id", None))
             )
 
             if should_do_validation:
                 self.current_step = current_step
                 # Setting the flag, do validation in the main loop.
-                self.validation_flag.set()
+                self.validation_round_id = validation_round_for_command(
+                    broadcast_command
+                )
+                if self.validation_round_id is not None:
+                    self.validation_flag.set()
 
         # Do validation if the flag is set.
         if self.validation_flag.is_set():

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import List, Any, Dict, Optional, Tuple, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 
 class ChatMessage(BaseModel):
@@ -46,6 +46,13 @@ class ChatMessage(BaseModel):
 ConversationType = List[ChatMessage]
 
 
+class TrainingCompletionIdentity(BaseModel):
+    """One controller-issued prompt slot, independent of generation version."""
+
+    work_id: str = Field(min_length=1, frozen=True)
+    slot: int = Field(ge=0, strict=True, frozen=True)
+
+
 class RLPayload(BaseModel):
     """
     The payload schema of RL sample.
@@ -59,6 +66,14 @@ class RLPayload(BaseModel):
     prompt_idx: int = Field(
         default=-1, description="The index of the prompt for the rollout."
     )
+
+    # Validation-round work identity; dataset indices may repeat in a sampler.
+    validation_work_id: Optional[int] = Field(default=None, ge=0)
+
+    # Controller-owned prompt/slot identity; survives generation and selection.
+    training_work_id: Optional[str] = Field(default=None, min_length=1)
+    training_completion_slots: Optional[List[StrictInt]] = None
+    training_rejected_slots: List[StrictInt] = Field(default_factory=list, exclude=True)
 
     conversation: Optional[ConversationType] = Field(
         default=None, description="The input conversation for the rollout."

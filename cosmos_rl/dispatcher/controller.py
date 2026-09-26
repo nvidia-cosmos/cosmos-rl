@@ -49,6 +49,12 @@ from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
+from cosmos_rl.dispatcher.publication import ControllerPublisher
+
+
+def _fatal_publication(error):
+    logger.critical("Controller publication failed; terminating execution: %s", error)
+    os._exit(86)
 
 
 def _wait_for_redis_ready(port: int, timeout: float) -> bool:
@@ -216,7 +222,7 @@ class Controller:
 
         custom_config = """
 maxmemory 500G
-maxmemory-policy allkeys-lfu
+maxmemory-policy noeviction
 """
         # redis-server binds its port itself, in a daemonized child (see
         # write_redis_config), so neither the port probe nor the parent exit
@@ -268,8 +274,9 @@ maxmemory-policy allkeys-lfu
             )
         self.config.redis = str(redis_free_port)
 
-        self.redis_controller = RedisStreamHandler(
-            ips=["0.0.0.0"], port=redis_free_port
+        self.redis_controller = ControllerPublisher(
+            RedisStreamHandler(ips=["0.0.0.0"], port=redis_free_port),
+            on_failure=_fatal_publication,
         )
 
         # Terminal discards must free the samples AND reopen the prompt slot
@@ -769,7 +776,9 @@ maxmemory-policy allkeys-lfu
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
                 already_retried_times = math.ceil(
-                    self.weight_version_to_prompt_num[weight_version_for_current_batch]
+                    self.weight_version_to_prompt_num.get(
+                        weight_version_for_current_batch, 0
+                    )
                     / global_batch_size
                 )
                 if (
@@ -887,22 +896,30 @@ maxmemory-policy allkeys-lfu
 
     async def put_application_rollouts(self, request, rollouts: List[Rollout]):
         async with self.life_cycle_lock:
-            admission = self.completion_admission
+            await self._put_application_rollouts_locked(request, rollouts)
+
+    async def _put_application_rollouts_locked(
+        self, request, rollouts: List[Rollout], *, plan=None, requested_versions=None
+    ):
+        admission = self.completion_admission
+        if plan is None:
             plan = admission.prepare(self, request, rollouts)
-            try:
-                accepted = admission.settle(self, request, plan)
-                accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
-                await self.put_rollouts(accepted)
-            except BaseException:
-                admission.failed = True
-                # Accounting may already be partially mutated. An HTTP error
-                # alone leaves workers training or waiting on corrupt state.
-                # Do not wait for distributed teardown on this fatal path.
-                logger.critical(
-                    "Completion settlement failed; terminating controller",
-                    exc_info=True,
-                )
-                os._exit(86)
+        try:
+            accepted = admission.settle(
+                self, request, plan, requested_versions=requested_versions
+            )
+            accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
+            await self.put_rollouts(accepted)
+        except BaseException:
+            admission.failed = True
+            # Accounting may already be partially mutated. An HTTP error
+            # alone leaves workers training or waiting on corrupt state.
+            # Do not wait for distributed teardown on this fatal path.
+            logger.critical(
+                "Completion settlement failed; terminating controller",
+                exc_info=True,
+            )
+            os._exit(86)
 
     async def put_rollouts(self, rollouts: List[Rollout]):
         """
@@ -990,6 +1007,10 @@ maxmemory-policy allkeys-lfu
                     atom, self.config, self.rollout_status_manager
                 )
             elif role == Role.ROLLOUT:
+                if atom.report_session_id is None:
+                    raise ValueError(
+                        "Rollout registration requires matching receipt-aware workers"
+                    )
                 self.rollout_status_manager.register(
                     atom, self.config, self.policy_status_manager
                 )
@@ -1038,8 +1059,14 @@ maxmemory-policy allkeys-lfu
                 )
                 self.policy_status_manager.clear_ncclerror()
         elif replica_name in self.rollout_status_manager:
-            raise NotImplementedError(
-                f"[Controller] Rollout replica {replica_name} set timeout ack not supported"
+            # This is a diagnostic acknowledgement, not proof that the other
+            # replicas died or that this worker's communicator can be reused.
+            # Rollout mesh invalidation and heartbeat-based departure retain
+            # their existing owners; do not reap peers from one report.
+            logger.warning(
+                "[Controller] Rollout replica %s reported NCCL failure: %s",
+                replica_name,
+                error,
             )
         else:
             logger.error(

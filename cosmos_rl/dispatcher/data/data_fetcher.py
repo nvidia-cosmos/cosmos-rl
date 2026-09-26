@@ -531,6 +531,33 @@ class ControllerDataFetcher(DataFetcherBase):
         is_validation = validation_step is not None
         weight_version = None if is_validation else weight_version
 
+        rank_dispatch = self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+        if rank_dispatch:
+            if (
+                rank_in_mesh is None
+                or not 0 <= rank_in_mesh < self.rollout_global_mesh_size
+            ):
+                raise ValueError("rank_in_mesh must identify an active rollout rank")
+            if weight_version is not None:
+                # An index assigned to rollout rank r can reach only policy
+                # ranks congruent to r modulo gcd(rollout_size, policy_size).
+                # Once those quotas are full, pulling more data cannot help.
+                stride = math.gcd(
+                    self.rollout_global_mesh_size, self.policy_global_mesh_size
+                )
+                counts = self.data_fetched_for_each_policy_at_step[weight_version]
+                capacity = sum(
+                    max(0, prompt_batch_per_replica - counts.get(rank, 0))
+                    for rank in range(
+                        rank_in_mesh % stride, self.policy_global_mesh_size, stride
+                    )
+                )
+                n = min(n, capacity)
+        if n <= 0:
+            # Throttled is not exhausted: a subsequent version can consume the
+            # same iterator and buffered items. In particular, do not roll epochs.
+            return [], False
+
         if is_validation:
             iterator = self.validation_get_dataloader(validation_step)
             batch_size = self.val_batch_size
@@ -596,8 +623,19 @@ class ControllerDataFetcher(DataFetcherBase):
                 else:
                     break
 
-        while n - len(payloads_list) > 0:
+        # Rank filtering can reject a whole scan (for example a shuffled batch
+        # containing only other ranks). Bound work per request and let callers
+        # retry; do not drain all epochs into the spill buffer in one call.
+        pulls_left = (
+            max(1, math.ceil(n / batch_size)) * self.rollout_global_mesh_size
+            if rank_dispatch
+            else math.ceil(n / batch_size)
+        )
+        while n - len(payloads_list) > 0 and pulls_left > 0:
             for _ in range(math.ceil(n / batch_size)):
+                if pulls_left <= 0:
+                    break
+                pulls_left -= 1
                 payload: RLPayload | None = None
                 try:
                     idxs, payloads = _next_payload(iterator, add_answer)
@@ -706,6 +744,7 @@ class ControllerDataFetcher(DataFetcherBase):
             return self.val_iters[validation_step]
 
     def clear_validation_status(self):
+        self.val_iters.pop(self.activated_val_step, None)
         self.activated_val_step = None
         self.activated_val_iter = None
         if self.activated_val_tqdm is not None:

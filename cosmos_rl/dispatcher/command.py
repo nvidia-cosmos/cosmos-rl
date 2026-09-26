@@ -372,6 +372,8 @@ class RolloutToRolloutBroadcastCommand(Command):
         weight_step: Optional[int],
         total_steps: Optional[int],
         trainable_only: bool,
+        validation_round_id: Optional[str] = None,
+        validation_protocol_version: int = 0,
         **kwargs,
     ):
         kwargs["scope"] = CommandScope.GLOBAL
@@ -383,12 +385,16 @@ class RolloutToRolloutBroadcastCommand(Command):
         self.total_steps = total_steps
         # Only transfer the trainable params.
         self.trainable_only = trainable_only
+        self.validation_round_id = validation_round_id
+        self.validation_protocol_version = validation_protocol_version
 
     src_replica_name: str
     dst_replica_names: List[str]
     weight_step: Optional[int]
     total_steps: Optional[int]
     trainable_only: bool
+    validation_round_id: Optional[str]
+    validation_protocol_version: int
 
     @classmethod
     def trigger(
@@ -398,6 +404,8 @@ class RolloutToRolloutBroadcastCommand(Command):
         weight_step: Optional[int],
         total_steps: Optional[int],
         redis_handler: RedisStreamHandler,
+        validation_round_id: Optional[str] = None,
+        validation_protocol_version: int = 1,
     ):
         # dst_replicas will contains the src_replica
         if not src_replica.in_mesh:
@@ -410,6 +418,8 @@ class RolloutToRolloutBroadcastCommand(Command):
             all(
                 [replica.weights_loaded_in_view_of_command for replica in dst_replicas]
             ),
+            validation_round_id=validation_round_id,
+            validation_protocol_version=validation_protocol_version,
         )
         for replica in dst_replicas:
             if not replica.in_mesh:
@@ -553,6 +563,16 @@ class DataFetchCommand(Command):
         do_save: bool,
         redis_handler: RedisStreamHandler,
     ):
+        cmd = cls.for_replica(
+            replica, items_count, global_step, total_steps, remain_samples_num, do_save
+        )
+        redis_handler.publish_command(cmd.pack(), replica.name)
+
+    @classmethod
+    def for_replica(
+        cls, replica, items_count, global_step, total_steps, remain_samples_num, do_save
+    ):
+        """Build without publishing, so a whole training step can be sealed."""
         cmd = cls(
             replica.name,
             items_count,
@@ -568,7 +588,7 @@ class DataFetchCommand(Command):
             replica.sub_profiler_config.with_stack,
             replica.sub_profiler_config.with_modules,
         )
-        redis_handler.publish_command(cmd.pack(), replica.name)
+        return cmd
 
     def replica_should_stop(self):
         if self.global_step is not None and self.total_steps is not None:

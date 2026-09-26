@@ -6,6 +6,7 @@ import time
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import pytest
 
 from cosmos_rl.colocated.api_client import ColocatedAPIClient
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -39,8 +40,8 @@ def test_rollout_end_request_supports_ranked_and_legacy_reporters():
 
 
 def test_http_rollout_end_reports_controller_acknowledgement():
-    client = object.__new__(APIClient)
-    client.controller_execution_id = None
+    client = APIClient("ROLLOUT", remote_ips=["localhost"], remote_port=8000)
+    client._registered_replica_name, client._registered_global_rank = "rollout-0", 7
     client.max_retries = 1
     client.get_alternative_urls = lambda _suffix: ["http://controller/rollout"]
     request = RolloutRequest(
@@ -60,8 +61,8 @@ def test_http_rollout_end_reports_controller_acknowledgement():
 
 
 def test_http_rollout_end_reports_failed_delivery():
-    client = object.__new__(APIClient)
-    client.controller_execution_id = None
+    client = APIClient("ROLLOUT", remote_ips=["localhost"], remote_port=8000)
+    client._registered_replica_name, client._registered_global_rank = "rollout-0", 7
     client.max_retries = 1
     client.get_alternative_urls = lambda _suffix: ["http://controller/rollout"]
     request = RolloutRequest(
@@ -75,9 +76,9 @@ def test_http_rollout_end_reports_failed_delivery():
         "cosmos_rl.dispatcher.api.client.make_request_with_retry",
         side_effect=RuntimeError("controller unavailable"),
     ):
-        acknowledged = client.post_rollout_completion(request)
-
-    assert acknowledged is False
+        with pytest.raises(RuntimeError, match="bounded HTTP"):
+            client.post_rollout_completion(request)
+    assert client._report_failed
 
 
 def test_colocated_rollout_end_reports_synchronous_acknowledgement():
