@@ -1067,17 +1067,21 @@ class PolicyStatusManager:
                 ):
                     self.data_fetcher.validation_activate_dataloader(self.current_step)
 
+                items_count = self.config.train.train_batch_per_replica
+                required_rollouts = items_count * len(valid_replicas)
+                self.remain_samples_num -= required_rollouts
+                # One logical update has one checkpoint decision and progress
+                # snapshot, including at an epoch boundary on the first step.
+                do_save = self.check_checkpoint_saving(required_rollouts)
                 for replica in valid_replicas:
-                    self.remain_samples_num -= self.config.train.train_batch_per_replica
                     command.DataFetchCommand.trigger(
                         replica=replica,
-                        items_count=self.config.train.train_batch_per_replica,
+                        items_count=items_count,
                         global_step=self.current_step,
                         total_steps=self.total_steps,
                         # `remain_samples_num` is just for checkpointing the training progress
                         remain_samples_num=self.remain_samples_num,
-                        # Only `do_save` when checkpointing is enabled
-                        do_save=False,
+                        do_save=do_save,
                         redis_handler=self.redis_handler,
                     )
                     self.set_status(replica.name, PolicyStatus.RUNNING)

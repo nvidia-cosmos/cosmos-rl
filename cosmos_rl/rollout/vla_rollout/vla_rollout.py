@@ -136,6 +136,13 @@ class OpenVLARollout(RolloutBase):
 
         self.obs_keys = ["full_images", "wrist_images", "states"]
 
+    def shutdown(self):
+        """Reap simulator children before Python joins them at process exit."""
+        manager = getattr(self, "env_manager", None)
+        if manager is not None:
+            manager.stop_simulator(preserve_state=False)
+            self.env_manager = None
+
     def post_init_hook(self, **kwargs):
         self._model_param_map = None  # Required by RolloutBase.model_param_map()
         self.model_type = self.config.vla.vla_type

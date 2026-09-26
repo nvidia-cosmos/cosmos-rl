@@ -21,7 +21,7 @@ from typing import Tuple
 def convert_weight_from_hf(
     tensor: torch.Tensor,
     name: str,
-    parallel_dims: ParallelDims,
+    parallel_dims: ParallelDims | None,
 ) -> Tuple[str, torch.Tensor]:
     """
     Convert a weight tensor from HuggingFace checkpoint format to cosmos-rl format.
@@ -33,13 +33,15 @@ def convert_weight_from_hf(
     Args:
         tensor: Full weight tensor from checkpoint
         name: Parameter name
-        parallel_dims: Parallelism configuration
+        parallel_dims: Parallelism configuration, or None for standalone inference
 
     Returns:
         Tuple of (parameter_name, sharded_tensor)
     """
     # Get FSDP sharding info
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+    if parallel_dims is not None and (
+        parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
+    ):
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:

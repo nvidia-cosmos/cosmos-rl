@@ -7,6 +7,14 @@ class ResumeMetadataMismatch(ValueError):
     """The controller and worker cannot agree on resumable training state."""
 
 
+class NoCheckpointFound(FileNotFoundError):
+    """Discovery found no committed checkpoint, before loading any state.
+
+    Only automatic discovery may treat this as a fresh start. Missing artifacts
+    or errors after selecting a checkpoint are NOT this outcome.
+    """
+
+
 def validate_resume_metadata(expected: dict, actual: dict) -> None:
     """Preserve exact agreement, reporting keys without leaking checkpoint data.
 

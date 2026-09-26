@@ -155,7 +155,6 @@ class RLPolicyWorker(PolicyWorkerBase):
         super().__init__(config, parallel_dims=parallel_dims)
 
         self.report_data = {}
-        self.upload_thread = None
 
         # Model Status related
         self.model_ready = False
@@ -324,6 +323,16 @@ class RLPolicyWorker(PolicyWorkerBase):
         if not hasattr(self, "_handle_shutdown_called"):
             self._handle_shutdown_called = True
 
+            from cosmos_rl.utils.model_export import finish_checkpoint_writes
+
+            # Keep heartbeat liveness while the actual trainer-owned writer
+            # finishes. Preserve its error, but still complete worker teardown.
+            checkpoint_error = None
+            try:
+                finish_checkpoint_writes(getattr(self, "trainer", None))
+            except Exception as error:
+                checkpoint_error = error
+
             # Release the payload-transport data packer FIRST: stop its
             # prefetch thread and abort its cached communicators.  A NCCL
             # payload transport (NCCLDataPackerMixin) holds 2-rank comms to
@@ -369,11 +378,8 @@ class RLPolicyWorker(PolicyWorkerBase):
             # process, which exits cleanly instead of being killed mid-teardown.
             self.unregister_from_controller()
 
-            if hasattr(self, "upload_thread") and self.upload_thread is not None:
-                logger.info("[Policy] Waiting for upload thread to finish...")
-                self.upload_thread.join()
-                logger.info("[Policy] Upload thread finished.")
-                self.upload_thread = None
+            if checkpoint_error is not None:
+                raise checkpoint_error
 
             # TODO(jiaxin)
             # The background threads are daemon threads, so that they will exit when the main thread exits
