@@ -36,6 +36,7 @@ from typing import Callable, Dict, List, Literal, Optional
 
 import torch
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.transport_failure import TransportDeadline, fail_transport
 from cosmos_rl.utils.pynccl_wrapper import (
     NCCLLibrary,
     buffer_type,
@@ -158,6 +159,11 @@ class _CommMeta:
     comm: ncclComm_t
     rank: int
     world_size: int
+    group_owner: object | None = None
+
+
+class _ActiveGroupAbort(RuntimeError):
+    """Native group state still references the communicator being aborted."""
 
 
 class _CommunicatorRegistry:
@@ -186,7 +192,44 @@ class _CommunicatorRegistry:
     def pop(self, idx: int) -> _CommMeta | None:
         """Remove and return metadata for *idx* (or sentinel tuple if absent)."""
         with self._lock:
+            meta = self._store.get(idx)
+            if meta is not None and meta.group_owner is not None:
+                raise _ActiveGroupAbort(
+                    f"abort requested inside active NCCL group {idx}"
+                )
             return self._store.pop(idx, None)
+
+    def claim_group(self, idx: int, owner: object) -> None:
+        with self._lock:
+            meta = self._store[idx]
+            if meta.group_owner is not None:
+                raise RuntimeError(f"Communicator {idx} already has an active group")
+            meta.group_owner = owner
+
+    def release_group(self, idx: int, owner: object) -> None:
+        with self._lock:
+            meta = self._store[idx]
+            if meta.group_owner is not owner:
+                raise RuntimeError(
+                    f"NCCL group ownership changed for communicator {idx}"
+                )
+            meta.group_owner = None
+
+    def check_group_access(self, idx: int, owner: object | None) -> None:
+        with self._lock:
+            meta = self._store.get(idx)
+            if (
+                meta is not None
+                and meta.group_owner is not None
+                and meta.group_owner is not owner
+            ):
+                raise RuntimeError(
+                    f"Communicator {idx} is owned by another thread's NCCL group"
+                )
+
+    def contains(self, idx: int) -> bool:
+        with self._lock:
+            return idx in self._store
 
     def all_indices(self) -> list[int]:
         """Return a snapshot of all currently registered communicator handles."""
@@ -195,6 +238,16 @@ class _CommunicatorRegistry:
 
 
 _COMM_REGISTRY = _CommunicatorRegistry()
+
+
+def nccl_comm_is_registered(comm_idx: int) -> bool:
+    """Whether a cached index still owns a registered native communicator.
+
+    This is a local cache check, not a native health check or a lifetime pin.
+    Aborts after this check remain failures of the operation using the handle.
+    """
+    return _COMM_REGISTRY.contains(comm_idx)
+
 
 # ---------------------------------------------------------------------------
 # Per-thread watchdog context
@@ -333,9 +386,12 @@ def _run_functor_bounded(task: _Task) -> ncclComm_t:
                 f"aborting communicator idx={task.comm_idx}"
             )
             task.timed_out.set()
-            _notify_p2p_phase(task.phase_observer, "abort_enter")
-            _safe_abort(task.comm_idx)
-            _notify_p2p_phase(task.phase_observer, "abort_return")
+        # Never hold the completion-publication lock across native abort. The
+        # raw call may return while abort itself stalls; it must still publish
+        # the already-sealed timeout instead of blocking in its own finally.
+        _notify_p2p_phase(task.phase_observer, "abort_enter")
+        _safe_abort(task.comm_idx)
+        _notify_p2p_phase(task.phase_observer, "abort_return")
 
     timer = threading.Timer(task.timeout_ms / 1000.0, _abort_blocked_call)
     timer.daemon = True
@@ -457,6 +513,13 @@ def _submit_nccl(
     phase_observer: Optional[_P2PPhaseObserver] = None,
 ):
     """Execute *functor* in the NCCL worker thread with watchdog integration."""
+    grouped_comm = getattr(_tls, "group_comm", None)
+    if grouped_comm is not None and (comm_idx != grouped_comm or not run_inline):
+        raise RuntimeError(
+            "Managed NCCL groups require one communicator and caller thread"
+        )
+    if comm_idx is not None:
+        _COMM_REGISTRY.check_group_access(comm_idx, getattr(_tls, "group_owner", None))
     if not _worker_started:
         raise RuntimeError(
             "NCCL worker thread not initialized; call create_nccl_comm first."
@@ -705,7 +768,14 @@ def get_nccl_comm_nranks(comm_idx: int) -> int:
 
 def nccl_abort(comm_idx: int):
     """Abort (destroy) communicator comm_idx."""
-    meta = _COMM_REGISTRY.pop(comm_idx)
+    try:
+        meta = _COMM_REGISTRY.pop(comm_idx)
+    except _ActiveGroupAbort as error:
+        # ncclGroupEnd's thread-local state can still reference this handle.
+        # A watchdog must not free it and leave that thread to dereference it.
+        # Do not take native locks or attempt cleanup on this terminal path.
+        fail_transport(str(error))
+        raise  # defensive if a test replaces the non-returning fatal handler
     if meta is not None and meta.comm is not None:
         try:
             _nccl.ncclCommAbort(meta.comm)
@@ -748,15 +818,21 @@ def bounded_drain_or_abort(stream, timeout_s: float, context: str) -> bool:
     on a healthy run; reaching it means a peer genuinely vanished mid-collective
     (crash / OOM / network), so we abort all NCCL communicators (best-effort) to
     force teardown to completion.  Returns ``True`` if the stream drained
-    cleanly, ``False`` if it timed out and aborted.  ``context`` is a short
+    cleanly, ``False`` if completion could not be proven (including event
+    creation/recording failure), with best-effort abort on timeout. ``context`` is a short
     label included in logs to identify the call site.
     """
     try:
         done = torch.cuda.Event()
         done.record(stream)
     except Exception:
-        # No CUDA context / stream available (e.g. CPU-only tests).
-        return True
+        # Missing/broken CUDA event support is not evidence that prior device
+        # work completed. Callers must not use it to authorize buffer reuse or
+        # a replacement mesh. CPU-only tests should model their device fence.
+        logger.exception(
+            "[ABNORMAL teardown] %s: cannot record CUDA drain fence", context
+        )
+        return False
     t0 = time.monotonic()
     deadline = t0 + timeout_s
     while not done.query():
@@ -830,6 +906,44 @@ def nccl_broadcast(
         return meta.comm
 
     _submit_nccl(_broadcast_call, timeout_ms, comm_idx)
+
+
+@contextmanager
+def nccl_group(comm_idx: int, timeout_ms: Optional[int] = None):
+    """Bound a single-communicator enqueue group; uncertain failure is terminal.
+
+    NCCL has no public group-cancel operation. Closing a partial group can launch
+    unmatched work, while aborting its communicator from another thread can free
+    a handle still referenced by group-local native state. Keep an atomic registry
+    claim until healthy GroupEnd completes; failures exit without native cleanup.
+    The independent deadline also covers Python work and async-error polling.
+    This is enqueue ownership, not proof of device completion or pair recovery.
+
+    Unlike the legacy raw start/end wrappers, this scope forbids nesting,
+    additional communicators and off-thread submission. In-tree groups use it.
+    """
+    if getattr(_tls, "group_comm", None) is not None:
+        raise RuntimeError("Nested managed NCCL groups are not supported")
+    owner = object()
+    _COMM_REGISTRY.claim_group(comm_idx, owner)
+    _tls.group_comm = comm_idx
+    _tls.group_owner = owner
+    try:
+        deadline = TransportDeadline(
+            _get_timeout_ms(timeout_ms) / 1000.0, f"NCCL group {comm_idx}"
+        )
+        nccl_group_start(comm_idx, timeout_ms=deadline.remaining_ms())
+        yield
+        nccl_group_end(comm_idx, timeout_ms=deadline.remaining_ms())
+        deadline.close()
+        _COMM_REGISTRY.release_group(comm_idx, owner)
+        _tls.group_comm = None
+        _tls.group_owner = None
+    except BaseException as error:
+        # Never run GroupEnd/abort as a speculative finally cleanup. Retain the
+        # claim and caller's operands until the fatal path terminates the process.
+        fail_transport(f"NCCL group {comm_idx}: {type(error).__name__}: {error}")
+        raise  # defensive if a test replaces the non-returning fatal handler
 
 
 def nccl_group_start(comm_idx: int, timeout_ms: Optional[int] = None):
@@ -1054,11 +1168,13 @@ def _safe_abort(comm_idx: Optional[int], comm: Optional[ncclComm_t] = None):
 
 
 __all__ = [
+    "nccl_group",
     # management
     "create_nccl_uid",
     "create_nccl_comm",
     "nccl_abort",
     "nccl_abort_all",
+    "nccl_comm_is_registered",
     "bounded_drain_or_abort",
     "get_nccl_comm_nranks",
     # collectives

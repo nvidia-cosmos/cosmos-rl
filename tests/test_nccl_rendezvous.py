@@ -55,6 +55,12 @@ class FakeRedis:
         self.published.append((channel, message))
         return 1
 
+    def eval(self, script, count, key, expected, replacement):
+        if self.store.get(key) != expected:
+            return 0
+        self.store[key] = replacement
+        return 1
+
 
 class _Clock:
     """Deterministic monotonic clock advancing a fixed dt per call."""
@@ -109,6 +115,7 @@ class TestInitiate(unittest.TestCase):
             uid_fn=lambda: [1, 2, 3, 4],
             clock=_Clock(),
             sleep=sleep or (lambda dt: None),
+            request_id_fn=lambda: "",
         )
 
     def test_accept_with_uid_exchange(self):
@@ -144,8 +151,8 @@ class TestInitiate(unittest.TestCase):
         parsed = parse_request_message(raw)
         self.assertEqual(parsed["uid_key"], uid_key)
         self.assertEqual(parsed["resp_key"], resp_key)
-        # Reply was consumed (deleted) on read.
-        self.assertIsNone(redis.get(resp_key))
+        # State persists for duplicate rejection and correlated terminal outcome.
+        self.assertEqual(redis.get(resp_key), TransferStatus.ACCEPTED.value)
 
     def test_missing_without_uid(self):
         redis = FakeRedis()
@@ -276,6 +283,7 @@ class TestSenderSide(unittest.TestCase):
         self.assertEqual(rv.read_uid(uid_key), [7, 8, 9])
 
         resp_key = build_response_key(PREFIX, "0:abc")
+        redis.set(resp_key, TransferStatus.REQUESTED.value)
         rv.respond(resp_key=resp_key, status=TransferStatus.ACCEPTED)
         self.assertEqual(redis.get(resp_key), "accepted")
 

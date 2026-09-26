@@ -18,6 +18,7 @@ import time
 import threading
 import uuid
 import torch
+from contextlib import nullcontext
 import atexit
 
 import torch.distributed as dist
@@ -52,8 +53,8 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     bounded_drain_or_abort,
-    nccl_group_start,
-    nccl_group_end,
+    nccl_group,
+    nccl_abort,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -589,23 +590,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         wst = getattr(self, "_weight_sync_thread", None)
         if wst is not None and not wst.fence():
-            # Do NOT treat this as fatal. The rebuild exists BECAUSE a replica
-            # departed, and that departure is the most likely reason the fence
-            # failed: an in-flight rollout-to-rollout broadcast aimed at the
-            # replica that just died can never complete. Raising here killed
-            # every survivor that received the rebuild, so losing one replica
-            # removed the rest -- measured at six replicas lost from a single
-            # departure.
-            #
-            # The pending work is known to be worthless in exactly this case:
-            # the rebuild replaces the communicator it was issued against.
-            # Discard it and carry on; reset_for_rebuild aborts NCCL if the
-            # work will not drain, which leaves the old communicator dead --
-            # the state a rebuild wants anyway.
+            # A completed prior failure must not veto recovery, but an abort
+            # alone does not prove that old host/device work has quiesced.
+            # reset_for_rebuild retries the drain and raises if it cannot prove
+            # that boundary, before any membership or communicator changes.
             logger.warning(
-                "[Rollout] %s: weight-sync work did not drain before the mesh "
-                "rebuild; discarding it and rebuilding. This is expected when "
-                "the departing replica was a broadcast peer.",
+                "[Rollout] %s: weight-sync fence failed before mesh rebuild; "
+                "checking whether old work can quiesce before clearing failure",
                 self.replica_name,
             )
             wst.reset_for_rebuild()
@@ -616,6 +607,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             raise RuntimeError(
                 f"[Rollout] Replica {self.replica_name} not found in registered replicas."
             )
+        old_comm = getattr(self, "global_commnicator_idex", -1)
+        if old_comm >= 0:
+            # WST work was fenced above. Synchronous broadcasts use the
+            # inference stream and can return after enqueue, not completion.
+            # Retire its old mesh only after that stream also proves completion.
+            if not bounded_drain_or_abort(
+                self.inference_stream,
+                _TEARDOWN_DRAIN_TIMEOUT_S,
+                f"Rollout mesh retirement[{self.replica_name}]",
+            ):
+                raise RuntimeError("Cannot drain old rollout mesh before replacement")
+            self.global_commnicator_idex = -1
+            nccl_abort(old_comm)
         self.rank_in_rollout_repicas = replica_name_to_rank[self.replica_name]
         # update the replcia_name to rank dict
         self.replica_name_to_rank = replica_name_to_rank
@@ -823,6 +827,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if (
                 not underlying_tensor_view.is_contiguous()
                 or underlying_tensor_view.dtype != target_dtype
+                or underlying_tensor_view.device != self.device
             ):
                 if (
                     self.temp_recv_tensor_queue.qsize()
@@ -852,11 +857,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if underlying_tensor_view.dtype != target_dtype:
                 recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
-            # Event for recv related operations completion tracking
-            # Hold these recv_tensor, in case of buffer reusing by torch
+            # Pending receives are owned by the completion closure until copy
+            # submission. Only recorded copy events may enter the cleanup queue:
+            # an unrecorded CUDA event queries complete even before the receive.
             if not inplace:
                 recv_complete_event = torch.cuda.Event()
-                self.temp_recv_tensor_queue.put((recv_tensor, recv_complete_event))
             else:
                 recv_complete_event = None
             return recv_tensor, recv_complete_event, inplace
@@ -935,11 +940,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 recv_complete_event,
                 inst_dest_name,
             ) in all_tensor_views_to_copy:
+                # A transfer-stream allocation is read by the copy-back stream.
+                # The completion closure/queue can release it before that read
+                # finishes. Register the reader before scheduling, including
+                # partial update failures, to prevent early allocator reuse.
+                recv_tensor.record_stream(torch.cuda.current_stream(recv_tensor.device))
                 self.weight_mapper.update_tensor_view(
                     view, recv_tensor, inst_dest_name, parallel_dims=self.parallel_dims
                 )
                 if recv_complete_event is not None:
                     recv_complete_event.record()
+                    self.temp_recv_tensor_queue.put((recv_tensor, recv_complete_event))
             for (
                 cloned_target_tensor,
                 target_tensor,
@@ -1436,52 +1447,45 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     for insts_group in sync_round
                     for param_insts in insts_group.param_instructions
                 )
-                if (
+                grouped = (
                     round_has_transfers
                     and self.rl_mode != "colocated_separated"
                     and p2r_group_size > 0
-                ):
-                    nccl_group_start(comm_id)
-                for insts_group in sync_round:
-                    (
-                        bytes_received,
-                        completion_fn,
-                        skipped_cnt,
-                    ) = self.recv_weight_shard(
-                        self.global_rank,
-                        insts_group,
-                        base_mesh_key,
-                        command.trainable_only,
-                        command.do_weight_sync_check,
-                    )
-                    skipped_params_cnt += skipped_cnt
-                    transferred_params_cnt += (
-                        len(insts_group.param_instructions) - skipped_cnt
-                    )
-                    if (
-                        self.weight_mapper.get_unsplited_weight_name(
-                            insts_group.param_instructions[0].param_name
+                )
+                with nccl_group(comm_id) if grouped else nullcontext():
+                    for insts_group in sync_round:
+                        (
+                            bytes_received,
+                            completion_fn,
+                            skipped_cnt,
+                        ) = self.recv_weight_shard(
+                            self.global_rank,
+                            insts_group,
+                            base_mesh_key,
+                            command.trainable_only,
+                            command.do_weight_sync_check,
                         )
-                        != insts_group.param_instructions[0].param_name
-                    ):
-                        skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
-                        transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
-                    else:
-                        skipped_groups_cnt += skipped_cnt
-                        transferred_groups_cnt += (
+                        skipped_params_cnt += skipped_cnt
+                        transferred_params_cnt += (
                             len(insts_group.param_instructions) - skipped_cnt
                         )
+                        if (
+                            self.weight_mapper.get_unsplited_weight_name(
+                                insts_group.param_instructions[0].param_name
+                            )
+                            != insts_group.param_instructions[0].param_name
+                        ):
+                            skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
+                            transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
+                        else:
+                            skipped_groups_cnt += skipped_cnt
+                            transferred_groups_cnt += (
+                                len(insts_group.param_instructions) - skipped_cnt
+                            )
 
-                    pending_bytes[0] += bytes_received
-                    pending_completions.append(completion_fn)
-                    total_bytes_received += bytes_received
-
-                if (
-                    round_has_transfers
-                    and self.rl_mode != "colocated_separated"
-                    and p2r_group_size > 0
-                ):
-                    nccl_group_end(comm_id)
+                        pending_bytes[0] += bytes_received
+                        pending_completions.append(completion_fn)
+                        total_bytes_received += bytes_received
                 flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):

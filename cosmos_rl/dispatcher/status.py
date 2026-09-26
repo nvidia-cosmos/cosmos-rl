@@ -664,7 +664,7 @@ class PolicyStatusManager:
     ) -> bool:
         """Whether ``train_ack`` should schedule P2R/R2R for ``step``."""
         if self.job_phase == JobPhase.DRAINING and not (
-            self.stop_reason is not None
+            self.config.validation.enable
             and self.data_fetcher.activated_val_iter is not None
         ):
             return False
@@ -681,13 +681,13 @@ class PolicyStatusManager:
             # Validation runs can exhaust the training prompt stream (``is_end``)
             # before the final ``train_ack`` lands.  ``status.ended`` only means
             # "no more training prompts", not "validation + shutdown complete".
-            # Keep the final-step R2R so rollout receives ``validation_flag``
-            # and ``replica_should_stop``; suppressing it here wedged final
-            # validation at 0/N with the controller val dataloader activated.
+            # Keep every already-activated validation's R2R, including a
+            # periodic round that precedes the final accepted tail update.
+            # Suppressing it would strand the active sampler and the drain.
             if not (
                 self.config.validation.enable
                 and need_sync_weight
-                and step == self.total_steps
+                and self.data_fetcher.activated_val_iter is not None
             ):
                 return False
         if need_sync_weight:

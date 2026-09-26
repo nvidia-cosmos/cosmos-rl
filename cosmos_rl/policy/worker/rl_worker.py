@@ -15,6 +15,7 @@
 
 import os
 import torch
+from contextlib import nullcontext
 import atexit
 import time
 import msgpack
@@ -45,8 +46,7 @@ from cosmos_rl.utils.parallelism_map import (
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
     nccl_abort_all,
-    nccl_group_start,
-    nccl_group_end,
+    nccl_group,
 )
 from cosmos_rl.dispatcher.command import (
     Command,
@@ -106,36 +106,25 @@ def _bind_p2p_nccl_hook(
 
 
 class P2RDrainAborted(RuntimeError):
-    """The P2R stream never drained and every communicator was aborted."""
+    """The P2R stream's completion could not be proven (legacy public name)."""
 
 
 def _drain_or_fail(
     stream, timeout_s: float, context: str, src: str, dst: str, weight_step
 ) -> None:
-    """Bounded-drain the P2R stream, and fail the replica if it had to abort.
+    """Require proven device completion before reporting successful weight sync.
 
-    ``bounded_drain_or_abort`` returns False only after calling
-    ``nccl_abort_all``: the peer vanished mid-collective and every communicator
-    on this replica is gone.  Ignoring that -- which this call site used to do
-    -- reports the weight sync as successful and returns to the main loop with
-    nothing left to talk to.  The policy then sits idle and never unregisters,
-    so the controller does not see a dead policy, its
-    COSMOS_SHUTDOWN_ON_NO_POLICY_REPLICAS escalation never fires, and the job
-    holds its nodes until the wall clock (job 2148080, silent for 16 minutes
-    after the abort while seven rollouts had already exited).
-
-    Raising instead takes the path the P2R send failure already takes, which
-    unregisters on the way down and exits non-zero -- a failed weight sync must
-    not look like a successful run to the scheduler.
+    Timeout triggers best-effort communicator abort; event creation/recording
+    failure also cannot prove completion. Preserve the existing failure type
+    and replica-exit path, without claiming an abort occurred in every case.
     """
     if bounded_drain_or_abort(stream, timeout_s, context):
         return
     raise P2RDrainAborted(
         f"[Policy] Weight sync to rollout {dst} at step {weight_step} never "
-        f"drained: in-flight GPU work on {src} exceeded {timeout_s:.0f}s and "
-        "every NCCL communicator was aborted, so this replica cannot continue. "
-        "The destination almost certainly failed its P2R receive; check its log "
-        "for a cancelled R2R round."
+        f"proved completion on {src} within a {timeout_s:.0f}s drain budget: "
+        "the drain failed or was aborted, so this replica cannot continue. "
+        "Check the preceding CUDA fence/timeout error and the destination log."
     )
 
 
@@ -536,18 +525,17 @@ class RLPolicyWorker(PolicyWorkerBase):
                     def grouped_send(grouped_send_ops):
                         if not grouped_send_ops:
                             return
-                        if self.rl_mode != "colocated_separated" and p2r_group_size > 0:
-                            # Only in non-colocated-separated mode, we could use NCCL group feature.
-                            nccl_group_start(comm_id)
-                        for view, r_rank, dest_name in grouped_send_ops:
-                            logger.debug(
-                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
-                            )
-                            self.p2r_collective_manager.send(
-                                base_mesh_key, view, r_rank
-                            )
-                        if self.rl_mode != "colocated_separated" and p2r_group_size > 0:
-                            nccl_group_end(comm_id)
+                        grouped = (
+                            self.rl_mode != "colocated_separated" and p2r_group_size > 0
+                        )
+                        with nccl_group(comm_id) if grouped else nullcontext():
+                            for view, r_rank, dest_name in grouped_send_ops:
+                                logger.debug(
+                                    f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
+                                )
+                                self.p2r_collective_manager.send(
+                                    base_mesh_key, view, r_rank
+                                )
                         grouped_send_ops.clear()
 
                     transferred_params_cnt = 0

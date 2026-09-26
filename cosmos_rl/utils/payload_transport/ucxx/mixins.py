@@ -397,16 +397,15 @@ class UCXXRolloutMixin:
 
         Order matters:
 
-        1. ``stop_server`` joins the server threads/loops and closes every
-           listener and endpoint (a bounded drain that lets in-flight reads
-           finish -- which needs the progress thread *running*).
-        2. ``reset_ucxx_context`` then stops the UCXX worker's background C++
-           progress thread (and tears down the global context).  Doing this
-           *before* the shared-memory ``close()`` ensures no ``ucp_worker_progress``
-           runs concurrently with object teardown -- the race behind the rare
-           post-"Server stopped" SIGSEGV.
-        3. ``close()`` releases the shared-memory buffer once the progress
-           thread is quiescent.
+        1. ``stop_server`` retires this producer's listeners, endpoints and
+           request waiters on their owning loops, then joins the threads and
+           releases its global-context lease.
+        2. Only the last quiescent owner resets the context and joins its native
+           progress thread. Other producers/pooled clients retain their leases;
+           their progress must continue. The explicit reset below also covers
+           partial startup and refuses an unproven untracked-context drain.
+        3. ``close()`` releases this producer's buffer once its own native users
+           are quiescent, even if another owner's progress thread is still live.
 
         Reset also covers partial server startup. A failed server join retains
         the buffer and prevents context reset or shared-memory release.

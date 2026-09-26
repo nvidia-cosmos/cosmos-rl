@@ -97,7 +97,17 @@ run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_sft_ack_progress.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
 run python -m pytest -q tests/test_prepared_training_prefetch.py
+run python -m pytest -q tests/test_prefetch_completion_deadline.py
+run python -m pytest -q tests/test_training_payload_lifetime.py
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
+run python -m pytest -q tests/test_receive_memory.py tests/test_receive_memory_cuda.py
+run python -m pytest -q tests/test_receive_rejection_outcomes.py
+if python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() >= 2 else 1)'; then
+    run torchrun --standalone --nproc-per-node=2 tests/receive_outcome_canary.py
+else
+    echo "SKIP: receive outcome canary requires two CUDA devices"
+    SKIPPED+=("tests/receive_outcome_canary.py [requires two CUDA devices]")
+fi
 run torchrun --standalone --nproc-per-node=2 tests/trainer_batching_canary.py --cpu
 run python tests/test_apex.py
 run python tests/test_cosmos_hf_precision.py
@@ -122,6 +132,7 @@ run python tests/test_pynccl_dtype_agnostic.py
 run python tests/test_parallel_map.py
 run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
+run python -m pytest -q tests/test_p2r_ci_harness.py
 run python tests/test_multirank_shutdown.py
 run python tests/test_policy_shutdown_deadline.py
 
@@ -142,6 +153,15 @@ run python tests/test_logging_level.py
 run python tests/test_nccl_addressing.py
 run python tests/test_nccl_buffer_registry.py
 run python tests/test_nccl_comm_cache.py
+run python -m pytest -q tests/test_transfer_readiness.py
+run python -m pytest -q tests/test_p2r_copyback_lifetime.py
+run python -m pytest -q tests/test_p2r_temporary_queue.py
+run python -m pytest -q tests/test_p2r_cached_uid.py
+run python -m pytest -q tests/test_transport_deadline.py
+run python -m pytest -q tests/test_nccl_group_containment.py
+run python -m pytest -q tests/test_shared_stream_canary_contract.py
+run python -m pytest -q tests/test_transport_terminal_contract.py
+run python -m pytest -q tests/test_nccl_operation_contract.py
 run python tests/test_nccl_data_packer_mixin.py
 run python tests/test_nccl_payload_pairing.py
 run python tests/test_nccl_rendezvous.py
@@ -154,6 +174,13 @@ run python tests/test_payload_transport.py
 run python tests/test_profiler_ucxx.py
 run python tests/test_ucxx_data_packer_mixin.py
 run python tests/test_ucxx_fetch_engine.py
+run python -m pytest -q tests/test_ucxx_operation_ownership.py
+run python -m pytest -q tests/test_ucxx_producer_ownership.py
+run python -m pytest -q tests/test_ucxx_context_drain.py
+run python -m pytest -q tests/test_ucxx_endpoint_retirement.py
+run python -m pytest -q tests/test_ucxx_context_native.py
+run python -m pytest -q tests/test_ucxx_lifetime_regressions.py
+run python -m pytest -q tests/test_ucxx_copy_cuda.py
 run python tests/test_ucxx_rollout_mixin.py
 run python tests/test_ucxx_transport.py
 run python tests/test_launcher_shutdown.py
@@ -180,7 +207,7 @@ run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
 # Pytest-style CPU suites; install pytest in case the image lacks it.
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
-run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_rollout_mesh_retirement.py tests/test_weight_sync_rebuild_safety.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
 run python -m unittest -v tests.contracts.test_trainer_metrics_contract
 run python -m unittest -v tests.contracts.test_config_routing_contract
 run python -m unittest -v tests.contracts.test_model_registry_contract

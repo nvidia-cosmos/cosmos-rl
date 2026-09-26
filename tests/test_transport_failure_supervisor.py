@@ -42,12 +42,17 @@ def test_torchrun_preserves_only_explicit_fatal_status(tmp_path, worker_exit):
 def test_expiration_retains_live_cache_before_fatal_exit(monkeypatch):
     import queue
     import threading
+    from types import SimpleNamespace
     from cosmos_rl.utils.payload_transport import prefetch_mixin
 
     packer = prefetch_mixin.PrefetchDataPackerMixin()
     packer._transport_strategy = object()
     packer._prefetch_deadline_lock = threading.Lock()
-    packer._prefetch_timers = {7: object()}
+    packer._prefetch_timers = {
+        7: SimpleNamespace(
+            _prefetch_deadline=0, _prefetch_timeout=1, cancel=lambda: None
+        )
+    }
     packer._prefetch_shutdown = threading.Event()
     packer._prefetch_result_queue = queue.Queue()
     cache = {"live": object()}
