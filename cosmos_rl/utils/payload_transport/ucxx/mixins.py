@@ -35,7 +35,6 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
@@ -46,12 +45,14 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     reset_ucxx_context,
 )
 
-from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
+from cosmos_rl.utils.payload_transport.pack import (
+    normalize_trajectory,
+    pack_trajectory_into,
+)
 from cosmos_rl.utils.trace import get_trace_time
 from cosmos_rl.utils.trajectory import (
     EPISODE_LENGTH,
     REWARDS,
-    VARLEN_FIELDS,
     build_trajectory_schema,
     episode_length,
     schema_layout,
@@ -276,6 +277,8 @@ class UCXXRolloutMixin:
             ep_len = episode_length(
                 trajectory, self._ucxx_schema, default=self._ucxx_max_steps
             )
+            rewards = trajectory.get(REWARDS, [])
+            reward_values = rewards.tolist() if hasattr(rewards, "tolist") else rewards
 
             any_gpu = any(
                 isinstance(v, torch.Tensor) and v.is_cuda for v in trajectory.values()
@@ -322,32 +325,12 @@ class UCXXRolloutMixin:
                 # emitted in its schema dtype and shape, and episode_length is
                 # written from the resolved ep_len even when the trajectory
                 # omits the key.
-                spec_by_name = {s.name: s for s in self._ucxx_schema}
-                cpu_data = {}
-                for key, value in trajectory.items():
-                    spec = spec_by_name.get(key)
-                    if key == EPISODE_LENGTH:
-                        cpu_data[key] = np.array([ep_len], dtype=np.int64)
-                        continue
-
-                    if isinstance(value, torch.Tensor):
-                        arr = value.cpu().numpy()
-                    else:
-                        arr = np.asarray(value)
-                    if spec is not None and arr.dtype != np.dtype(spec.dtype):
-                        arr = arr.astype(spec.dtype)
-
-                    if key in VARLEN_FIELDS and spec is not None:
-                        if len(arr.shape) > 0 and arr.shape[0] < spec.shape[0]:
-                            padded = np.zeros(spec.shape, dtype=arr.dtype)
-                            padded[: arr.shape[0]] = arr
-                            arr = padded
-
-                    cpu_data[key] = arr
-
-                # episode_length may be absent from the trajectory entirely.
-                if EPISODE_LENGTH not in cpu_data:
-                    cpu_data[EPISODE_LENGTH] = np.array([ep_len], dtype=np.int64)
+                cpu_data = {
+                    key: value.numpy()
+                    for key, value in normalize_trajectory(
+                        trajectory, self._ucxx_schema, ep_len, device="cpu"
+                    ).items()
+                }
 
                 t_gpu2cpu_end = get_trace_time()
 
@@ -376,7 +359,7 @@ class UCXXRolloutMixin:
                 "_slot": slot,
                 "_buffer_handle": self._ucxx_buffer.get_handle(),
                 "_replica_id": self._ucxx_replica_id,
-                REWARDS: trajectory.get(REWARDS, torch.tensor([])).tolist(),
+                REWARDS: reward_values,
                 EPISODE_LENGTH: ep_len,
             }
         except Exception as e:

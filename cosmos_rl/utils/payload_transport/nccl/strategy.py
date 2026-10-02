@@ -64,8 +64,7 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     TransferStatus,
 )
 from cosmos_rl.utils.trajectory import (
-    EPISODE_LENGTH,
-    VARLEN_FIELDS as _VARLEN_FIELDS,
+    truncate_trajectory,
     build_trajectory_schema,
     deserialize_schema,
     schema_layout,
@@ -1159,16 +1158,7 @@ def _unpack(
 
 
 def _truncate_to_episode_len(data: dict) -> None:
-    ep = data.get(EPISODE_LENGTH)
-    if ep is None:
-        return
-    try:
-        ep_len = int(ep.item()) if ep.numel() == 1 else int(ep[0].item())
-    except Exception:
-        return
-    for key in _VARLEN_FIELDS:
-        if key in data and data[key].shape[0] > ep_len:
-            data[key] = data[key][:ep_len]
+    truncate_trajectory(data)
 
 
 def _resolve_schema_dims(config: Any) -> dict:

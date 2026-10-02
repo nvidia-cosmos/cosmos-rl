@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import operator
 
 __all__ = [
     "ACTIONS",
@@ -60,6 +61,8 @@ __all__ = [
     "episode_length",
     "schema_layout",
     "serialize_schema",
+    "truncate_trajectory",
+    "validate_episode_length",
 ]
 
 
@@ -148,9 +151,41 @@ def schema_layout(schema: Sequence[TensorSpec]) -> Tuple[Dict[str, int], int]:
     offsets: Dict[str, int] = {}
     offset = 0
     for spec in schema:
+        if spec.name == EPISODE_LENGTH and (
+            spec.dtype != np.dtype("int64") or spec.shape not in ((), (1,))
+        ):
+            raise ValueError("episode_length schema must be a scalar or (1,) int64")
         offsets[spec.name] = offset
         offset += spec.nbytes
     return offsets, offset
+
+
+def validate_episode_length(value: Any, capacities: Sequence[int] = ()) -> int:
+    """A length is a nonnegative integer fitting every present sequence field."""
+    item = getattr(value, "item", None)
+    value = item() if callable(item) else value
+    try:
+        length = operator.index(value)
+    except TypeError as exc:
+        raise ValueError("episode_length must be an integer") from exc
+    if isinstance(value, (bool, np.bool_)) or length < 0:
+        raise ValueError("episode_length must be a nonnegative integer")
+    if any(length > capacity for capacity in capacities):
+        raise ValueError("episode_length exceeds available sequence rows")
+    return length
+
+
+def truncate_trajectory(data: Dict[str, Any]) -> None:
+    """Validate decoded metadata before consistently truncating either backend."""
+    if EPISODE_LENGTH not in data:
+        return
+    fields = [data[key] for key in VARLEN_FIELDS if key in data]
+    if any(len(value.shape) == 0 for value in fields):
+        raise ValueError("sequence fields must have a leading episode dimension")
+    length = validate_episode_length(data[EPISODE_LENGTH], [v.shape[0] for v in fields])
+    for key in VARLEN_FIELDS:
+        if key in data:
+            data[key] = data[key][:length]
 
 
 def serialize_schema(schema: Sequence[TensorSpec]) -> List[Dict[str, Any]]:
@@ -197,7 +232,7 @@ def episode_length(
     ep = trajectory.get(EPISODE_LENGTH)
     if ep is not None:
         item = getattr(ep, "item", None)
-        return int(item()) if callable(item) else int(ep)
+        return validate_episode_length(item() if callable(item) else ep)
 
     obs = trajectory.get(OBSERVATIONS)
     if obs is not None:

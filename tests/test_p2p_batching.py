@@ -352,17 +352,22 @@ def test_state_sync_packing_supports_pipeline_local_state(
         torch.testing.assert_close(destination.model.state_dict()[name], source_tensor)
 
 
-def test_state_sync_packing_supports_scalar_tensors(
+@pytest.mark.parametrize("singleton_stride", [False, True])
+def test_state_sync_packing_supports_scalar_and_singleton_tensors(
     monkeypatch: pytest.MonkeyPatch,
+    singleton_stride: bool,
 ) -> None:
     monkeypatch.setattr(llm_trainer_module, "_P2P_SYNC_BUCKET_SIZE_BYTES", 12)
     monkeypatch.setattr(llm_trainer_module, "_P2P_SYNC_PACK_TENSORS", None)
 
     class ScalarState:
         def __init__(self, fill: int) -> None:
+            self.backing = torch.full((1, 8), fill, dtype=torch.float32)
             self.state = {
                 "a_vector": torch.full((4,), fill, dtype=torch.int16),
-                "b_scalar": torch.tensor(fill, dtype=torch.float32),
+                "b_scalar": self.backing[:, 2]
+                if singleton_stride
+                else torch.tensor(fill, dtype=torch.float32),
             }
 
         def state_dict(self):
@@ -406,6 +411,8 @@ def test_state_sync_packing_supports_scalar_tensors(
     assert transport.received_call_kinds == ["single"]
     for name, source_tensor in source.model.state_dict().items():
         torch.testing.assert_close(destination.model.state_dict()[name], source_tensor)
+    if singleton_stride:
+        assert torch.count_nonzero(destination.model.backing).item() == 1
 
 
 def test_state_sync_keeps_plain_single_tensor_hook_compatibility() -> None:

@@ -221,6 +221,13 @@ class TestReturnedMetadata(unittest.TestCase):
 
 
 class TestUCXXServerPorts(unittest.TestCase):
+    def setUp(self):
+        # Port-policy tests own fake listeners, not a native UCXX worker.
+        for name in ("_acquire_ucxx_context", "_release_ucxx_context"):
+            self.enterContext(
+                patch(f"cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.{name}")
+            )
+
     @staticmethod
     def _server(base_port, n_threads=4):
         server = UCXXBuffer.__new__(UCXXBuffer)
@@ -236,6 +243,8 @@ class TestUCXXServerPorts(unittest.TestCase):
         server._listeners = []
         server._server_loops = []
         server._handler_tasks_per_thread = []
+        server._active_endpoints = []
+        server.config = SimpleNamespace(send_timeout=1.0)
         server._buffer = SimpleNamespace(close=lambda: None)
         return server
 
@@ -295,7 +304,7 @@ class TestUCXXServerPorts(unittest.TestCase):
         server._active_endpoints = []
         server._endpoints_lock = threading.Lock()
         server._shutdown_flag.set()
-        listener = SimpleNamespace(port=42017, close=lambda: None)
+        listener = SimpleNamespace(port=42017, close=lambda: None, active_clients=0)
         fake_ucxx = SimpleNamespace(
             init=lambda: None,
             create_listener=lambda callback, port: listener,
@@ -306,7 +315,7 @@ class TestUCXXServerPorts(unittest.TestCase):
         ):
             asyncio.run(server._async_server_main(0, 0))
 
-        self.assertIs(server._listeners[0], listener)
+        self.assertIsNone(server._listeners[0])
         self.assertEqual(server.ports, [42017])
 
     def test_partial_startup_is_unwound_before_timeout_is_reported(self):
@@ -317,6 +326,7 @@ class TestUCXXServerPorts(unittest.TestCase):
             if thread_idx == 0:
                 server._listeners[thread_idx] = SimpleNamespace(close=lambda: None)
                 server._shutdown_flag.wait(timeout=5)
+                server._listeners[thread_idx] = None
                 released.set()
 
         server._run_server_loop = bind

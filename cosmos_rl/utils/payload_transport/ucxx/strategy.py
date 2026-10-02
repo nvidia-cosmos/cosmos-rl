@@ -36,7 +36,7 @@ from cosmos_rl.utils.transport_failure import TransportUnusableError
 import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.trajectory import EPISODE_LENGTH, VARLEN_FIELDS
+from cosmos_rl.utils.trajectory import truncate_trajectory
 from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
 from cosmos_rl.utils.trace import get_trace_time
 from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
@@ -347,14 +347,6 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                 if value.dtype not in _NP_TO_TORCH or not value.flags.c_contiguous:
                     raise ValueError(f"Unsupported UCXX array for key {key!r}")
                 total_bytes += value.nbytes
-        ep_len_array = arrays.get(EPISODE_LENGTH)
-        ep_len = None
-        if ep_len_array is not None:
-            if not isinstance(ep_len_array, np.ndarray) or not ep_len_array.size:
-                raise ValueError("UCXX episode length must be a nonempty host array")
-            ep_len = int(ep_len_array.flat[0])
-            if ep_len < 0:
-                raise ValueError("UCXX episode length must be nonnegative")
         if isinstance(pinned_buf, torch.Tensor) and pinned_buf.numel() != total_bytes:
             raise ValueError("UCXX pinned buffer and decoded schema size disagree")
 
@@ -434,10 +426,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             if pinned_buf is not None:
                 client.return_pinned(pinned_buf)
 
-        if ep_len is not None:
-            for key in VARLEN_FIELDS:
-                if key in gpu_data and gpu_data[key].shape[0] > ep_len:
-                    gpu_data[key] = gpu_data[key][:ep_len]
+        truncate_trajectory(gpu_data)
         return gpu_data
 
     async def _fetch_all(self, ucxx_tasks: list) -> tuple:
