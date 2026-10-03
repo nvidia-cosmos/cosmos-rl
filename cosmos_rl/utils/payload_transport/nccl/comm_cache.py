@@ -79,12 +79,12 @@ SENDER_LOCAL_RANK = 0
 RECEIVER_LOCAL_RANK = 1
 
 
-def _default_build_fn(uid_chars: List[int], local_rank: int) -> int:
+def _default_build_fn(uid_chars: List[int], local_rank: int, timeout_ms=None) -> int:
     # Imported lazily so this module (and its tests) do not require a CUDA
     # build of pynccl just to exercise the cache bookkeeping.
     from cosmos_rl.utils.pynccl import create_nccl_comm
 
-    return create_nccl_comm(uid_chars, local_rank, 2)
+    return create_nccl_comm(uid_chars, local_rank, 2, timeout_ms=timeout_ms)
 
 
 def _default_abort_fn(comm_idx: int) -> None:
@@ -136,6 +136,9 @@ class CommCache:
         # exactly one comm (the second waits and reuses).
         self._pair_locks: Dict[PairKey, threading.Lock] = {}
         self._lock = threading.Lock()
+        self._generation = 0
+        self._closed = False
+        self._pair_generations: Dict[PairKey, int] = {}
         self._init_sem = threading.BoundedSemaphore(max(1, max_concurrent_init))
 
         # Health-aware quarantine (shared skip-list; see rotation.py).
@@ -166,7 +169,11 @@ class CommCache:
             return comm_idx
 
     def _reuse_or_drop(
-        self, pair: PairKey, fp: Optional[Tuple[int, ...]], pin: bool = False
+        self,
+        pair: PairKey,
+        fp: Optional[Tuple[int, ...]],
+        pin: bool = False,
+        expected_generation: Optional[Tuple[int, int]] = None,
     ) -> Optional[int]:
         """Return the cached comm for ``pair`` if it is still CURRENT.
 
@@ -179,6 +186,11 @@ class CommCache:
         """
         stale_idx: Optional[int] = None
         with self._lock:
+            if expected_generation is not None and expected_generation != (
+                self._generation,
+                self._pair_generations[pair],
+            ):
+                raise RuntimeError(f"NCCL attempt invalidated before reuse: {pair}")
             comm_idx = self._comms.get(pair)
             if comm_idx is None:
                 return None
@@ -213,6 +225,7 @@ class CommCache:
         uid_chars: List[int],
         local_rank: int,
         pin: bool = False,
+        deadline=None,
     ) -> int:
         """Return the comm for ``pair``, building it under the init semaphore.
 
@@ -230,15 +243,31 @@ class CommCache:
         it with :meth:`unpin`; prefer :meth:`leased`, which does both.
         """
         fp = tuple(uid_chars) if uid_chars else None
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("NCCL communicator cache is closed")
+            generation = self._generation
+            pair_generation = self._pair_generations.setdefault(pair, 0)
 
-        cached = self._reuse_or_drop(pair, fp, pin)
+        def still_current():
+            # Caller holds _lock. Invalidation includes queued/in-progress
+            # builds, not only communicators already present in _comms.
+            return (
+                generation == self._generation
+                and pair_generation == self._pair_generations[pair]
+            )
+
+        cached = self._reuse_or_drop(pair, fp, pin, (generation, pair_generation))
         if cached is not None:
             return cached
 
         pair_lock = self._pair_lock(pair)
         with pair_lock:
+            with self._lock:
+                if not still_current():
+                    raise RuntimeError(f"NCCL build invalidated before start: {pair}")
             # Re-check under the pair lock (another thread may have built it).
-            cached = self._reuse_or_drop(pair, fp, pin)
+            cached = self._reuse_or_drop(pair, fp, pin, (generation, pair_generation))
             if cached is not None:
                 return cached
 
@@ -257,18 +286,38 @@ class CommCache:
                 )
 
             with self._init_sem:
-                comm_idx = self._build_fn(uid_chars, local_rank)
+                with self._lock:
+                    if not still_current():
+                        raise RuntimeError(
+                            f"NCCL build invalidated while queued: {pair}"
+                        )
+                if deadline is not None:
+                    remaining_ms = deadline.remaining_ms()
+                if deadline is not None and self._build_fn is _default_build_fn:
+                    comm_idx = self._build_fn(uid_chars, local_rank, remaining_ms)
+                else:
+                    comm_idx = self._build_fn(uid_chars, local_rank)
+                if deadline is not None:
+                    try:
+                        deadline.remaining_ms()
+                    except BaseException:
+                        self._safe_abort(comm_idx)
+                        raise
 
             with self._lock:
-                self._comms[pair] = comm_idx
-                self._comm_uid[pair] = fp
-                self._comms.move_to_end(pair)
-                self._n_built += 1
-                # Pin BEFORE evicting so this freshly-built comm is never the
-                # eviction victim of its own insertion.
-                if pin:
-                    self._pins[pair] = self._pins.get(pair, 0) + 1
-                evicted = self._evict_if_needed_locked(protect=pair)
+                valid = still_current()
+                if valid:
+                    self._comms[pair] = comm_idx
+                    self._comm_uid[pair] = fp
+                    self._comms.move_to_end(pair)
+                    self._n_built += 1
+                    # Pin before eviction and while committing this generation.
+                    if pin:
+                        self._pins[pair] = self._pins.get(pair, 0) + 1
+                    evicted = self._evict_if_needed_locked(protect=pair)
+            if not valid:
+                self._safe_abort(comm_idx)
+                raise RuntimeError(f"NCCL build completed after invalidation: {pair}")
             # Abort evicted comms OUTSIDE the lock -- a slow/hung nccl_abort must
             # not freeze the whole cache (get/stats/other builds), matching every
             # other abort path here (_reuse_or_drop/abort/abort_endpoint/abort_all).
@@ -377,6 +426,7 @@ class CommCache:
         Fires regardless of pins -- see :meth:`leased`.
         """
         with self._lock:
+            self._pair_generations[pair] = self._pair_generations.get(pair, 0) + 1
             comm_idx = self._comms.pop(pair, None)
             self._comm_uid.pop(pair, None)
         if comm_idx is None:
@@ -398,6 +448,9 @@ class CommCache:
             return 0
         n = len(prefix)
         with self._lock:
+            for pair in self._pair_generations:
+                if isinstance(pair, tuple) and pair[:n] == prefix:
+                    self._pair_generations[pair] += 1
             matched = [
                 p for p in self._comms if isinstance(p, tuple) and p[:n] == prefix
             ]
@@ -409,8 +462,17 @@ class CommCache:
         return len(idxs)
 
     def abort_all(self) -> int:
-        """Abort every cached comm (teardown).  Returns count aborted."""
+        """Invalidate all current attempts; future generations may still build."""
+        return self._invalidate_all(close=False)
+
+    def close(self) -> int:
+        """Permanently reject new builds and invalidate outstanding attempts."""
+        return self._invalidate_all(close=True)
+
+    def _invalidate_all(self, *, close: bool) -> int:
         with self._lock:
+            self._closed = self._closed or close
+            self._generation += 1
             items = list(self._comms.items())
             self._comms.clear()
             self._comm_uid.clear()

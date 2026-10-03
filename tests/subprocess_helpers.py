@@ -49,8 +49,28 @@ def _kill_descendants(parent_pid: int) -> None:
             pass
 
 
-def kill_process_group(process):
-    """SIGKILL the whole process tree of ``process`` and reap it."""
+def kill_process_group(process, *, owned_session=False):
+    """Kill and reap a child, including its explicitly owned session after exit.
+
+    ``owned_session`` requires a child launched with ``start_new_session=True``.
+    Its group may outlive the leader and keep the suite's output pipe open.
+    """
+    if owned_session:
+        if process.pid <= 1 or process.pid == os.getpgrp():
+            raise ValueError("Refusing to signal the caller's process group")
+        if process.poll() is None:
+            try:
+                if os.getpgid(process.pid) != process.pid:
+                    raise ValueError("Child does not lead an owned session")
+            except ProcessLookupError:
+                pass  # The leader exited; its owned group may still exist.
+            _kill_descendants(process.pid)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=30)
+        return
     if process.poll() is None:
         try:
             _kill_descendants(process.pid)

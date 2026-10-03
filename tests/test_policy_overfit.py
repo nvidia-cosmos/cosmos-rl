@@ -24,6 +24,8 @@ import unittest
 import toml
 
 from cosmos_rl.utils import network_util
+from cosmos_rl.utils.model_config import load_model_config
+from subprocess_helpers import kill_process_group
 
 
 class TestPolicyOverfit(unittest.TestCase):
@@ -42,22 +44,26 @@ class TestPolicyOverfit(unittest.TestCase):
         config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
             cur_dir, "data_fixtures", "sharegpt52k_small"
         )
+        # Publish the immutable fixture's dynamic configuration before ranks
+        # race to copy/import it into the shared Transformers module cache.
+        # A half-written import can otherwise stay poisoned across retries.
+        load_model_config(config["policy"]["model_name_or_path"])
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
         ) as tmpfile:
             toml.dump(config, tmpfile)
             tmpfile_toml = tmpfile.name
-        controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
-        controller_cmd += f" --port {port}"
+        controller_cmd = [
+            sys.executable,
+            "-m",
+            "cosmos_rl.dispatcher.run_web_panel",
+            "--config",
+            tmpfile_toml,
+            "--port",
+            str(port),
+        ]
         env_dict = os.environ.copy()
         env_dict["COSMOS_ROLE"] = "Controller"
-        controller_process = subprocess.Popen(
-            controller_cmd,
-            shell=True,
-            stdout=sys.stderr,
-            stderr=sys.stderr,
-            env=env_dict,
-        )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
         policy_cmd = [
@@ -90,14 +96,6 @@ class TestPolicyOverfit(unittest.TestCase):
         # directly and so is the one path that misses it.  Set it here rather
         # than in the CI harness so the test carries its own requirement.
         policy_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        # Start the process
-        policy_process = subprocess.Popen(
-            policy_cmd,
-            stdout=sys.stderr,
-            stderr=sys.stderr,
-            env=policy_env,
-        )
-
         # Wait on the POLICY, not the controller.  The controller is an HTTP
         # server: it exits only when training completes normally, so waiting on
         # it first turns *any* policy-side failure into an unbounded hang --
@@ -106,28 +104,39 @@ class TestPolicyOverfit(unittest.TestCase):
         # each time consuming the suite's entire remaining budget (a 2h
         # ceiling, and 29 later suites that never ran).
         timeout_s = float(os.environ.get("COSMOS_TEST_OVERFIT_TIMEOUT_S", "1800"))
+        controller_process = subprocess.Popen(
+            controller_cmd,
+            start_new_session=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env_dict,
+        )
+        policy_process = None
         try:
+            policy_process = subprocess.Popen(
+                policy_cmd,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                env=policy_env,
+                start_new_session=True,
+            )
             policy_process.communicate(timeout=timeout_s)
+            assert policy_process.returncode == 0, (
+                f"policy process failed with code: {policy_process.returncode}"
+            )
         except subprocess.TimeoutExpired:
-            policy_process.kill()
-            policy_process.communicate()
             raise AssertionError(
                 f"policy did not finish within {timeout_s:.0f}s; killed it. "
                 "Set COSMOS_TEST_OVERFIT_TIMEOUT_S to raise the budget."
             )
         finally:
-            # The controller has no reason to exit if the policy failed, so
-            # never wait on it -- just reap it.
-            controller_process.terminate()
+            # A shell-only terminate leaves the controller holding tee's pipe,
+            # even after the test and its timeout process have already exited.
             try:
-                controller_process.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                controller_process.kill()
-                controller_process.communicate()
-
-        assert policy_process.returncode == 0, (
-            f"policy process failed with code: {policy_process.returncode}"
-        )
+                if policy_process is not None:
+                    kill_process_group(policy_process, owned_session=True)
+            finally:
+                kill_process_group(controller_process, owned_session=True)
 
 
 if __name__ == "__main__":

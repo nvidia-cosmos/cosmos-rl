@@ -65,6 +65,7 @@ from cosmos_rl.utils.payload_transport.nccl.strategy import (
     _parse_ref,
 )
 from cosmos_rl.utils.trajectory import build_trajectory_schema, schema_layout
+from cosmos_rl.utils.transport_failure import TransportUnusableError
 
 
 # ---------------------------------------------------------------------------
@@ -75,12 +76,22 @@ from cosmos_rl.utils.trajectory import build_trajectory_schema, schema_layout
 class _FakeRendezvous:
     def __init__(self):
         self.replies = []
+        self.outcomes = []
 
     def respond(self, *, resp_key, status):
-        self.replies.append((resp_key, status))
+        target = (
+            self.outcomes
+            if status in (TransferStatus.COMPLETE, TransferStatus.FAILED)
+            else self.replies
+        )
+        target.append((resp_key, status))
+        return True
 
     def read_uid(self, uid_key):
         return [1, 2, 3]
+
+    def watch_operation(self, key, operation):
+        pass
 
 
 def _schema(max_steps=10):
@@ -230,8 +241,8 @@ class TestConsumerRejectsMispairedPayload(unittest.TestCase):
 
     The consumer posts a recv for transfer A and the pair's stream hands it
     transfer B's bytes.  Before the header it unpacked them with A's schema and
-    returned plausible-looking tensors; now it must drop the episode and tear
-    the pair down.
+    returned plausible-looking tensors; now it must terminate the transport,
+    not silently drop and replay the episode.
     """
 
     def _fetch(self, *, wire_transfer_id, ref_transfer_id):
@@ -258,14 +269,9 @@ class TestConsumerRejectsMispairedPayload(unittest.TestCase):
             results, nbytes, _ = s._fetch_all([(0, ref)])
         return results, cache, aborted, pair, s
 
-    def test_foreign_payload_is_dropped_and_pair_resynced(self):
-        results, cache, aborted, pair, s = self._fetch(
-            wire_transfer_id="0:someone-else", ref_transfer_id="0:mine"
-        )
-        self.assertEqual(results, {})  # episode dropped, not decoded
-        self.assertNotIn(pair, cache)  # comm torn down...
-        self.assertEqual(aborted, [55])  # ...and actually aborted
-        self.assertNotIn(pair, s._warm_pairs)  # rebuild gets the cold budget
+    def test_foreign_payload_is_terminal_not_a_replayable_miss(self):
+        with self.assertRaisesRegex(TransportUnusableError, "identity mismatch"):
+            self._fetch(wire_transfer_id="0:someone-else", ref_transfer_id="0:mine")
 
     def test_matching_payload_is_accepted(self):
         # Positive control: the same path must NOT reject a correct pairing.
@@ -323,7 +329,12 @@ class TestAbortedPairDropsItsPostedRecvs(unittest.TestCase):
                 raise RuntimeError("enqueue timed out")
 
         with mock.patch.object(pynccl_mod, "nccl_recv", _recv):
-            results, _, _ = s._fetch_all(list(enumerate(refs)))
+            if second_recv_raises:
+                with self.assertRaises(TransportUnusableError):
+                    s._fetch_all(list(enumerate(refs)))
+                results = None
+            else:
+                results, _, _ = s._fetch_all(list(enumerate(refs)))
         return results, cache, aborted, pair
 
     def test_sibling_of_a_failed_recv_is_dropped_not_unpacked(self):
@@ -333,9 +344,9 @@ class TestAbortedPairDropsItsPostedRecvs(unittest.TestCase):
         # Ref 2 failed outright; ref 1 was posted on the comm that its failure
         # aborted. Neither may be returned -- and critically, ref 1 must not
         # reach the header check, which would call it a desync.
-        self.assertEqual(results, {})
-        self.assertNotIn(pair, cache)
-        self.assertEqual(aborted, [55])
+        self.assertIsNone(results)
+        self.assertIn(pair, cache)
+        self.assertEqual(aborted, [])
 
     def test_unaffected_pair_still_unpacks(self):
         # Control: with no failure, both refs unpack normally, so the filter is
@@ -433,7 +444,7 @@ class TestSendsLeaveInAcceptOrder(unittest.TestCase):
         first_launched = threading.Event()
         all_accepted = threading.Event()
 
-        def _fake_send(entry, receiver_rank, uid_key, receiver_replica=None):
+        def _fake_send(entry, receiver_rank, uid_key, receiver_replica=None, **kwargs):
             # Mirror the real ``_send``: the launch order that reaches NCCL is
             # the order workers win ``_nccl_send_lock``, not the order they
             # were submitted in.
@@ -473,7 +484,7 @@ class TestSendsLeaveInAcceptOrder(unittest.TestCase):
         parked = threading.Event()
         b_sent = threading.Event()
 
-        def _fake_send(entry, receiver_rank, uid_key, receiver_replica=None):
+        def _fake_send(entry, receiver_rank, uid_key, receiver_replica=None, **kwargs):
             if receiver_replica == "pol-A":
                 parked.wait(timeout=5)
             else:
@@ -625,6 +636,12 @@ class _FakeRedis:
     def get(self, key):
         return self.store.get(key)
 
+    def eval(self, script, count, key, expected, replacement):
+        if self.store.get(key) != expected:
+            return 0
+        self.store[key] = replacement
+        return 1
+
     def set(self, key, value, ex=None):
         self.store[key] = value
 
@@ -745,12 +762,11 @@ class TestConsumerResyncsOnLateAccept(unittest.TestCase):
                 )
 
         s._rendezvous = _Rv()
-        out = s._rendezvous_one(_consumer_ref("0:x", _schema()), pynccl_mod)
-
-        self.assertIsNone(out)
+        with self.assertRaises(TransportUnusableError):
+            s._rendezvous_one(_consumer_ref("0:x", _schema()), pynccl_mod)
         self.assertEqual(attempts, [1], "must not retry into the orphaned send")
-        self.assertNotIn(pair, cache)
-        self.assertEqual(aborted, [55])
+        self.assertIn(pair, cache)
+        self.assertEqual(aborted, [])
 
 
 # ---------------------------------------------------------------------------

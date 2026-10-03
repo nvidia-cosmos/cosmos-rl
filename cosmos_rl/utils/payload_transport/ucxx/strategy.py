@@ -32,6 +32,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from cosmos_rl.utils.transport_failure import TransportUnusableError
 import torch
 
 from cosmos_rl.utils.logging import logger
@@ -42,6 +43,7 @@ from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     UCXX_AVAILABLE,
     UCXXClient,
 )
+from cosmos_rl.utils.payload_transport.ucxx.operation import UCXXOperation
 
 
 # Errors that are worth retrying at the data-packer layer.  Mirrors
@@ -93,12 +95,16 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
     def __init__(self):
         self._io_lock = threading.RLock()
         self._event_loop = None
+        self._failure = None
 
     def _run_async(self, coroutine):
         # UCXX ties progress work to the event loop used at initialization.
         # Keep that loop alive across reads and endpoint teardown, and serialize
         # prefetch/synchronous fallback so it is never run on two threads.
         with self._io_lock:
+            if self._failure is not None:
+                coroutine.close()
+                raise TransportUnusableError(self._failure)
             if self._event_loop is None:
                 self._event_loop = asyncio.new_event_loop()
             return self._event_loop.run_until_complete(coroutine)
@@ -144,9 +150,9 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             device: Target GPU device for fetched tensors.
             max_attempts: Total attempts per remote slot read (initial +
                 retries on transient UCX errors).  Defaults to 2.
-            read_timeout: Per-await timeout (seconds) inside one
-                ``UCXXClient.read`` call -- bounds a single ``send`` /
-                ``recv`` operation.
+            read_timeout: Whole-attempt timeout (seconds), including native
+                connection/read completion. Device-copy completion has the same
+                budget. Uncertain completion is terminal, not a retry.
         """
         if not UCXX_AVAILABLE:
             raise RuntimeError(
@@ -281,6 +287,8 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         try:
             results, _, _ = self._run_async(self._fetch_all([(0, rollout_output)]))
             return results.get(0)
+        except TransportUnusableError:
+            raise
         except Exception as e:
             logger.warning("[UCXXTransportStrategy] Sync fallback failed: %s", e)
             return None
@@ -324,6 +332,114 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
     # Async fetch (UCXX-specific; unchanged from pre-refactor)
     # ------------------------------------------------------------------
 
+    def _mark_failed(self, reason):
+        self._failure = reason
+
+    def _copy_to_device(self, result):
+        client, device = self._client, torch.device(self._device)
+        pinned_buf = result.get("_pinned_buf")
+        arrays = {key: value for key, value in result.items() if key != "_pinned_buf"}
+        # Validate and read scalar metadata on the host BEFORE any asynchronous
+        # copy. A malformed schema must not send us into a GPU-error fallback.
+        total_bytes = 0
+        for key, value in arrays.items():
+            if isinstance(value, np.ndarray):
+                if value.dtype not in _NP_TO_TORCH or not value.flags.c_contiguous:
+                    raise ValueError(f"Unsupported UCXX array for key {key!r}")
+                total_bytes += value.nbytes
+        ep_len_array = arrays.get(EPISODE_LENGTH)
+        ep_len = None
+        if ep_len_array is not None:
+            if not isinstance(ep_len_array, np.ndarray) or not ep_len_array.size:
+                raise ValueError("UCXX episode length must be a nonempty host array")
+            ep_len = int(ep_len_array.flat[0])
+            if ep_len < 0:
+                raise ValueError("UCXX episode length must be nonnegative")
+        if isinstance(pinned_buf, torch.Tensor) and pinned_buf.numel() != total_bytes:
+            raise ValueError("UCXX pinned buffer and decoded schema size disagree")
+
+        if device.type != "cuda":
+            # CPU tensors must not retain numpy views into a recycled buffer.
+            gpu_data = {
+                key: torch.from_numpy(value.copy()).to(device)
+                if isinstance(value, np.ndarray)
+                else value
+                for key, value in arrays.items()
+            }
+            if pinned_buf is not None:
+                client.return_pinned(pinned_buf)
+        else:
+            operation = UCXXOperation(
+                self._read_timeout,
+                "UCXX device copy",
+                owners=(self, client, result, pinned_buf),
+                on_failure=self._mark_failed,
+            )
+            gpu_data = {}
+            operation.owners.append(gpu_data)
+            try:
+                with torch.cuda.device(device):
+                    stream = torch.cuda.current_stream(device)
+                    operation.owners.append(stream)
+                    if pinned_buf is not None:
+                        raw_gpu = pinned_buf.to(device, non_blocking=True)
+                        operation.owners.append(raw_gpu)
+                        offset = 0
+                        for key, value in arrays.items():
+                            if not isinstance(value, np.ndarray):
+                                gpu_data[key] = value
+                                continue
+                            copied = raw_gpu[offset : offset + value.nbytes].clone()
+                            operation.owners.append(copied)
+                            gpu_data[key] = copied.view(
+                                _NP_TO_TORCH[value.dtype]
+                            ).reshape(value.shape)
+                            offset += value.nbytes
+                    else:
+                        for key, value in arrays.items():
+                            if isinstance(value, np.ndarray):
+                                host = torch.from_numpy(value)
+                                operation.owners.append(host)
+                                gpu_data[key] = host.to(device, non_blocking=True)
+                            else:
+                                gpu_data[key] = value
+                    event = torch.cuda.Event()
+                    operation.owners.append(event)
+                    event.record(stream)
+                    operation.deadline.wait_event(event)
+                    operation.complete()
+            except torch.OutOfMemoryError as error:
+                # Allocation failure need not kill training if a bounded device
+                # fence proves that earlier copies no longer read this storage.
+                try:
+                    with torch.cuda.device(device):
+                        event = torch.cuda.Event()
+                        operation.owners.append(event)
+                        event.record(torch.cuda.current_stream(device))
+                        operation.deadline.wait_event(event)
+                        operation.complete()
+                except BaseException as completion_error:
+                    operation.fail(
+                        f"OOM cleanup completion uncertain: {completion_error}"
+                    )
+                if pinned_buf is not None:
+                    client.return_pinned(pinned_buf)
+                raise ValueError(
+                    "UCXX device-copy allocation failed after safe drain"
+                ) from error
+            except BaseException as error:
+                # Even .to()/record() can issue native work and then raise. No
+                # second copy, buffer recycle, or stream cleanup without proof.
+                operation.fail(f"device-copy completion uncertain: {error}")
+            if pinned_buf is not None:
+                client.return_pinned(pinned_buf)
+
+        if ep_len is not None:
+            for key in VARLEN_FIELDS:
+                if key in gpu_data and gpu_data[key].shape[0] > ep_len:
+                    gpu_data[key] = gpu_data[key][:ep_len]
+        return gpu_data
+
     async def _fetch_all(self, ucxx_tasks: list) -> tuple:
         """Fetch all episodes concurrently with multi-round retry.
 
@@ -331,7 +447,6 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         ``results_dict`` maps task index -> GPU tensor dict.
         """
         client = self._client
-        device = self._device
 
         async def _read_one(idx: int, metadata: dict):
             worker_ip = metadata.get("_worker_ip")
@@ -373,6 +488,8 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                         timeout=read_timeout,
                     )
                     break
+                except TransportUnusableError:
+                    raise
                 except Exception as e:
                     if type(e).__name__ not in _TRANSIENT_UCXX_ERRORS:
                         # Non-transient (e.g. ``StaleSlotError``,
@@ -414,70 +531,6 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                     )
             return idx, data, retryable
 
-        def _to_gpu(result: dict) -> dict:
-            pinned_buf = result.pop("_pinned_buf", None)
-            if pinned_buf is not None:
-                try:
-                    raw_gpu = pinned_buf.to(device, non_blocking=True)
-                    torch.cuda.current_stream().synchronize()
-
-                    gpu_data: Dict[str, Any] = {}
-                    offset = 0
-                    for key, value in result.items():
-                        if not hasattr(value, "shape"):
-                            gpu_data[key] = value
-                            continue
-                        nbytes = value.nbytes
-                        td = _NP_TO_TORCH.get(value.dtype)
-                        if td is None:
-                            raise ValueError(
-                                f"Unsupported dtype {value.dtype} for key '{key}'"
-                            )
-                        gpu_data[key] = (
-                            raw_gpu[offset : offset + nbytes]
-                            .clone()
-                            .view(td)
-                            .reshape(value.shape)
-                        )
-                        offset += nbytes
-                except Exception as e:
-                    logger.error(
-                        "[UCXXTransportStrategy] Bulk GPU copy failed (%s), "
-                        "falling back to per-tensor copy",
-                        e,
-                    )
-                    gpu_data = {}
-                    for key, value in result.items():
-                        if hasattr(value, "shape"):
-                            gpu_data[key] = torch.from_numpy(value.copy()).to(
-                                device, non_blocking=True
-                            )
-                        else:
-                            gpu_data[key] = value
-                finally:
-                    client.return_pinned(pinned_buf)
-            else:
-                gpu_data = {}
-                for key, value in result.items():
-                    if hasattr(value, "shape"):
-                        gpu_data[key] = torch.from_numpy(value).to(
-                            device, non_blocking=True
-                        )
-                    else:
-                        gpu_data[key] = value
-
-            ep_len_tensor = gpu_data.get(EPISODE_LENGTH)
-            if ep_len_tensor is not None:
-                ep_len = (
-                    int(ep_len_tensor.item())
-                    if ep_len_tensor.numel() == 1
-                    else int(ep_len_tensor[0].item())
-                )
-                for key in VARLEN_FIELDS:
-                    if key in gpu_data and gpu_data[key].shape[0] > ep_len:
-                        gpu_data[key] = gpu_data[key][:ep_len]
-            return gpu_data
-
         meta_by_idx: dict = {}
         for idx, metadata in ucxx_tasks:
             worker_ip = metadata.get("_worker_ip")
@@ -496,28 +549,53 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             if not pending:
                 break
 
-            tasks = [_read_one(idx, meta_by_idx[idx]) for idx in pending]
+            tasks = [
+                asyncio.create_task(_read_one(idx, meta_by_idx[idx])) for idx in pending
+            ]
             failed = []
 
-            for coro in asyncio.as_completed(tasks):
-                t0 = get_trace_time()
-                idx, result, retryable = await coro
-                t1 = get_trace_time()
-                total_transfer_ms += t1 - t0
+            try:
+                for coro in asyncio.as_completed(tasks):
+                    t0 = get_trace_time()
+                    idx, result, retryable = await coro
+                    t1 = get_trace_time()
+                    total_transfer_ms += t1 - t0
 
-                if result is None:
-                    if retryable:
-                        failed.append(idx)
-                    # Non-retryable failures (e.g. stale slot): drop
-                    # immediately so the round-level retry doesn't
-                    # waste another ~RTT per round on a slot that
-                    # cannot be resurrected.
-                    continue
+                    if result is None:
+                        if retryable:
+                            failed.append(idx)
+                        continue
 
-                gpu_data = _to_gpu(result)
-                batch_results[idx] = gpu_data
-                t2 = get_trace_time()
-                total_copy_ms += t2 - t1
+                    try:
+                        gpu_data = self._copy_to_device(result)
+                    except ValueError as error:
+                        # Rejection before device work is recoverable. Any error
+                        # after native issue is already TransportUnusableError.
+                        logger.error(
+                            "[UCXXTransportStrategy] Invalid payload: %s", error
+                        )
+                        continue
+                    batch_results[idx] = gpu_data
+                    t2 = get_trace_time()
+                    total_copy_ms += t2 - t1
+            except BaseException as error:
+                if any(not task.done() for task in tasks):
+                    operation = UCXXOperation(
+                        self._read_timeout,
+                        "UCXX concurrent batch",
+                        owners=(self, tasks, batch_results),
+                        on_failure=self._mark_failed,
+                    )
+                    operation.fail(f"cannot abandon outstanding native reads: {error}")
+                if isinstance(error, TransportUnusableError):
+                    self._mark_failed(str(error))
+                raise
+            finally:
+                # Observe completed failures without cancelling pending native
+                # waiters. Terminal operations own the latter until process exit.
+                for task in tasks:
+                    if task.done() and not task.cancelled():
+                        task.exception()
 
             if failed:
                 logger.warning(

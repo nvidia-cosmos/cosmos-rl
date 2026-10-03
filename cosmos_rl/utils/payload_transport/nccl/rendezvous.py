@@ -15,56 +15,32 @@
 
 """Per-transfer NCCL rendezvous over the Redis control plane.
 
-Why not a Lua CAS module
-------------------------
-The UCXX design used a ``rendezvous.py`` built on a Redis Lua
-compare-and-set to elect a single winner among contending readers.  NCCL
-payload transfer does **not** need that: each ``transfer_id`` has exactly
-one intended receiver, so there is no multi-winner election to solve.  A
-plain request / ack with **bilateral timeouts** suffices and is much
-simpler to reason about (and to fake in tests).
+Each invocation owns a unique operation ID and persistent bounded state:
+REQUESTED -> ACCEPTED -> COMPLETE/FAILED, or REQUESTED -> MISSING/NEED_UID/
+CANCELLED. Redis compare-and-set seals acceptance against cancellation and
+duplicate delivery. A lost publication reply is resolved against that same
+operation, not blindly replayed. Accepted work carries its immutable UID and
+original lifetime through queueing, initialization and device completion.
 
-Protocol (receiver-driven)
---------------------------
-The receiver (trainer rank) drives each transfer::
-
-    receiver                                   sender (rollout rank)
-    ────────                                   ─────────────────────
-    initiate(transfer_id, sender_rank):
-      if comm not cached for the pair:
-        uid = create_nccl_uid()
-        redis.SET  pair_uid_key = uid          serve loop: on :nccl_req msg
-      redis.DEL  resp_key (clear stale)   ───►   respond(...):
-      redis.PUBLISH :nccl_req {req}                if buffer present:
-      poll resp_key up to `timeout`:                 redis.SET resp_key=ACCEPTED
-        ACCEPTED  -> build 2-rank comm  ◄──────      (both build comm, nccl_send/recv)
-        MISSING   -> drop episode (recycled) ◄──     else: redis.SET resp_key=MISSING
-        (no reply within timeout) -> CANCELLED
-
-Three states: a request is implicitly ``REQUESTED``; the sender resolves
-it to ``ACCEPTED`` or ``MISSING``; a receiver-side timeout yields
-``CANCELLED``.  All three are terminal and idempotent — a duplicate or
-late reply is ignored because the receiver clears ``resp_key`` before
-each attempt and consumes (deletes) it on read.
-
-Testability
------------
-The only Redis surface used is ``set`` / ``get`` / ``delete`` /
-``publish`` (all with string values), and ``create_nccl_uid`` is
-injectable, so the whole handshake — including timeout / missing / accept
-paths — is unit-testable against a tiny in-memory fake Redis with no
-CUDA.
+ACCEPTED is a promise, not success. Failed or ambiguous accepted work is terminal
+for the worker; ordinary pre-accept rejection can still drop a missing episode.
+A batched peer-outcome observer works while native calls block; independent hard
+timers do not depend on Redis progress. Tests include real Redis races.
 """
 
 from __future__ import annotations
 
 import enum
 import json
+import math
 import time
+import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.transport_failure import TransportUnusableError
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     build_pair_uid_key,
     build_response_key,
@@ -82,7 +58,7 @@ __all__ = [
 class TransferStatus(str, enum.Enum):
     """Outcome of one per-transfer rendezvous.
 
-    ``ACCEPTED`` / ``MISSING`` / ``CANCELLED`` are terminal; ``NEED_UID`` is
+    ``MISSING`` / ``CANCELLED`` reject before native work; ``NEED_UID`` is
     a *retry* signal: the sender evicted its side of the comm, so the
     receiver must drop its (now half-open) cached comm and re-initiate with a
     fresh unique-ID rather than waiting forever on a comm the sender will
@@ -93,6 +69,9 @@ class TransferStatus(str, enum.Enum):
     MISSING = "missing"
     CANCELLED = "cancelled"
     NEED_UID = "need_uid"
+    REQUESTED = "requested"
+    COMPLETE = "complete"
+    FAILED = "failed"
 
 
 @dataclass
@@ -106,18 +85,19 @@ class RendezvousResult:
             already cached and no exchange happened).
         late_accept: Set with ``CANCELLED`` when the sender's ``ACCEPTED``
             landed after the deadline had already passed.  The transfer is
-            still abandoned -- but the sender believes it owes us a send, so
-            the caller must tear the pair's communicator down instead of
-            letting that send be taken by the next transfer's recv.
+            not replayable: the sender may owe an unmatched send, so the
+            caller must terminate rather than reuse the ordered stream.
     """
 
     status: TransferStatus
     uid_chars: Optional[List[int]] = None
     late_accept: bool = False
+    response_key: Optional[str] = None
+    deadline: Optional[float] = None
 
     @property
     def accepted(self) -> bool:
-        return self.status is TransferStatus.ACCEPTED
+        return self.status in (TransferStatus.ACCEPTED, TransferStatus.COMPLETE)
 
 
 def build_request_message(
@@ -130,6 +110,7 @@ def build_request_message(
     uid_key: Optional[str],
     req_deadline: Optional[float] = None,
     req_timeout: Optional[float] = None,
+    uid_chars: Optional[List[int]] = None,
 ) -> str:
     """Serialize a transfer request published on the ``:nccl_req`` channel.
 
@@ -158,6 +139,7 @@ def build_request_message(
             "uid_key": uid_key,
             "req_deadline": req_deadline,
             "req_timeout": req_timeout,
+            "uid_chars": uid_chars,
         }
     )
 
@@ -214,6 +196,7 @@ class NcclRendezvous:
         clock: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], None]] = None,
         wall_clock: Optional[Callable[[], float]] = None,
+        request_id_fn: Optional[Callable[[], str]] = None,
     ) -> None:
         self._redis = redis_client
         self._prefix = prefix
@@ -229,6 +212,10 @@ class NcclRendezvous:
         # ``_clock`` (monotonic) while the cross-process request deadline uses
         # ``_wall_clock``.  Assumes NTP-synced cluster clocks (exact on one node).
         self._wall_clock = wall_clock or time.time
+        self._request_id_fn = request_id_fn or (lambda: uuid.uuid4().hex)
+        self._watch_lock = threading.Lock()
+        self._watched = {}
+        self._watcher = None
 
     # ------------------------------------------------------------------
     # Receiver side
@@ -272,12 +259,17 @@ class NcclRendezvous:
         resp_key = build_response_key(
             self._prefix, transfer_id, receiver_replica, receiver_rank, attempt
         )
+        request_id = self._request_id_fn()
+        if request_id:
+            resp_key += ":" + request_id
         uid_key: Optional[str] = None
         uid_chars: Optional[List[int]] = None
-
-        # Clear any stale reply from a prior attempt so a late duplicate
-        # cannot be mistaken for this attempt's result.
-        self._safe_delete(resp_key)
+        deadline = self._clock() + max(0.0, timeout)
+        # Persist state past the whole attempt. A receiver must atomically
+        # cancel REQUESTED, not assume a missing/lost acknowledgement means
+        # the sender did not accept. Every invocation has a fresh operation ID.
+        ttl = max(self._resp_ttl_s, math.ceil(max(0.0, timeout)) + 60)
+        self._redis.set(resp_key, TransferStatus.REQUESTED.value, ex=ttl)
 
         if need_uid:
             uid_key = build_pair_uid_key(
@@ -299,6 +291,7 @@ class NcclRendezvous:
             uid_key=uid_key,
             req_deadline=self._wall_clock() + max(0.0, timeout),
             req_timeout=max(0.0, timeout),
+            uid_chars=uid_chars,
         )
         try:
             self._redis.publish(request_channel, message)
@@ -308,21 +301,35 @@ class NcclRendezvous:
                 transfer_id,
                 exc,
             )
-            return RendezvousResult(TransferStatus.CANCELLED, uid_chars)
+            # Publication may have committed despite a lost reply. Resolve the
+            # same operation; do not blindly retry or start a different stream.
+            pass
 
-        deadline = self._clock() + max(0.0, timeout)
         while True:
             reply = self._consume_reply(resp_key)
             if reply is not None:
-                return RendezvousResult(reply, uid_chars)
+                if reply is TransferStatus.FAILED:
+                    raise TransportUnusableError(
+                        f"Accepted sender failed: {transfer_id}"
+                    )
+                return RendezvousResult(
+                    reply, uid_chars, response_key=resp_key, deadline=deadline
+                )
             if self._clock() >= deadline:
                 # One last look before giving up.  A reply that landed between
                 # the poll above and this check would otherwise be left in
-                # Redis while the sender goes on to launch its send -- and an
-                # unmatched send desynchronises the pair's ordered stream for
-                # every transfer after it.  Report it so the caller can abort
-                # the pair rather than silently mispair the next payload.
-                late = self._consume_reply(resp_key)
+                # Redis while the sender launches its send. An unmatched send
+                # desynchronises the ordered stream; report ambiguity so the
+                # caller terminates instead of mispairing the next payload.
+                try:
+                    cancelled = self.respond(
+                        resp_key=resp_key, status=TransferStatus.CANCELLED
+                    )
+                except Exception as exc:
+                    raise TransportUnusableError(
+                        "Cannot establish whether payload request was accepted"
+                    ) from exc
+                late = None if cancelled else self._consume_reply(resp_key)
                 logger.debug(
                     "[NcclRendezvous] transfer %s timed out after %.3fs; "
                     "cancelling (late reply: %s)",
@@ -335,7 +342,15 @@ class NcclRendezvous:
                 return RendezvousResult(
                     TransferStatus.CANCELLED,
                     uid_chars,
-                    late_accept=late is TransferStatus.ACCEPTED,
+                    late_accept=not cancelled
+                    and late
+                    not in (
+                        TransferStatus.MISSING,
+                        TransferStatus.NEED_UID,
+                        TransferStatus.CANCELLED,
+                    ),
+                    response_key=resp_key,
+                    deadline=deadline,
                 )
             self._sleep(self._poll_interval)
 
@@ -343,29 +358,80 @@ class NcclRendezvous:
         raw = self._safe_get(resp_key)
         if raw is None:
             return None
-        self._safe_delete(resp_key)
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("utf-8", errors="replace")
         try:
-            return TransferStatus(raw)
+            status = TransferStatus(raw)
+            return None if status is TransferStatus.REQUESTED else status
         except ValueError:
-            logger.warning(
-                "[NcclRendezvous] unrecognized reply %r; treating as missing", raw
-            )
-            return TransferStatus.MISSING
+            raise TransportUnusableError(f"Invalid transfer outcome: {raw!r}")
 
     # ------------------------------------------------------------------
     # Sender side
     # ------------------------------------------------------------------
 
-    def respond(self, *, resp_key: str, status: TransferStatus) -> None:
-        """Write the sender's terminal reply for a request.
+    def respond(self, *, resp_key: str, status: TransferStatus) -> bool:
+        """Atomically advance one operation, returning whether this call won."""
+        expected = (
+            TransferStatus.ACCEPTED
+            if status in (TransferStatus.COMPLETE, TransferStatus.FAILED)
+            else TransferStatus.REQUESTED
+        )
+        # Keep the original whole-operation TTL. Duplicate requests/replies
+        # cannot accept twice or overwrite cancellation/terminal completion.
+        return bool(
+            self._redis.eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+                "redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL'); return 1 end; return 0",
+                1,
+                resp_key,
+                expected.value,
+                status.value,
+            )
+        )
 
-        Idempotent from the receiver's perspective: the receiver clears
-        ``resp_key`` before each attempt and deletes on read, so a stale
-        reply from an abandoned attempt is discarded.
+    def check_failure(self, response_key):
+        if response_key and self._consume_reply(response_key) is TransferStatus.FAILED:
+            raise TransportUnusableError("Peer reported accepted transfer failure")
+
+    def watch_operation(self, response_key, operation):
+        """Observe peer failure even while the native caller is blocked.
+
+        One batched observer per rendezvous, not one Redis polling thread per
+        payload. Its I/O can never delay the operation's independent hard timer.
+        Closed operations are pruned and the daemon exits when no work remains.
         """
-        self._safe_set(resp_key, status.value, ex=self._resp_ttl_s)
+        with self._watch_lock:
+            self._watched[response_key] = operation
+            if self._watcher is None:
+                self._watcher = threading.Thread(
+                    target=self._watch_operations,
+                    daemon=True,
+                    name="payload-peer-outcomes",
+                )
+                self._watcher.start()
+
+    def _watch_operations(self):
+        while True:
+            with self._watch_lock:
+                self._watched = {
+                    key: op for key, op in self._watched.items() if op.active
+                }
+                if not self._watched:
+                    self._watcher = None
+                    return
+                pending = list(self._watched.items())
+            try:
+                outcomes = self._redis.mget([key for key, _op in pending])
+            except Exception:
+                outcomes = ()  # each operation still has its independent deadline
+            for (_key, op), outcome in zip(pending, outcomes):
+                if outcome in (
+                    TransferStatus.FAILED.value,
+                    TransferStatus.FAILED.value.encode(),
+                ):
+                    op.fail("peer reported accepted transfer failure")
+            time.sleep(0.05)
 
     def read_uid(self, uid_key: Optional[str]) -> Optional[List[int]]:
         """Sender-side: read the pair unique-ID the receiver published."""

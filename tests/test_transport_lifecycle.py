@@ -103,8 +103,14 @@ def test_invalid_close_deadline_does_not_start_cleanup(timeout):
     cleanup.assert_called_once()
 
 
-def test_ucxx_pending_server_retains_listeners_and_buffer():
+def test_ucxx_pending_server_retains_listeners_and_buffer(monkeypatch):
     from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXBuffer
+    from cosmos_rl.utils.payload_transport.ucxx import operation
+    from cosmos_rl.utils.transport_failure import TransportUnusableError
+
+    failures = []
+    monkeypatch.setattr(operation, "fail_transport", failures.append)
+    monkeypatch.setattr(operation, "_TERMINAL_OPERATIONS", [])
 
     buffer = UCXXBuffer.__new__(UCXXBuffer)
     buffer._buffer = Mock()
@@ -115,15 +121,17 @@ def test_ucxx_pending_server_retains_listeners_and_buffer():
     buffer._server_threads = [thread]
     buffer._listeners = [listener]
     buffer._ports = [1234]
-    with pytest.raises(TimeoutError, match="remain active"):
+    with pytest.raises(TransportUnusableError, match="remain active"):
         buffer.stop_server(timeout=0)
     assert buffer._server_threads == [thread]
     assert buffer._listeners == [listener]
     listener.close.assert_not_called()
     buffer._buffer.close.assert_not_called()
     thread.is_alive.return_value = False
-    buffer.stop_server()
-    listener.close.assert_called_once()
+    with pytest.raises(TransportUnusableError):
+        buffer.stop_server()
+    listener.close.assert_not_called()
+    assert failures
 
 
 def test_ucxx_failed_join_prevents_context_reset_and_buffer_release(monkeypatch):
@@ -159,18 +167,28 @@ def test_ucxx_partial_start_resets_context_before_freeing_buffer(monkeypatch):
     ]
 
 
-def test_ucxx_client_retains_endpoint_when_close_fails():
+def test_ucxx_client_retains_endpoint_when_close_fails(monkeypatch):
     from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXClient
+    from cosmos_rl.utils.payload_transport.ucxx import operation
+    from cosmos_rl.utils.transport_failure import TransportUnusableError
+
+    monkeypatch.setattr(operation, "fail_transport", Mock())
+    monkeypatch.setattr(operation, "_TERMINAL_OPERATIONS", [])
 
     client = UCXXClient.__new__(UCXXClient)
+    client._failure = None
+    client._closing = False
+    client._operations = set()
     endpoint = Mock(close=AsyncMock(side_effect=RuntimeError("endpoint busy")))
     client._pool = {("host", 123): deque([endpoint])}
-    with pytest.raises(RuntimeError, match="endpoint busy"):
+    endpoint._ep = SimpleNamespace(raise_on_error=Mock())
+    with pytest.raises(TransportUnusableError, match="endpoint busy"):
         asyncio.run(client.close())
     assert list(client._pool[("host", 123)]) == [endpoint]
     endpoint.close.side_effect = None
-    asyncio.run(client.close())
-    assert client._pool == {}
+    with pytest.raises(TransportUnusableError):
+        asyncio.run(client.close())
+    assert list(client._pool[("host", 123)]) == [endpoint]
 
 
 def test_ucxx_strategy_retains_client_and_propagates_close_failure():
@@ -228,7 +246,7 @@ def test_producer_partial_setup_rolls_back_and_preserves_original_error(monkeypa
         producer.setup_nccl()
     assert raised.value is failure
     producer._nccl_registry.clear.assert_called_once()
-    producer._nccl_comm_cache.abort_all.assert_called_once()
+    producer._nccl_comm_cache.close.assert_called_once()
     producer.cleanup_nccl()
     producer._nccl_registry.clear.assert_called_once()
 

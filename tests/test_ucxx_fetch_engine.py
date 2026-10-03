@@ -265,13 +265,11 @@ class _ExplodingPinned:
         raise RuntimeError("bulk D2H failed")
 
 
-class TestToGpuFallback(unittest.TestCase):
-    def test_falls_back_to_per_tensor_copy_and_still_returns_the_pinned_buffer(
+class TestCpuCopyOwnership(unittest.TestCase):
+    def test_cpu_copy_is_independent_and_returns_the_pinned_buffer(
         self,
     ):
-        # The bulk path is an optimisation; when it fails the episode must still
-        # be delivered -- and the pinned buffer must go back to the pool either
-        # way, or the client leaks one per failed fetch.
+        # CPU copies do not call CUDA or retain views into pooled pinned storage.
         pinned = _ExplodingPinned()
         payload = _payload()
         payload["_pinned_buf"] = pinned
@@ -281,6 +279,8 @@ class TestToGpuFallback(unittest.TestCase):
         data = _fetch(p, [_meta(slot=1)])["10.0.0.1:7000:1"]
         self.assertEqual(data[OBSERVATIONS].shape[0], 3)  # delivered anyway
         self.assertEqual(client.returned_pinned, [pinned], "pinned buffer leaked")
+        payload[OBSERVATIONS][:] = 9
+        self.assertTrue(torch.all(data[OBSERVATIONS] == 1))
 
 
 class TestSyncFetchContainment(unittest.TestCase):

@@ -24,6 +24,7 @@ transport-driven ``_setup_nccl_data_packer`` invocation.
 import unittest
 from types import SimpleNamespace
 from typing import Any, List
+from cosmos_rl.utils.transport_failure import TransportUnusableError
 from unittest import mock
 
 from cosmos_rl.utils.payload_transport.nccl.data_packer_mixin import (
@@ -129,7 +130,7 @@ class TestShutdownAbortsBeforeJoin(unittest.TestCase):
     def _packer(self, aborted):
         p = _Packer()
         p._nccl_dp_comm_cache = SimpleNamespace(
-            abort_all=lambda: aborted.append("abort_all")
+            close=lambda: aborted.append("abort_all")
         )
         return p
 
@@ -169,7 +170,7 @@ class TestShutdownAbortsBeforeJoin(unittest.TestCase):
             raise RuntimeError("nccl_abort exploded")
 
         p = _Packer()
-        p._nccl_dp_comm_cache = SimpleNamespace(abort_all=_boom)
+        p._nccl_dp_comm_cache = SimpleNamespace(close=_boom)
         p.shutdown_nccl_data_packer()  # must not raise
         self.assertFalse(p._prefetch_enabled)
 
@@ -519,23 +520,22 @@ class TestRecvFailureIsolation(unittest.TestCase):
         with mock.patch.object(
             pynccl_mod, "nccl_recv", mock.Mock(side_effect=RuntimeError("boom"))
         ):
-            results, nbytes, _ = p._fetch_all([(0, _ref())])
-        return results, cache, aborted
+            with self.assertRaises(TransportUnusableError):
+                p._fetch_all([(0, _ref())])
+        return cache, aborted
 
     def test_warm_pair_failure_isolated_and_quarantined(self):
-        results, cache, aborted = self._run(warm=True)
-        self.assertEqual(results, {})
-        self.assertTrue(cache.is_quarantined(("rA", 0)))  # warm -> quarantined
-        self.assertEqual(aborted, [55])  # its comm aborted
+        cache, aborted = self._run(warm=True)
+        self.assertIn(("rA", 0, 0), cache)
+        self.assertEqual(aborted, [])  # terminal owner retains native operands
 
     def test_warming_pair_failure_not_quarantined_but_resynced(self):
-        results, cache, aborted = self._run(warm=False)
-        self.assertEqual(results, {})
+        cache, aborted = self._run(warm=False)
         self.assertFalse(cache.is_quarantined(("rA", 0)))  # warming -> no cooldown
         # ...but the comm still goes, so the accepted-yet-unreceived send
         # cannot be taken by the next recv on this pair.
-        self.assertNotIn(("rA", 0, 0), cache)
-        self.assertEqual(aborted, [55])
+        self.assertIn(("rA", 0, 0), cache)
+        self.assertEqual(aborted, [])
 
 
 class TestRecvLaunchSerialized(unittest.TestCase):
@@ -577,7 +577,8 @@ class TestRecvLaunchSerialized(unittest.TestCase):
             raise RuntimeError("stop after lock check")
 
         with mock.patch.object(pynccl_mod, "nccl_recv", mock.Mock(side_effect=_recv)):
-            p._fetch_all([(0, _ref())])
+            with self.assertRaises(TransportUnusableError):
+                p._fetch_all([(0, _ref())])
 
         self.assertEqual(held, [True])  # launch happened WITH the lock held
         self.assertFalse(p._recv_lock.locked())  # released afterwards
@@ -608,7 +609,8 @@ class TestRecvLaunchSerialized(unittest.TestCase):
         with mock.patch.object(
             pynccl_mod, "nccl_recv", mock.Mock(side_effect=RuntimeError("x"))
         ):
-            p._fetch_all([(0, _ref())])  # must not raise TypeError
+            with self.assertRaises(TransportUnusableError):
+                p._fetch_all([(0, _ref())])  # not TypeError, lock exists
         self.assertIsNotNone(p._recv_lock)  # lazily created
 
 
@@ -646,22 +648,20 @@ class TestRecvSyncFailureContained(unittest.TestCase):
         p._rendezvous_one = lambda ref, pynccl: (0, torch.zeros(4, dtype=torch.uint8))
 
         bad_stream = mock.Mock()
-        bad_stream.synchronize.side_effect = RuntimeError("peer never sent")
+        bad_stream.query.side_effect = RuntimeError("peer never sent")
 
         with (
             mock.patch.object(pynccl_mod, "nccl_recv", mock.Mock()),
-            mock.patch.object(dpm, "record_event", lambda stream=None: object()),
+            mock.patch.object(dpm, "record_event", lambda stream=None: bad_stream),
             mock.patch.object(dpm, "wait_event", lambda s, e: None),
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch("torch.cuda.current_stream", return_value=bad_stream),
         ):
-            results, nbytes, _ = p._fetch_all([(0, _ref())])
+            with self.assertRaises(TransportUnusableError):
+                p._fetch_all([(0, _ref())])
 
-        self.assertEqual(results, {})  # batch dropped to fallback, NO raise
-        self.assertEqual(nbytes, 0)
-        self.assertTrue(cache.is_quarantined(("rA", 0)))  # dead pair quarantined
-        self.assertEqual(aborted, [9])  # its comm aborted
-        self.assertNotIn(("rA", 0, 0), cache)  # comm removed
+        self.assertEqual(aborted, [])
+        self.assertIn(("rA", 0, 0), cache)  # retained until terminal process exit
 
 
 class TestReceiverRenegotiation(unittest.TestCase):
@@ -704,6 +704,7 @@ class TestReceiverRenegotiation(unittest.TestCase):
         # attempt 2: aborted -> need_uid=True -> ACCEPTED -> comm rebuilt.
         self.assertEqual(rv.need_uids, [False, True])
         self.assertIsNotNone(out)
+        out.operation.close()
 
 
 class TestSetupViaTransportAttach(unittest.TestCase):
@@ -969,14 +970,19 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         p._rendezvous_one = fake_rendezvous
         with (
             mock.patch.object(pynccl_mod, "nccl_recv", fake_recv),
-            mock.patch.object(dpm, "record_event", lambda stream=None: object()),
+            mock.patch.object(dpm, "record_event", lambda stream=None: None),
             mock.patch.object(dpm, "wait_event", lambda s, e: None),
             mock.patch.object(dpm, "_unpack", lambda b, s, d: {"ok": True}),
             # Pin the completion path off so the assertion is the call order,
             # not whether the host running the suite has a GPU.
             mock.patch("torch.cuda.is_available", return_value=False),
         ):
-            results, _nbytes, _ms = p._fetch_all(refs)
+            if failing_recv:
+                with self.assertRaises(TransportUnusableError):
+                    p._fetch_all(refs)
+                results = None
+            else:
+                results, _nbytes, _ms = p._fetch_all(refs)
         return events, results
 
     def test_recv_posted_before_the_next_same_producer_rendezvous(self):
@@ -995,12 +1001,8 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         )
         self.assertEqual(sorted(results), [0, 1])
 
-    def test_recv_enqueue_failure_still_negotiates_the_rest_and_unpins(self):
-        """A failed enqueue isolates that pair; it must not leak its pin.
-
-        The ref is recorded for cleanup BEFORE its recv is attempted, so the
-        ``finally`` unpins the comm even when the enqueue raises.
-        """
+    def test_recv_enqueue_failure_stops_negotiation_and_retains_pins(self):
+        """A failed enqueue is terminal and retains uncertain native owners."""
 
         class _UnpinRecordingCache:
             """Enough of CommCache to be a fair stand-in: a comm can be looked
@@ -1026,24 +1028,11 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
             [(0, self._ref("0:first")), (1, self._ref("0:second"))],
             failing_recv="0:first",
         )
-        self.assertEqual(
-            events,
-            [
-                ("rendezvous", "0:first"),
-                ("recv", "0:first"),
-                ("rendezvous", "0:second"),
-                ("recv", "0:second"),
-            ],
-        )
-        # NEITHER resolves.  Both refs are on the same pair, so the abort that
-        # isolates the first ref's failure also kills the comm the second was
-        # already posted on -- its enqueue succeeded, so nothing raised for it,
-        # but NCCL will never write its buffer.  It is dropped rather than
-        # unpacked as uninitialised memory.  Both fall through to the
-        # synchronous per-ref retry.
-        self.assertEqual(sorted(results), [])
-        # ...and BOTH pins are still released.
-        self.assertEqual(len(p._comm_cache.unpinned), 2)
+        self.assertEqual(events, [("rendezvous", "0:first"), ("recv", "0:first")])
+        # Neither resolves: the first failure terminates before negotiating
+        # the second. No synchronous fallback or optimistic unpin is allowed.
+        self.assertIsNone(results)
+        self.assertEqual(len(p._comm_cache.unpinned), 0)
 
 
 if __name__ == "__main__":

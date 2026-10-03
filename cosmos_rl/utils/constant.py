@@ -126,6 +126,10 @@ def _resolve_rollout_mesh_build_timeout_ms() -> int:
 
 
 COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS = _resolve_rollout_mesh_build_timeout_ms()
+# Application readiness is distinct from native communicator construction.
+COSMOS_P2R_READY_TIMEOUT_S = float(os.environ.get("COSMOS_P2R_READY_TIMEOUT_S", "600"))
+if not 0 < COSMOS_P2R_READY_TIMEOUT_S < float("inf"):
+    raise ValueError("COSMOS_P2R_READY_TIMEOUT_S must be finite and positive")
 COSMOS_P2R_NCCL_GROUP_SIZE = int(os.environ.get("COSMOS_P2R_NCCL_GROUP_SIZE", "0"))
 
 

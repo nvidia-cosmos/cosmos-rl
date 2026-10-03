@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+from contextlib import nullcontext
 import time
 import threading
 from functools import partial
@@ -43,8 +44,7 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_comm,
     nccl_broadcast,
     nccl_recv,
-    nccl_group_start,
-    nccl_group_end,
+    nccl_group,
 )
 
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
@@ -498,22 +498,23 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 self.policy_to_rollout_recv_insts,
                 p2r_group_size,
             ):
-                if p2r_group_size > 0:
-                    nccl_group_start(communicator_index)
-                for insts_group in sync_round:
-                    # insts_group: WeightSyncInstructionsGroup -> inst
-                    # collection for a full weight tensor.
-                    bytes_received, completion_fn = self.recv_weight_shard(
-                        self.global_rank,
-                        insts_group,
-                        communicator_index,
-                        command.do_weight_sync_check,
-                    )
-                    pending_bytes[0] += bytes_received
-                    pending_completions.append(completion_fn)
-                    total_bytes_received += bytes_received
-                if p2r_group_size > 0:
-                    nccl_group_end(communicator_index)
+                with (
+                    nccl_group(communicator_index)
+                    if p2r_group_size > 0
+                    else nullcontext()
+                ):
+                    for insts_group in sync_round:
+                        # insts_group: WeightSyncInstructionsGroup -> inst
+                        # collection for a full weight tensor.
+                        bytes_received, completion_fn = self.recv_weight_shard(
+                            self.global_rank,
+                            insts_group,
+                            communicator_index,
+                            command.do_weight_sync_check,
+                        )
+                        pending_bytes[0] += bytes_received
+                        pending_completions.append(completion_fn)
+                        total_bytes_received += bytes_received
                 flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):
