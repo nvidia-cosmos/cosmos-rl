@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+import threading
 from cosmos_rl.utils import constant, teacher_channel
 import redis
-from redis.backoff import NoBackoff
-from redis.retry import Retry
-from datetime import datetime
 from cosmos_rl.utils.constant import (
     RedisStreamConstant,
     COSMOS_HTTP_RETRY_CONFIG,
@@ -28,6 +27,9 @@ from typing import List, Dict
 from cosmos_rl.utils.network_util import make_request_with_retry
 from functools import partial
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.redis_publication import PublicationPlan
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 import enum
 import msgpack
 
@@ -80,6 +82,9 @@ class RedisStreamHandler:
                     protocol=2,
                 )
             )
+        self._publication_lock = threading.Lock()
+        self._publication_failure = None
+        self._publication_server_id = None
         self.latest_id_command = "0-0"
         self.latest_id_rollout = "0-0"
         # Teacher request related
@@ -167,24 +172,58 @@ class RedisStreamHandler:
         Returns:
             str: The ID of the added stream entry.
         """
-        message = {"command": data, "timestamp": datetime.now().isoformat()}
-        # Add message to stream
-        try:
-            make_request_with_retry(
-                self.requests_for_alternative_clients(
-                    RedisOpType.XADD,
-                    stream_name + "_command",
-                    message,
-                    maxlen=RedisStreamConstant.STREAM_MAXLEN,
-                ),
-                response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-        except Exception as e:
-            logger.error(
-                f"[Redis] Failed to write to Redis stream {stream_name}_command: {e}"
-            )
-            raise e
+        return self.publish_plan(
+            PublicationPlan.create(((stream_name + "_command", "command", data),))
+        )[0]
+
+    def publish_plan(self, plan: PublicationPlan):
+        """Publish/retry one sealed operation; never regenerate it on lost reply.
+
+        Finite socket timeouts also bound a single native Redis call. Once the
+        outcome cannot be established, refuse later publications from this
+        controller rather than silently proceeding past a partial dispatch.
+        """
+        with self._publication_lock:
+            if self._publication_failure is not None:
+                raise RuntimeError(
+                    "Redis publication is terminally failed"
+                ) from self._publication_failure
+            try:
+                last_error = None
+                local_deadline = time.monotonic() + max(0, plan.deadline - time.time())
+                while time.monotonic() < local_deadline:
+                    for client in self.redis_clients:
+                        if time.monotonic() >= local_deadline:
+                            break
+                        try:
+                            if self._publication_server_id is None:
+                                # Markers must not be evicted while live. Restart
+                                # is checked atomically inside the Lua operation.
+                                if (
+                                    client.config_get("maxmemory-policy").get(
+                                        "maxmemory-policy"
+                                    )
+                                    != "noeviction"
+                                ):
+                                    raise ValueError(
+                                        "Idempotent publication requires Redis noeviction"
+                                    )
+                                self._publication_server_id = client.info("server")[
+                                    "run_id"
+                                ]
+                            bound = plan.for_server(self._publication_server_id)
+                            return bound.publish(
+                                client, maxlen=RedisStreamConstant.STREAM_MAXLEN
+                            )
+                        except (redis.ConnectionError, redis.TimeoutError) as error:
+                            last_error = error
+                    time.sleep(min(0.05, max(0, local_deadline - time.monotonic())))
+                raise TimeoutError(
+                    "Redis publication deadline expired; outcome is unknown"
+                ) from last_error
+            except Exception as error:
+                self._publication_failure = error
+                raise
 
     def subscribe_command(self, stream_name: str) -> List[Dict]:
         """
@@ -238,24 +277,9 @@ class RedisStreamHandler:
         Returns:
             str: The ID of the added stream entry.
         """
-        message = {"rollout": data, "timestamp": datetime.now().isoformat()}
-        # Add message to stream
-        try:
-            make_request_with_retry(
-                self.requests_for_alternative_clients(
-                    RedisOpType.XADD,
-                    stream_name + "_rollout",
-                    message,
-                    maxlen=RedisStreamConstant.STREAM_MAXLEN,
-                ),
-                response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-        except Exception as e:
-            logger.error(
-                f"[Redis] Failed to write to Redis stream {stream_name}_rollout: {e}"
-            )
-            raise e
+        return self.publish_plan(
+            PublicationPlan.create(((stream_name + "_rollout", "rollout", data),))
+        )[0]
 
     def subscribe_rollout(self, stream_name: str, count: int = -1) -> List[Dict]:
         """

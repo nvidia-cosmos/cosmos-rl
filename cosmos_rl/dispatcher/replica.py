@@ -25,6 +25,8 @@ from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
 from cosmos_rl.dispatcher.data.schema import Rollout
+from cosmos_rl.dispatcher.receipt import OrderedReceipt
+from cosmos_rl.dispatcher.reservations import ProducerReservations
 
 
 @dataclass
@@ -50,6 +52,7 @@ class Atom:
     trace_path: Optional[str]
     group_size: List[int]
     rollout_: asyncio.Queue[Rollout]
+    validation_reporter: Optional[bool]
 
     def __init__(
         self,
@@ -60,6 +63,9 @@ class Atom:
         ranks: List[int],
         group_size: List[int],
         replica_name: str,
+        validation_reporter: Optional[bool] = None,
+        report_session_id: Optional[str] = None,
+        rollout_reporter: Optional[bool] = None,
     ):
         self.ranks = ranks
         self.group_size = group_size
@@ -70,6 +76,14 @@ class Atom:
         self.host_ip = host_ip
         self.host_name = host_name
         self.trace_path = trace_path
+        self.validation_reporter = validation_reporter
+        self.report_session_id = report_session_id
+        self.rollout_reporter = rollout_reporter
+        self.rollout_report_receipt = OrderedReceipt()
+        self.rollout_report_lock = asyncio.Lock()
+        self.rollout_reports_ended = False
+        self.rollout_fetch_receipt = OrderedReceipt()
+        self.rollout_fetch_lock = asyncio.Lock()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -116,6 +130,9 @@ class Atom:
             ranks=request.ranks,
             group_size=request.group_size,
             replica_name=request.replica_name,
+            validation_reporter=request.validation_reporter,
+            report_session_id=request.report_session_id,
+            rollout_reporter=request.rollout_reporter,
         )
 
     def tp_rank(self) -> int:
@@ -189,6 +206,7 @@ class Replica:
 
     def __init__(self, name: str, role: Role, atoms: List[Atom]):
         self.name = name  # Note: name must be unique across all the replicas.
+        self.producer_reservations = ProducerReservations()
         self.role = role
         self.atoms = {str(atom): atom for atom in atoms}
         self.command_queue = asyncio.Queue()
@@ -218,7 +236,28 @@ class Replica:
         return self.atoms[str(ranks)]
 
     def arrive(self, atom: Atom):
-        assert str(atom) not in self.atoms, f"Atom {atom} already exists"
+        previous = self.atoms.get(str(atom))
+        if previous is not None:
+            # A response lost after registration must not repeat mesh/weight
+            # commands. Trace paths may legitimately change after registration;
+            # identity/topology and process location may not.
+            identity = (
+                "global_rank",
+                "ranks",
+                "group_size",
+                "host_ip",
+                "host_name",
+                "replica_name",
+                "validation_reporter",
+                "report_session_id",
+                "rollout_reporter",
+            )
+            if any(getattr(previous, key) != getattr(atom, key) for key in identity):
+                raise ValueError(
+                    f"Atom {atom} registration changed identity or topology"
+                )
+            atom.bind_replica(self)
+            return False
         # Verify group size is consistent with existing atoms
         if len(self.atoms) > 0:
             existing_atom = next(iter(self.atoms.values()))
@@ -254,6 +293,7 @@ class Replica:
             assert tp_size * cp_size * dp_shard_size * pp_size == len(self.atoms), (
                 f"Group sizes must be consistent with the number of atoms, got {tp_size} * {cp_size} * {dp_shard_size} * {pp_size} = {tp_size * cp_size * dp_shard_size * pp_size} and {len(self.atoms)}"
             )
+        return True
 
     def n_atoms_per_replica(self) -> int:
         """

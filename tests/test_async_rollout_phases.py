@@ -164,6 +164,8 @@ def phase_worker(scheduler, train_packer):
     worker.val_batch_size = 2
     worker.should_report = True
     worker.replica_name = "rollout-test"
+    worker.global_rank = 0
+    worker.validation_round_id = "validation-test-round"
     worker.is_diffusers = False
     worker.config = SimpleNamespace(
         validation=SimpleNamespace(n_generation=1),
@@ -228,7 +230,10 @@ def test_validation_preserves_generation_version_after_later_adoption(
     worker.request_new_prompts = fetch
     worker.reward_dispatcher.enqueue_rewards_cal = reward
     worker.do_validation()
-    report = worker.api_client.post_validation_report.call_args.args[0]
+    reports = [
+        call.args[0] for call in worker.api_client.post_validation_report.call_args_list
+    ]
+    report = next(report for report in reports if report.payloads)
     assert report.validation_step == 7
     assert report.payloads[0].weight_version == (3 if result_version is not None else 9)
 

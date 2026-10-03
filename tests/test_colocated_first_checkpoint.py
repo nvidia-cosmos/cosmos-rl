@@ -36,13 +36,16 @@ def test_initial_colocated_command_honors_checkpoint_schedule():
             remain_samples_num=100,
             redis_handler=Mock(),
             training_horizon=lambda: horizon,
+            dispatched_rollouts_by_step={},
+            _seal_training_dispatch=Mock(),
         )
         manager.check_checkpoint_saving = lambda count: (
             PolicyStatusManager.check_checkpoint_saving(manager, count)
         )
         with patch(
-            "cosmos_rl.dispatcher.status.command.DataFetchCommand.trigger"
+            "cosmos_rl.dispatcher.status.command.DataFetchCommand.for_replica"
         ) as emit:
+            emit.return_value.pack.return_value = b"fetch"
             PolicyStatusManager.post_register_hook(
                 manager, [replica], replica, config, Mock()
             )
@@ -84,6 +87,8 @@ def test_initial_colocated_replicas_share_epoch_save_decision_and_metadata():
         samples_per_epoch=32,
         redis_handler=Mock(),
         training_horizon=lambda: 20,
+        dispatched_rollouts_by_step={},
+        _seal_training_dispatch=Mock(),
     )
     manager.check_checkpoint_saving = Mock(
         side_effect=lambda count: PolicyStatusManager.check_checkpoint_saving(
@@ -91,11 +96,14 @@ def test_initial_colocated_replicas_share_epoch_save_decision_and_metadata():
         )
     )
     with (
-        patch("cosmos_rl.dispatcher.status.command.DataFetchCommand.trigger") as emit,
+        patch(
+            "cosmos_rl.dispatcher.status.command.DataFetchCommand.for_replica"
+        ) as emit,
         patch(
             "cosmos_rl.dispatcher.status.command.PolicyToPolicyBroadcastCommand.trigger"
         ),
     ):
+        emit.return_value.pack.return_value = b"fetch"
         PolicyStatusManager.post_register_hook(
             manager, replicas, replicas[-1], config, Mock()
         )

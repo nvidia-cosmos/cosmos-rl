@@ -94,6 +94,8 @@ class MockAPIClient(APIClient):
         global_rank: int,
         host_ip: str,
         host_name: str,
+        validation_reporter: Optional[bool] = None,
+        rollout_reporter: Optional[bool] = None,
     ):
         logger.info(
             f"[MockAPIClient] Register: {replica_name}, {role}, {mesh_names}, {ranks}, {group_size}, {global_rank}, {host_ip}, {host_name}"
@@ -107,6 +109,7 @@ class MockAPIClient(APIClient):
         batch_size: int,
         validation_step: Optional[int] = None,
         rank_in_mesh: Optional[int] = None,
+        **validation_identity,
     ) -> Tuple[List[Tuple[int, str]], bool]:
         # masked validation_step for testing
         validation_step = None
@@ -380,6 +383,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         try:
             worker.lazy_initialize_rollout_engine("auto")
             worker.current_step = 1
+            worker.validation_round_id = "test-validation-round"
             worker.do_validation()
 
             self.assertEqual(

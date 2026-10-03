@@ -43,7 +43,8 @@ from cosmos_rl.utils.constant import (
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.rollout_base import RolloutRegistry, RolloutBase
 from cosmos_rl.rollout.prompt_batch import PromptBatch, required_weight_version
-from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
+from cosmos_rl.dispatcher.protocol import RolloutRequest
+from cosmos_rl.rollout.validation import ValidationSession, validation_round_for_command
 from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
@@ -77,6 +78,11 @@ from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.dispatcher import RewardDispatcher
 from cosmos_rl.reward.identity import CompletionReporter
+from cosmos_rl.reward.reservations import (
+    attach_training_rejections,
+    discarded_training_slots,
+    select_training_slots,
+)
 from cosmos_rl.reward.admission import (
     apply_rollout_result_to_payload,
     consume_completion_admission_metrics,
@@ -283,6 +289,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         self.temp_recv_tensor_queue = Queue()
         self.misc_params = set()
         self.validation_flag = threading.Event()
+        self.validation_round_id = None
         self.reward_dispatcher = RewardDispatcher(
             payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
         )
@@ -1230,8 +1237,22 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
 
     def do_validation(self):
+        if self.validation_round_id is not None and self.validation_round_id == getattr(
+            self, "_completed_validation_round_id", None
+        ):
+            if self.current_step != self._completed_validation_step:
+                raise ValueError("Validation retry changed its step")
+            self.validation_flag.clear()
+            return
         if self._is_async_rollout:
             self._drain_async_training_for_validation()
+        self._validation_session = ValidationSession(
+            self.api_client,
+            self.validation_round_id,
+            self.current_step,
+            self.replica_name,
+            self.global_rank,
+        )
         validation_queue = Queue()
         validation_payloads: List[RLPayload] = []
         is_end = False
@@ -1338,22 +1359,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self._is_async_rollout and not rollout_results:
                 time.sleep(self.scheduler.check_interval)
 
-        # Clear the flag to indicate validation is done.
-        self.validation_flag.clear()
-
-        if self.should_report:
-            if not validation_payloads:
-                # No reward task exists for an empty reporting rank. It still
-                # owes the controller a terminal validation report.
-                self.api_client.post_validation_report(
-                    ValidationReportRequest(
-                        src_replica_name=self.replica_name,
-                        validation_step=self.current_step,
-                        payloads=[],
-                        is_end=True,
-                    )
-                )
-                return
+        if self.should_report and validation_payloads:
             self.reward_dispatcher.enqueue_rewards_cal(
                 validation_payloads, True, self.current_step
             )
@@ -1382,16 +1388,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         if self.is_diffusers:
                             payloads[i].extra_info = None
 
-                    response = ValidationReportRequest(
-                        src_replica_name=self.replica_name,
-                        validation_step=current_step,
-                        payloads=payloads,
-                        is_end=True,
-                    )
-                    self.api_client.post_validation_report(response)
+                    if current_step != self._validation_session.step:
+                        raise ValueError("Validation reward belongs to another step")
+                    self._validation_session.report(payloads)
                 payloads, is_validation, current_step, empty = (
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
+        if self.should_report:
+            # Empty reporting ranks owe the same identified terminal receipt,
+            # but have no reward task to enqueue or drain.
+            self._validation_session.report([], is_end=True)
+        self._completed_validation_round_id = self.validation_round_id
+        self._completed_validation_step = self.current_step
+        self.validation_flag.clear()
 
     def _start_async_rollout_scheduler(self, load_format):
         """
@@ -1863,11 +1872,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     is_initial_validation
                     or is_periodic_validation
                     or is_final_validation
+                    or bool(getattr(broadcast_command, "validation_round_id", None))
                 )
 
                 if should_do_validation:
                     self.current_step = current_step
-                    self.validation_flag.set()
+                    self.validation_round_id = validation_round_for_command(
+                        broadcast_command
+                    )
+                    if self.validation_round_id is not None:
+                        self.validation_flag.set()
 
             if broadcast_command.replica_should_stop():
                 # This handler may run inside an inference-step callback. The
@@ -1982,6 +1996,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         rank stays in lockstep regardless of this value.
         """
         prompts_and_is_end = (None, False)
+        validation_fetch_error = None
         if self.global_rank == 0:
             # request new prompts for all ranks from controller only on global rank 0
             # this is to avoid getting different number of prompts at different ranks
@@ -1994,9 +2009,27 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if prompt_queue.qsize() < max_pending_batches:
                     # blocking request to get prompts from controller
                     # batch_size is per data parallel rank so we need to multiply it with data parallel size
-                    payloads, is_end = self.api_client.get_next_prompt(
-                        batch_size * self.parallel_dims.mesh["dp"].size(), **kwargs
-                    )
+                    if kwargs.get("validation_step") is not None:
+                        try:
+                            payloads, is_end = self._validation_session.fetch(
+                                batch_size * self.parallel_dims.mesh["dp"].size(),
+                                rank_in_mesh=kwargs.get("rank_in_mesh"),
+                            )
+                        except Exception as error:
+                            # Use the existing prompt broadcast to make every
+                            # rank leave the fetch together; raising on rank 0
+                            # first would strand peers in that collective.
+                            validation_fetch_error = f"{type(error).__name__}: {error}"
+                            payloads, is_end = [], False
+                    else:
+                        try:
+                            payloads, is_end = self.api_client.get_next_prompt(
+                                batch_size * self.parallel_dims.mesh["dp"].size(),
+                                **kwargs,
+                            )
+                        except Exception as error:
+                            validation_fetch_error = f"{type(error).__name__}: {error}"
+                            payloads, is_end = [], False
 
                     assert all(payload["prompt_idx"] >= 0 for payload in payloads), (
                         "All payloads should have a valid prompt index"
@@ -2037,7 +2070,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     )
 
         # Broadcast the prompts and is_end to all ranks
-        prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        prompts_and_is_end, validation_fetch_error = dist_utils.broadcast_object_cpu(
+            (prompts_and_is_end, validation_fetch_error)
+        )
+        if validation_fetch_error is not None:
+            phase = (
+                "Validation"
+                if kwargs.get("validation_step") is not None
+                else "Training"
+            )
+            raise RuntimeError(f"{phase} prompt fetch failed: {validation_fetch_error}")
         global_prompts, _ = prompts_and_is_end
         batch_version = (
             required_weight_version(global_prompts) if global_prompts else None
@@ -2230,6 +2272,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if is_validation:
                     break
 
+                reservation_payloads = list(payloads)
                 identified_payloads = (
                     list(payloads)
                     if getattr(self, "completion_reporter", None) is not None
@@ -2276,6 +2319,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     )
                     self._post_identified_report(response)
                 else:
+                    attach_training_rejections(response, reservation_payloads)
                     self.api_client.post_rollout_completion(response)
             elif not block or empty:
                 break
@@ -2456,8 +2500,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         while not self.shutdown_signal.is_set():
             self._raise_prefetch_error()
+            self._raise_training_fetch_error()
             self.consume_command(cmd_pred=None)
             self._raise_prefetch_error()
+            self._raise_training_fetch_error()
 
             # Adopt WST updates before processing validation/shutdown on the
             # main thread. Synchronous callbacks defer these actions here too.
@@ -2637,6 +2683,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     if self.should_report:
                         self.send_end_signal()
         self._raise_prefetch_error()
+        self._raise_training_fetch_error()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def _raise_prefetch_error(self):
@@ -2644,8 +2691,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if error is not None:
             raise RuntimeError("Rollout prompt producer failed") from error
 
+    def _raise_training_fetch_error(self):
+        # A finite HTTP failure is permanent for this receipt stream. Surface
+        # it on the consumer too, even when the background producer owns fetch.
+        if getattr(self.api_client, "training_fetch_failed", False) is True:
+            raise RuntimeError("Training prompt fetch failed; source cannot continue")
+
     def _report_discarded_samples(
-        self, count: int, weight_version: Optional[int] = None
+        self,
+        count: int,
+        weight_version: Optional[int] = None,
+        *,
+        training_rejections=None,
     ) -> None:
         """Report fetched samples that terminated without trainable results."""
         if getattr(self, "completion_reporter", None) is not None:
@@ -2667,6 +2724,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 DISCARDED_WEIGHT_VERSION_KEY: weight_version,
             },
             is_end=False,
+            training_rejections=training_rejections or [],
         )
         if not self.api_client.post_rollout_completion(response):
             logger.error(
@@ -2698,7 +2756,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             for payload, rr in zip(payloads_list, rollout_results):
                 if rr.completions is not None and len(rr.completions) > 0:
                     valid_result.append(rr)
-                    valid_payloads_list.append(payload)
+                    valid_payloads_list.append(
+                        select_training_slots(payload, list(range(len(rr.completions))))
+                    )
         elif self.config.rollout.multi_turn_config.enable:
             partially_discarded_samples = 0
             for payload, rr in zip(payloads_list, rollout_results):
@@ -2736,7 +2796,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     partially_discarded_samples += len(valid_indices)
                     continue
                 valid_result.append(selected_result)
-                valid_payloads_list.append(payload)
+                valid_payloads_list.append(
+                    select_training_slots(payload, valid_indices)
+                )
         else:
             # Remove empty completions
             for payload, rr in zip(payloads_list, rollout_results):
@@ -2768,13 +2830,23 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if not skip_output:
                     rr.completions = output_texts
                     valid_result.append(rr)
-                    valid_payloads_list.append(payload)
+                    valid_payloads_list.append(
+                        select_training_slots(
+                            payload, list(range(total_generation_count))
+                        )
+                    )
 
+        rejected_slots = discarded_training_slots(payloads_list, valid_payloads_list)
         self._report_discarded_samples(
-            partially_discarded_samples
-            if partially_discarded_samples is not None
-            else (len(payloads_list) - len(valid_payloads_list))
-            * self.config.rollout.n_generation
+            len(rejected_slots)
+            if all(payload.training_work_id is not None for payload in payloads_list)
+            else (
+                partially_discarded_samples
+                if partially_discarded_samples is not None
+                else (len(payloads_list) - len(valid_payloads_list))
+                * self.config.rollout.n_generation
+            ),
+            training_rejections=rejected_slots,
         )
 
         should_report = self.should_report and len(valid_result) > 0
@@ -2823,7 +2895,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         reporter.generation_failure([payload], "generation_error")
                     )
                 else:
-                    self._report_discarded_samples(self.config.rollout.n_generation)
+                    self._report_discarded_samples(
+                        self.config.rollout.n_generation,
+                        training_rejections=discarded_training_slots([payload], []),
+                    )
                 continue
             size = (
                 len(payload.completion_sequences)
@@ -2834,6 +2909,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 raise ValueError(
                     "Generation must preserve reserved completion slots; mark failures with a mask"
                 )
+            selected = select_training_slots(payload, list(range(size)))
+            missing = discarded_training_slots([payload], [selected])
+            if missing:
+                self._report_discarded_samples(
+                    len(missing), training_rejections=missing
+                )
+            payload = selected
             apply_rollout_result_to_payload(
                 payload,
                 result,
@@ -2930,7 +3012,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         if len(rollout_results) == 0:
             self._report_discarded_samples(
-                len(payloads_list) * self.config.rollout.n_generation
+                len(payloads_list) * self.config.rollout.n_generation,
+                training_rejections=discarded_training_slots(payloads_list, []),
             )
             logger.debug(
                 "[one_step_generation exit] rank=%d elapsed_ms=%.1f "
@@ -3294,6 +3377,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         rank_in_mesh=self.rank_in_rollout_repicas,
                     )
                 except Exception:
+                    self._raise_training_fetch_error()
                     logger.exception("[Rollout] Prefetch fetch failed")
                     # Backoff to avoid hammering an unhealthy
                     # controller.  Re-check shutdown immediately on
@@ -3364,7 +3448,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         finally:
             # Preserve the clean-shutdown contract, but do not disguise failure
             # as exhaustion. The consumer observes the retained exception.
-            if getattr(self, "_prefetch_error", None) is None:
+            if (
+                getattr(self, "_prefetch_error", None) is None
+                and getattr(self.api_client, "training_fetch_failed", False) is not True
+            ):
                 self.state.set_prompt_fetch_end()
 
     def work(self):

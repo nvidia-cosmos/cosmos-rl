@@ -22,13 +22,27 @@ import sys
 from cosmos_rl.utils import network_util
 import toml
 import tempfile
+from pathlib import Path
+import torch
 from subprocess_helpers import wait_all_or_fail, wait_for_controller_ready
 
 
 class TestColocated(unittest.TestCase):
     def test_colocated(self):
+        self.run_colocated()
+
+    def test_final_step_healthy(self):
+        self.run_colocated("healthy")
+
+    def test_final_step_quality_refill(self):
+        self.run_colocated("reject-final-group")
+
+    def test_genuine_exhaustion_checkpoints_last_completed_update(self):
+        self.run_colocated("exhaust-final-group")
+
+    def run_colocated(self, refill_case=None):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
-        world_size = 4
+        world_size = 1 if refill_case else 4
         port = network_util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
@@ -60,6 +74,18 @@ class TestColocated(unittest.TestCase):
         if "logging" not in config:
             config["logging"] = {}
         config["logging"]["logger"] = ["console"]
+        if refill_case:
+            config["train"]["max_num_steps"] = 3
+            config["train"]["train_batch_per_replica"] = 16
+            config["rollout"]["parallelism"]["dp_shard_size"] = world_size
+            config["policy"]["parallelism"]["dp_shard_size"] = world_size
+            config["validation"] = {"enable": False}
+            if refill_case == "exhaust-final-group":
+                config["train"]["output_dir"] = tempfile.mkdtemp(
+                    prefix="colocated-exhaustion-"
+                )
+                config["train"]["ckpt"]["enable_checkpoint"] = True
+                config["train"]["ckpt"]["save_freq"] = 100
 
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
@@ -96,11 +122,14 @@ class TestColocated(unittest.TestCase):
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "utils", "mock_policy_entrance.py"),
             "--test",
-            "colocated",
+            "colocated_final_step_refill" if refill_case else "colocated",
         ]
 
         policy_env = dict(os.environ)
-        policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+        policy_env["CUDA_VISIBLE_DEVICES"] = "0" if refill_case else "0,1,2,3"
+        if refill_case:
+            policy_env["COLOCATED_REFILL_CASE"] = refill_case
+            policy_env["COLOCATED_REFILL_TARGET"] = "1"
         # Start the process
         policy_process0 = subprocess.Popen(
             policy_cmd,
@@ -111,7 +140,10 @@ class TestColocated(unittest.TestCase):
         )
 
         policy_env = dict(os.environ)
-        policy_env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+        policy_env["CUDA_VISIBLE_DEVICES"] = "1" if refill_case else "4,5,6,7"
+        if refill_case:
+            policy_env["COLOCATED_REFILL_CASE"] = refill_case
+            policy_env["COLOCATED_REFILL_TARGET"] = "0"
         # Start the process
         policy_process1 = subprocess.Popen(
             policy_cmd,
@@ -126,6 +158,19 @@ class TestColocated(unittest.TestCase):
         # shutdown. CI can still be making step-1 progress near five minutes.
         # Keep a finite budget and the existing failure/process-tree cleanup.
         wait_all_or_fail(self, processes, timeout_s=600, context="test_colocated")
+        if refill_case == "exhaust-final-group":
+            output = Path(config["train"]["output_dir"])
+            metadata = list(output.rglob("extra_info_rank_0.pth"))
+            self.assertTrue(metadata, "early completion must save a checkpoint")
+            for path in metadata:
+                state = torch.load(path, map_location="cpu", weights_only=False)
+                self.assertEqual(state["step"], 2)
+                self.assertEqual(state["total_steps"], 3)
+                self.assertTrue((path.parent / ".rank_0_complete").is_file())
+                self.assertTrue((path.parent / "model_rank_0.pth").is_file())
+                self.assertTrue((path.parent / "optimizer_rank_0.pth").is_file())
+            self.assertFalse(list(output.rglob("step_3")))
+            print("COLOCATED_EXHAUSTION_ARTIFACT_PASS step=2 horizon=3", flush=True)
 
 
 if __name__ == "__main__":
