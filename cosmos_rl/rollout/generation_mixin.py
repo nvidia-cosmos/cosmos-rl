@@ -39,7 +39,7 @@ When ``config.rollout.prefetch_rollout`` is ``True``, the rollout
 worker's ``_prefetch_loop`` calls :meth:`submit_setup` as soon as it
 hands a new prompt batch to the prompt queue; the mixin runs
 :meth:`_prepare_sample` for each payload on a background thread keyed
-by :meth:`_payload_key` so by the time the consumer hits
+by payload-object identity plus :meth:`_payload_key` so by the time the consumer hits
 :meth:`rollout_generation`, the prepared samples are already done (or
 in flight, in which case the template method simply waits per-future
 just before :meth:`_collate_batch`).  When the flag is ``False``,
@@ -115,9 +115,9 @@ Edge cases
   ``_gather_prepared_samples`` re-raises in the consumer thread, the
   template's ``except`` clause hands the error to
   :meth:`_on_generation_error` (default: log + return ``[]``).
-* Same payload key submitted twice: last writer wins; the previous
-  future is dropped.  The controller doesn't repeat indices in normal
-  flow, but cancellation paths can.
+* Resubmitting the same payload object replaces its previous future. Different
+  objects remain distinct occurrences even when their dataset indices or custom
+  keys match. Payloads must remain unchanged until their preparation is consumed.
 * Cold-start (a payload arrives at ``rollout_generation`` without a
   matching ``submit_setup`` call): falls back to inline preparation
   for that payload only.  This handles the very first batch of a run
@@ -150,10 +150,6 @@ from concurrent.futures import Future
 from typing import Any, Dict, Hashable, List, Optional, Sequence, final
 
 from cosmos_rl.utils.logging import logger as _default_logger
-
-
-# Sentinel passed to the bg worker to ask it to exit cleanly.
-_SHUTDOWN = object()
 
 
 # Stable contract for the per-batch trace line emitted at DEBUG level
@@ -279,16 +275,21 @@ class RolloutGenerationMixin:
         raise NotImplementedError("[RolloutGenerationMixin] _postprocess is required.")
 
     def _payload_key(self, payload: Any) -> Hashable:
-        """Stable cache key for prefetch.  Default: ``prompt_idx`` or ``id()``.
+        """Logical prefetch namespace. Default: ``prompt_idx`` or ``id()``.
 
-        The default is correct for any payload that carries a
-        ``prompt_idx`` attribute (e.g. ``RLPayload``); backends that
-        receive raw dicts override.
+        Backends may override this for raw dictionaries. Logical keys can
+        repeat; `_setup_key` also includes object identity so distinct work
+        occurrences never borrow one another's prepared input.
         """
         idx = getattr(payload, "prompt_idx", None)
         if idx is not None and idx >= 0:
             return ("idx", idx)
         return ("id", id(payload))
+
+    def _setup_key(self, payload: Any) -> Hashable:
+        # Logical keys (including custom overrides) can repeat across legitimate
+        # work occurrences. The queue and consumer pass the same payload object.
+        return (self._payload_key(payload), id(payload))
 
     def _on_generation_error(
         self,
@@ -339,9 +340,16 @@ class RolloutGenerationMixin:
                     "finish shutdown_generation() before restarting"
                 )
             return
+        previous_worker = getattr(self, "_setup_thread", None)
+        if previous_worker is not None and previous_worker.is_alive():
+            # A bounded shutdown cannot interrupt arbitrary callback code.
+            # Do not replace the queue/event it will read when it returns.
+            raise RuntimeError("Previous generation setup worker is still running")
 
         self._gen_logger = logger or _default_logger
         self._setup_futures: Dict[Hashable, Future] = {}
+        # Retain owners until consumption/close so object IDs cannot be reused.
+        self._setup_payloads: Dict[Hashable, Any] = {}
         self._setup_futures_lock = threading.Lock()
         self._setup_shutdown = threading.Event()
         self._setup_request_queue: "queue.Queue[Any]" = queue.Queue()
@@ -379,12 +387,18 @@ class RolloutGenerationMixin:
         """
         if not getattr(self, "_gen_initialized", False):
             return
-        self._setup_shutdown.set()
-        # Wake the worker if it's blocked on the queue.
-        try:
-            self._setup_request_queue.put_nowait(_SHUTDOWN)
-        except Exception:  # pragma: no cover - queue.Full unreachable for unbounded
-            pass
+        with self._setup_futures_lock:
+            self._setup_shutdown.set()
+            # Queue ownership outlives the lookup cache: a consumer may have
+            # claimed the whole batch before awaiting its first future. Cancel
+            # every unstarted request, including those no longer in the map.
+            while True:
+                try:
+                    _, _, future = self._setup_request_queue.get_nowait()
+                except queue.Empty:
+                    break
+                future.cancel()
+        # An idle worker observes stop after its bounded queue.get timeout.
         if self._setup_thread is not None and self._setup_thread.is_alive():
             self._setup_thread.join(timeout=2.0)
             if self._setup_thread.is_alive():
@@ -397,6 +411,7 @@ class RolloutGenerationMixin:
                 # ``cancel`` is a no-op and the result is discarded.
                 fut.cancel()
             self._setup_futures.clear()
+            self._setup_payloads.clear()
         self._gen_initialized = False
 
     # ------------------------------------------------------------------
@@ -404,30 +419,39 @@ class RolloutGenerationMixin:
     # ------------------------------------------------------------------
 
     def submit_setup(self, payloads: Sequence[Any]) -> None:
-        """Schedule :meth:`_prepare_sample` for each payload.
+        """Schedule training :meth:`_prepare_sample` for each payload.
 
         Called from the rollout worker's ``_prefetch_loop`` thread after
         it puts a batch on the prompt queue.  No-op when prefetch is
         disabled or :meth:`setup_generation` was never called.
 
-        Resubmissions: if a key is already pending or done, the new
-        request replaces it.  This handles the rare cancellation /
-        re-issue path; the controller doesn't normally repeat indices.
+        This queue uses the training preparation context. Validation prepares
+        inline and cannot consume these futures, even for an equal prompt index.
+
+        Resubmitting the same payload object replaces its pending/done future.
+        Distinct objects with equal indices/keys are independent occurrences.
+        The caller must keep payload contents stable through consumption. A
+        reconstructed object uses inline preparation rather than another
+        occurrence's cached result; it is not an implicit retry identity.
         """
+        shutdown = getattr(self, "_setup_shutdown", None)
         if not getattr(self, "_prefetch_enabled", False):
             return
-        if not getattr(self, "_gen_initialized", False):
+        if shutdown is None or not getattr(self, "_gen_initialized", False):
             return
         for payload in payloads:
-            key = self._payload_key(payload)
+            key = self._setup_key(payload)
             future: Future = Future()
             with self._setup_futures_lock:
+                if shutdown.is_set() or shutdown is not self._setup_shutdown:
+                    return
                 old = self._setup_futures.get(key)
                 if old is not None and not old.done():
                     old.cancel()
                 self._setup_futures[key] = future
-            # The worker pulls (key, payload, future) and runs the hook.
-            self._setup_request_queue.put((key, payload, future))
+                self._setup_payloads[key] = payload
+                # Registration and queue publication share shutdown admission.
+                self._setup_request_queue.put_nowait((key, payload, future))
 
     # ------------------------------------------------------------------
     # Final template method
@@ -554,7 +578,7 @@ class RolloutGenerationMixin:
     ) -> List[Any]:
         """Return prepared samples in payload order.
 
-        Prefetch path: pop the matching future per payload, await it,
+        Prefetch path: claim all matching futures for the batch, await them,
         propagate any exception.  Cold-start path (no future for a
         key): run :meth:`_prepare_sample` inline for that payload.
         Inline path (prefetch disabled): run :meth:`_prepare_sample`
@@ -573,12 +597,18 @@ class RolloutGenerationMixin:
         inline_count = 0
         wait_ms_total = 0.0
         wait_count = 0
-        for payload in payloads:
-            future: Optional[Future] = None
-            if prefetch:
-                key = self._payload_key(payload)
-                with self._setup_futures_lock:
-                    future = self._setup_futures.pop(key, None)
+        futures: List[Optional[Future]] = [None] * len(payloads)
+        if prefetch and not is_validation:
+            with self._setup_futures_lock:
+                # submit_setup binds training context and prepares with
+                # is_validation=False. Validation leaves those futures intact.
+                # Claim the entire batch before waiting: an early preparation
+                # error must not strand later occurrences in the cache forever.
+                for index, payload in enumerate(payloads):
+                    key = self._setup_key(payload)
+                    futures[index] = self._setup_futures.pop(key, None)
+                    self._setup_payloads.pop(key, None)
+        for payload, future in zip(payloads, futures, strict=True):
             if future is not None:
                 t0 = time.perf_counter()
                 # Future.result re-raises whatever the hook raised.
@@ -612,11 +642,16 @@ class RolloutGenerationMixin:
                 item = self._setup_request_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if item is _SHUTDOWN:
-                break
             key, payload, future = item
-            if future.cancelled():
-                continue
+            # Claim execution before preparation. Otherwise a replacement can
+            # cancel this still-PENDING future while its callback is running;
+            # publishing either the result or error would kill the setup thread.
+            with self._setup_futures_lock:
+                if self._setup_shutdown.is_set():
+                    future.cancel()
+                    continue
+                if not future.set_running_or_notify_cancel():
+                    continue
             # Use the bound method so subclasses see ``self``.
             try:
                 # The setup worker doesn't have access to the

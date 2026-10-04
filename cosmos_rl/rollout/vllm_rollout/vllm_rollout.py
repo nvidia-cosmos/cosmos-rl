@@ -860,27 +860,42 @@ class vLLMRollout(RolloutBase):
                     output.cumulative_logprob for output in results[0].outputs
                 ]
 
+                previous_message_count = len(current_conversation)
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
                     responses,
                     ground_truth=payload.reference_answer,
                 )
 
-                # check if the sequence length is reached the max_sequence_length
+                # Reward the last generated assistant response, not a tool
+                # observation appended by the packer when a limit is reached.
+                completion = responses[0]
+                assistant_turn_count += 1
+                # The packer appends a tool/user message when another model
+                # turn is needed. A final assistant answer (or no extension)
+                # completes this trajectory; do not generate repeated answers.
+                if len(
+                    current_conversation
+                ) <= previous_message_count or current_conversation[-1].role not in (
+                    "tool",
+                    "user",
+                ):
+                    break
+
+                # max_tokens already bounds each assistant response through
+                # the selected train/validation SamplingParams. Prompt tokens
+                # count against the model context limit, not that output cap.
                 if (
                     len(results[0].prompt_token_ids)
                     + len(results[0].outputs[0].token_ids)
-                    > self.rollout_config.max_response_length
+                    >= self.config.policy.model_max_length
                 ):
                     logger.warning(
-                        "[Rollout] The sequence length is reached the max_response_length, stop the multi-turn generation."
+                        "[Rollout] Model context limit reached; stop multi-turn generation."
                     )
                     break
 
-                assistant_turn_count += 1
-
             # return the last assistant message as the completion to compute the reward in controller
-            completion = current_conversation[-1].content
             return (
                 current_conversation,
                 completion,
