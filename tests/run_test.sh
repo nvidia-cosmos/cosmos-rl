@@ -150,6 +150,7 @@ run python tests/test_policy_to_policy.py
 run python tests/test_policy_to_rollout.py
 run python -m pytest -q tests/test_p2r_ci_harness.py
 run python tests/test_multirank_shutdown.py
+run python -m pytest -q tests/test_worker_supervision.py
 run python tests/test_policy_shutdown_deadline.py
 
 # Only end-to-end guard for the NCCL payload transport; it was referenced by no

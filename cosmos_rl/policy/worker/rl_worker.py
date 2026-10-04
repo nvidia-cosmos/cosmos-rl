@@ -60,6 +60,7 @@ from cosmos_rl.dispatcher.command import (
 )
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
+from cosmos_rl.utils.worker_threads import start_worker_thread, stop_worker_threads
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.collective.collective import P2RCollectiveManager
 
@@ -322,7 +323,12 @@ class RLPolicyWorker(PolicyWorkerBase):
             except Exception as error:
                 checkpoint_error = error
 
-            # Release the payload-transport data packer FIRST: stop its
+            # Stop command/data producers before retiring their resources.
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
+            stop_worker_threads(self)
+
+            # Release the payload-transport data packer: stop its
             # prefetch thread and abort its cached communicators.  A NCCL
             # payload transport (NCCLDataPackerMixin) holds 2-rank comms to
             # the rollout replicas; by shutdown time those replicas have
@@ -331,8 +337,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             # Idempotent + best-effort; also covers the UCXX packer.
             self._shutdown_payload_data_packers()
 
-            self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
             self.inter_policy_nccl.shutdown()
             if self.fetch_rollouts_thread is not None:
                 self.fetch_rollouts_thread.join()
@@ -382,16 +386,13 @@ class RLPolicyWorker(PolicyWorkerBase):
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
-            rollouts: List[Rollout] = []
-            try:
-                rollouts = [
-                    Rollout.model_validate(msgpack.unpackb(x))
-                    for x in self.redis_controller.subscribe_rollout(self.replica_name)
-                ]
-            except Exception as e:
-                logger.debug(
-                    f"[Policy] Failed to get rollouts: {e}, wait for next round"
-                )
+            # A consumed malformed entry cannot be skipped under a fixed-count
+            # dispatch. Let the owned producer fail the worker instead of
+            # silently dropping this batch after advancing the Redis cursor.
+            rollouts = [
+                Rollout.model_validate(msgpack.unpackb(x))
+                for x in self.redis_controller.subscribe_rollout(self.replica_name)
+            ]
             for rollout in rollouts:
                 self.data_queue.put_nowait(rollout)
                 if rollout.teacher_result_uuid:
@@ -814,15 +815,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             if self.global_rank == 0:
                 # rank 0 will get command from redis
                 # and broadcast the buildmesh command to all ranks
-                commands = []
-                try:
-                    commands = self.redis_controller.subscribe_command(
-                        self.replica_name
-                    )
-                except Exception as e:
-                    logger.debug(
-                        f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
-                    )
+                commands = self.redis_controller.subscribe_command(self.replica_name)
                 for x in commands:
                     command = Command.depack(x)
                     if isinstance(command, BuildMeshCommand):
@@ -1076,30 +1069,22 @@ class RLPolicyWorker(PolicyWorkerBase):
         # Start the thread with daemon=True, so it will exit when the main program exits.
         # we need all ranks have fetch_command_thread, so that buildmesh command can be broadcasted to all ranks
         # TODO(zjx): we will only let rank 0 fetch and broadcast command
-        self.fetch_command_thread = threading.Thread(
-            target=fetch_command_helper,
-            args=(self,),
-            daemon=True,
-            name="fetch_command_thread",
-        ).start()
+        self.fetch_command_thread = start_worker_thread(
+            self, "fetch_command_thread", fetch_command_helper, (self,)
+        )
 
         if self.global_rank == 0:
-            self.fetch_rollouts_thread = threading.Thread(
-                target=fetch_rollouts_helper,
-                args=(self,),
-                daemon=True,
-                name="fetch_rollouts_thread",
-            ).start()
+            self.fetch_rollouts_thread = start_worker_thread(
+                self, "fetch_rollouts_thread", fetch_rollouts_helper, (self,)
+            )
         if (
             self.parallel_dims.pp_cp_tp_coord[0] == 0
             and self.config.distillation.enable
         ):
             # Initiate teacher interaction thread once for each same dp group
-            self.teacher_interact_thread = threading.Thread(
-                target=self.teacher_interact_loop,
-                daemon=True,
-                name="teacher_interact_thread",
-            ).start()
+            self.teacher_interact_thread = start_worker_thread(
+                self, "teacher_interact_thread", self.teacher_interact_loop
+            )
 
         abort = False
         while True:

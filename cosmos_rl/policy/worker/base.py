@@ -29,6 +29,7 @@ from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
 from cosmos_rl.utils.model_export import finish_checkpoint_writes
+from cosmos_rl.utils.worker_threads import stop_worker_threads
 
 
 class PolicyWorkerBase(WorkerBase, CommMixin):
@@ -188,6 +189,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 finish_checkpoint_writes(self.trainer)
             finally:
                 try:
+                    stop_worker_threads(self)
                     self.close_payload_transports()
                 finally:
                     self.destroy_worker()
