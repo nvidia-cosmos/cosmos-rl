@@ -903,6 +903,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                     prefetch_list[0] = prefetch_scatter_list[0]
                 if self.parallel_dims.pp_cp_tp_coord[0] == 0:
                     for item in prefetch_list[0]:
+                        self.trainer.teacher_results.admit(item)
                         self.teacher_interact_queue.put_nowait(item)
             else:
                 for _ in range(batch_for_this_step):
@@ -917,6 +918,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                         )
                     if self.parallel_dims.pp_cp_tp_coord[0] == 0:
                         for item in prefetch_list[0]:
+                            self.trainer.teacher_results.admit(item)
                             self.teacher_interact_queue.put_nowait(item)
         return prefetch_dp_id
 
@@ -1030,22 +1032,34 @@ class RLPolicyWorker(PolicyWorkerBase):
         while not self.shutdown_signal.is_set():
             if not self.teacher_interact_queue.empty():
                 teacher_result_uuid = self.teacher_interact_queue.get_nowait()
+                if not self.trainer.teacher_results.pending(teacher_result_uuid):
+                    continue
                 logger.debug(
                     f"[Policy] Getting teacher result {teacher_result_uuid} from Redis"
                 )
                 # Interactive with teacher if the teacher result uuid is not empty
                 teacher_result = self.redis_controller.get_teacher_result(
-                    teacher_result_uuid
+                    teacher_result_uuid, timeout=0.1, stop_event=self.shutdown_signal
                 )
                 if teacher_result is None:
-                    logger.error(
-                        f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
+                    # Rotate pending reads: one absent target cannot prevent
+                    # retrieval of every healthy target queued behind it.
+                    if self.trainer.teacher_results.pending(teacher_result_uuid):
+                        self.teacher_interact_queue.put_nowait(teacher_result_uuid)
+                else:
+                    self.trainer.teacher_results.complete(
+                        teacher_result_uuid, teacher_result
                     )
-                if not hasattr(self.trainer, "teacher_interact_results"):
-                    self.trainer.teacher_interact_results = {}
-                self.trainer.teacher_interact_results[teacher_result_uuid] = (
-                    teacher_result
-                )
+                    try:
+                        self.redis_controller.acknowledge_teacher_result(
+                            teacher_result_uuid
+                        )
+                    except Exception as error:
+                        # Bytes are already owned; failed cleanup leaves a TTL-
+                        # bounded copy, not a failed or fabricated training target.
+                        logger.warning(
+                            "[Policy] Teacher result cleanup deferred: %s", error
+                        )
             time.sleep(0.01)
 
     def main_loop(self):

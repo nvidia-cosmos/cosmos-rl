@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
-from cosmos_rl.utils import constant
+from cosmos_rl.utils import constant, teacher_channel
 import redis
 from datetime import datetime
 from cosmos_rl.utils.constant import (
@@ -29,7 +28,6 @@ from functools import partial
 from cosmos_rl.utils.logging import logger
 import enum
 import msgpack
-import uuid
 
 
 class RedisOpType(enum.Enum):
@@ -311,114 +309,59 @@ class RedisStreamHandler:
             )
             raise e
 
-    def publish_teacher_request(self, data: Dict, replica_name: str) -> List[str]:
-        """
-        Write data to the Redis stream.
-
-        Args:
-            data (Dict): The teacher request to write to the stream.
-            stream_name (str): The name of the Redis stream to write to.
-
-        Returns:
-            List[str]: The UUIDs of the teacher result.
-        """
-        if "teacher_result_uuid" in data:
-            uuid_values = data["teacher_result_uuid"]
-            data.update({"replica_name": replica_name})
-        else:
-            uuid_values = []
-            for _ in data["completion_token_ids"]:
-                uuid_value = str(uuid.uuid4())
-                uuid_values.append(uuid_value)
-            data.update(
-                {"teacher_result_uuid": uuid_values, "replica_name": replica_name}
-            )
-        message = {
-            "teacher_request": msgpack.packb(data),
-            "timestamp": datetime.now().isoformat(),
-        }
-        self.create_teacher_request_group()
-        # Add message to stream
-        logger.debug(
-            f"[Redis] Publishing teacher request to Redis stream {self.teacher_request_group}: token lengths {[len(tokens) for tokens in data['completion_token_ids']]} for uuids {uuid_values}"
+    def publish_teacher_request(
+        self, data: Dict, replica_name: str, *, stop_event=None
+    ) -> List[str]:
+        """Publish once per completion identity; never report a failed write as success."""
+        return teacher_channel.publish(
+            self,
+            data,
+            replica_name,
+            constant.COSMOS_TEACHER_RESULT_SET_TIMEOUT,
+            stop_event,
         )
-        try:
-            make_request_with_retry(
-                self.requests_for_alternative_clients(
-                    RedisOpType.XADD,
-                    self.teacher_request_stream,
-                    message,
-                    maxlen=RedisStreamConstant.STREAM_MAXLEN,
-                ),
-                response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-        except Exception as e:
-            logger.error(
-                f"[Redis] Failed to write to Redis stream teacher_request: {e}"
-            )
-            # return if failed to write to Redis stream for fault tolerance
-            # raise e
-        logger.debug(
-            f"[Redis] Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_values}"
-        )
-        return uuid_values
 
     def subscribe_teacher_request(
         self, replica_name: str, count: int = -1
     ) -> List[Dict]:
-        """
-        Read data from the Redis stream.
+        """Retain stream bodies and pending entries until result publication."""
+        deadline = teacher_channel.deadline_after(1.0)
 
-        Args:
-            stream_name (str): The name of the Redis stream to read from.
-            count (int): The number of messages to read.
-
-        Returns:
-            list: A list of stream entries.
-        """
-        self.create_teacher_request_group()
-        try:
-            messages = make_request_with_retry(
-                self.requests_for_alternative_clients(
-                    RedisOpType.XREADGROUP,
+        def read(client):
+            try:
+                client.xgroup_create(
+                    self.teacher_request_stream,
                     self.teacher_request_group,
-                    replica_name,
-                    {self.teacher_request_stream: ">"},
-                    count=RedisStreamConstant.TEACHER_REQUEST_FETCH_SIZE
-                    if count <= 0
-                    else count,
-                    block=RedisStreamConstant.TEACHER_REQUEST_READING_TIMEOUT_MS,
-                ),
-                response_parser=None,
-                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                    id="0",
+                    mkstream=True,
+                )
+            except redis.ResponseError as error:
+                if "BUSYGROUP" not in str(error):
+                    raise
+            return client.xreadgroup(
+                self.teacher_request_group,
+                replica_name,
+                {self.teacher_request_stream: ">"},
+                count=RedisStreamConstant.TEACHER_REQUEST_FETCH_SIZE
+                if count <= 0
+                else count,
+                block=100,
             )
-        except Exception as e:
-            messages = []  # return empty list if failed to read from Redis stream
-            logger.error(
-                f"[Redis] Failed to read from Redis stream teacher_request: {e}"
-            )
-        teacher_requests = []
-        if messages:
-            for _, message_list in messages:
-                for message_id, message_data in message_list:
-                    teacher_request = msgpack.unpackb(message_data[b"teacher_request"])
-                    try:
-                        messages = make_request_with_retry(
-                            self.requests_for_alternative_clients(
-                                RedisOpType.XDEL,
-                                self.teacher_request_stream,
-                                message_id,
-                            ),
-                            response_parser=None,
-                            max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[Redis] Failed to acknowledge message {message_id} from Redis stream teacher_request: {e}"
-                        )
-                    teacher_requests.append(teacher_request)
-        return teacher_requests
+
+        try:
+            messages = teacher_channel.bounded_call(self.redis_clients, deadline, read)
+        except teacher_channel.TeacherDeadline:
+            return []
+        requests = []
+        for _, entries in messages or []:
+            for _, fields in entries:
+                request = msgpack.unpackb(fields[b"teacher_request"])
+                if request.get("is_end"):
+                    teacher_channel.complete(
+                        self, request["_teacher_control_id"], b"", 1.0, control=True
+                    )
+                requests.append(request)
+        return requests
 
     def set_teacher_result(
         self,
@@ -427,55 +370,25 @@ class RedisStreamHandler:
         replica_name: str,
         timeout: float = constant.COSMOS_TEACHER_RESULT_SET_TIMEOUT,
     ) -> bool:
-        """
-        Write teacher result to Redis.
-
-        Args:
-            data (Dict): The teacher result to write to the stream.
-            stream_name (str): The name of the Redis stream to write to.
-            replica_name (str): The name of the replica to write to.
-        Returns:
-            bool: True if successful, False otherwise.
-        """
-        data.update(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "replica_name": replica_name,
-            }
-        )
-        start_time = time.time()
-        while time.time() - start_time < float(timeout):
-            if self.set_key_value(uuid_value, msgpack.packb(data)):
-                return True
-            time.sleep(constant.COSMOS_TEACHER_RESULT_RETRY_TIMEOUT_INTERVAL)
-        return False
+        """Publish a result before acknowledging/removing its pending request."""
+        packed = msgpack.packb(dict(data, replica_name=replica_name))
+        try:
+            return teacher_channel.complete(self, uuid_value, packed, timeout)
+        except teacher_channel.TeacherDeadline:
+            return False
 
     def get_teacher_result(
         self,
         uuid_value: str,
         timeout: float = constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT,
+        *,
+        stop_event=None,
     ) -> bytes:
-        """
-        Get teacher result from Redis.
+        """Replay-safe read; caller acknowledges only after owning the bytes."""
+        return teacher_channel.read_result(self, uuid_value, timeout, stop_event)
 
-        Args:
-            uuid_value (str): The UUID of the teacher result to get.
-
-        Returns:
-            bytes: The teacher result data (packed).
-        """
-        start_time = time.time()
-        while time.time() - start_time < float(timeout):
-            value = self.get_key_value(uuid_value, op=RedisOpType.GETDEL)
-            if value is not None:
-                break
-            time.sleep(constant.COSMOS_TEACHER_RESULT_RETRY_TIMEOUT_INTERVAL)
-        if value is None:
-            logger.error(
-                f"[Redis] Failed to get teacher result from Redis key {uuid_value}"
-            )
-            return None
-        return value
+    def acknowledge_teacher_result(self, uuid_value: str) -> None:
+        teacher_channel.acknowledge_result(self, uuid_value)
 
     def requests_for_alternative_clients(self, op: RedisOpType, *args, **kwargs):
         """

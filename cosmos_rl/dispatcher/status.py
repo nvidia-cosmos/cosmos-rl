@@ -1870,6 +1870,45 @@ class PolicyStatusManager:
                 total_steps=total_steps,
             )
 
+    def _report_teacher_update_skip(self, step, total_steps, admission_records):
+        reports = self.report_data_list
+        if not any(data.get("train/teacher_update_skipped") for data in reports):
+            if not self.config.logging.logger:
+                self.report_data_list = []
+            return
+        if not all(data.get("train/teacher_update_skipped") == 1 for data in reports):
+            raise RuntimeError("Policy replicas reported inconsistent teacher outcomes")
+        # A skipped update has no loss or optimizer statistics. Retire this
+        # step's reports even with logging disabled or a failed logging sink;
+        # otherwise they poison every subsequent healthy report aggregation.
+        self.report_data_list = []
+        self.filter_records = {}
+        report = self.train_report_data.setdefault(step, {})
+        report.update(admission_records)
+        report.update(
+            {
+                "train_step": step,
+                "train/total_steps": total_steps,
+                "train/teacher_update_skipped": 1,
+            }
+        )
+        logger.warning(
+            "[Controller] Step %s/%s skipped: teacher targets unavailable; "
+            "optimizer and scheduler did not advance",
+            step,
+            total_steps,
+        )
+        try:
+            if "wandb" in self.config.logging.logger:
+                log_wandb(data=report, step=step)
+        except Exception as error:
+            logger.warning("[Controller] Could not report skipped update: %s", error)
+        for callback in self.custom_logger_fns:
+            try:
+                callback(report, step)
+            except Exception as error:
+                logger.warning("[Controller] Skipped-update logger failed: %s", error)
+
     def train_ack(
         self,
         replica_name: str,
@@ -1969,6 +2008,10 @@ class PolicyStatusManager:
                 # Only reset the do_profile flag if the profile is finished
                 logger.debug(f"[Controller] Unset the profile mode of {replica_name}")
                 self[replica_name].sub_profiler_config.do_profile = False
+
+            self._report_teacher_update_skip(
+                step, total_steps, completion_admission_records
+            )
 
             # Sum and report data
             if self.config.logging.logger and not all(

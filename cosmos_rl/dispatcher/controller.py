@@ -216,7 +216,7 @@ class Controller:
 
         custom_config = """
 maxmemory 500G
-maxmemory-policy allkeys-lfu
+maxmemory-policy noeviction
 """
         # redis-server binds its port itself, in a daemonized child (see
         # write_redis_config), so neither the port probe nor the parent exit

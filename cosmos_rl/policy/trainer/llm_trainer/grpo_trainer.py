@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import time
 import torch
 import types
 from functools import partial
@@ -33,6 +32,9 @@ from cosmos_rl.policy.trainer.optm import (
 )
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
+from cosmos_rl.utils import constant
+from cosmos_rl.utils.teacher_results import TeacherResultInbox
+from cosmos_rl.policy.trainer.teacher_update import teacher_update_boundary
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import (
     compute_mfu,
@@ -593,7 +595,7 @@ class GRPOTrainer(LLMTrainer):
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
         # For teacher model interaction
-        self.teacher_interact_results: Dict[str, Any] = {}
+        self.teacher_results = TeacherResultInbox()
         self.fetched_teacher_uuids: Set[str] = set()
 
     def collate_teacher_logprobs(
@@ -620,21 +622,7 @@ class GRPOTrainer(LLMTrainer):
                     f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
                 )
             if teacher_logprobs is None:
-                logger.warning(
-                    f"[Policy] Teacher logprobs is None for rollout {i}, using [0] * {computed_max_len} and set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs"
-                )
-                teacher_logprobs = [
-                    [0] * (self.config.distillation.top_k or 1)
-                ] * computed_max_len
-                if hasattr(processed_samples[i], "logprob_masks"):
-                    # set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs
-                    processed_samples[i].logprob_masks = [
-                        0 for _ in processed_samples[i].logprob_masks
-                    ]
-                else:
-                    processed_samples[i]["logprob_masks"] = [
-                        0 for _ in processed_samples[i]["logprob_masks"]
-                    ]
+                raise ValueError("Teacher targets must be agreed before collation")
             teacher_logprobs = teacher_logprobs + [
                 [0] * (self.config.distillation.top_k or 1)
             ]
@@ -838,15 +826,19 @@ class GRPOTrainer(LLMTrainer):
         self,
         rollouts: List[Rollout],
         mini_batch_indices: List[int],
+        *,
+        timeout: Optional[float] = None,
     ):
         all_uuids = [rollouts[i].teacher_result_uuid for i in mini_batch_indices]
         teacher_logprobs_needed = []
         if self.parallel_dims.pp_cp_tp_coord[0] == 0:
-            for id in all_uuids:
-                while id not in self.teacher_interact_results:
-                    time.sleep(0.01)
-                self.fetched_teacher_uuids.add(id)
-                teacher_logprobs_needed.append(self.teacher_interact_results[id])
+            teacher_logprobs_needed = self.teacher_results.wait(
+                all_uuids,
+                constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT
+                if timeout is None
+                else timeout,
+            )
+            self.fetched_teacher_uuids.update(all_uuids)
         if self.parallel_dims.pp_cp_tp_coord[1] > 1:
             all_teacher_logprobs = dist_util.broadcast_object_cpu(
                 teacher_logprobs_needed,
@@ -863,7 +855,27 @@ class GRPOTrainer(LLMTrainer):
                 teacher_logprobs = None
             else:
                 teacher_result = msgpack.unpackb(teacher_result)
+                if not isinstance(teacher_result, dict):
+                    raise ValueError("Teacher result must be a mapping")
                 teacher_logprobs = teacher_result.get("teacher_logprobs", None)
+                if teacher_logprobs is not None:
+                    array = np.asarray(teacher_logprobs)
+                    if (
+                        array.ndim != 2
+                        or not len(array)
+                        or array.shape[1] != (self.config.distillation.top_k or 1)
+                        or not np.isfinite(array).all()
+                    ):
+                        raise ValueError("Invalid teacher logprob shape or values")
+                    if self.config.train.train_policy.collect_rollout_logprobs:
+                        sampled = (
+                            rollouts[idx].prompt_logprobs
+                            + rollouts[idx].completion_logprobs
+                        )
+                        if len(sampled) != len(teacher_logprobs):
+                            raise ValueError(
+                                "Teacher and sampled logprob lengths differ"
+                            )
                 if self.config.distillation.trainer_token_ids_from_teacher:
                     if (
                         "completion_token_ids" not in teacher_result
@@ -913,16 +925,18 @@ class GRPOTrainer(LLMTrainer):
                             f"Token ids mismatch in prompt_token_ids from teacher and rollouts for rollout {idx}"
                         )
                         rollouts[idx].prompt_token_ids = prompt_token_ids
-            if (
-                teacher_logprobs is None
-                and self.config.distillation.trainer_token_ids_from_teacher
-            ):
-                rollouts[idx].completion_token_ids = [
-                    [1] * (self.config.distillation.top_k or 1)
-                ] * len(rollouts[idx].completion_token_ids)
-                rollouts[idx].prompt_token_ids = [
-                    [1] * (self.config.distillation.top_k or 1)
-                ] * len(rollouts[idx].prompt_token_ids)
+                    # Validate the existing top-k collation contract before the
+                    # cohort seals participation, not on just one rank later.
+                    top_k = self.config.distillation.top_k
+                    allowed_widths = {top_k, top_k + 1} if top_k else {1}
+                    if any(
+                        len(row) not in allowed_widths
+                        for row in (
+                            rollouts[idx].prompt_token_ids
+                            + rollouts[idx].completion_token_ids
+                        )
+                    ):
+                        raise ValueError("Teacher token row width does not match top_k")
             logger.debug(
                 f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
             )
@@ -930,11 +944,7 @@ class GRPOTrainer(LLMTrainer):
 
     def clear_teacher_result_cache(self):
         # Clear the cached teacher interaction results to save memory
-        for id in self.fetched_teacher_uuids:
-            assert id in self.teacher_interact_results, (
-                f"Teacher result uuid {id} not found in teacher_interact_results"
-            )
-            del self.teacher_interact_results[id]
+        self.teacher_results.retire(self.fetched_teacher_uuids)
         self.fetched_teacher_uuids.clear()
 
     def should_export_checkpoint(self, *, is_final: bool) -> bool:
@@ -974,6 +984,7 @@ class GRPOTrainer(LLMTrainer):
         )
         self.ckpt_manager.save_check(step=current_step)
 
+    @teacher_update_boundary
     def step_training(
         self,
         rollouts: List[Rollout],
@@ -1240,20 +1251,6 @@ class GRPOTrainer(LLMTrainer):
                                 )
 
                                 if self.config.distillation.enable:
-                                    self.fetch_teacher_logprobs(
-                                        rollouts=rollouts,
-                                        mini_batch_indices=mini_batch_indices,
-                                    )
-                                    if all(
-                                        [
-                                            rollouts[i].teacher_logprobs is None
-                                            for i in mini_batch_indices
-                                        ]
-                                    ):
-                                        logger.warning(
-                                            "[Policy] All teacher logprobs are None for current mini-batch, skipping distillation loss calculation."
-                                        )
-                                        continue
                                     minibatched_teacher_logprobs = self.collate_teacher_logprobs(
                                         rollouts=[
                                             rollouts[i] for i in mini_batch_indices

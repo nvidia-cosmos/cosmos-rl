@@ -19,6 +19,8 @@ import threading
 import uuid
 import torch
 import atexit
+from redis import RedisError
+from cosmos_rl.utils.teacher_channel import TeacherDeadline
 
 import torch.distributed as dist
 
@@ -1782,7 +1784,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         while not self.shutdown_signal.is_set():
             if not self.teacher_interact_queue.empty():
                 data = self.teacher_interact_queue.get_nowait()
-                self.redis_controller.publish_teacher_request(data, self.replica_name)
+                try:
+                    self.redis_controller.publish_teacher_request(
+                        data, self.replica_name, stop_event=self.shutdown_signal
+                    )
+                except (TeacherDeadline, RedisError, ValueError) as error:
+                    # An unavailable teacher request is not a successful
+                    # publication. Its update will be skipped at the trainers'
+                    # shared readiness boundary; keep serving later requests.
+                    logger.error(
+                        "[Rollout] Teacher request publication failed: %s", error
+                    )
             time.sleep(0.01)
 
     def request_new_prompts(
