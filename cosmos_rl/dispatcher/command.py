@@ -34,6 +34,7 @@ class CommandType(StrEnum):
     POLICY_TO_ROLLOUT_UNICAST = "POLICY_TO_ROLLOUT_UNICAST"
     ROLLOUT_TO_ROLLOUT_BROADCAST = "ROLLOUT_TO_ROLLOUT_BROADCAST"
     DATA_FETCH = "DATA_FETCH"
+    PAYLOAD_PREFETCH = "PAYLOAD_PREFETCH"
     TRAINING_COMPLETE = "TRAINING_COMPLETE"
     ALL_REDUCE = "ALL_REDUCE"
     STOP = "STOP"
@@ -83,6 +84,8 @@ class Command(ABC):
             sub_cls = RolloutToRolloutBroadcastCommand
         elif dict_v["command_type"] == CommandType.DATA_FETCH:
             sub_cls = DataFetchCommand
+        elif dict_v["command_type"] == CommandType.PAYLOAD_PREFETCH:
+            sub_cls = PayloadPrefetchCommand
         elif dict_v["command_type"] == CommandType.TRAINING_COMPLETE:
             sub_cls = TrainingCompleteCommand
         elif dict_v["command_type"] == CommandType.STOP:
@@ -498,6 +501,28 @@ class StopCommand(Command):
         return cls(**dict_v)
 
 
+class PayloadPrefetchCommand(Command):
+    """Input admission only; handled by the background control reader.
+
+    Original metadata and process incarnations are immutable. This command
+    never authorizes optimizer work or produces a training ACK.
+    """
+
+    def __init__(self, replica_name, batch_id, global_step, cohort, rollouts, **kwargs):
+        kwargs["scope"] = CommandScope.LOCAL
+        kwargs["command_type"] = CommandType.PAYLOAD_PREFETCH
+        super().__init__(**kwargs)
+        self.replica_name = replica_name
+        self.batch_id = batch_id
+        self.global_step = global_step
+        self.cohort = cohort
+        self.rollouts = rollouts
+
+    @classmethod
+    def from_dict(cls, dict_v):
+        return cls(**dict_v)
+
+
 class DataFetchCommand(Command):
     """
     Used to fetch data from the controller.
@@ -522,6 +547,9 @@ class DataFetchCommand(Command):
         profile_memory: Optional[bool] = None,
         with_stack: Optional[bool] = None,
         with_modules: Optional[bool] = None,
+        prefetched_batch_id: Optional[str] = None,
+        prefetch_next_batch_id: Optional[str] = None,
+        payload_notification: Optional[Dict] = None,
         **kwargs,
     ):
         kwargs["scope"] = CommandScope.LOCAL
@@ -532,6 +560,10 @@ class DataFetchCommand(Command):
         self.global_step = global_step
         self.total_steps = total_steps
         self.remain_samples_num = remain_samples_num
+
+        self.prefetched_batch_id = prefetched_batch_id
+        self.prefetch_next_batch_id = prefetch_next_batch_id
+        self.payload_notification = payload_notification
 
         self.do_save = do_save
 

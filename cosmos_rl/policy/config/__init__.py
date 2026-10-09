@@ -783,6 +783,10 @@ class FP4Config(BaseModel):
 
 
 class TrainingConfig(BaseModel):
+    prefetch_payloads: bool = Field(
+        default=False,
+        description="Worker-owned one-batch payload lookahead. Preserves training ACKs; unsupported modes and synchronization barriers remain synchronous.",
+    )
     train_policy: Union[SFTDataConfig, GrpoConfig] = Field(
         discriminator="type", default=GrpoConfig(type="grpo")
     )

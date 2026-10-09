@@ -24,7 +24,9 @@ def _command(*, do_save: bool = True) -> TrainingCompleteCommand:
 
 
 def _worker(save_checkpoint=None, invalidate_checkpoint=None):
-    return SimpleNamespace(
+    # Retain the real handler/delegation methods without starting worker services.
+    worker = RLPolicyWorker.__new__(RLPolicyWorker)
+    worker.__dict__.update(
         replica_name="policy-0",
         replica_batch_for_this_step=-1,
         is_master_replica=True,
@@ -37,6 +39,7 @@ def _worker(save_checkpoint=None, invalidate_checkpoint=None):
         global_rank=0,
         api_client=SimpleNamespace(post_policy_train_ack=MagicMock()),
     )
+    return worker
 
 
 class TestTrainingCompleteCheckpointAgreement(unittest.TestCase):

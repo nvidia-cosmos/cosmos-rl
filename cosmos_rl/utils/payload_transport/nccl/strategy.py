@@ -673,6 +673,11 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                     # enqueued work or partially written the destination.
                     native_pending = True
                     try:
+                        # The allocator may reuse storage whose previous user
+                        # is still queued on the allocation stream. Raw NCCL
+                        # writes on a different stream must wait for that use,
+                        # even though torch.empty itself launches no kernel.
+                        wait_event(stream, record_event(None))
                         pynccl.nccl_recv(
                             recv_buf,
                             SENDER_LOCAL_RANK,  # peer in the 2-rank comm is the sender

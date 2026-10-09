@@ -82,6 +82,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future
+from contextlib import contextmanager, nullcontext
 from collections import deque
 from cosmos_rl.utils.transport_failure import fail_transport, TransportUnusableError
 from typing import Any, Callable, Dict, List, Optional
@@ -616,6 +617,13 @@ class PrefetchDataPackerMixin:
         No-op when the prefetch thread isn't running yet.
         """
         self._raise_if_prefetch_failed()
+        managed = getattr(self, "_managed_payload_rollouts", None)
+        if managed is not None:
+            if len(managed) != len(rollouts) or any(
+                a is not b for a, b in zip(managed, rollouts)
+            ):
+                raise ValueError("Trainer cannot replace a worker-owned payload batch")
+            return
         if not self._prefetch_enabled or self._prefetch_request_queue is None:
             if getattr(self, "_transport_close_operation", None) is not None:
                 raise RuntimeError("Payload transport is closing or closed")
@@ -642,7 +650,7 @@ class PrefetchDataPackerMixin:
             cache.release(streams=streams)
         self._prefetch_cache = {}
 
-    def start_prepared_prefetch(self, rollouts, prepare):
+    def start_prepared_prefetch(self, rollouts, prepare, *, fetch_stream=None):
         """Fetch and CPU-prepare one owned batch on the existing prefetch thread.
 
         The trainer thread submits/consumes; no collectives run in ``prepare``.
@@ -663,6 +671,9 @@ class PrefetchDataPackerMixin:
         tasks = self._filter_prefetch_tasks(rollouts)
         future = Future()
         future._prefetch_handoff = threading.Event()
+        # Install before publishing the request: the worker may take it at once.
+        # Only the worker-owned payload path supplies a non-default stream.
+        future._fetch_stream = fetch_stream
         batch_id = self._arm_prefetch_deadline()
         self._prepared_prefetch_future = future
         self._prefetch_request_queue.put((batch_id, tasks, prepare, future))
@@ -707,6 +718,8 @@ class PrefetchDataPackerMixin:
         path. Legacy strategy-less packers raise a terminal TimeoutError.
         """
         self._raise_if_prefetch_failed()
+        if getattr(self, "_managed_payload_rollouts", None) is not None:
+            return
         if not self._prefetch_enabled or self._prefetch_result_queue is None:
             return
         if (
@@ -746,6 +759,64 @@ class PrefetchDataPackerMixin:
                 str(exc),
             )
 
+    def prefetch_payload_batch(self, rollouts, *, stream=None):
+        """Fetch one identified worker-owned batch without replacing live cache."""
+        if self._prefetch_outstanding:
+            raise RuntimeError("Cannot mix unmanaged and worker-owned prefetch")
+        started = time.monotonic()
+        timings = {}
+
+        def ready():
+            # Decode/copy operations can remain asynchronous after transport
+            # completion. Do not expose tensors to the training stream early.
+            # The submission watchdog remains armed during this fence.
+            if stream is not None:
+                stream.synchronize()
+            timings["fetch_latency_s"] = time.monotonic() - started
+            return self._preparation_local.cache
+
+        future = self.start_prepared_prefetch(rollouts, ready, fetch_stream=stream)
+        future.payload_timings = timings
+        return future
+
+    def consume_payload_batch(self, future):
+        """Install this exact completed batch; late/failed work is never reused."""
+        self._raise_if_prefetch_failed()
+        if future is not self._prepared_prefetch_future:
+            raise ValueError("Payload batch ownership mismatch")
+        result = future.result(timeout=self._prefetch_timeout_s)
+        self._raise_if_prefetch_failed()
+        self.release_prepared_prefetch(future)
+        self._prefetch_cache = result
+
+    def finish_payload_batch(self, *, streams=()):
+        """Final use of the current batch, without retiring the next future.
+
+        The worker has fenced all declared readers and trainers must have
+        dropped their aliases. Newer bounded transports expose an explicit
+        release hook; legacy caches need only relinquish their strong owner.
+        """
+        cache = self._prefetch_cache
+        release = getattr(self, "release_prefetch", None)
+        if release is not None:
+            release(streams=streams)
+        # A completed Future/background frame may still reference the legacy
+        # dictionary even when an optional release hook swaps it out. Clear
+        # its contents too, after any bounded lease has safely been released.
+        cache.clear()
+        self._prefetch_cache = {}
+
+    @contextmanager
+    def payload_batch_scope(self, rollouts):
+        """Legacy start/wait pairs may reuse, but never replace, this batch."""
+        if getattr(self, "_managed_payload_rollouts", None) is not None:
+            raise RuntimeError("Nested worker-owned payload batches")
+        self._managed_payload_rollouts = tuple(rollouts)
+        try:
+            yield
+        finally:
+            self._managed_payload_rollouts = None
+
     # --- Deferred-wait / early-ack -------------------------------------
 
     @property
@@ -766,6 +837,10 @@ class PrefetchDataPackerMixin:
         rotates the double-buffer.  Returns the current buffer
         (``None`` on cold start).
         """
+        if getattr(self, "_managed_payload_rollouts", None) is not None:
+            raise RuntimeError(
+                "Legacy deferred training cannot run inside managed prefetch"
+            )
         if self._prefetch_pending:
             collect_start = get_trace_time()
             self.wait_prefetch()
@@ -791,6 +866,10 @@ class PrefetchDataPackerMixin:
         so ``step_training`` can return immediately and the rollout
         worker's train-ack fires sooner.
         """
+        if getattr(self, "_managed_payload_rollouts", None) is not None:
+            raise RuntimeError(
+                "Legacy deferred training cannot run inside managed prefetch"
+            )
         if self._prefetch_buffer is None:
             self._prefetch_buffer = rollouts
         else:
@@ -822,16 +901,25 @@ class PrefetchDataPackerMixin:
                         continue
                     result, preparation_error = None, None
                     try:
+                        import torch
+
                         # Retain fetched tensors while preparing; avoid racing
                         # the current training batch's shared transport cache.
-                        self._preparation_local.cache = (
-                            self._fetch_batch(tasks) if tasks else {}
+                        stream = future._fetch_stream
+                        scope = (
+                            torch.cuda.stream(stream)
+                            if stream is not None
+                            else nullcontext()
                         )
-                        if isinstance(self._preparation_local.cache, ReceivedBatch):
-                            self._prepared_prefetch_lease = (
-                                self._preparation_local.cache
+                        with scope:
+                            self._preparation_local.cache = (
+                                self._fetch_batch(tasks) if tasks else {}
                             )
-                        result = prepare()
+                            if isinstance(self._preparation_local.cache, ReceivedBatch):
+                                self._prepared_prefetch_lease = (
+                                    self._preparation_local.cache
+                                )
+                            result = prepare()
                     except TransportUnusableError as error:
                         fail_transport(str(error))
                     except BaseException as error:
@@ -928,7 +1016,11 @@ class PrefetchDataPackerMixin:
             known_rejection = (
                 isinstance(cache, ReceivedBatch) and cache_key in cache.rejected_keys
             )
-            if resolved is None and not known_rejection:
+            if (
+                resolved is None
+                and not known_rejection
+                and getattr(self, "_managed_payload_rollouts", None) is None
+            ):
                 resolved = self._sync_fetch(rollout_output)
             if resolved is not None:
                 return super().get_policy_input(
