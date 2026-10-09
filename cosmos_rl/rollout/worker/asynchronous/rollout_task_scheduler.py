@@ -218,6 +218,9 @@ class RolloutTaskScheduler:
         self.complete_queue = Queue()
 
         # Track running state
+        self._stop_requested = threading.Event()
+        self._started = threading.Event()
+        self._start_error = None
         self._running = threading.Event()
         self._paused = threading.Event()
         self._worker_thread = (
@@ -423,9 +426,17 @@ class RolloutTaskScheduler:
 
             # mark the scheduler as running after the rollout engine is initialized.
             self._running.set()
-            self._loop.run_until_complete(self._worker_loop())
+            self._started.set()
+            if self._stop_requested.is_set():
+                self._running.clear()
+            else:
+                self._loop.run_until_complete(self._worker_loop())
+        except BaseException as exc:
+            self._start_error = exc
+            logger.exception("[RolloutTaskScheduler] Worker failed")
         finally:
             self._running.clear()
+            self._started.set()
 
             # Cancel all remaining tasks before closing the loop to prevent "Task was destroyed but it is pending" errors
             try:
@@ -474,6 +485,9 @@ class RolloutTaskScheduler:
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
             return
 
+        self._stop_requested.clear()
+        self._started.clear()
+        self._start_error = None
         self._worker_thread = threading.Thread(
             target=self._run_event_loop,
             daemon=True,
@@ -483,11 +497,15 @@ class RolloutTaskScheduler:
         self._worker_thread.start()
 
         if wait_initialized:
-            self._running.wait()
+            self._started.wait()
+            if self._start_error is not None:
+                raise RuntimeError(
+                    "Rollout engine initialization failed"
+                ) from self._start_error
 
         logger.info("[RolloutTaskScheduler] Background worker started")
 
-    def stop(self, wait: bool = True):
+    def stop(self, wait: bool = True, *, shutdown_engine: bool = True):
         """
         Stop the background worker thread gracefully.
 
@@ -505,18 +523,25 @@ class RolloutTaskScheduler:
         Thread Safety:
             Uses threading.Event.clear() for atomic state change visible to worker thread.
         """
-        if not self._running.is_set():
-            logger.warning("[RolloutTaskScheduler] Scheduler is not running")
-            return
-
         logger.info("[RolloutTaskScheduler] Stopping background worker...")
+        self._stop_requested.set()
         self._running.clear()
 
-        if wait and self._worker_thread:
+        if wait and self._worker_thread and self._worker_thread.ident is not None:
             self._worker_thread.join(timeout=10)
+            if self._worker_thread.is_alive():
+                raise TimeoutError("Rollout scheduler did not stop within 10 seconds")
 
-        self._try_shutdown_rollout_engine()
+        if shutdown_engine and (
+            self._worker_thread is None or not self._worker_thread.is_alive()
+        ):
+            self._try_shutdown_rollout_engine()
         logger.info("[RolloutTaskScheduler] Background worker stopped")
+
+    def raise_if_failed(self) -> None:
+        """Raise a background worker failure in the owning control thread."""
+        if self._start_error is not None:
+            raise RuntimeError("Rollout scheduler worker failed") from self._start_error
 
     async def start_async(self, init_engine_hook: Callable):
         """

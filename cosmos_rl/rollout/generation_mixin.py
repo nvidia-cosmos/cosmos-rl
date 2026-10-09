@@ -333,6 +333,11 @@ class RolloutGenerationMixin:
         """
         # Re-entrant: bail out cleanly on a second call.
         if getattr(self, "_gen_initialized", False):
+            if self._setup_shutdown.is_set():
+                raise RuntimeError(
+                    "Previous generation setup shutdown is incomplete; "
+                    "finish shutdown_generation() before restarting"
+                )
             return
 
         self._gen_logger = logger or _default_logger
@@ -382,6 +387,10 @@ class RolloutGenerationMixin:
             pass
         if self._setup_thread is not None and self._setup_thread.is_alive():
             self._setup_thread.join(timeout=2.0)
+            if self._setup_thread.is_alive():
+                raise TimeoutError(
+                    "Rollout preparation is still using backend resources"
+                )
         with self._setup_futures_lock:
             for fut in self._setup_futures.values():
                 # Cancel best-effort; if already running on the worker,

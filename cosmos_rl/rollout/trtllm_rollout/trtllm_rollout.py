@@ -44,6 +44,16 @@ from cosmos_rl.rollout.schema import RolloutResult
 
 
 class TRTLLM_Rollout(RolloutBase):
+    def post_init_hook(self, **kwargs):
+        """TRT-LLM initialization is performed explicitly by ``init_engine``."""
+
+    def shutdown(self):
+        engine = getattr(self, "rollout_engine", None)
+        if engine is not None:
+            engine.shutdown()
+            self.rollout_engine = None
+        self._engine_initialized = False
+
     def __init__(self, config: Config, **kwargs):
         super().__init__(config)
         self.rollout_config = self.config.rollout
@@ -67,7 +77,6 @@ class TRTLLM_Rollout(RolloutBase):
         self.model_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        self._engine_initialized = True
 
     def init_engine(
         self,
@@ -122,6 +131,7 @@ class TRTLLM_Rollout(RolloutBase):
             cosmos_config=self.config,
             **kwargs,
         )
+        self._engine_initialized = True
         logger.info("[Rollout] TRTLLM Engine initialized.")
 
     def rollout_generation(

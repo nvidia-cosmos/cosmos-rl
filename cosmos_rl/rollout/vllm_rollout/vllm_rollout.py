@@ -986,6 +986,19 @@ class vLLMRollout(RolloutBase):
             )
         return self.rollout_engine
 
+    def shutdown(self):
+        engine = getattr(self, "rollout_engine", None)
+        if engine is None:
+            return
+        llm_engine = engine.llm_engine
+        # V1 owns an EngineCoreClient; older supported engines own an executor.
+        owner = getattr(llm_engine, "engine_core", None)
+        if owner is None:
+            owner = llm_engine.model_executor
+        owner.shutdown()
+        self.rollout_engine = None
+        self._engine_initialized = False
+
     def fp8_quantization(self, weight: torch.Tensor):
         # convert to fp8
         from vllm import _custom_ops as ops

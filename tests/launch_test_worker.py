@@ -1200,7 +1200,14 @@ def run_dummy_rollout(args: argparse.Namespace):
         device: torch.device,
         **kwargs,
     ):
+        class ModelExecutor:
+            def shutdown(self):
+                # This process-flow fixture owns no inference resources.
+                pass
+
         class Llm_engine:
+            model_executor = ModelExecutor()
+
             def step(self, *args, **kwargs):
                 pass
 

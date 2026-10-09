@@ -154,6 +154,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     def __init__(
         self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs
     ) -> None:
+        try:
+            self._initialize(config, parallel_dims, **kwargs)
+        except BaseException:
+            try:
+                self.handle_shutdown()
+            except BaseException:
+                logger.exception("[Rollout] Cleanup after construction failure failed")
+            raise
+
+    def _initialize(self, config, parallel_dims, **kwargs):
         super(DisaggregatedRolloutControlWorker, self).__init__(config, parallel_dims)
 
         self.state = State()
@@ -463,83 +473,144 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
     def handle_shutdown(self):
-        # Only call once
-        if not hasattr(self, "_shutdown_handled"):
-            self._shutdown_handled = True
-            if not self.shutdown_signal.is_set():
-                logger.info(
-                    f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
-                )
-                self.shutdown_signal.set()
-            # Clean shutdown is still live while releasing owned resources.
-            # Never restart a heartbeat already stopped by a terminal WST fault.
-            _begin_shutdown_heartbeat_grace(self)
-            # All joins below MUST be bounded.  Worker teardown blocking
-            # on an unresponsive controller or a wedged daemon would
-            # otherwise turn into multi-minute scheduler-timeout hangs
-            # (e.g. ``unregister_from_controller`` -> ``requests.post``
-            # to a wedged controller keeping the worker alive long
-            # enough that the orchestrator hard-kills the whole job).
-            # Worst-case delay caused by a missed join is bounded: the
-            # background/heartbeat daemons are ``daemon=True`` /
-            # ``mp.Process(daemon=True)`` with PR_SET_PDEATHSIG, so the
-            # OS will reap them when the worker process exits.
-            _JOIN_TIMEOUT_S = 15.0
-            logger.info(
-                "[Teardown] %s: handle_shutdown joining daemons "
-                "(background/teacher/heartbeat)",
-                self.replica_name,
-            )
-            if self.background_thread is not None:
-                logger.info("[Rollout] handle_shutdown: joining command-query thread")
-                self.background_thread.join(timeout=_JOIN_TIMEOUT_S)
-                if self.background_thread.is_alive():
-                    logger.warning(
-                        "[Rollout] background_thread did not exit within "
-                        "%.1fs of shutdown_signal; continuing teardown "
-                        "(daemon will be reaped on process exit)",
-                        _JOIN_TIMEOUT_S,
-                    )
-                self.background_thread = None
-                logger.info("[Rollout] handle_shutdown: command-query thread joined")
-            if self.teacher_interact_thread is not None:
-                logger.info(
-                    "[Rollout] handle_shutdown: joining teacher-interact thread"
-                )
-                self.teacher_interact_thread.join(timeout=_JOIN_TIMEOUT_S)
-                if self.teacher_interact_thread.is_alive():
-                    logger.warning(
-                        "[Rollout] teacher_interact_thread did not exit "
-                        "within %.1fs of shutdown_signal; continuing teardown",
-                        _JOIN_TIMEOUT_S,
-                    )
-                self.teacher_interact_thread = None
-                logger.info("[Rollout] handle_shutdown: teacher-interact thread joined")
+        if getattr(self, "_shutdown_handled", False):
+            if getattr(self, "_shutdown_failure", None) is not None:
+                raise self._shutdown_failure
+            return
+        self._shutdown_handled = True
+        atexit.unregister(self.handle_shutdown)
+        errors = []
+
+        # Fixed resource ownership, not an application callback registry.
+        # Attempt independent cleanup even after one action fails.
+        def attempt(label, action):
             try:
-                if self.scheduler is not None:
-                    self.scheduler.stop(wait=False)
-                    self.scheduler = None
-                else:
-                    # The scheduler owns async engine shutdown; synchronous
-                    # engines also own resources such as simulator children.
-                    self.rollout.shutdown()
-            finally:
-                # Engine failure must not skip unregister, nor be mistaken for
-                # successful teardown. Propagate it after essential cleanup.
-                try:
-                    # The API makes one bounded best-effort request, no retries.
-                    self.unregister_from_controller()
-                finally:
-                    self.shutdown_mp_signal.set()
-                    if self.heartbeat_thread is not None:
-                        self.heartbeat_thread.join(timeout=_JOIN_TIMEOUT_S)
-                        if self.heartbeat_thread.is_alive():
-                            logger.warning(
-                                "[Rollout] heartbeat did not exit within %.1fs; "
-                                "parent-death cleanup remains armed",
-                                _JOIN_TIMEOUT_S,
-                            )
-                        self.heartbeat_thread = None
+                action()
+            except BaseException as exc:
+                errors.append((label, exc))
+                logger.exception("[Rollout] %s cleanup failed", label)
+
+        for name in ("shutdown_signal",):
+            event = getattr(self, name, None)
+            if event is not None:
+                event.set()
+
+        _begin_shutdown_heartbeat_grace(self)
+
+        # Producers must stop before engine/packer resources can be retired.
+        for name in ("background_thread", "teacher_interact_thread", "prefetch_thread"):
+            thread = getattr(self, name, None)
+            if thread is not None:
+
+                def join(thread=thread, name=name):
+                    if thread.ident is None and not thread.is_alive():
+                        setattr(self, name, None)
+                        return
+                    thread.join(timeout=15.0)
+                    if thread.is_alive():
+                        raise TimeoutError(f"{name} still running after shutdown")
+                    setattr(self, name, None)
+
+                attempt(name, join)
+
+        scheduler = getattr(self, "scheduler", None)
+        scheduler_quiesced = False
+        if scheduler is not None:
+            before = len(errors)
+            attempt(
+                "scheduler", lambda: scheduler.stop(wait=True, shutdown_engine=False)
+            )
+            scheduler_quiesced = len(errors) == before
+        reward_dispatcher = getattr(self, "reward_dispatcher", None)
+        if reward_dispatcher is not None:
+            attempt(
+                "reward executor",
+                reward_dispatcher.shutdown,
+            )
+        # Close producer reads before any weight-sync abort can retire CUDA
+        # communicators. Preserve the existing transport-before-NCCL ordering.
+        if not errors:
+            attempt("producer transport", self._cleanup_payload_server)
+        wst = getattr(self, "_weight_sync_thread", None)
+        if wst is not None and not errors:
+
+            def stop_weights():
+                if wst.stop() is False:
+                    raise RuntimeError("Weight sync did not drain cleanly")
+
+            attempt("weight sync", stop_weights)
+            if wst._thread.is_alive():
+                errors.append(
+                    ("weight sync", TimeoutError("Weight sync thread still alive"))
+                )
+
+        if not errors:
+            stream = getattr(self, "inference_stream", None)
+            if stream is not None:
+
+                def drain():
+                    if not bounded_drain_or_abort(
+                        stream, _TEARDOWN_DRAIN_TIMEOUT_S, "rollout teardown"
+                    ):
+                        raise RuntimeError("Inference stream did not drain cleanly")
+
+                attempt("inference stream", drain)
+            # A failed transport drain may still hold engine storage.
+            if not errors:
+                # Colocated control borrows policy model/packer state; its
+                # enclosing policy owner retains that lifetime. This owner is
+                # responsible for standalone rollout resources only.
+                if not getattr(self, "colocated", False):
+                    rollout = getattr(self, "rollout", None)
+                    if rollout is not None:
+                        attempt("engine", rollout.shutdown)
+                    if not errors:
+                        attempt("packer transports", self.close_payload_transports)
+                    seen = set()
+                    packer_names = () if errors else ("data_packer", "val_data_packer")
+                    for name in packer_names:
+                        packer = getattr(self, name, None)
+                        if packer is None or id(packer) in seen:
+                            continue
+                        seen.add(id(packer))
+                        close = getattr(packer, "close", None)
+                        if callable(close):
+                            attempt(name, close)
+
+        resources_released = not errors
+        # A worker exception does not make a joined scheduler unsafe to retire,
+        # but it must still make the owning worker fail. Check only after the
+        # dependent engine/transport resources have been released.
+        raise_scheduler_failure = getattr(scheduler, "raise_if_failed", None)
+        if scheduler_quiesced and callable(raise_scheduler_failure):
+            attempt("scheduler worker", raise_scheduler_failure)
+        self._shutdown_resources_released = resources_released
+        attempt("unregister", self.unregister_from_controller)
+        shutdown_mp = getattr(self, "shutdown_mp_signal", None)
+        if shutdown_mp is not None:
+            shutdown_mp.set()
+        heartbeat = getattr(self, "heartbeat_thread", None)
+        if heartbeat is not None:
+
+            def stop_heartbeat():
+                if heartbeat.pid is None:
+                    self.heartbeat_thread = None
+                    return
+                heartbeat.join(timeout=15.0)
+                if heartbeat.is_alive():
+                    heartbeat.terminate()
+                    heartbeat.join(timeout=15.0)
+                if heartbeat.is_alive():
+                    raise TimeoutError("Heartbeat process still alive")
+                self.heartbeat_thread = None
+
+            attempt("heartbeat", stop_heartbeat)
+        atexit.unregister(self.unregister_from_controller)
+        if errors:
+            self._shutdown_failure = RuntimeError(
+                "Rollout cleanup failed: " + ", ".join(label for label, _ in errors)
+            )
+            raise self._shutdown_failure from errors[0][1]
 
     def get_underlying_model(self):
         """
@@ -2170,34 +2241,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             "that bypasses the buffer model."
         )
 
-        try:
-            self._main_loop_impl()
-        finally:
-            _begin_shutdown_heartbeat_grace(self)
-            # Stop the UCXX output server *before* any NCCL teardown/abort.
-            # The rollout backend (e.g. rl-gym's ModularRolloutWorker via
-            # UCXXRolloutMixin) serves this replica's generated output to the
-            # trainer over a UCXX server.  cleanup_ucxx() is otherwise never
-            # invoked, so at end-of-data a trainer can still be pulling the
-            # final output when teardown begins -- and that concurrent UCXX
-            # activity wedges ncclCommAbort on the straggler.  stop_server()
-            # sets the shutdown flag and bounded-joins its threads (in-flight
-            # reads finish first), so this is a graceful close, not a kill.
-            self._cleanup_payload_server()
-            wst = getattr(self, "_weight_sync_thread", None)
-            if wst is not None:
-                logger.info(
-                    "[Teardown] %s: stopping WeightSyncThread", self.replica_name
-                )
-                _t_wst = time.monotonic()
-                wst.stop()
-                logger.info(
-                    "[Teardown] %s: WeightSyncThread.stop() returned in %.2fs "
-                    "(thread_alive=%s)",
-                    self.replica_name,
-                    time.monotonic() - _t_wst,
-                    wst._thread.is_alive(),
-                )
+        # work()/the entrypoint owns teardown on both success and failure.
+        self._main_loop_impl()
 
     def _cleanup_payload_server(self) -> None:
         """Close the configured producer transport before distributed teardown."""
@@ -2879,6 +2924,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         This function is non-blocking.
         """
+        # A scheduler exception otherwise looks like an empty completion queue
+        # and can leave the control loop waiting forever.
+        raise_scheduler_failure = getattr(self.scheduler, "raise_if_failed", None)
+        if callable(raise_scheduler_failure):
+            raise_scheduler_failure()
+
         # update the state of the rollout generation worker
         if (
             self.state.prompt_fetch_end()
@@ -3187,24 +3238,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             self.teacher_interact_thread.start()
 
-        self.main_loop()
-        # [Teardown trace] These calls are otherwise silent; emitting a
-        # breadcrumb before/after each one means the last line in a wedged
-        # worker's log names the exact blocking call (e.g. a hung
-        # inference_stream.synchronize() from a cross-replica NCCL teardown
-        # race) instead of an un-attributable silent gap before unregister.
-        logger.info(
-            "[Teardown] %s: main_loop returned; draining inference_stream",
-            self.replica_name,
-        )
-        # Synchronous-path backstop: in async_r2r_sync=disabled there is no
-        # WeightSyncThread, so R2R/P2R run on inference_stream; an orphaned
-        # collective here is drained-or-aborted the same way.  Quiet on healthy
-        # runs now that the controller waits for rollout checkout.
-        bounded_drain_or_abort(
-            self.inference_stream,
-            _TEARDOWN_DRAIN_TIMEOUT_S,
-            f"inference_stream[{self.replica_name}]",
-        )
-        self.handle_shutdown()
+        try:
+            self.main_loop()
+            scheduler = getattr(self, "scheduler", None)
+            raise_scheduler_failure = getattr(scheduler, "raise_if_failed", None)
+            if callable(raise_scheduler_failure):
+                raise_scheduler_failure()
+        except BaseException:
+            try:
+                self.handle_shutdown()
+            except BaseException:
+                logger.exception("[Rollout] Cleanup after work failure failed")
+            raise
+        else:
+            self.handle_shutdown()
         logger.info("[Teardown] %s: work() returning", self.replica_name)

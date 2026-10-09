@@ -216,9 +216,15 @@ class vLLMRolloutAsync(vLLMRollout):
         return self._engine_initialized.is_set()
 
     def shutdown(self):
-        if self._engine_initialized.is_set():
-            self._engine_initialized.clear()
-            self.rollout_engine.shutdown()
+        # The engine can exist before initialization completes. Retire it even
+        # when a later setup step failed, without shutting it down twice.
+        engine = getattr(self, "rollout_engine", None)
+        if engine is not None:
+            engine.shutdown()
+            self.rollout_engine = None
+        initialized = getattr(self, "_engine_initialized", None)
+        if isinstance(initialized, threading.Event):
+            initialized.clear()
 
     def _get_request_id(self, prompt_idx: int, child_idx: int = 0):
         return str(f"req_{prompt_idx}_{child_idx}")

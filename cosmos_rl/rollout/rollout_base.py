@@ -25,6 +25,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
+from cosmos_rl.utils.logging import logger
 
 
 class RolloutBase(ABC):
@@ -47,7 +48,14 @@ class RolloutBase(ABC):
         self.device = device
         self._engine_initialized = False
 
-        self.post_init_hook(**kwargs)
+        try:
+            self.post_init_hook(**kwargs)
+        except BaseException:
+            try:
+                self.shutdown()
+            except BaseException:
+                logger.exception("Rollout cleanup after post_init_hook failure failed")
+            raise
 
     @abstractmethod
     def post_init_hook(self, **kwargs):
@@ -131,6 +139,10 @@ class RolloutBase(ABC):
     def shutdown(self):
         """
         Shutdown the engine and release the resources.
+
+        Implementations must tolerate partial initialization and repeated calls.
+        Constructors/factories acquiring resources before returning are responsible
+        for unwinding them on failure. The base handles post_init_hook failures.
         """
         # In some case, the engine may create a child thread to run the generation, Rollout should release the resources before shutting down.
         pass

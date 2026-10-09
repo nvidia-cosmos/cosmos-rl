@@ -77,6 +77,16 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     """
 
     def __init__(self, config: CosmosConfig, **kwargs) -> None:
+        try:
+            self._initialize(config, **kwargs)
+        except BaseException:
+            try:
+                self.handle_shutdown()
+            except BaseException:
+                logger.exception("[Rollout] TRTLLM construction cleanup failed")
+            raise
+
+    def _initialize(self, config, **kwargs):
         super(TRTLLMRolloutWrapper, self).__init__()
         self.post_init(config, None, init_comm=False)
         # only init some meta info.
@@ -297,10 +307,17 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         assert not self.rollout.rollout_config.multi_turn_config.enable, (
             "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
         )
-        while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
+        self.cosmos_replica_name_queue.setup_lazily()
+        while not self.shutdown_signal.is_set():
+            if not self.cosmos_replica_name_queue.socket.poll(timeout=100):
+                continue
+            replica_name = self.cosmos_replica_name_queue.get()
+            if replica_name is None:
+                break
             while not self.rollout_wrapper_event.is_set():
                 # this means that inside trtllmwoker, the weight is not synced yet.
-                pass
+                if self.shutdown_signal.wait(timeout=0.1):
+                    return
             # Main process will be blocked here until the trtllm worker has all done the registration.
             # So the worker processes has done the registration.
             logger.info(
@@ -313,6 +330,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             self._is_registered = True
             break
 
+        if self.shutdown_signal.is_set():
+            return
         while not self.shutdown_signal.is_set():
             # 1. check if we have to do validation first
             if self.validation_event.is_set():
@@ -503,7 +522,32 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def life_control_loop(self):
-        while inst := self.cosmos_weight_sync_queue.get():
+        try:
+            self._life_control_loop()
+        except BaseException as exc:
+            self._life_control_error = exc
+            self.shutdown_signal.set()
+            logger.exception("[Rollout] TRTLLM control thread failed")
+        finally:
+            try:
+                self.cosmos_weight_sync_queue.close()
+            except BaseException as exc:
+                if getattr(self, "_life_control_error", None) is None:
+                    self._life_control_error = exc
+                self.shutdown_signal.set()
+                logger.exception("[Rollout] TRTLLM control queue cleanup failed")
+
+    def _life_control_loop(self):
+        queue = self.cosmos_weight_sync_queue
+        queue.setup_lazily()
+        while not self.shutdown_signal.is_set():
+            # Poll on this socket's owning thread so local teardown can stop
+            # an idle receiver without closing a live ZMQ socket cross-thread.
+            if not queue.socket.poll(timeout=100):
+                continue
+            inst = queue.get()
+            if inst is None:
+                break
             if isinstance(inst, ShutdownInstruction):
                 logger.info(
                     f"[Rollout] Received shutdown instruction of {self.replica_name}, setting shutdown signal"
@@ -527,6 +571,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.life_control_thread.start()
 
         self.main_loop()
+        if getattr(self, "_life_control_error", None) is not None:
+            raise self._life_control_error
 
     def get_ipc_queue(self) -> Tuple[IpcQueue, IpcQueue]:
         return (
@@ -535,16 +581,69 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         )
 
     def handle_shutdown(self):
-        if not hasattr(self, "_shutdown_handled"):
-            self._shutdown_handled = True
-            if not self.shutdown_signal.is_set():
-                self.shutdown_signal.set()
-            if not self.shutdown_mp_signal.is_set():
-                self.shutdown_mp_signal.set()
-            if self.life_control_thread is not None:
-                # Don't wait for life_control_thread to finish
-                # self.life_control_thread.join()
-                # self.life_control_thread = None
-                pass
+        if getattr(self, "_shutdown_handled", False):
+            if getattr(self, "_shutdown_failure", None) is not None:
+                raise self._shutdown_failure
+            return
+        self._shutdown_handled = True
+        atexit.unregister(self.handle_shutdown)
+        errors = []
 
-            self.unregister_from_controller()
+        def attempt(label, action):
+            try:
+                action()
+            except BaseException as exc:
+                errors.append((label, exc))
+                logger.exception("[Rollout] TRTLLM %s cleanup failed", label)
+
+        for name in ("shutdown_signal", "shutdown_mp_signal"):
+            event = getattr(self, name, None)
+            if event is not None:
+                event.set()
+        thread = getattr(self, "life_control_thread", None)
+        if thread is not None:
+
+            def stop_control():
+                if thread.ident is None and not thread.is_alive():
+                    return
+                thread.join(timeout=15.0)
+                if thread.is_alive():
+                    raise TimeoutError("TRTLLM control thread still alive")
+
+            attempt("control thread", stop_control)
+        reward_dispatcher = getattr(self, "reward_dispatcher", None)
+        if reward_dispatcher is not None:
+            attempt(
+                "reward executor",
+                reward_dispatcher.shutdown,
+            )
+        if not errors:
+            replica_queue = getattr(self, "cosmos_replica_name_queue", None)
+            if replica_queue is not None:
+                attempt("replica queue", replica_queue.close)
+            rollout = getattr(self, "rollout", None)
+            if rollout is not None:
+                attempt("engine", rollout.shutdown)
+            if not errors:
+                attempt("packer transports", self.close_payload_transports)
+            seen = set()
+            packer_names = () if errors else ("data_packer", "val_data_packer")
+            for name in packer_names:
+                packer = getattr(self, name, None)
+                if packer is None or id(packer) in seen:
+                    continue
+                seen.add(id(packer))
+                close = getattr(packer, "close", None)
+                if callable(close):
+                    attempt(name, close)
+        self._shutdown_resources_released = not errors
+        control_error = getattr(self, "_life_control_error", None)
+        if control_error is not None:
+            errors.append(("control thread", control_error))
+        attempt("unregister", self.unregister_from_controller)
+        atexit.unregister(self.unregister_from_controller)
+        if errors:
+            self._shutdown_failure = RuntimeError(
+                "TRTLLM cleanup failed: " + ", ".join(label for label, _ in errors)
+            )
+            raise self._shutdown_failure from errors[0][1]
