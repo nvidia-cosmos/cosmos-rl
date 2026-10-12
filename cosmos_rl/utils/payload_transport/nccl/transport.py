@@ -186,6 +186,10 @@ class NcclPayloadTransport(PayloadTransport):
              budget for the FIRST (comm-creating) transfer of a pair, which
              must wait out the cold-start comm-init storm; floored at
              ``nccl_recv_timeout``.
+           * ``nccl_receive_budget_bytes`` (int, default 0): opt-in device
+             payload storage cap; requires explicit final-consumer release.
+           * ``nccl_receive_admission_timeout`` (float, default 30.0): maximum
+             wait for an older consumer to release budget capacity.
 
         2. **Composed** -- a packer that only schedules (exposes
            ``set_transport_strategy``) gets a strategy built and attached,

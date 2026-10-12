@@ -22,6 +22,7 @@ dependencies = [
     "redis",
     "msgpack",
     "qwen_vl_utils",
+    "av<19", # TorchVision's video reader passes metadata_errors, removed in PyAV 19.
     "pynvml",
     "boto3",
     "modelscope",

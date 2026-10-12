@@ -121,6 +121,15 @@ class Trainer(ABC):
             "Expanded trainers must consume the validated sample batch"
         )
 
+    def training_payload_streams(self):
+        """Additional final payload readers for opt-in bounded reception.
+
+        The training and current CUDA streams are included automatically.
+        Expanded steps must not retain samples/views or return payload aliases.
+        Override for reward, visualization, or other asynchronous readers.
+        """
+        return ()
+
     def __init__(
         self,
         config: CosmosConfig,

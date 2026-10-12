@@ -191,6 +191,16 @@ def prefetch_training_batch(trainer, rollouts):
 def _take_local_batch(trainer, rollouts):
     pending = getattr(trainer, "_prepared_training_batch", None)
     if pending is None:
+        packer = getattr(trainer, "data_packer", None)
+        if _bounded_payloads(packer):
+            from cosmos_rl.utils.payload_transport.receive_memory import ReceivedBatch
+
+            # Inline CPU preparation still needs one batch-owned receive, never
+            # per-sample synchronous refetches that bypass the memory budget.
+            if not isinstance(packer._prefetch_cache, ReceivedBatch):
+                if not packer._prefetch_outstanding:
+                    packer.start_prefetch(rollouts)
+                packer.wait_prefetch()
         return _prepare_local_batch(trainer, rollouts)
     owned, future, packer = pending
     packer._raise_if_prefetch_failed()
@@ -208,7 +218,45 @@ def _take_local_batch(trainer, rollouts):
             trainer._prepared_training_batch = None
 
 
+def _bounded_payloads(packer):
+    return getattr(
+        getattr(packer, "_transport_strategy", None), "_receive_budget", None
+    )
+
+
 def run_training_step(trainer, *, before_step=None, **kwargs):
+    """Consume an update, then release its payloads after the final readers.
+
+    Expanded trainers must not retain prepared samples or payload aliases after
+    step_expanded_training returns. Extra CUDA readers must be declared through
+    training_payload_streams(). Unexpected failures retain ownership; a failed
+    step is not evidence that all readers have finished.
+    """
+    packer = getattr(trainer, "data_packer", None)
+    bounded = _bounded_payloads(packer)
+    if bounded and not isinstance(trainer.batching_contract, ExpandedSampleBatching):
+        raise ValueError(
+            "Bounded reception at the training entrypoint requires ExpandedSampleBatching; "
+            "legacy trainers need an explicit final-reader integration"
+        )
+    # Keep preparation/future/minibatch aliases in a separate frame. They must
+    # be gone before returning capacity, not merely done with CPU preparation.
+    result = _run_training_step(trainer, before_step=before_step, **kwargs)
+    if bounded:
+        from cosmos_rl.utils.payload_transport.receive_memory import ReceivedBatch
+
+        if isinstance(packer._prefetch_cache, ReceivedBatch):
+            packer._prefetch_cache.check_returned_metrics(result)
+        stream_hook = getattr(trainer, "training_payload_streams", None)
+        streams = stream_hook() if stream_hook is not None else ()
+        train_stream = getattr(trainer, "train_stream", None)
+        if train_stream is not None:
+            streams = (*streams, train_stream)
+        packer.release_prefetch(streams=streams)
+    return result
+
+
+def _run_training_step(trainer, *, before_step=None, **kwargs):
     """Worker entrypoint enforcing the declared contract, not a boolean bypass.
 
     One metadata exchange per expanded update agrees the variable schedule, not
