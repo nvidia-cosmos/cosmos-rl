@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 from typing import Dict, Any, List
 import torch
 
@@ -76,6 +78,8 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         start_event.record()
 
         self.optimizers.zero_grad()
+        audit_enabled = os.getenv("COSMOS_VLA_AUDIT") == "1"
+        audit_rows = []
         total_loss = 0.0
         max_loss = -float("inf")
         TRAINING_CHUNK_SIZE = self.config.vla.training_chunk_size
@@ -124,6 +128,11 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                         chunk_data["attention_mask"],
                         labels=chunk_data["responses"],
                         temperature=self.config.train.train_policy.temperature,
+                        **(
+                            {"proprio": chunk_data["proprio"]}
+                            if "proprio" in chunk_data
+                            else {}
+                        ),
                     ).logprobs
 
                     chunk_response_mask = chunk_data["logprob_masks"]
@@ -146,6 +155,44 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                     ).sum()
                     ppo_kl = (-negative_approx_kl * chunk_response_mask).sum()
 
+                    if audit_enabled and chunk_valid_responses.item() > 0:
+                        with torch.no_grad():
+                            valid = chunk_response_mask.bool()
+                            delta = negative_approx_kl[valid].float()
+                            valid_ratio = ratio[valid].float()
+                            audit_rows.append(
+                                {
+                                    "step": current_step,
+                                    "rank": self.global_rank,
+                                    "task": int(task_id),
+                                    "trial": int(trial_id),
+                                    "weight_version": int(weight_version),
+                                    "advantage": float(advantage),
+                                    "success": bool(policy_input.complete),
+                                    "finish_step": int(policy_input.finish_step),
+                                    "chunk": chunk_idx,
+                                    "tokens": int(valid.sum()),
+                                    "masked_prompt_tokens": int(
+                                        (
+                                            chunk_data["attention_mask"][
+                                                valid.any(dim=-1)
+                                            ]
+                                            == 0
+                                        ).sum()
+                                    ),
+                                    "ratio_mean": valid_ratio.mean().item(),
+                                    "ratio_min": valid_ratio.min().item(),
+                                    "ratio_max": valid_ratio.max().item(),
+                                    "abs_logprob_delta": delta.abs().mean().item(),
+                                    "kl_k3": (valid_ratio - 1 - delta).mean().item(),
+                                    "clip_fraction": (
+                                        torch.gt(pg_losses2, pg_losses)[valid]
+                                    )
+                                    .float()
+                                    .mean()
+                                    .item(),
+                                }
+                            )
                     policy_loss = pg_loss / episode_valid_responses
                     pg_clipfrac = pg_clipfrac / episode_valid_responses
                     ppo_kl = ppo_kl / episode_valid_responses
@@ -162,6 +209,9 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                         f"mask_sum={chunk_valid_responses.item():.0f}"
                         + (" [PADDED]" if chunk_valid_responses == 0 else "")
                     )
+        if audit_enabled:
+            for row in audit_rows:
+                logger.info("VLA_AUDIT " + json.dumps(row, sort_keys=True))
         self.lr_schedulers.step()
         current_lr = self.lr_schedulers.get_last_lr()[0]
         grad_norm = self.all_reduce_states(inter_policy_nccl)

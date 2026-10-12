@@ -67,41 +67,36 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         # Setup hooks for later use
         SFTPolicyWorker.setup_hooks(self)
 
+    def _prepare_lr_schedulers(self, total_steps: int):
+        # Validate before constructing LambdaLR: construction mutates optimizer
+        # LRs and must not overwrite a successfully restored scheduler.
+        for name, expected in (
+            ("loaded_total_steps", self.loaded_total_steps),
+            ("total_steps", self.total_steps),
+        ):
+            if expected is not None and expected > 0 and total_steps != expected:
+                raise ValueError(
+                    f"total_steps {total_steps} differs from {name} {expected}"
+                )
+        if self.trainer.lr_schedulers is None:
+            if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
+                raise RuntimeError("Resumed SFT training requires a restored scheduler")
+            self.trainer.lr_schedulers = build_lr_schedulers(
+                self.trainer.optimizers, self.config, total_steps
+            )
+        self.total_steps = total_steps
+
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
     ):
-        if self.total_steps is None:
-            self.trainer.lr_schedulers = build_lr_schedulers(
-                self.trainer.optimizers, self.config, command.total_steps
-            )
-            self.total_steps = command.total_steps
-            if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
-                assert self.total_steps == self.loaded_total_steps, (
-                    f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
-                )
-        else:
-            assert self.total_steps == command.total_steps, (
-                f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
-            )
+        self._prepare_lr_schedulers(command.total_steps)
         ret = super().execute_policy_to_policy_broadcast(command)
         self.weight_sync_done = True
         logger.info("[SFT] Weight synchronization from broadcast command done.")
         return ret
 
     def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
-        if self.total_steps is None:
-            self.trainer.lr_schedulers = build_lr_schedulers(
-                self.trainer.optimizers, self.config, command.total_steps
-            )
-            self.total_steps = command.total_steps
-            if self.loaded_total_steps is not None and self.loaded_total_steps > 0:
-                assert self.total_steps == self.loaded_total_steps, (
-                    f"total_steps {self.total_steps} should be equal to loaded_total_steps {self.loaded_total_steps}"
-                )
-        else:
-            assert self.total_steps == command.total_steps, (
-                f"total_steps {self.total_steps} should be equal to command.total_steps {command.total_steps}"
-            )
+        self._prepare_lr_schedulers(command.total_steps)
         ret = super().execute_policy_to_policy_unicast(command)
         self.weight_sync_done = True
         logger.info("[SFT] Weight synchronization from unicast command done.")

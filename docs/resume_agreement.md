@@ -25,6 +25,16 @@ their existing retries. Successful agreement is unchanged. No launcher or Slurm
 propagation behavior is added: allocation-wide cleanup remains the launcher's or
 scheduler's responsibility.
 
-This change does not alter checkpoint discovery, legacy fallback-to-base-weight
-behavior, or the successful-resume command ordering. It detects disagreement;
-it does not certify a resume when both sides report empty metadata.
+Native automatic discovery distinguishes absence from failure. Only
+`NoCheckpointFound`, raised before selecting or loading a committed checkpoint,
+permits an automatic (`resume = true`) fresh start. An explicit path never
+falls back. A missing/corrupt artifact, incompatible state, or loader/hook error
+after selection propagates instead of loading an older candidate or base weights.
+This applies to the built-in LLM SFT/DPO/GRPO and diffusion SFT/NFT trainers.
+
+The legacy RL controller publishes its selected native checkpoint path to the
+workers, just as the opt-in custom resume adapter does. No checkpoint disables
+automatic resume before dispatch; corrupt metadata does not. This is not a
+transactional rollback, a new distributed restore protocol, or a custom-format
+adapter for SFT. Resume agreement alone still cannot certify a resume when both
+sides report empty metadata.

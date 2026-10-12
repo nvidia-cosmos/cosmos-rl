@@ -81,8 +81,10 @@ def extract_from_cuda_tensor(device, key, obj, tensor):
             raise ValueError(
                 f"Object {key} is not the same shape as the tensor. Please check the data consistency."
             )
+        # Keep the receiver's array (and its aliases), including strided views.
+        # ndarray has no Tensor.copy_ method; do not replace its owner either.
         x = tensor.cpu()
-        obj.copy_(x.numpy())
+        np.copyto(obj, x.numpy(), casting="no")
     else:
         np_arr = tensor.cpu()
         obj_new = msgpack.unpackb(bytes(np_arr.numpy()), ext_hook=msgunpack_c_long)
@@ -90,7 +92,7 @@ def extract_from_cuda_tensor(device, key, obj, tensor):
             assert len(obj) == len(obj_new)
             obj = tuple(
                 [
-                    np.array(obj_new[idx])
+                    np.array(obj_new[idx], dtype=x.dtype)
                     if isinstance(x, np.ndarray)
                     else tuple(obj_new[idx])
                     if isinstance(x, tuple)
@@ -225,7 +227,11 @@ class Trainer(ABC):
         )
 
     def invalidate_checkpoint_completion(self, current_step: int) -> None:
-        """Invalidate this rank before a coordinated same-step final save."""
+        """Join pending state before final promotion (legacy hook name).
+
+        The checkpoint manager preserves committed state instead of invalidating
+        it. Final save verifies immutable state before reusing its artifacts.
+        """
         manager = getattr(self, "ckpt_manager", None)
         if manager is None or not hasattr(manager, "invalidate_completion_marker"):
             raise NotImplementedError(

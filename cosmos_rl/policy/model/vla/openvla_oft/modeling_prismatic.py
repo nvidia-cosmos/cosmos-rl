@@ -1263,9 +1263,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         labels[:] = IGNORE_INDEX
 
         # # Get number of tokens in prompt (excluding the start token)
-        NUM_PROMPT_TOKENS = (
-            input_ids.shape[-1] - 1
-        )  # Subtract action tokens and stop token
+        # Generation indexes action logits using each unpadded prompt length.
+        # A shared padded length changes both token positions and PPO likelihoods.
+        NUM_PROMPT_TOKENS = (attention_mask.long().sum(dim=-1) - 1).clamp_min(0)
 
         # # Prepare inputs by adding necessary tokens
         # #input_ids, attention_mask = self._prepare_input_for_action_prediction(input_ids, attention_mask)
@@ -1310,6 +1310,15 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         # # Replace last label token with stop token
         labels[:, -1] = STOP_INDEX
+
+        # Match generate_action: keep prompt/action/stop tokens in order and move
+        # padding behind them before inserting visual tokens after the BOS token.
+        sorted_indices = torch.argsort(
+            attention_mask.long(), dim=1, descending=True, stable=True
+        )
+        input_ids = torch.gather(input_ids, 1, sorted_indices)
+        attention_mask = torch.gather(attention_mask, 1, sorted_indices)
+        labels = torch.gather(labels, 1, sorted_indices)
 
         # Get input embeddings and action masks
 
@@ -1461,11 +1470,16 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 return_dict=True,
             )
 
+            action_positions = (
+                NUM_PATCHES
+                + NUM_PROMPT_TOKENS[:, None]
+                + torch.arange(ACTION_DIM * NUM_ACTIONS_CHUNK, device=input_ids.device)[
+                    None, :
+                ]
+            )
             compute_logits = language_model_output.logits[
-                :,
-                NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES
-                + NUM_PROMPT_TOKENS
-                + ACTION_DIM * NUM_ACTIONS_CHUNK,
+                torch.arange(input_ids.shape[0], device=input_ids.device)[:, None],
+                action_positions,
             ]
 
             # test end

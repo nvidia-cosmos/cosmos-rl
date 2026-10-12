@@ -69,6 +69,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         if command.dst_replica_name != self.replica_name:
             return
         self.rollout.set_underlying_model(self.api_client.get_policy_model())
+        if command.weight_step is not None:
+            assert command.weight_step >= self.current_weight_version
+            self.current_weight_version = command.weight_step
         logger.info(
             f"[Rollout] Reset model from Policy replica {command.src_replica_name} to Rollout replica {self.replica_name}."
         )
@@ -105,6 +108,13 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             should_do_validation = self.config.validation.enable and (
                 is_initial_validation or is_periodic_validation or is_final_validation
             )
+            if not getattr(self, "_initial_weight_broadcast_done", False):
+                self._initial_weight_broadcast_done = True
+                # On resume the initial step can also be a periodic boundary.
+                # Match the dispatcher's val_before_train gate at startup.
+                should_do_validation = (
+                    should_do_validation and self.config.validation.val_before_train
+                )
 
             if should_do_validation:
                 self.current_step = current_step
@@ -117,7 +127,6 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
 
     @torch.no_grad()
     def rollout_for_one_minor_step(self):

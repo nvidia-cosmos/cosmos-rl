@@ -417,6 +417,7 @@ class PolicyStatusManager:
         if (
             self.config.train.resume
             and self.config.validation.enable
+            and self.config.validation.val_before_train
             and self.current_step > 0
             and (
                 self.current_step % self.config.validation.freq == 0
@@ -1067,17 +1068,21 @@ class PolicyStatusManager:
                 ):
                     self.data_fetcher.validation_activate_dataloader(self.current_step)
 
+                items_count = self.config.train.train_batch_per_replica
+                required_rollouts = items_count * len(valid_replicas)
+                self.remain_samples_num -= required_rollouts
+                # One logical update has one checkpoint decision and progress
+                # snapshot, including at an epoch boundary on the first step.
+                do_save = self.check_checkpoint_saving(required_rollouts)
                 for replica in valid_replicas:
-                    self.remain_samples_num -= self.config.train.train_batch_per_replica
                     command.DataFetchCommand.trigger(
                         replica=replica,
-                        items_count=self.config.train.train_batch_per_replica,
+                        items_count=items_count,
                         global_step=self.current_step,
                         total_steps=self.total_steps,
                         # `remain_samples_num` is just for checkpointing the training progress
                         remain_samples_num=self.remain_samples_num,
-                        # Only `do_save` when checkpointing is enabled
-                        do_save=False,
+                        do_save=do_save,
                         redis_handler=self.redis_handler,
                     )
                     self.set_status(replica.name, PolicyStatus.RUNNING)
@@ -2812,8 +2817,8 @@ class RolloutStatusManager:
                 dst_replica=target_replica,
                 src_replica_size=policy_status_manager.policy_atoms_in_replica,
                 dst_replica_size=self.rollout_atoms_in_replica,
-                weight_step=None,
-                total_steps=None,
+                weight_step=policy_status_manager.current_step,
+                total_steps=policy_status_manager.total_steps,
                 redis_handler=self.redis_handler,
             )
             logger.info(

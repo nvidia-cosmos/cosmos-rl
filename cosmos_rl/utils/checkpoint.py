@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import re
 import json
@@ -23,6 +24,7 @@ import numpy as np
 import concurrent.futures as futures
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound, controller_checkpoint_metadata
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.s3_utils import upload_file_to_s3
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -45,6 +47,46 @@ def _step_dir_sort_key(dir_path: str) -> int:
     if match:
         return int(match.group(1))
     return -9999
+
+
+def _same_checkpoint_state(saved, current) -> bool:
+    """Exact local-state comparison; never issue a DTensor collective.
+
+    A committed step is immutable. Promotion may reuse it only if the caller's
+    model, optimizer, scheduler and shared progress still describe that save.
+    """
+    if isinstance(saved, torch.Tensor) and isinstance(current, torch.Tensor):
+        from torch.distributed.tensor import DTensor
+
+        if isinstance(saved, DTensor) != isinstance(current, DTensor):
+            return False
+        if saved.shape != current.shape or saved.dtype != current.dtype:
+            return False
+        if isinstance(saved, DTensor):
+            if (
+                saved.placements != current.placements
+                or saved.device_mesh.mesh_dim_names
+                != current.device_mesh.mesh_dim_names
+                or not torch.equal(saved.device_mesh.mesh, current.device_mesh.mesh)
+            ):
+                return False
+            saved, current = saved.to_local(), current.to_local()
+        return torch.equal(saved.detach().cpu(), current.detach().cpu())
+    if isinstance(saved, dict) and isinstance(current, dict):
+        return (
+            saved.keys() == current.keys()
+            and all(_same_checkpoint_state(saved[key], current[key]) for key in saved)
+            and _same_checkpoint_state(
+                getattr(saved, "_metadata", None), getattr(current, "_metadata", None)
+            )
+        )
+    if isinstance(saved, (list, tuple)) and type(saved) is type(current):
+        return len(saved) == len(current) and all(
+            _same_checkpoint_state(a, b) for a, b in zip(saved, current, strict=True)
+        )
+    if isinstance(saved, np.ndarray) and isinstance(current, np.ndarray):
+        return saved.dtype == current.dtype and np.array_equal(saved, current)
+    return type(saved) is type(current) and bool(saved == current)
 
 
 class CheckpointMananger:
@@ -73,12 +115,16 @@ class CheckpointMananger:
             if self.save_mode == "async":
                 self.executor = futures.ThreadPoolExecutor(max_workers=4)
         self.pre_save_futures = []
+        # Housekeeping is caller-owned, never concurrent with another writer.
+        # A rank's save completion is not the complete checkpoint's commit.
+        self._pending_save_checks = {}
+        self.selected_checkpoint_path = None
         if self._is_master_rank():
             self.saved_ckpt_step_dirs = sorted(
                 self._get_all_saved_ckpt_step_dirs(),
                 key=_step_dir_sort_key,
             )
-            self._prune_corrupted_ckpts()
+            self._filter_owned_ckpts()
             # Load best score from file if exists (persists across resumes)
             self.best_score, self.best_ckpt_abs_dir = self._load_best_score()
         if "save_checkpoint_hook" in hook_fns:
@@ -97,20 +143,25 @@ class CheckpointMananger:
             and is_master_rank(self.parallel_dims, self.global_rank)
         )
 
-    def _prune_corrupted_ckpts(self):
-        """Prune corrupted checkpoints."""
-        # Create a list of directories to remove (avoid modifying list while iterating)
-        dirs_to_remove = []
-        for ckpt_dir in self.saved_ckpt_step_dirs:
-            policy_path = os.path.join(ckpt_dir, "policy")
-            if not self.ckpt_path_check(policy_path):
-                dirs_to_remove.append(ckpt_dir)
+    def _filter_owned_ckpts(self):
+        """Discovery is read-only; retention only owns this run's checkpoints.
 
-        # Remove corrupted checkpoints
-        for ckpt_dir in dirs_to_remove:
-            self._delete_checkpoint(ckpt_dir)
-            self.saved_ckpt_step_dirs.remove(ckpt_dir)
-            logger.info(f"Pruned corrupted checkpoint: {ckpt_dir}")
+        A missing marker can indicate an active writer or another topology,
+        not corruption. Never delete a directory merely because discovery
+        cannot load it. Cross-run candidates remain available to resume through
+        get_latest_ckpt_paths(), but are not eligible for max_keep deletion.
+        """
+        owned_dirs = []
+        output_dir = os.path.realpath(self.ckpt_output_dir)
+        for ckpt_dir in self.saved_ckpt_step_dirs:
+            if os.path.dirname(os.path.realpath(ckpt_dir)) != output_dir:
+                continue
+            if os.path.islink(ckpt_dir):
+                continue
+            policy_path = os.path.join(ckpt_dir, "policy")
+            if self.ckpt_path_check(policy_path):
+                owned_dirs.append(ckpt_dir)
+        self.saved_ckpt_step_dirs = owned_dirs
 
     def _get_num_saving_ranks(self) -> int:
         """
@@ -183,7 +234,11 @@ class CheckpointMananger:
         saved_ckpt_step_dirs = []
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = self._root_output_dir
-            timestamps = os.listdir(root_output_dir)
+            try:
+                timestamps = os.listdir(root_output_dir)
+            except FileNotFoundError:
+                # A never-created output root is an ordinary discovery miss.
+                return []
             timestamps.sort()
 
             for timestamp in timestamps:
@@ -251,6 +306,10 @@ class CheckpointMananger:
                     data = json.load(f)
                     score = data.get("best_score", default_score)
                     best_ckpt_abs_dir = data.get("best_ckpt_abs_dir", None)
+                    if best_ckpt_abs_dir is not None:
+                        # Older metadata may retain a symlinked output-root
+                        # spelling; compare artifact identity, not path aliases.
+                        best_ckpt_abs_dir = os.path.realpath(best_ckpt_abs_dir)
                     if (
                         best_ckpt_abs_dir is None
                         or best_ckpt_abs_dir != self._get_best_ckpt_abs_dir()
@@ -272,7 +331,7 @@ class CheckpointMananger:
             json.dump(
                 {
                     "best_score": score,
-                    "best_ckpt_abs_dir": os.path.abspath(best_ckpt_dir),
+                    "best_ckpt_abs_dir": os.path.realpath(best_ckpt_dir),
                     "metric": self.metric,
                 },
                 f,
@@ -346,10 +405,9 @@ class CheckpointMananger:
 
     def _is_ckpt_dir_linked_as_best(self, ckpt_dir: str) -> bool:
         """Check if the given ckpt_dir is currently linked as the best checkpoint."""
-        return (
-            self.best_ckpt_abs_dir is not None
-            and self.best_ckpt_abs_dir == os.path.abspath(ckpt_dir)
-        )
+        return self.best_ckpt_abs_dir is not None and os.path.realpath(
+            self.best_ckpt_abs_dir
+        ) == os.path.realpath(ckpt_dir)
 
     def _delete_checkpoint(self, ckpt_dir: str):
         """Delete checkpoint and safetensors for a given step.
@@ -399,44 +457,66 @@ class CheckpointMananger:
                 extra_info = torch.load(f, weights_only=False, map_location="cpu")
             return extra_info
         else:
-            logger.warning(f"Extra info file {extra_info_path} does not exist.")
-            return {}
+            raise FileNotFoundError(
+                f"Checkpoint metadata is missing: {extra_info_path}"
+            )
 
     def offload_state_dict_cpu(self, state_dict: dict):
-        state_dict_cpu = {}
-        for key, value in state_dict.items():
+        """Own all snapshot storage before handing it to the async writer.
+
+        The caller must hold its training/sampling snapshot boundary while this
+        runs. This isolates later mutations; it cannot make concurrently changing
+        model, optimizer, and application state a coherent checkpoint.
+        """
+
+        def snapshot(value):
             if isinstance(value, torch.Tensor):
-                if value.is_meta:
-                    continue
-                state_dict_cpu[key] = value.cpu()
-            elif isinstance(value, dict):
-                state_dict_cpu[key] = self.offload_state_dict_cpu(value)
-            else:
-                state_dict_cpu[key] = value
-        return state_dict_cpu
+                # .cpu() aliases an already-CPU tensor (including Adam's step).
+                # A blocking copy also completes CUDA staging before training
+                # can reuse the source storage. Detach avoids retaining graphs.
+                return value.detach().to(device="cpu", copy=True)
+            if isinstance(value, dict):
+                result = copy.copy(value)
+                result.clear()
+                for key, child in value.items():
+                    # Preserve the existing omission of nonresident parameters.
+                    if isinstance(child, torch.Tensor) and child.is_meta:
+                        continue
+                    result[copy.deepcopy(key)] = snapshot(child)
+                # Module state_dict OrderedDicts carry versioning metadata.
+                if hasattr(value, "__dict__"):
+                    result.__dict__ = snapshot(value.__dict__)
+                return result
+            if isinstance(value, list):
+                return [snapshot(child) for child in value]
+            if isinstance(value, tuple):
+                children = [snapshot(child) for child in value]
+                if hasattr(value, "_fields"):
+                    return type(value)(*children)
+                return tuple(children)
+            # Includes NumPy RNG arrays and mutable application metadata.
+            return copy.deepcopy(value)
+
+        return snapshot(state_dict)
 
     def _wait_for_pending_async_saves(self) -> None:
         """Wait for pending saves and propagate any background failure."""
-        if not self.pre_save_futures:
-            return
-        futures.wait(self.pre_save_futures)
-        for future in self.pre_save_futures:
-            future.result()
-        self.pre_save_futures = []
+        while self.pre_save_futures:
+            futures.wait(self.pre_save_futures)
+            for future in self.pre_save_futures:
+                future.result()
+            self.pre_save_futures = []
+            self._publish_completed_checkpoints()
 
     def invalidate_completion_marker(self, step: int) -> None:
-        """Remove this rank's marker before a same-step checkpoint rewrite."""
+        """Compatibility hook before final promotion: join, never invalidate.
+
+        Completed rank artifacts and their markers are immutable. The historical
+        hook name remains for worker/custom-trainer compatibility; conflicting
+        same-step state is rejected by save_checkpoint without touching files.
+        """
         if self.save_mode == "async" and self.pre_save_futures:
             self._wait_for_pending_async_saves()
-
-        marker_path = os.path.join(
-            self.ckpt_output_dir,
-            f"step_{step}",
-            "policy",
-            f".rank_{self.global_rank}_complete",
-        )
-        if os.path.exists(marker_path):
-            os.remove(marker_path)
 
     def finalize(self) -> None:
         """Wait for any pending async checkpoint saves/uploads to finish.
@@ -444,15 +524,15 @@ class CheckpointMananger:
         `save_mode == "async"`.
         """
         if self.save_mode != "async" or not hasattr(self, "executor"):
+            self._publish_completed_checkpoints()
             return
-        if self.pre_save_futures:
-            for future in futures.as_completed(self.pre_save_futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Async checkpoint save/upload failed: {e}")
-            self.pre_save_futures = []
-        self.executor.shutdown(wait=True)
+        # Observe failures after joining every writer. A failed final save must
+        # not be logged and converted into a successful training exit.
+        try:
+            self._wait_for_pending_async_saves()
+            self._publish_completed_checkpoints()
+        finally:
+            self.executor.shutdown(wait=True)
 
     def save_checkpoint(
         self,
@@ -476,9 +556,8 @@ class CheckpointMananger:
             str: The path to the saved checkpoint directory.
         """
 
-        def _save_upload(state_dict, local_rel_path, is_final=False):
+        def _upload(local_rel_path, is_final=False):
             local_abs_path = os.path.join(self.ckpt_output_dir, local_rel_path)
-            torch.save(state_dict, local_abs_path)
             if self.config.train.ckpt.upload_s3:
                 if (self.config.train.ckpt.upload_s3 == "final" and is_final) or (
                     self.config.train.ckpt.upload_s3 == "all"
@@ -490,6 +569,11 @@ class CheckpointMananger:
                         s3_file_path=s3_path,
                     )
 
+        def _save_upload(state_dict, local_rel_path, is_final=False):
+            local_abs_path = os.path.join(self.ckpt_output_dir, local_rel_path)
+            torch.save(state_dict, local_abs_path)
+            _upload(local_rel_path, is_final)
+
         is_final = kwargs.get("is_final", False)
         cur_step_ckpt_dir = os.path.join(f"step_{step}", "policy")
 
@@ -500,15 +584,7 @@ class CheckpointMananger:
         )
         self.invalidate_completion_marker(step)
 
-        os.makedirs(
-            os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
-        )
-
         # construct the extra info dict
-        with open(
-            os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir, "cosmos_config"), "w"
-        ) as f:
-            f.write(json.dumps(self.config.model_dump(), indent=4))
         extra_info = {
             "rng_state": self.get_rng_state(),
             "step": step,
@@ -543,7 +619,57 @@ class CheckpointMananger:
                 "Unsupport model type, should either be a torch.nn.Module or dict"
             )
 
-        if self.save_mode == "async":
+        reused = os.path.exists(complete_marker_path)
+        if reused:
+            # Verify all components before any upload, hook or file mutation.
+            # Final promotion preserves the original coherent RNG/progress
+            # snapshot; is_final selects export/upload, not new training state.
+            states = (
+                (model_ckpt_path, state_dict),
+                (optimizer_ckpt_path, optimizer.state_dict()),
+                (scheduler_ckpt_path, scheduler.state_dict()),
+                (extra_info_ckpt_path, extra_info),
+            )
+            for relative, current in states:
+                saved = torch.load(
+                    os.path.join(self.ckpt_output_dir, relative),
+                    weights_only=False,
+                    map_location="cpu",
+                )
+                if relative == extra_info_ckpt_path:
+                    ignored = {"rng_state", "is_final"}
+                    saved = {k: v for k, v in saved.items() if k not in ignored}
+                    current = {k: v for k, v in current.items() if k not in ignored}
+                if not _same_checkpoint_state(saved, current):
+                    raise ValueError(
+                        f"Checkpoint step {step} is immutable: conflicting {relative}"
+                    )
+            for relative, _ in states:
+                _upload(relative, is_final)
+        else:
+            # A failed attempt is not permission to overwrite partly saved
+            # artifacts. Other saving ranks may already own committed shards.
+            for relative in (
+                model_ckpt_path,
+                optimizer_ckpt_path,
+                scheduler_ckpt_path,
+                extra_info_ckpt_path,
+            ):
+                if os.path.exists(os.path.join(self.ckpt_output_dir, relative)):
+                    raise ValueError(
+                        f"Checkpoint step {step} has incomplete rank artifacts; "
+                        "refusing an in-place retry"
+                    )
+            os.makedirs(
+                os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
+            )
+            with open(
+                os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir, "cosmos_config"),
+                "w",
+            ) as f:
+                f.write(json.dumps(self.config.model_dump(), indent=4))
+
+        if not reused and self.save_mode == "async":
 
             def _write_complete_marker_after_saves(futures_to_wait, marker_path):
                 """Wait for all save futures to complete, then write the complete marker."""
@@ -553,7 +679,7 @@ class CheckpointMananger:
                 with open(marker_path, "w") as f:
                     f.write("")
 
-            # offload the state dict to CPU
+            # Freeze every component before submitting any background writer.
             model_state_dict_cpu = self.offload_state_dict_cpu(state_dict)
             optimizer_state_dict_cpu = self.offload_state_dict_cpu(
                 optimizer.state_dict()
@@ -605,7 +731,7 @@ class CheckpointMananger:
 
             if is_final:
                 self._wait_for_pending_async_saves()
-        else:  # sync
+        elif not reused:  # sync
             _save_upload(state_dict, model_ckpt_path, is_final)
             _save_upload(optimizer.state_dict(), optimizer_ckpt_path, is_final)
             _save_upload(scheduler.state_dict(), scheduler_ckpt_path, is_final)
@@ -644,6 +770,7 @@ class CheckpointMananger:
             List[str]
         ] = None,  # dotted module paths for each PP stage
     ) -> tuple[Dict, torch.optim.lr_scheduler._LRScheduler]:
+        self.selected_checkpoint_path = None
         extra_vars = {}
         base_paths: List[str] = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
@@ -651,6 +778,7 @@ class CheckpointMananger:
             try:
                 logger.info(f"Trying to load checkpoint from {base_path}...")
                 if self.ckpt_path_check(base_path):
+                    self.selected_checkpoint_path = os.path.abspath(base_path)
                     logger.info(
                         f"Cosmos checkpoint found at {self.config.train.resume}. Resuming..."
                     )
@@ -694,14 +822,51 @@ class CheckpointMananger:
                     saved_state = torch.load(
                         model_path, weights_only=False, map_location="cpu"
                     )
-                    if pp_model_parts is not None and pp_model_module_paths is not None:
-                        for mp, prefix in zip(pp_model_parts, pp_model_module_paths):
-                            mp_state = {}
-                            prefix_dot = f"{prefix}." if prefix else ""
-                            for k, v in saved_state.items():
-                                if k.startswith(prefix_dot):
-                                    mp_state[k[len(prefix_dot) :]] = v
-                            mp.load_state_dict(mp_state, strict=False)
+                    if pp_model_parts is not None or pp_model_module_paths is not None:
+                        if (
+                            pp_model_parts is None
+                            or pp_model_module_paths is None
+                            or not pp_model_parts
+                            or len(pp_model_parts) != len(pp_model_module_paths)
+                        ):
+                            raise ValueError(
+                                "Pipeline checkpoint requires matching parts and prefixes"
+                            )
+                        stage_keys = []
+                        expected_keys = set()
+                        for part, prefix in zip(
+                            pp_model_parts, pp_model_module_paths, strict=True
+                        ):
+                            if not isinstance(prefix, str):
+                                raise ValueError(
+                                    "Pipeline checkpoint prefixes must be strings"
+                                )
+                            keys = {
+                                key: f"{prefix}.{key}" if prefix else key
+                                for key in part.state_dict()
+                            }
+                            if expected_keys.intersection(keys.values()):
+                                raise ValueError(
+                                    "Pipeline checkpoint has duplicate stage keys"
+                                )
+                            expected_keys.update(keys.values())
+                            stage_keys.append(keys)
+                        if expected_keys != saved_state.keys():
+                            raise ValueError(
+                                "Incomplete pipeline checkpoint: "
+                                f"missing={sorted(expected_keys - saved_state.keys())}, "
+                                f"unexpected={sorted(saved_state.keys() - expected_keys)}"
+                            )
+                        # Validate ownership for every part before loading any.
+                        # Repeated root prefixes are valid when their keys differ.
+                        for part, keys in zip(pp_model_parts, stage_keys, strict=True):
+                            part.load_state_dict(
+                                {
+                                    key: saved_state[full_key]
+                                    for key, full_key in keys.items()
+                                },
+                                strict=True,
+                            )
                     else:
                         model.load_state_dict(saved_state, strict=strict)
                     optimizer.load_state_dict(
@@ -733,12 +898,14 @@ class CheckpointMananger:
                 import traceback
 
                 logger.error(
-                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint...\n{traceback.format_exc()}"
+                    f"Error loading selected checkpoint from {base_path}: {e}; continuation is unsafe.\n{traceback.format_exc()}"
                 )
+                raise
 
-        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
+        raise NoCheckpointFound(f"No complete checkpoint found at {base_paths}")
 
     def load_extra_info_from_checkpoint(self):
+        self.selected_checkpoint_path = None
         extra_vars = {}
         base_paths = self.get_latest_ckpt_paths()
         # check whether checkpoint existing
@@ -747,6 +914,7 @@ class CheckpointMananger:
             try:
                 is_ckpt_path = self.ckpt_path_check(base_path)
                 if is_ckpt_path:
+                    self.selected_checkpoint_path = os.path.abspath(base_path)
                     logger.info(
                         f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
                     )
@@ -762,17 +930,33 @@ class CheckpointMananger:
                     logger.info(
                         f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
                     )
-                    return extra_vars
-                else:
-                    raise FileNotFoundError(f"No checkpoint found at {base_path}")
+                    return controller_checkpoint_metadata(extra_vars)
             except Exception as e:
                 logger.error(
-                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                    f"Error loading selected checkpoint from {base_path}: {e}; continuation is unsafe."
                 )
+                raise
 
-        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
+        raise NoCheckpointFound(f"No complete checkpoint found at {base_paths}")
 
     def save_check(self, step: int, **kwargs):
+        if self._is_master_rank():
+            self._pending_save_checks[step] = dict(kwargs)
+            self._publish_completed_checkpoints()
+
+    def _publish_completed_checkpoints(self):
+        """Defer pruning/best links until all saving ranks have committed.
+
+        Never wait for another rank here. Incomplete saves retain the previous
+        checkpoint; a later save_check/finalize can observe their completion.
+        """
+        for step, options in list(self._pending_save_checks.items()):
+            path = os.path.join(self.ckpt_output_dir, f"step_{step}", "policy")
+            if self.ckpt_path_check(path):
+                self._commit_save_check(step, **options)
+                del self._pending_save_checks[step]
+
+    def _commit_save_check(self, step: int, **kwargs):
         if self._is_master_rank():
             step_ckpt_path = os.path.join(self.ckpt_output_dir, f"step_{step}")
             step_ckpt_abs_path = os.path.abspath(step_ckpt_path)
@@ -822,7 +1006,7 @@ class CheckpointMananger:
                     "loss" not in self.metric and val_score > self.best_score
                 ):
                     self.best_score = val_score
-                    self.best_ckpt_abs_dir = os.path.abspath(step_ckpt_path)
+                    self.best_ckpt_abs_dir = os.path.realpath(step_ckpt_path)
 
                     best_dir = self._best_dir
                     os.makedirs(best_dir, exist_ok=True)
@@ -832,7 +1016,9 @@ class CheckpointMananger:
                     # assume the best checkpoint is at self.ckpt_output_dir/step_<step>
                     if os.path.islink(best_ckpt_link):
                         os.unlink(best_ckpt_link)
-                    os.symlink(step_ckpt_path, best_ckpt_link)
+                    # Relative output paths are relative to the process cwd,
+                    # not the best/ directory containing this link.
+                    os.symlink(step_ckpt_abs_path, best_ckpt_link)
                     logger.info(
                         f"Best checkpoint updated to step_{step} with score: {val_score}"
                     )
@@ -845,7 +1031,10 @@ class CheckpointMananger:
                         )
                         if os.path.islink(best_safetensors_link):
                             os.unlink(best_safetensors_link)
-                        os.symlink(step_safetensors_path, best_safetensors_link)
+                        os.symlink(
+                            os.path.abspath(step_safetensors_path),
+                            best_safetensors_link,
+                        )
                         logger.info(f"Best safetensors updated to step_{step}")
 
                     # Save best score to file for persistence across resumes

@@ -55,6 +55,7 @@ def _checkpoint_config(*, export_safetensors: bool):
             output_dir="/output",
             param_dtype="float32",
             ckpt=SimpleNamespace(export_safetensors=export_safetensors),
+            train_policy=SimpleNamespace(kl_beta=0.0),
         )
     )
 
@@ -101,6 +102,7 @@ def test_base_checkpoint_hook_raises_only_when_invoked():
 def test_grpo_checkpoint_hook_preserves_final_checkpoint_behavior():
     trainer = object.__new__(GRPOTrainer)
     trainer.config = _checkpoint_config(export_safetensors=False)
+    trainer.parallel_dims = SimpleNamespace(pp_enabled=False)
     trainer.model = object()
     trainer.optimizers = object()
     trainer.lr_schedulers = object()
@@ -133,6 +135,9 @@ def test_grpo_checkpoint_hook_preserves_final_checkpoint_behavior():
             "total_steps": 8,
             "remain_samples_num": 21,
             "is_final": True,
+            "grpo_reference_enabled": False,
+            "grpo_reference_state": None,
+            "grpo_reference_reset_step": 0,
         }
     ]
     assert trainer.ckpt_manager.completed_steps == [3]
@@ -166,6 +171,7 @@ def test_nft_checkpoint_hook_restores_temporary_ema_weights_after_failure():
 def test_vla_checkpoint_hooks_preserve_configured_export_behavior(trainer_cls):
     trainer = object.__new__(trainer_cls)
     trainer.config = _checkpoint_config(export_safetensors=False)
+    trainer.parallel_dims = SimpleNamespace(pp_enabled=False)
     trainer.model = object()
     trainer.optimizers = object()
     trainer.lr_schedulers = object()
@@ -190,6 +196,9 @@ def test_vla_checkpoint_hooks_preserve_configured_export_behavior(trainer_cls):
             "total_steps": 8,
             "remain_samples_num": 21,
             "is_final": True,
+            "grpo_reference_enabled": False,
+            "grpo_reference_state": None,
+            "grpo_reference_reset_step": 0,
         }
     ]
     assert trainer.ckpt_manager.completed_steps == [3]

@@ -17,36 +17,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import ctypes
-import gc
+import math
 import os
 import subprocess
-import sys
 from typing import Optional
 
 import torch
 import torch.multiprocessing as mp
-
-
-def force_gc_tensor(tensor):
-    if not torch.is_tensor(tensor):
-        return
-
-    try:
-        ref_count = sys.getrefcount(tensor)
-        for _ in range(ref_count + 10):
-            ctypes.pythonapi.Py_DecRef(ctypes.py_object(tensor))
-
-    except Exception as e:
-        print(f"Error during force delete: {e}")
-
-
-def cleanup_cuda_tensors():
-    for obj in gc.get_objects():
-        if torch.is_tensor(obj) and obj.is_cuda:
-            force_gc_tensor(obj)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 def get_gpu_numa_node(gpu_id: int) -> int:
@@ -229,7 +206,15 @@ class EnvManager:
         if result["status"] != "ready":
             raise RuntimeError(f"Simulator initialization failed: {result}")
 
-    def stop_simulator(self):
+    def stop_simulator(self, *, preserve_state=True, state_timeout=60, join_timeout=5):
+        """Stop and reap a child; terminal shutdown need not snapshot its state.
+
+        Each subprocess wait is bounded. State-save errors are propagated only
+        after cleanup. An unreaped child retains its handle for a later retry.
+        In-process environments still own the behavior of their close method.
+        """
+        if any(not math.isfinite(t) or t <= 0 for t in (state_timeout, join_timeout)):
+            raise ValueError("Simulator shutdown timeouts must be positive")
         # Handle in-process mode
         if self.env is not None:
             if hasattr(self.env, "close"):
@@ -238,31 +223,47 @@ class EnvManager:
             return
 
         # Handle subprocess mode
-        if self.process is None or not self.process.is_alive():
-            return  # Already stopped
-
-        # Request state save
-        self.command_queue.put({"method": "get_state", "args": [], "kwargs": {}})
-
-        # Get saved state
-        result = self.result_queue.get(timeout=60)
-        if result["status"] == "success":
-            self.state_buffer = result["data"]
-
-        self.command_queue.put({"method": "shutdown"})
-        self.command_queue.close()
-        self.result_queue.close()
-        self.command_queue = None
-        self.result_queue = None
-        self.process.join(timeout=5)
-
-        self.command_queue = None
-        self.result_queue = None
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join()
-
-        self.process = None
+        process = self.process
+        try:
+            if process is not None and process.is_alive() and preserve_state:
+                self.command_queue.put(
+                    {"method": "get_state", "args": [], "kwargs": {}},
+                    timeout=state_timeout,
+                )
+                result = self.result_queue.get(timeout=state_timeout)
+                if result["status"] != "success":
+                    raise RuntimeError("Simulator state save failed")
+                self.state_buffer = result["data"]
+        finally:
+            try:
+                if process is not None:
+                    if process.is_alive():
+                        try:
+                            self.command_queue.put(
+                                {"method": "shutdown"}, timeout=join_timeout
+                            )
+                        except Exception:
+                            # A broken/full queue must not prevent termination.
+                            pass
+                    process.join(timeout=join_timeout)
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=join_timeout)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=join_timeout)
+                    if process.is_alive():
+                        raise RuntimeError("Simulator child did not exit after kill")
+                    self.process = None
+            finally:
+                for name in ("command_queue", "result_queue"):
+                    channel = getattr(self, name)
+                    if channel is not None:
+                        # A dead child cannot drain its pipe. Never let Python
+                        # join a feeder thread blocked writing to that pipe.
+                        channel.cancel_join_thread()
+                        channel.close()
+                        setattr(self, name, None)
 
     def __getattr__(self, name):
         if self.env is not None:
@@ -397,4 +398,8 @@ def _simulator_worker(
     finally:
         command_queue.close()
         result_queue.close()
-        cleanup_cuda_tensors()
+        # This dedicated process is exiting. Let normal reference ownership and
+        # process teardown release its CUDA context; queue feeders and simulator
+        # objects can still own tensors here. Forcing reference counts to zero
+        # corrupts those owners, and a cache flush is neither necessary nor a
+        # guarantee that native simulator work has stopped.

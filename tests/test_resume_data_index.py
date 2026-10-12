@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import pytest
 from torch.utils.data import Dataset
 
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
@@ -125,6 +126,36 @@ def _make_sft_config(resume: bool):
         ),
         logging=SimpleNamespace(logger=[]),
     )
+
+
+@pytest.mark.parametrize("dp_size", [1, 2, 4])
+@pytest.mark.parametrize("resume_step", [0, 1])
+@pytest.mark.parametrize("epoch_frequency", [1, 3])
+def test_sft_epoch_checkpoint_cadence_counts_full_rank_local_steps(
+    dp_size, resume_step, epoch_frequency
+):
+    class DummyTrainer:
+        def __init__(self, **kwargs):
+            pass
+
+        def load_model(self):
+            return 100, resume_step, None
+
+    config = _make_sft_config(resume=bool(resume_step))
+    config.train.ckpt.save_freq_in_epoch = epoch_frequency
+    worker = _WorkerHarness(config)
+    worker.dp_world_size = dp_size
+    dataset = _IndexDataset(16)
+    with patch.object(TrainerRegistry, "get_trainer_cls", lambda _: DummyTrainer):
+        worker.build_runner(
+            data_packer=worker._packer,
+            val_data_packer=worker._packer,
+            dataset=dataset,
+            val_dataset=dataset,
+        )
+    full_epoch_steps = 16 // dp_size // config.train.train_batch_per_replica
+    assert len(worker.train_data_loader) == full_epoch_steps - resume_step
+    assert worker._save_freq == epoch_frequency * full_epoch_steps
 
 
 class TestSFTResumeDataloaderIndex(unittest.TestCase):
@@ -309,6 +340,7 @@ class TestRLResumeDataFetcherIndex(unittest.TestCase):
         class _DummyCheckpointManager:
             def __init__(self, config):
                 self.config = config
+                self.selected_checkpoint_path = "/selected/checkpoint"
 
             def load_extra_info_from_checkpoint(self):
                 return {"remain_samples_num": remain_samples_num}

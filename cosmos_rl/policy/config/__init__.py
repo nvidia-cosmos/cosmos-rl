@@ -251,7 +251,7 @@ class CheckpointConfig(BaseModel):
     )
     max_keep: int = Field(
         default=5,
-        description="Maximum number of checkpoints to keep. If set to -1, all checkpoints will be kept.",
+        description="Maximum number of completed checkpoints to keep in the current run's output directory. Checkpoints discovered in other runs are not deleted. If set to -1, all checkpoints will be kept.",
     )
     export_safetensors: bool = Field(
         default=True,

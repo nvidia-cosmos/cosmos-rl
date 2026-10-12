@@ -45,6 +45,7 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.utils.report.wandb_logger import is_wandb_available
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound
 
 try:
     import imageio
@@ -150,15 +151,10 @@ class NFTTrainer(DiffusersTrainer):
                 # Need to reload again from checkpoint to make sure the model is in the correct state
                 ckpt_extra_info = self.model_resume_from_checkpoint()
                 model_loaded = True
-            except Exception as e:
-                if isinstance(e, FileNotFoundError):
-                    logger.info(
-                        f"[Policy] Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
-                    )
-                else:
-                    logger.error(
-                        f"[Policy] Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
-                    )
+            except NoCheckpointFound:
+                if isinstance(self.config.train.resume, str):
+                    raise
+                logger.info("No committed checkpoint found; starting from HuggingFace.")
                 if not model_loaded:
                     self.model_load_from_hf()
                     model_loaded = True

@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
+
 import numpy as np
-import libero.libero.benchmark as benchmark
+
+if TYPE_CHECKING:
+    import libero.libero.benchmark as benchmark
 
 
 LIBERO_MAX_STEPS_MAP = {
@@ -74,6 +80,8 @@ def get_benchmark_overridden(benchmark_name) -> benchmark.Benchmark:
     Returns:
         Benchmark class
     """
+    import libero.libero.benchmark as benchmark
+
     name = str(benchmark_name).lower()
     if name != "libero_all":
         return benchmark.get_benchmark(benchmark_name)

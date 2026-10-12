@@ -19,9 +19,9 @@ import time
 import random
 import numpy as np
 import json
-import threading
 import shutil
 import glob
+import uuid
 from typing import Optional, Dict
 from transformers import AutoConfig, GenerationConfig
 
@@ -29,6 +29,12 @@ from safetensors.torch import save_file
 from huggingface_hub import create_repo, upload_folder, whoami
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 from cosmos_rl.utils.s3_utils import upload_folder_to_s3
+from cosmos_rl.utils.model_export import (
+    ModelExportThread,
+    finish_model_export,
+    staged_export_path,
+    publish_export_directory,
+)
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.trainer.optm import build_optimizers
@@ -565,12 +571,21 @@ class LLMTrainer(Trainer):
 
         save_hf_config = self.config.policy.lora is None
         save_lora_config = self.config.policy.lora is not None
+        if save_lora_config and self.parallel_dims.pp_enabled:
+            raise ValueError(
+                "Pipeline-parallel LoRA export is unsupported: adapter shards need "
+                "an explicit merge before publishing a single adapter_model.safetensors"
+            )
         save_generation_config = True
         export_weight_index_json = self.config.policy.lora is None
 
-        path = os.path.join(output_dir, rel_path)
+        destination = os.path.join(output_dir, rel_path)
         if self.parallel_dims.dp_replicate_coord[0] > 0:
             return
+        token = [uuid.uuid4().hex if self.global_rank == 0 else None]
+        if self.parallel_dims.pp_enabled:
+            torch.distributed.broadcast_object_list(token, src=0)
+        path = staged_export_path(destination, token[0])
 
         if self.global_rank == 0:
             logger.info(
@@ -620,7 +635,7 @@ class LLMTrainer(Trainer):
                 chunk_cpu = {}
                 for name, param in chunk.items():
                     manifest[name] = os.path.basename(file_path)
-                    chunk_cpu[name] = param.cpu()
+                    chunk_cpu[name] = param.detach().to(device="cpu", copy=True)
                 total_chunk_size += chunk_size
                 cpu_chunks_to_save.append(
                     (chunk_cpu, file_path)
@@ -699,9 +714,6 @@ class LLMTrainer(Trainer):
             merged_manifest = manifest
             total_tensor_size = total_chunk_size
 
-        if not self.parallel_dims.dp_replicate_enabled:
-            torch.distributed.barrier()
-
         def save_and_upload_handler(
             chunks_to_save,
             weight_index_json,
@@ -716,10 +728,20 @@ class LLMTrainer(Trainer):
             max_retries=3,
         ):
             """Handle the save to local and the upload of the model to huggingface and s3."""
+            os.makedirs(path, exist_ok=True)
             # upload the final model to huggingface
             for chunk_cpu, file_path in chunks_to_save:
                 save_file(chunk_cpu, file_path)
             if weight_index_json is not None:
+                missing = sorted(
+                    file_name
+                    for file_name in set(weight_index_json["weight_map"].values())
+                    if not os.path.isfile(os.path.join(path, file_name))
+                )
+                if missing:
+                    raise RuntimeError(
+                        f"Cannot publish export with missing shards: {missing}"
+                    )
                 with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
                     json.dump(
                         weight_index_json,
@@ -773,6 +795,8 @@ class LLMTrainer(Trainer):
                     )
             except Exception as e:
                 logger.warning(f"Failed to copy missing files from source model: {e}")
+
+            path = publish_export_directory(path, destination)
 
             if config.train.ckpt.upload_hf and is_final:
                 username = whoami()["name"]
@@ -829,6 +853,32 @@ class LLMTrainer(Trainer):
                     )
             logger.info(f"\n\nExported safetensors to {path}\n\n")
 
+        if self.parallel_dims.pp_enabled:
+            # Every PP stage owns distinct CPU shards. Complete those writes on
+            # the training thread before rank 0 publishes/uploads the manifest;
+            # background collectives would race the next training collectives.
+            error = None
+            try:
+                finish_model_export(self)
+            except Exception as exc:
+                error = f"rank {self.global_rank}: {type(exc).__name__}: {exc}"
+            errors = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(errors, error)
+            if any(errors):
+                raise RuntimeError(f"Previous pipeline export failed: {errors}")
+            try:
+                for chunk_cpu, file_path in cpu_chunks_to_save:
+                    save_file(chunk_cpu, file_path)
+            except Exception as exc:
+                error = f"rank {self.global_rank}: {type(exc).__name__}: {exc}"
+            errors = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(errors, error)
+            if any(errors):
+                raise RuntimeError(f"Pipeline export shard writes failed: {errors}")
+            cpu_chunks_to_save.clear()
+        elif not self.parallel_dims.dp_replicate_enabled:
+            torch.distributed.barrier()
+
         if self.global_rank == 0:
             if export_weight_index_json:
                 weight_index_json = {
@@ -867,9 +917,8 @@ class LLMTrainer(Trainer):
                 logger.warning("[Policy] No generation config found, do not save it.")
 
             # If the upload thread is already running, wait for it to finish
-            if self.upload_thread is not None:
-                self.upload_thread.join()
-            self.upload_thread = threading.Thread(
+            finish_model_export(self)
+            self.upload_thread = ModelExportThread(
                 target=save_and_upload_handler,
                 args=(
                     cpu_chunks_to_save,

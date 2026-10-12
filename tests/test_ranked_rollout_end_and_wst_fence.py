@@ -443,4 +443,4 @@ def test_stop_fences_weight_sync_before_setting_shutdown():
 
     wst.fence.assert_called_once_with()
     assert shutdown_signal.is_set()
-    assert shutdown_mp_signal.is_set()
+    assert not shutdown_mp_signal.is_set()  # retained until owned teardown

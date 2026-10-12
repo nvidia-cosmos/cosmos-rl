@@ -16,6 +16,7 @@
 from typing import List, Optional, Callable, Any, Type, Union
 from itertools import chain
 from numbers import Real
+from queue import Empty
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -276,6 +277,10 @@ class ColocatedController(Controller):
         if isinstance(data_fetch_cmd, TrainingCompleteCommand):
             self.finish_requested_stop(data_fetch_cmd)
             return False
+        # The first fetch targets the next update. Bind resumed weights using
+        # the completed step before synthesizing local weight-sync commands.
+        self.current_step = data_fetch_cmd.global_step - 1
+        self.total_steps = data_fetch_cmd.total_steps
         self.rollout_consume_one_step_commands_util_r2r()
         assert isinstance(data_fetch_cmd, DataFetchCommand)
         self.init_data_fetch_command = data_fetch_cmd
@@ -383,6 +388,36 @@ class ColocatedController(Controller):
         """
         Advance the training iteration for new iteration of rollout and policy.
         """
+        if self.config.train.train_policy.on_policy:
+            assert self.rollout.current_weight_version == self.current_step, (
+                "Colocated on-policy weights are not synchronized: "
+                f"rollout={self.rollout.current_weight_version}, policy={self.current_step}"
+            )
+            # A parallel generation round can produce more than one train
+            # batch. Leftovers predate the last optimizer step and must not
+            # feed the next on-policy update. Generation/reporting and policy
+            # consumption are serial here; retain current-version samples in
+            # FIFO order on whichever ranks own the local training queues.
+            retained = []
+            discarded = 0
+            while True:
+                try:
+                    sample = self.policy.data_queue.get_nowait()
+                except Empty:
+                    break
+                assert sample.weight_version <= self.current_step
+                if sample.weight_version < self.current_step:
+                    discarded += 1
+                else:
+                    retained.append(sample)
+            for sample in retained:
+                self.policy.data_queue.put_nowait(sample)
+            if discarded:
+                logger.info(
+                    "[Controller] Discarded %d leftover on-policy rollouts before update %d",
+                    discarded,
+                    self.current_step + 1,
+                )
         self.train_report_data[self.current_step] = {}
         self.current_step += 1
 

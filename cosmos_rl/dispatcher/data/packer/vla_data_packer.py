@@ -171,6 +171,16 @@ class VLADataPacker(DataPacker):
         pixel_values = trajectory["pixel_values"]
         old_log_probs = trajectory["old_log_probs"]
         responses = trajectory["responses"]
+        attention_mask = trajectory.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = input_ids.ne(self.tokenizer.pad_token_id).long()
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError("Replay attention_mask must match input_ids shape")
+        proprio = trajectory.get("proprio")
+        if self.config.vla.use_proprio and proprio is None:
+            raise ValueError(
+                "Proprioceptive VLA training requires proprio in the trajectory"
+            )
 
         # Return full episode without chunking
         # Chunking will be handled in train_vla() for gradient accumulation
@@ -189,6 +199,8 @@ class VLADataPacker(DataPacker):
                 responses,
                 pixel_values,
                 old_log_probs,
+                attention_mask,
+                proprio,
             ):
                 self.weight_version = weight_version
                 self.task_id = task_id
@@ -200,6 +212,8 @@ class VLADataPacker(DataPacker):
                 self.responses = responses
                 self.pixel_values = pixel_values
                 self.old_log_probs = old_log_probs
+                self.attention_mask = attention_mask
+                self.proprio = proprio
 
         return RLPolicyInput(
             weight_version,
@@ -212,6 +226,8 @@ class VLADataPacker(DataPacker):
             responses.to(device),
             pixel_values.to(device),
             old_log_probs.to(device),
+            attention_mask.to(device),
+            proprio.to(device) if proprio is not None else None,
         )
 
     def policy_collate_fn(
@@ -258,7 +274,7 @@ class VLADataPacker(DataPacker):
             )
             attention_masks = torch.cat(
                 (
-                    torch.ones((num_chunks, prompt_len), dtype=torch.long),
+                    policy_input.attention_mask,
                     torch.zeros((pad_chunks, prompt_len), dtype=torch.long),
                 ),
                 dim=0,
@@ -302,7 +318,7 @@ class VLADataPacker(DataPacker):
                 dim=0,
             ).reshape(max_chunks, NUM_ACTIONS_CHUNK * ACTION_DIM)
 
-        return {
+        batch = {
             "input_ids": input_ids,
             "attention_mask": attention_masks,
             "pixel_values": pixel_values,
@@ -310,6 +326,12 @@ class VLADataPacker(DataPacker):
             "old_log_probs": old_log_probs,
             "logprob_masks": logprob_masks,
         }
+        proprio = getattr(policy_input, "proprio", None)
+        if proprio is not None:
+            batch["proprio"] = torch.cat(
+                (proprio, proprio.new_zeros((pad_chunks, *proprio.shape[1:]))), dim=0
+            )
+        return batch
 
 
 # Register VLA data packer for VLA model types
