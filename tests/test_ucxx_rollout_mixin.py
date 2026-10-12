@@ -30,13 +30,18 @@ unpack exactly that way rather than trusting the producer's own view of what it
 wrote.
 """
 
+import asyncio
+import threading
 import unittest
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from cosmos_rl.utils.payload_transport.ucxx.mixins import UCXXRolloutMixin
+from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import UCXXBuffer
 from cosmos_rl.utils.trajectory import (
     ACTIONS,
     EPISODE_LENGTH,
@@ -213,6 +218,154 @@ class TestReturnedMetadata(unittest.TestCase):
         for key in ("_worker_ip", "_ucxx_port", "_slot"):
             self.assertIn(key, out)
             self.assertIsNotNone(out[key])
+
+
+class TestUCXXServerPorts(unittest.TestCase):
+    @staticmethod
+    def _server(base_port, n_threads=4):
+        server = UCXXBuffer.__new__(UCXXBuffer)
+        server._base_port = base_port
+        server._n_threads = n_threads
+        server._local_ip = "127.0.0.1"
+        server._server_threads = []
+        server._shutdown_flag = threading.Event()
+        server._server_ready_count = 0
+        server._server_ready_lock = threading.Lock()
+        server._server_ready_event = threading.Event()
+        server._ports = []
+        server._listeners = []
+        server._server_loops = []
+        server._handler_tasks_per_thread = []
+        server._buffer = SimpleNamespace(close=lambda: None)
+        return server
+
+    def test_auto_port_is_requested_independently_by_every_listener(self):
+        server = self._server(0)
+        requested = []
+
+        def bind(thread_idx, port):
+            requested.append(port)
+            with server._server_ready_lock:
+                server._ports.append(41000 + thread_idx)
+                server._server_ready_count += 1
+                if server._server_ready_count == server._n_threads:
+                    server._ports.sort()
+                    server._server_ready_event.set()
+
+        server._run_server_loop = bind
+        with patch(
+            "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.UCXX_AVAILABLE",
+            True,
+        ):
+            server.start_server(timeout=1)
+
+        self.assertEqual(requested, [0, 0, 0, 0])
+        self.assertEqual(server.ports, [41000, 41001, 41002, 41003])
+
+    def test_explicit_base_port_remains_consecutive(self):
+        server = self._server(31000)
+        requested = []
+
+        def bind(thread_idx, port):
+            requested.append(port)
+            with server._server_ready_lock:
+                server._ports.append(port)
+                server._server_ready_count += 1
+                if server._server_ready_count == server._n_threads:
+                    server._ports.sort()
+                    server._server_ready_event.set()
+
+        server._run_server_loop = bind
+        with patch(
+            "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.UCXX_AVAILABLE",
+            True,
+        ):
+            server.start_server(timeout=1)
+
+        self.assertEqual(sorted(requested), [31000, 31001, 31002, 31003])
+        self.assertEqual(server.ports, sorted(requested))
+
+    def test_auto_port_publishes_listener_actual_port(self):
+        server = self._server(0, n_threads=1)
+        server._listeners = [None]
+        server._server_loops = [None]
+        server._handler_tasks_per_thread = [[]]
+        server._thread_metrics = {}
+        server._thread_metrics_lock = threading.Lock()
+        server._active_endpoints = []
+        server._endpoints_lock = threading.Lock()
+        server._shutdown_flag.set()
+        listener = SimpleNamespace(port=42017, close=lambda: None)
+        fake_ucxx = SimpleNamespace(
+            init=lambda: None,
+            create_listener=lambda callback, port: listener,
+        )
+
+        with patch(
+            "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.ucxx", fake_ucxx
+        ):
+            asyncio.run(server._async_server_main(0, 0))
+
+        self.assertIs(server._listeners[0], listener)
+        self.assertEqual(server.ports, [42017])
+
+    def test_partial_startup_is_unwound_before_timeout_is_reported(self):
+        server = self._server(0, n_threads=2)
+        released = threading.Event()
+
+        def bind(thread_idx, port):
+            if thread_idx == 0:
+                server._listeners[thread_idx] = SimpleNamespace(close=lambda: None)
+                server._shutdown_flag.wait(timeout=5)
+                released.set()
+
+        server._run_server_loop = bind
+        with (
+            patch(
+                "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.UCXX_AVAILABLE",
+                True,
+            ),
+            self.assertRaisesRegex(RuntimeError, "failed to start 2 threads"),
+        ):
+            server.start_server(timeout=0.05)
+
+        self.assertTrue(released.is_set())
+        self.assertFalse(any(t.is_alive() for t in server._server_threads))
+        self.assertEqual(server._listeners, [])
+        self.assertEqual(server._ports, [])
+
+    def test_thread_start_failure_unwinds_already_started_threads(self):
+        server = self._server(0, n_threads=2)
+        released = threading.Event()
+
+        def serve(thread_idx, port):
+            server._shutdown_flag.wait(timeout=5)
+            released.set()
+
+        server._run_server_loop = serve
+        real_start = threading.Thread.start
+        start_count = 0
+
+        def fail_second_start(thread):
+            nonlocal start_count
+            start_count += 1
+            if start_count == 2:
+                raise RuntimeError("thread start failed")
+            return real_start(thread)
+
+        with (
+            patch(
+                "cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer.UCXX_AVAILABLE",
+                True,
+            ),
+            patch.object(threading.Thread, "start", fail_second_start),
+            self.assertRaisesRegex(RuntimeError, "thread start failed"),
+        ):
+            server.start_server(timeout=1)
+
+        self.assertTrue(released.is_set())
+        self.assertFalse(any(t.is_alive() for t in server._server_threads))
+        self.assertEqual(server._listeners, [])
 
 
 @requires_cuda

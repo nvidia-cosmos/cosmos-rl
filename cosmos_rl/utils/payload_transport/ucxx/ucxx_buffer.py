@@ -348,6 +348,13 @@ class UCXXBuffer:
         self.config = config
         self._base_port = config.port
         self._n_threads = max(1, config.n_server_threads)
+        if not 0 <= self._base_port <= 65535:
+            raise ValueError("UCXX base port must be between 0 and 65535")
+        if self._base_port and self._base_port + self._n_threads - 1 > 65535:
+            raise ValueError(
+                "UCXX listener range exceeds port 65535: "
+                f"base={self._base_port}, listeners={self._n_threads}"
+            )
         self._local_ip = self._get_local_ip()
 
         # Create underlying SharedRingBuffer
@@ -390,7 +397,11 @@ class UCXXBuffer:
     # =========================================================================
 
     def start_server(self, timeout: float = 10.0) -> None:
-        """Start N UCXX listeners on consecutive ports in background threads.
+        """Start N UCXX listeners in background threads.
+
+        A nonzero base requests consecutive ports. With base port 0, every
+        listener independently asks the OS for an ephemeral port; the actual
+        bound ports are read from the listeners and published in metadata.
 
         This method is synchronous and blocks until all server threads are
         ready.  Each thread gets its own asyncio event loop and UCX worker.
@@ -420,23 +431,38 @@ class UCXXBuffer:
         self._handler_tasks_per_thread = [[] for _ in range(self._n_threads)]
         self._server_threads = []
 
-        for i in range(self._n_threads):
-            port = self._base_port + i
-            t = threading.Thread(
-                target=self._run_server_loop,
-                args=(i, port),
-                daemon=True,
-                name=f"UCXXServer-{port}",
-            )
-            self._server_threads.append(t)
-            t.start()
+        try:
+            for i in range(self._n_threads):
+                port = 0 if self._base_port == 0 else self._base_port + i
+                thread_port = f"auto-{i}" if port == 0 else str(port)
+                t = threading.Thread(
+                    target=self._run_server_loop,
+                    args=(i, port),
+                    daemon=True,
+                    name=f"UCXXServer-{thread_port}",
+                )
+                self._server_threads.append(t)
+                t.start()
 
-        if not self._server_ready_event.wait(timeout=timeout):
-            raise RuntimeError(
-                f"UCXX server failed to start {self._n_threads} threads "
-                f"within {timeout}s (ports {self._base_port}–"
-                f"{self._base_port + self._n_threads - 1})"
-            )
+            if not self._server_ready_event.wait(timeout=timeout):
+                requested = (
+                    "auto-assigned ports"
+                    if self._base_port == 0
+                    else (
+                        f"ports {self._base_port}–"
+                        f"{self._base_port + self._n_threads - 1}"
+                    )
+                )
+                raise RuntimeError(
+                    f"UCXX server failed to start {self._n_threads} threads "
+                    f"within {timeout}s ({requested})"
+                )
+        except BaseException as start_error:
+            try:
+                self.stop_server(timeout=min(5.0, max(0.1, timeout)))
+            except BaseException as cleanup_error:
+                raise start_error from cleanup_error
+            raise
 
         ucx_tls = os.environ.get("UCX_TLS", "(not set)")
         logger.info(
@@ -495,16 +521,43 @@ class UCXXBuffer:
 
         last_err: Optional[Exception] = None
         bound_port = port
+        listener = None
         for attempt in range(self._PORT_RETRY_ATTEMPTS):
-            candidate = port + attempt * self._n_threads
+            # Port 0 is a request for OS allocation, not the first member of a
+            # consecutive range. Retrying it must never fall through to
+            # privileged ports 1..1023.
+            candidate = 0 if port == 0 else port + attempt * self._n_threads
+            if candidate > 65535:
+                last_err = ValueError(f"UCXX port {candidate} exceeds 65535")
+                break
             try:
-                listener = ucxx.create_listener(_dispatch, port=candidate)
-                bound_port = candidate
+                candidate_listener = ucxx.create_listener(_dispatch, port=candidate)
+                try:
+                    bound_port = int(candidate_listener.port)
+                    if not 1 <= bound_port <= 65535:
+                        raise RuntimeError(
+                            f"UCXX listener reported invalid bound port {bound_port}"
+                        )
+                except Exception:
+                    try:
+                        candidate_listener.close()
+                    except Exception:
+                        logger.exception(
+                            "[UCXXBuffer] Failed to close a listener with invalid "
+                            "bound-port metadata"
+                        )
+                    raise
+                listener = candidate_listener
                 self._listeners[thread_idx] = listener
-                if candidate != port:
+                if port == 0:
+                    logger.info(
+                        f"[UCXXBuffer] Thread {thread_idx}: auto-assigned "
+                        f"port {bound_port}"
+                    )
+                elif candidate != port:
                     logger.warning(
                         f"[UCXXBuffer] Thread {thread_idx}: port {port} busy, "
-                        f"bound to {candidate} instead"
+                        f"bound to {bound_port} instead"
                     )
                 break
             except Exception as e:
@@ -512,10 +565,9 @@ class UCXXBuffer:
                 logger.debug(
                     f"[UCXXBuffer] Thread {thread_idx}: port {candidate} unavailable: {e}"
                 )
-        else:
+        if listener is None:
             logger.error(
-                f"[UCXXBuffer] Thread {thread_idx}: failed to bind after "
-                f"{self._PORT_RETRY_ATTEMPTS} attempts: {last_err}"
+                f"[UCXXBuffer] Thread {thread_idx}: failed to bind listener: {last_err}"
             )
             return
 
