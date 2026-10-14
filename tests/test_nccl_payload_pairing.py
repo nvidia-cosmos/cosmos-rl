@@ -54,7 +54,7 @@ from cosmos_rl.utils.payload_transport.nccl.header import (
     parse_header,
     verify_header,
 )
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     NcclRendezvous,
     TransferStatus,
@@ -64,7 +64,8 @@ from cosmos_rl.utils.payload_transport.nccl.strategy import (
     _pair_key,
     _parse_ref,
 )
-from cosmos_rl.utils.trajectory import build_trajectory_schema, schema_layout
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
+from cosmos_rl.utils.trajectory import build_trajectory_schema
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
 
@@ -101,14 +102,26 @@ def _schema(max_steps=10):
 
 
 def _make_producer(*, executor=None, max_steps=10, capacity=32):
-    p = NCCLRolloutMixin()
+    p = NCCLPayloadProducer()
     p._nccl_enabled = True
     p._nccl_replica_id = "rollout-test-0"
     p._nccl_rollout_idx = 0
     p._nccl_sender_rank = 0
     p._nccl_device = None  # CPU tensors
     p._nccl_schema = _schema(max_steps)
-    p._nccl_offsets, p._nccl_entry_size = schema_layout(p._nccl_schema)
+    p._nccl_layout = TensorLayout.compile(p._nccl_schema)
+    p._nccl_offsets = p._nccl_layout.offsets()
+    p._nccl_entry_size = p._nccl_layout.payload_nbytes
+    p._nccl_sender_incarnation = "sender-test"
+    p._nccl_prefix = "test"
+    p._nccl_redis = mock.Mock()
+    p._nccl_published_layouts = set()
+    from cosmos_rl.utils.payload_transport.receive_memory import ReceiveBufferPool
+
+    p._nccl_send_pool = ReceiveBufferPool(max_cached_per_layout=capacity)
+    p._nccl_send_leases = {}
+    p._nccl_retained_entries = {}
+    p._nccl_write_lock = threading.Lock()
     p._nccl_registry = SendBufferRegistry(capacity=capacity, on_free=p._on_buffer_free)
     p._nccl_rendezvous = _FakeRendezvous()
     p._nccl_comm_cache = CommCache(build_fn=lambda u, r: 7, abort_fn=lambda i: None)
@@ -163,12 +176,15 @@ def _consumer(cache, *, warm_pairs=None):
 
 
 def _consumer_ref(transfer_id, schema):
+    layout = TensorLayout.compile(schema)
     return {
         "transfer_id": transfer_id,
         "rollout_idx": 0,
         "sender_rank": 0,
         "sender_replica": "rA",
-        "schema": schema,
+        "layout": layout,
+        "layout_id": layout.layout_id,
+        "sender_incarnation": "",
     }
 
 
@@ -220,13 +236,15 @@ class TestPayloadHeader(unittest.TestCase):
 class TestProducerStampsHeader(unittest.TestCase):
     def test_packed_buffer_names_its_transfer(self):
         p = _make_producer()
-        meta = p.write_to_buffer(_trajectory())
+        meta = p.publish(_trajectory())
         entry = p._nccl_registry.get(meta["_transfer_id"])
         self.assertEqual(entry.buffer.numel(), HEADER_NBYTES + p._nccl_entry_size)
         verify_header(
             bytes(entry.buffer[:HEADER_NBYTES].numpy()),
             transfer_id=meta["_transfer_id"],
             payload_nbytes=p._nccl_entry_size,
+            layout_id=meta["_layout_id"],
+            sender_incarnation=meta["_sender_incarnation"],
         )
         p._nccl_executor.shutdown(wait=True)
 
@@ -247,18 +265,23 @@ class TestConsumerRejectsMispairedPayload(unittest.TestCase):
 
     def _fetch(self, *, wire_transfer_id, ref_transfer_id):
         schema = _schema()
-        _, entry_size = schema_layout(schema)
+        layout = TensorLayout.compile(schema)
+        entry_size = layout.payload_nbytes
 
         aborted = []
         cache = CommCache(build_fn=lambda u, r: 55, abort_fn=aborted.append)
-        pair = ("rA", 0, 0)
+        pair = ("rA", "", 0, 0)
         cache.get_or_create(pair, uid_chars=[1], local_rank=1)
         s = _consumer(cache, warm_pairs={pair})
 
         # The buffer as it looks AFTER the recv: header stamped by whichever
         # transfer actually crossed the wire.
         recv_buf = torch.zeros(HEADER_NBYTES + entry_size, dtype=torch.uint8)
-        header = build_header(transfer_id=wire_transfer_id, payload_nbytes=entry_size)
+        header = build_header(
+            transfer_id=wire_transfer_id,
+            payload_nbytes=entry_size,
+            layout_id=layout.layout_id,
+        )
         recv_buf[:HEADER_NBYTES] = torch.frombuffer(
             bytearray(header), dtype=torch.uint8
         )
@@ -297,8 +320,9 @@ class TestAbortedPairDropsItsPostedRecvs(unittest.TestCase):
 
     def _fetch_two_refs_on_one_pair(self, *, second_recv_raises):
         schema = _schema()
-        _, entry_size = schema_layout(schema)
-        pair = ("rA", 0, 0)
+        layout = TensorLayout.compile(schema)
+        entry_size = layout.payload_nbytes
+        pair = ("rA", "", 0, 0)
 
         aborted = []
         cache = CommCache(build_fn=lambda u, r: 55, abort_fn=aborted.append)
@@ -315,7 +339,11 @@ class TestAbortedPairDropsItsPostedRecvs(unittest.TestCase):
         bufs = []
         for r in refs:
             b = torch.zeros(HEADER_NBYTES + entry_size, dtype=torch.uint8)
-            hdr = build_header(transfer_id=r["transfer_id"], payload_nbytes=entry_size)
+            hdr = build_header(
+                transfer_id=r["transfer_id"],
+                payload_nbytes=entry_size,
+                layout_id=layout.layout_id,
+            )
             b[:HEADER_NBYTES] = torch.frombuffer(bytearray(hdr), dtype=torch.uint8)
             bufs.append(b)
         it = iter(range(len(refs)))
@@ -365,7 +393,7 @@ class TestProducerConsumerRoundtrip(unittest.TestCase):
     def test_packed_payload_unpacks_to_the_same_tensors(self):
         p = _make_producer()
         traj = _trajectory(ep_len=6)
-        meta = p.write_to_buffer(traj)
+        meta = p.publish(traj)
         wire = p._nccl_registry.get(meta["_transfer_id"]).buffer
         p._nccl_executor.shutdown(wait=True)
 
@@ -373,6 +401,7 @@ class TestProducerConsumerRoundtrip(unittest.TestCase):
         s = _consumer(cache)
         # The consumer's schema comes off the reference, exactly as in the run.
         ref = _parse_ref(meta | {"_nccl": True})
+        ref["layout"] = p._nccl_layout
         # Prime the cache under the REF's own pair key -- the producer names
         # itself in the metadata, so it is not the "rA" the other fixtures use.
         pair = _pair_key(ref, s._receiver_rank)
@@ -388,40 +417,53 @@ class TestProducerConsumerRoundtrip(unittest.TestCase):
         self.assertTrue(torch.equal(got["rewards"], traj["rewards"]))
 
 
-class TestReferenceWithoutSchema(unittest.TestCase):
-    """A dict reference that lost its schema must not decode at the default.
+class TestReferenceWithoutLayout(unittest.TestCase):
+    """A dict reference that lost its layout must fail before rendezvous.
 
     Dict metadata is what a per-payload-schema producer emits.  Silently
     falling back to the static ``build_trajectory_schema`` layout is the same
     failure as a mispaired buffer -- garbage that looks like tensors.
     """
 
-    def test_parse_keeps_the_id_but_no_schema(self):
-        ref = _parse_ref(
-            {"_nccl": True, "_transfer_id": "3:deadbeef"}, default_schema=_schema()
-        )
-        self.assertEqual(ref["transfer_id"], "3:deadbeef")
-        self.assertIsNone(ref["schema"])
+    def test_parse_rejects_missing_wire_identity(self):
+        with self.assertRaises(ValueError):
+            _parse_ref(
+                {"_nccl": True, "_transfer_id": "3:deadbeef"},
+            )
+
+    def test_parse_rejects_rollout_index_disagreement(self):
+        layout = TensorLayout.compile(_schema())
+        with self.assertRaisesRegex(ValueError, "do not agree"):
+            _parse_ref(
+                {
+                    "_nccl": True,
+                    "_transfer_id": "3:deadbeef",
+                    "_rollout_idx": 4,
+                    "_sender_rank": 0,
+                    "_sender_replica": "sender",
+                    "_sender_incarnation": "incarnation",
+                    "_wire_version": WIRE_VERSION,
+                    "_layout_id": layout.layout_id,
+                }
+            )
 
     def test_fetch_batch_drops_it(self):
         s = _consumer(CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None))
         s._schema = _schema()
         s._rendezvous_one = lambda ref, pynccl: self.fail("must not rendezvous")
-        self.assertEqual(
-            s.fetch_batch([(0, {"_nccl": True, "_transfer_id": "3:deadbeef"})]), {}
-        )
+        with self.assertRaises(TransportUnusableError):
+            s.fetch_batch([(0, {"_nccl": True, "_transfer_id": "3:deadbeef"})])
 
     def test_sync_fetch_drops_it(self):
         s = _consumer(CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None))
         s._schema = _schema()
         s._rendezvous_one = lambda ref, pynccl: self.fail("must not rendezvous")
-        self.assertIsNone(s.sync_fetch({"_nccl": True, "_transfer_id": "3:deadbeef"}))
+        with self.assertRaises(TransportUnusableError):
+            s.sync_fetch({"_nccl": True, "_transfer_id": "3:deadbeef"})
 
-    def test_string_form_still_uses_the_default_schema(self):
-        # The bare "nccl:<id>" form has no metadata channel; the default is the
-        # only schema it can have, and that is documented and intended.
-        ref = _parse_ref("nccl:0:abc", default_schema=_schema())
-        self.assertIsNotNone(ref["schema"])
+    def test_cleanup_string_cannot_fall_back_to_the_default_layout(self):
+        with self.assertRaisesRegex(ValueError, "do not carry"):
+            _parse_ref("nccl:0:abc")
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +788,7 @@ class TestConsumerResyncsOnLateAccept(unittest.TestCase):
 
         aborted = []
         cache = CommCache(build_fn=lambda u, r: 55, abort_fn=aborted.append)
-        pair = ("rA", 0, 0)
+        pair = ("rA", "", 0, 0)
         cache.get_or_create(pair, uid_chars=[1], local_rank=1)
         s = _consumer(cache, warm_pairs={pair})
         s._max_attempts = 3

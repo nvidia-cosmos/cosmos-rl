@@ -68,7 +68,7 @@ def trajectory(seed, length, device):
 def endpoint():
     import redis
     import test_nccl_e2e as e2e
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 
     assert e2e._ensure_redis(), "Redis unavailable: refusing an inconclusive GPU test"
     endpoints = []
@@ -89,8 +89,8 @@ def endpoint():
         endpoints.append((producers, packer))
         torch.cuda.set_device(0)
         for index, length in enumerate(LENGTHS):
-            producer = NCCLRolloutMixin()
-            producer.setup_nccl(
+            producer = NCCLPayloadProducer()
+            producer.setup(
                 replica_id=f"producer-{token}-{index}",
                 rollout_idx=index,
                 redis_client=client,
@@ -120,7 +120,7 @@ def endpoint():
             for i in range(count):
                 which = i % len(producers)
                 data = trajectory(seed + i, LENGTHS[which], "cuda:0")
-                meta = producers[which].write_to_buffer(data)
+                meta = producers[which].publish(data)
                 assert meta is not None
                 metas.append(meta)
             torch.cuda.set_device(1)
@@ -140,7 +140,7 @@ def endpoint():
         # Tests must drop their aliases themselves. This is failure cleanup only.
         packer.release_prefetch()
         for producer in producers:
-            producer.cleanup_nccl()
+            producer.close()
     torch.cuda.set_device(0)
 
 
@@ -390,14 +390,15 @@ def test_oversized_payload_never_contacts_sender(endpoint):
     assert env.strategy.receive_memory_stats()["reserved_bytes"] == 0
 
 
-def test_decode_fault_cleans_real_cuda_allocations(endpoint, monkeypatch):
+def test_decode_fault_releases_budget_and_pools_safe_cuda_allocations(
+    endpoint, monkeypatch
+):
     env = endpoint(32 * MAX_BYTES + 32)
     refs = env.batch()
     # Use the same collection boundary as the post-fault measurement; earlier
     # trainer fixtures can have cycles retaining unrelated CUDA tensors.
     gc.collect()
     torch.cuda.synchronize(1)
-    before = torch.cuda.memory_allocated(1)
     original = nccl._unpack
     count = 0
 
@@ -415,7 +416,14 @@ def test_decode_fault_cleans_real_cuda_allocations(endpoint, monkeypatch):
         env.packer.wait_prefetch()
     torch.cuda.synchronize(1)
     gc.collect()
-    assert torch.cuda.memory_allocated(1) == before
+    # Safe receive buffers are retained by the bounded pool rather than freed.
+    # Active receive ownership and budget accounting must still be completely
+    # released, and idle storage must remain inside the configured byte bound.
+    assert (
+        0
+        < env.strategy._receive_pool._cached_bytes
+        <= env.strategy._receive_budget.limit
+    )
     stats = env.strategy.receive_memory_stats()
     assert stats["reserved_bytes"] == stats["current_tensor_bytes"] == 0
 
@@ -433,10 +441,11 @@ def test_mid_window_fault_keeps_actual_pending_nccl_storage(endpoint, monkeypatc
     # Warm communicator creation before injecting a pending device operation.
     collect(env, env.batch(count=1))
     env.packer.release_prefetch()
-    refs = [
-        (i, nccl._parse_ref(meta, default_schema=env.strategy._schema))
-        for i, meta in enumerate(env.batch(count=2, seed=10))
-    ]
+    refs = []
+    for i, meta in enumerate(env.batch(count=2, seed=10)):
+        ref = nccl._parse_ref(meta)
+        ref["layout"] = env.strategy._resolve_layout(ref)
+        refs.append((i, ref))
     original_recv = pynccl.nccl_recv
     original_rendezvous = env.strategy._rendezvous_one
     done = torch.cuda.Event()
@@ -478,7 +487,9 @@ def test_missing_payload_preserves_other_payloads_and_following_progress(endpoin
     assert env.producers[1]._nccl_registry.free(refs[1]["_transfer_id"])
     env.packer.start_prefetch(refs)
     env.packer.wait_prefetch()
-    assert set(env.packer._prefetch_cache) == {refs[i]["_transfer_id"] for i in (0, 2)}
+    assert set(env.packer._prefetch_cache) == {
+        env.strategy.cache_key(refs[i]) for i in (0, 2)
+    }
     env.packer.release_prefetch()
     collect(env, env.batch(count=3, seed=10))
     env.packer.release_prefetch()
@@ -500,7 +511,9 @@ def test_dictionary_mutation_cannot_drop_storage_before_final_cuda_reader(endpoi
     env.packer.release_prefetch(streams=[stream])
     assert done.query()
     assert all(torch.isfinite(value).item() for value in values)
-    assert torch.cuda.memory_allocated(1) < allocated
+    # Releasing the consumer lease makes the slot reusable; it does not force
+    # pooled CUDA storage back through the allocator.
+    assert env.strategy._receive_pool._cached_buffers > 0
     assert env.strategy.receive_memory_stats()["reserved_bytes"] == 0
 
 
@@ -509,9 +522,9 @@ def test_concurrent_window_and_prepared_cpu_lease(endpoint, monkeypatch):
     widths = []
     original = env.strategy._fetch_unbounded
 
-    def receive(refs):
+    def receive(refs, **kwargs):
         widths.append(len(refs))
-        return original(refs)
+        return original(refs, **kwargs)
 
     monkeypatch.setattr(env.strategy, "_fetch_unbounded", receive)
     refs = env.batch(count=6)

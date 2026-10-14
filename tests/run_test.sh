@@ -196,7 +196,8 @@ run python -m pytest -q tests/test_nccl_operation_contract.py
 run python tests/test_nccl_data_packer_mixin.py
 run python tests/test_nccl_payload_pairing.py
 run python tests/test_nccl_rendezvous.py
-run python tests/test_nccl_rollout_mixin.py
+run python tests/test_nccl_payload_producer.py
+run python -m pytest -q tests/test_payload_layout.py tests/test_payload_context.py
 run python tests/test_nccl_streams.py
 run python tests/test_nccl_transport.py
 run python tests/test_pack_canonical_stride.py
@@ -214,7 +215,7 @@ run python -m pytest -q tests/test_ucxx_endpoint_retirement.py
 run python -m pytest -q tests/test_ucxx_context_native.py
 run python -m pytest -q tests/test_ucxx_lifetime_regressions.py
 run python -m pytest -q tests/test_ucxx_copy_cuda.py
-run python tests/test_ucxx_rollout_mixin.py
+run python tests/test_ucxx_payload_producer.py
 run python tests/test_ucxx_transport.py
 run python tests/test_launcher_shutdown.py
 # Same predicate as above, for the multi-node sbatch template.

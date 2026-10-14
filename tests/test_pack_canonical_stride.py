@@ -32,7 +32,9 @@ import numpy as np
 import torch
 
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import SendBufferRegistry
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
+from cosmos_rl.utils.payload_transport.receive_memory import ReceiveBufferPool
 from cosmos_rl.utils.payload_transport.pack import (
     _canonical_for_byte_view,
     pack_trajectory_into,
@@ -191,7 +193,7 @@ class TestProducerKeepsNcclPath(unittest.TestCase):
     """End-to-end producer check: no silent fallback to disk."""
 
     def _producer(self):
-        p = NCCLRolloutMixin()
+        p = NCCLPayloadProducer()
         p._nccl_enabled = True
         p._nccl_replica_id = "rollout-test-0"
         p._nccl_rollout_idx = 0
@@ -204,7 +206,17 @@ class TestProducerKeepsNcclPath(unittest.TestCase):
         p._nccl_schema.append(
             TensorSpec(name="sampled_mode", shape=(1,), dtype=np.int64)
         )
-        p._nccl_offsets, p._nccl_entry_size = schema_layout(p._nccl_schema)
+        p._nccl_layout = TensorLayout.compile(p._nccl_schema)
+        p._nccl_offsets = p._nccl_layout.offsets()
+        p._nccl_entry_size = p._nccl_layout.payload_nbytes
+        p._nccl_sender_incarnation = "sender-test"
+        p._nccl_prefix = "test"
+        p._nccl_redis = mock.Mock()
+        p._nccl_published_layouts = set()
+        p._nccl_send_pool = ReceiveBufferPool(max_cached_per_layout=4)
+        p._nccl_send_leases = {}
+        p._nccl_retained_entries = {}
+        p._nccl_write_lock = threading.Lock()
         p._nccl_registry = SendBufferRegistry(capacity=4, on_free=p._on_buffer_free)
         p._nccl_streams = None
         p._nccl_send_lock = threading.Lock()
@@ -212,7 +224,7 @@ class TestProducerKeepsNcclPath(unittest.TestCase):
 
     def test_write_to_buffer_returns_a_reference(self):
         p = self._producer()
-        meta = p.write_to_buffer(
+        meta = p.publish(
             {
                 "observations": torch.zeros(4, 2),
                 "actions": torch.zeros(4, 2),

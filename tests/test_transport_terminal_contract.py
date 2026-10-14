@@ -27,8 +27,9 @@ def test_sync_fetch_distinguishes_missing_from_terminal(monkeypatch, backend, te
         strategy = NCCLTransportStrategy()
         monkeypatch.setattr(
             "cosmos_rl.utils.payload_transport.nccl.strategy._parse_ref",
-            lambda *args, **kwargs: {"schema": []},
+            lambda *args, **kwargs: {"layout_id": "test-layout"},
         )
+        strategy._resolve_layout = lambda ref: object()
         strategy._fetch_all = fetch
     else:
         strategy = UCXXTransportStrategy()

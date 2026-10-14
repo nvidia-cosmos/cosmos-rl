@@ -34,7 +34,7 @@ from cosmos_rl.dispatcher.transfer_readiness import (
     TransferReadyRequest,
 )
 from cosmos_rl.utils import constant
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 from cosmos_rl.utils.payload_transport.nccl.strategy import compose_nccl_transport
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 from cosmos_rl.utils.pynccl import nccl_abort, nccl_abort_all
@@ -73,8 +73,8 @@ def shared_stream_worker(args, device, rank):
     producer, packer = None, None
     phase = ["warm"]
     if rank == 0:
-        producer = NCCLRolloutMixin()
-        producer.setup_nccl(
+        producer = NCCLPayloadProducer()
+        producer.setup(
             replica_id="producer",
             rollout_idx=0,
             redis_client=client,
@@ -136,7 +136,7 @@ def shared_stream_worker(args, device, rank):
     for step in range(2):
         metadata = [None]
         if rank == 0:
-            metadata[0] = producer.write_to_buffer(
+            metadata[0] = producer.publish(
                 {
                     "observations": torch.full((8, 4), step + 1.0, device=device),
                     "actions": torch.ones(8, 2, device=device),
@@ -174,7 +174,7 @@ def shared_stream_worker(args, device, rank):
             print(f"SHARED_PAYLOAD_PASS rank={rank} step={step} exact=True", flush=True)
         dist.barrier()
     if producer:
-        producer.cleanup_nccl(timeout=10)
+        producer.close(timeout=10)
     if packer:
         packer.close_transport(timeout=10)
     client.close()
@@ -319,8 +319,8 @@ def worker(args):
     producer, packer = None, None
     injected = False
     if rank == 0:
-        producer = NCCLRolloutMixin()
-        producer.setup_nccl(
+        producer = NCCLPayloadProducer()
+        producer.setup(
             replica_id="producer",
             rollout_idx=0,
             redis_client=client,
@@ -376,7 +376,7 @@ def worker(args):
     for step in range(3):
         metadata = [None]
         if rank == 0:
-            metadata[0] = producer.write_to_buffer(
+            metadata[0] = producer.publish(
                 {
                     "observations": torch.full((8, 4), step + 1.0, device=device),
                     "actions": torch.ones(8, 2, device=device),
@@ -410,7 +410,7 @@ def worker(args):
         dist.barrier()
         print(f"PAYLOAD_PASS rank={rank} step={step} exact=True", flush=True)
     if producer:
-        producer.cleanup_nccl(timeout=10)
+        producer.close(timeout=10)
     if packer:
         packer.close_transport(timeout=10)
     client.close()

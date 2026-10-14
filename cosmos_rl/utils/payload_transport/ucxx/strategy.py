@@ -36,12 +36,31 @@ from cosmos_rl.utils.transport_failure import TransportUnusableError
 import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.trajectory import truncate_trajectory
+from cosmos_rl.utils.payload_transport.layout import (
+    LayoutCache,
+    TensorLayout,
+    WIRE_VERSION,
+    validate_layout_id,
+)
+from cosmos_rl.utils.payload_transport.pack import NP_TO_TORCH
+from cosmos_rl.utils.trajectory import (
+    EPISODE_LENGTH,
+    VARLEN_FIELDS,
+    truncate_trajectory,
+    validate_episode_length,
+)
 from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
+from cosmos_rl.utils.payload_transport.receive_memory import (
+    ReceiveBufferPool,
+    ReceivedBatch,
+    ReusableViewMap,
+    storage_bytes,
+)
 from cosmos_rl.utils.trace import get_trace_time
 from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
     UCXX_AVAILABLE,
     UCXXClient,
+    PayloadIdentityError,
 )
 from cosmos_rl.utils.payload_transport.ucxx.operation import UCXXOperation
 
@@ -63,30 +82,24 @@ _TRANSIENT_UCXX_ERRORS = frozenset(
         "UCXXCanceledError",
         "UCXXConnectionResetError",
         "UCXXCloseError",
-        "TimeoutError",
     }
 )
 
 _MAX_FETCH_ROUNDS = 3
+_MAX_PORTS_PER_REFERENCE = 64
+_MAX_UINT64 = (1 << 64) - 1
 
 
 _LOG_INTERVAL = 50
 
 
-# Numpy → torch dtype map for the bulk pinned-buffer copy in
-# ``_to_gpu``.  Defined at module scope so it is built once at import
-# time rather than on every fetch.
-_NP_TO_TORCH = {
-    np.dtype("float32"): torch.float32,
-    np.dtype("float64"): torch.float64,
-    np.dtype("float16"): torch.float16,
-    np.dtype("int64"): torch.int64,
-    np.dtype("int32"): torch.int32,
-    np.dtype("int16"): torch.int16,
-    np.dtype("int8"): torch.int8,
-    np.dtype("uint8"): torch.uint8,
-    np.dtype("bool"): torch.bool,
-}
+class _PlacedPayload(dict):
+    """Tensor views plus the backing-storage retirement operation."""
+
+    def __init__(self, values, *, owner, release):
+        super().__init__(values)
+        self.owner = owner
+        self.release_storage = release
 
 
 class UCXXTransportStrategy(PayloadTransportStrategy):
@@ -96,6 +109,8 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         self._io_lock = threading.RLock()
         self._event_loop = None
         self._failure = None
+        self._layout_cache = LayoutCache()
+        self._receive_pool = ReceiveBufferPool()
 
     def _run_async(self, coroutine):
         # UCXX ties progress work to the event loop used at initialization.
@@ -190,6 +205,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             if self._event_loop is not None:
                 self._event_loop.close()
                 self._event_loop = None
+            self._receive_pool.close()
 
         if self._steps > 0:
             avg_ms = self._total_latency_ms / self._steps
@@ -207,8 +223,8 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
     def should_intercept(self, rollout_output: Any) -> bool:
         """UCXX wire-format predicate.
 
-        UCXX-tagged completions are dicts produced by
-        :class:`UCXXRolloutMixin` carrying ``{_ucxx: True,
+        UCXX-tagged completions are dicts produced by ``PayloadContext`` carrying
+        ``{_ucxx: True,
         _ucxx_enabled: True, _worker_ip, _ucxx_port, _slot, ...}``.
         Plain trajectories and ``"nccl:<id>"`` strings fall through
         untouched (NCCL has its own intercept predicate in a sibling
@@ -225,7 +241,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         return rollout_output.get("_ucxx_enabled", True)
 
     def cache_key(self, rollout_output: Any) -> str:
-        return self._ref_cache_key(rollout_output)
+        return self._ref_cache_key(_validate_ucxx_reference(rollout_output))
 
     # NOTE: deliberately NO _filter_prefetch_tasks override.  The base default
     # already delegates to :meth:`_should_intercept`, which is the only way to
@@ -243,18 +259,31 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         Called by the base mixin's worker loop.  Returns
         ``{cache_key: gpu_data}``.
         """
-        raw_results, transfer_ms, copy_ms = self._run_async(self._fetch_all(tasks))
+        validated_tasks = [
+            (idx, _validate_ucxx_reference(metadata)) for idx, metadata in tasks
+        ]
+        raw_results, transfer_ms, copy_ms = self._run_async(
+            self._fetch_all(validated_tasks)
+        )
 
         cache_results: Dict[str, Any] = {}
+        keys_by_idx = {
+            idx: self._ref_cache_key(metadata) for idx, metadata in validated_tasks
+        }
         total_bytes = 0
         ucxx_count = 0
         for idx, gpu_data in raw_results.items():
-            key = self._ref_cache_key_from_task(tasks, idx)
+            key = keys_by_idx.get(idx, str(idx))
             cache_results[key] = gpu_data
             ucxx_count += 1
             for val in gpu_data.values():
                 if isinstance(val, torch.Tensor):
                     total_bytes += val.nelement() * val.element_size()
+
+        if isinstance(raw_results, ReceivedBatch):
+            raw_results.clear()
+            raw_results.update(cache_results)
+            cache_results = raw_results
 
         # Stash for _on_prefetch_complete (called from the trainer
         # thread once wait_prefetch drains the result queue).  We
@@ -286,7 +315,13 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             return None
         try:
             results, _, _ = self._run_async(self._fetch_all([(0, rollout_output)]))
-            return results.get(0)
+            payload = results.get(0)
+            if payload is None or not isinstance(results, ReceivedBatch):
+                return payload
+            try:
+                return {name: tensor.clone() for name, tensor in payload.items()}
+            finally:
+                results.release()
         except TransportUnusableError:
             raise
         except Exception as e:
@@ -338,63 +373,86 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
     def _copy_to_device(self, result):
         client, device = self._client, torch.device(self._device)
         pinned_buf = result.get("_pinned_buf")
-        arrays = {key: value for key, value in result.items() if key != "_pinned_buf"}
-        # Validate and read scalar metadata on the host BEFORE any asynchronous
-        # copy. A malformed schema must not send us into a GPU-error fallback.
-        total_bytes = 0
-        for key, value in arrays.items():
-            if isinstance(value, np.ndarray):
-                if value.dtype not in _NP_TO_TORCH or not value.flags.c_contiguous:
-                    raise ValueError(f"Unsupported UCXX array for key {key!r}")
-                total_bytes += value.nbytes
-        if isinstance(pinned_buf, torch.Tensor) and pinned_buf.numel() != total_bytes:
-            raise ValueError("UCXX pinned buffer and decoded schema size disagree")
+        try:
+            layout = result.get("_layout")
+            if not isinstance(layout, TensorLayout):
+                raise ValueError("UCXX result carries no validated tensor layout")
+            if (
+                not isinstance(pinned_buf, torch.Tensor)
+                or pinned_buf.dtype != torch.uint8
+                or pinned_buf.ndim != 1
+                or not pinned_buf.is_contiguous()
+            ):
+                raise ValueError("UCXX result carries no valid backing buffer")
+            arrays = {
+                key: value
+                for key, value in result.items()
+                if key not in {"_pinned_buf", "_layout"}
+            }
+            # Validate and read scalar metadata on the host BEFORE any
+            # asynchronous copy. A malformed schema must not send us into a
+            # GPU-error fallback.
+            for key, value in arrays.items():
+                if isinstance(value, np.ndarray):
+                    if value.dtype not in NP_TO_TORCH or not value.flags.c_contiguous:
+                        raise ValueError(f"Unsupported UCXX array for key {key!r}")
+            ep_len_array = arrays.get(EPISODE_LENGTH)
+            if ep_len_array is not None:
+                fields = [arrays[key] for key in VARLEN_FIELDS if key in arrays]
+                validate_episode_length(
+                    ep_len_array, [value.shape[0] for value in fields]
+                )
+            if pinned_buf.numel() != layout.payload_nbytes:
+                raise ValueError("UCXX pinned buffer and decoded schema size disagree")
+        except BaseException:
+            if isinstance(pinned_buf, torch.Tensor):
+                self._return_pinned_if_open(pinned_buf)
+            raise
 
         if device.type != "cuda":
-            # CPU tensors must not retain numpy views into a recycled buffer.
-            gpu_data = {
-                key: torch.from_numpy(value.copy()).to(device)
-                if isinstance(value, np.ndarray)
-                else value
-                for key, value in arrays.items()
-            }
-            if pinned_buf is not None:
-                client.return_pinned(pinned_buf)
+            bind_views = getattr(client, "bind_pinned_views", None)
+            gpu_data = (
+                bind_views(pinned_buf, layout, reset_fields=VARLEN_FIELDS)
+                if callable(bind_views)
+                else layout.views(pinned_buf)
+            )
+            owner = pinned_buf
+
+            def release_storage():
+                return self._return_pinned_if_open(pinned_buf)
         else:
+            try:
+                storage_lease = self._receive_pool.acquire(
+                    layout.layout_id, layout.payload_nbytes, device
+                )
+            except torch.OutOfMemoryError as error:
+                # No device operation has been issued, so the host receive
+                # buffer can be returned immediately without a CUDA fence.
+                self._return_pinned_if_open(pinned_buf)
+                raise ValueError(
+                    "UCXX device-copy allocation failed before native issue"
+                ) from error
             operation = UCXXOperation(
                 self._read_timeout,
                 "UCXX device copy",
-                owners=(self, client, result, pinned_buf),
+                owners=(self, client, result, pinned_buf, storage_lease),
                 on_failure=self._mark_failed,
             )
             gpu_data = {}
-            operation.owners.append(gpu_data)
             try:
                 with torch.cuda.device(device):
                     stream = torch.cuda.current_stream(device)
                     operation.owners.append(stream)
                     if pinned_buf is not None:
-                        raw_gpu = pinned_buf.to(device, non_blocking=True)
+                        raw_gpu = storage_lease.tensor
+                        raw_gpu.copy_(pinned_buf, non_blocking=True)
                         operation.owners.append(raw_gpu)
-                        offset = 0
-                        for key, value in arrays.items():
-                            if not isinstance(value, np.ndarray):
-                                gpu_data[key] = value
-                                continue
-                            copied = raw_gpu[offset : offset + value.nbytes].clone()
-                            operation.owners.append(copied)
-                            gpu_data[key] = copied.view(
-                                _NP_TO_TORCH[value.dtype]
-                            ).reshape(value.shape)
-                            offset += value.nbytes
+                        gpu_data = storage_lease.bind_views(
+                            layout, reset_fields=VARLEN_FIELDS
+                        )
+                        operation.owners.append(gpu_data)
                     else:
-                        for key, value in arrays.items():
-                            if isinstance(value, np.ndarray):
-                                host = torch.from_numpy(value)
-                                operation.owners.append(host)
-                                gpu_data[key] = host.to(device, non_blocking=True)
-                            else:
-                                gpu_data[key] = value
+                        raise ValueError("UCXX device result carries no backing buffer")
                     event = torch.cuda.Event()
                     operation.owners.append(event)
                     event.record(stream)
@@ -416,6 +474,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                     )
                 if pinned_buf is not None:
                     client.return_pinned(pinned_buf)
+                storage_lease.release()
                 raise ValueError(
                     "UCXX device-copy allocation failed after safe drain"
                 ) from error
@@ -425,9 +484,32 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                 operation.fail(f"device-copy completion uncertain: {error}")
             if pinned_buf is not None:
                 client.return_pinned(pinned_buf)
+            owner = storage_lease.tensor
+            release_storage = storage_lease.release
 
-        truncate_trajectory(gpu_data)
-        return gpu_data
+        try:
+            truncate_trajectory(gpu_data)
+        except BaseException:
+            release_storage()
+            raise
+        if isinstance(gpu_data, ReusableViewMap):
+            # Preserve the cached mapping itself. Copying it into a plain dict
+            # would hide consumer key mutations from reset(), allowing one
+            # batch's replaced metadata view to leak into the next reuse.
+            return gpu_data.retain(owner=owner, release=release_storage)
+        return _PlacedPayload(gpu_data, owner=owner, release=release_storage)
+
+    def _return_pinned_if_open(self, pinned_buf):
+        client = self._client
+        if client is not None:
+            return_pinned = getattr(client, "return_pinned_if_open", None)
+            if callable(return_pinned):
+                return_pinned(pinned_buf)
+            elif (
+                not getattr(client, "_closing", False)
+                and getattr(client, "_failure", None) is None
+            ):
+                client.return_pinned(pinned_buf)
 
     async def _fetch_all(self, ucxx_tasks: list) -> tuple:
         """Fetch all episodes concurrently with multi-round retry.
@@ -441,26 +523,11 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             worker_ip = metadata.get("_worker_ip")
             ucxx_port = metadata.get("_ucxx_port")
             slot = metadata.get("_slot")
-            handle = metadata.get("_buffer_handle")
-            ports = metadata.get("_ports") or (
-                handle.get("ucxx_ports") if handle else None
-            )
+            generation = metadata.get("_slot_generation")
+            ports = metadata.get("_ports")
 
-            schema = None
-            schema_info = handle.get("schema") if handle else None
-            if schema_info:
-                from cosmos_rl.utils.trajectory import (
-                    TensorSpec,
-                )
-
-                schema = [
-                    TensorSpec(
-                        name=s["name"],
-                        shape=tuple(s["shape"]),
-                        dtype=np.dtype(s["dtype"]),
-                    )
-                    for s in schema_info
-                ]
+            layout = metadata["_resolved_layout"]
+            sender_incarnation = metadata["_sender_incarnation"]
 
             max_attempts = max(1, self._max_attempts)
             read_timeout = self._read_timeout
@@ -472,13 +539,19 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                         worker_ip,
                         ucxx_port,
                         slot,
-                        schema,
+                        layout,
                         ports=ports,
                         timeout=read_timeout,
+                        generation=generation,
+                        sender_incarnation=sender_incarnation,
                     )
                     break
                 except TransportUnusableError:
                     raise
+                except PayloadIdentityError as error:
+                    raise TransportUnusableError(
+                        f"UCXX payload reference is not trustworthy: {error}"
+                    ) from error
                 except Exception as e:
                     if type(e).__name__ not in _TRANSIENT_UCXX_ERRORS:
                         # Non-transient (e.g. ``StaleSlotError``,
@@ -522,15 +595,38 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
 
         meta_by_idx: dict = {}
         for idx, metadata in ucxx_tasks:
-            worker_ip = metadata.get("_worker_ip")
-            ucxx_port = metadata.get("_ucxx_port")
-            slot = metadata.get("_slot")
-            if not (worker_ip and ucxx_port and slot is not None):
-                continue
-            meta_by_idx[idx] = metadata
+            meta_by_idx[idx] = _validate_ucxx_reference(metadata)
+
+        for metadata in meta_by_idx.values():
+            layout_id = metadata["_layout_id"]
+            try:
+                layout = self._layout_cache.resolve(layout_id, None)
+            except KeyError:
+                ports = metadata.get("_ports") or []
+                port = ports[0] if ports else metadata["_ucxx_port"]
+                try:
+                    descriptor = await client.read_layout(
+                        metadata["_worker_ip"],
+                        port,
+                        sender_incarnation=metadata["_sender_incarnation"],
+                        timeout=self._read_timeout,
+                        ports=ports,
+                    )
+                except PayloadIdentityError as error:
+                    raise TransportUnusableError(
+                        f"UCXX payload reference is not trustworthy: {error}"
+                    ) from error
+                try:
+                    layout = self._layout_cache.resolve(layout_id, descriptor)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise TransportUnusableError(
+                        f"UCXX payload layout is not trustworthy: {error}"
+                    ) from error
+            metadata["_resolved_layout"] = layout
 
         pending = list(meta_by_idx.keys())
         batch_results: dict = {}
+        placements = []
         total_transfer_ms = 0.0
         total_copy_ms = 0.0
 
@@ -565,9 +661,20 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                         )
                         continue
                     batch_results[idx] = gpu_data
+                    placements.append(gpu_data)
                     t2 = get_trace_time()
                     total_copy_ms += t2 - t1
             except BaseException as error:
+                for payload in placements:
+                    try:
+                        payload.release_storage()
+                    except Exception:
+                        logger.exception(
+                            "[UCXXTransportStrategy] Failed to retire an already "
+                            "completed placement while unwinding the batch"
+                        )
+                placements.clear()
+                batch_results.clear()
                 if any(not task.done() for task in tasks):
                     operation = UCXXOperation(
                         self._read_timeout,
@@ -606,7 +713,20 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
                 pending,
             )
 
-        return batch_results, total_transfer_ms, total_copy_ms
+        owners = tuple(payload.owner for payload in placements)
+
+        def release_storage():
+            for payload in placements:
+                payload.release_storage()
+
+        values = dict(batch_results)
+        batch = ReceivedBatch(
+            values,
+            nbytes=storage_bytes(values.values()),
+            owners=owners,
+            on_release=release_storage,
+        )
+        return batch, total_transfer_ms, total_copy_ms
 
     # ------------------------------------------------------------------
     # Cache key helpers (kept as static methods for tests + the
@@ -618,22 +738,85 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         return (
             f"{metadata.get('_worker_ip')}:"
             f"{metadata.get('_ucxx_port')}:"
-            f"{metadata.get('_slot')}"
+            f"{metadata.get('_sender_incarnation')}:"
+            f"{metadata.get('_slot')}:{metadata.get('_slot_generation')}:"
+            f"{metadata.get('_layout_id')}"
         )
 
-    @staticmethod
-    def _ref_cache_key_from_task(
-        ucxx_tasks: list,
-        idx: int,
-    ) -> str:
-        for task_idx, metadata in ucxx_tasks:
-            if task_idx == idx:
-                return (
-                    f"{metadata.get('_worker_ip')}:"
-                    f"{metadata.get('_ucxx_port')}:"
-                    f"{metadata.get('_slot')}"
-                )
-        return str(idx)
+
+def _validate_ucxx_reference(metadata: Any) -> dict:
+    """Copy and validate every identity field used by UCXX and its cache."""
+    if not isinstance(metadata, dict):
+        raise TransportUnusableError(
+            "UCXX payload reference metadata must be a mapping"
+        )
+    validated = dict(metadata)
+    worker_ip = validated.get("_worker_ip")
+    ucxx_port = validated.get("_ucxx_port")
+    slot = validated.get("_slot")
+    generation = validated.get("_slot_generation")
+    if not isinstance(worker_ip, str) or not worker_ip or len(worker_ip) > 255:
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid worker address"
+        )
+    if (
+        not isinstance(ucxx_port, int)
+        or isinstance(ucxx_port, bool)
+        or not 1 <= ucxx_port <= 65535
+    ):
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid server port"
+        )
+    if (
+        not isinstance(slot, int)
+        or isinstance(slot, bool)
+        or not 0 <= slot <= _MAX_UINT64
+    ):
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid slot identity"
+        )
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not 1 <= generation <= _MAX_UINT64
+    ):
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid slot generation"
+        )
+    if validated.get("_wire_version") != WIRE_VERSION:
+        raise TransportUnusableError(
+            "UCXX payload reference has an unsupported wire version"
+        )
+    sender_incarnation = validated.get("_sender_incarnation")
+    if (
+        not isinstance(sender_incarnation, str)
+        or not sender_incarnation
+        or len(sender_incarnation) > 256
+    ):
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid sender incarnation"
+        )
+    try:
+        validate_layout_id(validated.get("_layout_id"))
+    except ValueError as error:
+        raise TransportUnusableError(
+            f"UCXX payload reference has an invalid tensor layout identity: {error}"
+        ) from error
+    ports = validated.get("_ports")
+    if ports is not None and (
+        not isinstance(ports, (list, tuple))
+        or len(ports) > _MAX_PORTS_PER_REFERENCE
+        or any(
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+            for port in ports
+        )
+    ):
+        raise TransportUnusableError(
+            "UCXX payload reference has an invalid server port list"
+        )
+    return validated
 
 
 def compose_ucxx_transport(

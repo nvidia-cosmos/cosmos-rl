@@ -34,7 +34,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
@@ -56,6 +55,7 @@ from cosmos_rl.utils.payload_transport.nccl.header import (
 )
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     NCCL_COMPLETION_PREFIX,
+    build_layout_key,
     build_sender_request_channel,
     parse_transfer_rollout_idx,
 )
@@ -63,11 +63,17 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     NcclRendezvous,
     TransferStatus,
 )
+from cosmos_rl.utils.payload_transport.layout import (
+    LayoutCache,
+    TensorLayout,
+    WIRE_VERSION,
+    deserialize_layout_descriptor,
+    validate_layout_id,
+)
 from cosmos_rl.utils.trajectory import (
+    VARLEN_FIELDS,
     truncate_trajectory,
     build_trajectory_schema,
-    deserialize_schema,
-    schema_layout,
 )
 from cosmos_rl.utils.payload_transport.nccl.streams import (
     bind_thread_device,
@@ -77,10 +83,11 @@ from cosmos_rl.utils.payload_transport.nccl.streams import (
 )
 from cosmos_rl.utils.payload_transport.strategy import PayloadTransportStrategy
 from cosmos_rl.utils.payload_transport.receive_memory import (
+    ReceiveBufferLease,
+    ReceiveBufferPool,
     ReceiveBudget,
     ReceiveMemoryError,
     ReceivedBatch,
-    storage_bytes,
 )
 from cosmos_rl.utils.trace import get_trace_time
 from cosmos_rl.utils.transport_failure import TransportUnusableError, TransportDeadline
@@ -90,6 +97,7 @@ from cosmos_rl.utils.transport_failure import TransportUnusableError, TransportD
 class _PreparedReceive:
     comm_idx: int
     buffer: torch.Tensor
+    lease: ReceiveBufferLease
     operation: TransportDeadline
     response_key: Optional[str]
 
@@ -100,24 +108,28 @@ class _PreparedReceive:
         return (self.comm_idx, self.buffer)[index]
 
 
+class _DetachedReceiveLease:
+    """Test/embedding adapter for a caller-supplied receive tensor."""
+
+    def __init__(self, tensor):
+        self.tensor = tensor
+
+    def release(self):
+        pass
+
+    def quarantine(self):
+        pass
+
+    def bind_views(self, layout, *, offset=0, reset_fields=()):
+        return layout.views(self.tensor.narrow(0, offset, layout.payload_nbytes))
+
+
 _LOG_INTERVAL = 50
 
 # Terminal ownership, not a retry cache. Native failure/abort is not proof that
 # a CUDA stream stopped touching these buffers. Retain until process exit, even
 # if the caller catches the error or drops the strategy during teardown.
 _FAILED_RECEIVE_OWNERS = []
-
-_NP_TO_TORCH = {
-    np.dtype("float32"): torch.float32,
-    np.dtype("float64"): torch.float64,
-    np.dtype("float16"): torch.float16,
-    np.dtype("int64"): torch.int64,
-    np.dtype("int32"): torch.int32,
-    np.dtype("int16"): torch.int16,
-    np.dtype("int8"): torch.int8,
-    np.dtype("uint8"): torch.uint8,
-    np.dtype("bool"): torch.bool,
-}
 
 
 class NCCLTransportStrategy(PayloadTransportStrategy):
@@ -143,6 +155,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
     _first_transfer_timeout: float = 30.0
     _warm_pairs: Any = None
     _schema: Optional[list] = None
+    _default_layout: Optional[TensorLayout] = None
+    _layout_cache: Optional[LayoutCache] = None
     _total_nccl: int = 0
     _total_fallback: int = 0
     _total_bytes: int = 0
@@ -154,6 +168,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
     _bounded_fetch_lock = None
     _decode_account = None
     _bounded_rejections = None
+    _receive_pool = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -226,6 +241,18 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             )
         self._prefix = _resolve_prefix(config)
         self._schema = build_trajectory_schema(_resolve_schema_dims(config))
+        self._default_layout = TensorLayout.compile(self._schema)
+        self._layout_cache = LayoutCache(
+            int(custom.get("payload_layout_cache_capacity", 64))
+        )
+        self._layout_cache.register(self._default_layout)
+        self._receive_pool = ReceiveBufferPool(
+            max_cached_per_layout=int(
+                custom.get("payload_receive_pool_cached_slots", 64)
+            ),
+            max_cached_buffers=int(custom.get("payload_receive_pool_cached_slots", 64)),
+            max_cached_bytes=limit or None,
+        )
 
         # The per-pair UID key must outlive a cold-start request: it is
         # published when the receiver initiates and read by the sender when it
@@ -252,7 +279,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         # cannot exchange payloads (the header check rejects every transfer).
         logger.info(
             "[NCCLTransportStrategy] Initialised: device=%s, rank=%d, "
-            "max_attempts=%d, recv_timeout=%ss, payload_header=v%d",
+            "max_attempts=%d, recv_timeout=%ss, payload_header=%d",
             device,
             self._receiver_rank,
             self._max_attempts,
@@ -295,6 +322,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 self._total_bytes / 1e6,
                 avg_ms,
             )
+        if self._receive_pool is not None:
+            self._receive_pool.close()
         logger.info("[NCCLTransportStrategy] Shut down")
 
     # ------------------------------------------------------------------
@@ -310,19 +339,38 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         return False
 
     def cache_key(self, rollout_output: Any) -> str:
-        return self._ref_cache_key(rollout_output)
+        try:
+            ref = _parse_ref(rollout_output)
+        except (TypeError, ValueError) as error:
+            raise TransportUnusableError(
+                f"NCCL payload reference is not trustworthy: {error}"
+            ) from error
+        return (
+            _identity_cache_key(ref)
+            if ref is not None
+            else self._ref_cache_key(rollout_output)
+        )
 
     def fetch_batch(self, tasks: List[Any]) -> Dict[str, Any]:
         """Resolve a batch of NCCL references via rendezvous + standalone per-pair recvs."""
         refs: List[Tuple[Any, dict]] = []
         rejected = set()
+        keys_by_idx = {}
         for idx, ro in tasks:
-            ref = _parse_ref(ro, default_schema=self._schema)
-            if ref is not None and _has_schema(ref):
-                refs.append((idx, ref))
-            else:
-                # No rendezvous/native work was issued for this reference.
-                rejected.add(idx)
+            try:
+                ref = _parse_ref(ro)
+                if ref is not None and _has_layout(ref):
+                    keys_by_idx[idx] = _identity_cache_key(ref)
+                    ref["layout"] = self._resolve_layout(ref)
+                    refs.append((idx, ref))
+                else:
+                    # No rendezvous/native work was issued for this reference.
+                    keys_by_idx[idx] = self._ref_cache_key(ro)
+                    rejected.add(idx)
+            except (KeyError, TypeError, ValueError) as error:
+                raise TransportUnusableError(
+                    f"NCCL payload reference is not trustworthy: {error}"
+                ) from error
 
         results, total_bytes, transfer_ms = self._fetch_all(refs)
         if self._receive_budget is not None and not isinstance(results, ReceivedBatch):
@@ -333,12 +381,12 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
         cache_results: Dict[str, Any] = {}
         for idx, gpu_data in results.items():
-            key = _cache_key_from_task(tasks, idx)
+            key = keys_by_idx.get(idx, str(idx))
             cache_results[key] = gpu_data
 
         if isinstance(results, ReceivedBatch):
             results.rejected_keys = {
-                _cache_key_from_task(tasks, idx)
+                keys_by_idx.get(idx, str(idx))
                 for idx in results.rejected_keys | rejected
             }
             results.clear()
@@ -369,19 +417,54 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 "cache-miss refetch is disabled to preserve consumer leases."
             )
         try:
-            # Parse inside the guard too: a malformed dict ref (e.g. a corrupt
-            # ``_schema``) raises from deserialize_schema, and this path has no
-            # containment above it in the base get_policy_input.
-            ref = _parse_ref(rollout_output, default_schema=self._schema)
-            if ref is None or not _has_schema(ref):
+            # Parse inside the guard too: a malformed layout descriptor raises,
+            # and this path has no containment above it in get_policy_input.
+            ref = _parse_ref(rollout_output)
+            if ref is None or not _has_layout(ref):
                 return None
+            ref["layout"] = self._resolve_layout(ref)
             results, _, _ = self._fetch_all([(0, ref)])
         except TransportUnusableError:
             raise
+        except (KeyError, ValueError, TypeError) as e:
+            raise TransportUnusableError(
+                f"NCCL payload reference is not trustworthy: {e}"
+            ) from e
         except Exception as e:
             logger.warning("[NCCLTransportStrategy] Sync fallback failed: %s", e)
             return None
-        return results.get(0)
+        payload = results.get(0)
+        if payload is None or not isinstance(results, ReceivedBatch):
+            return payload
+        try:
+            return {name: tensor.clone() for name, tensor in payload.items()}
+        finally:
+            results.release()
+
+    def _resolve_layout(self, ref: dict) -> TensorLayout:
+        layout_id = validate_layout_id(ref.get("layout_id"))
+        try:
+            return self._layout_cache.resolve(layout_id, None)
+        except KeyError:
+            sender_replica = ref.get("sender_replica")
+            sender_incarnation = ref.get("sender_incarnation")
+            if not isinstance(sender_replica, str) or not sender_replica:
+                raise ValueError("NCCL payload reference has no sender identity")
+            if not isinstance(sender_incarnation, str) or not sender_incarnation:
+                raise ValueError("NCCL payload reference has no sender incarnation")
+            key = build_layout_key(
+                self._prefix,
+                sender_replica,
+                sender_incarnation,
+                layout_id,
+            )
+            if self._redis is None:
+                raise ValueError("NCCL tensor layout registry is not initialized")
+            descriptor_text = self._redis.get(key)
+            if descriptor_text is None:
+                raise KeyError(f"unknown tensor layout {layout_id}")
+            descriptor = deserialize_layout_descriptor(descriptor_text)
+            return self._layout_cache.resolve(layout_id, descriptor)
 
     def on_prefetch_complete(
         self, batch_id: int, n_results: int, fetch_ms: float, step: int
@@ -427,132 +510,40 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
     def _fetch_bounded(self, refs):
         budget = self._receive_budget
-        decoded_size = 0
-        wire_sizes = []
-        for _, ref in refs:
-            _, raw_size = schema_layout(ref["schema"])
-            decoded_size += sum(spec.nbytes for spec in ref["schema"])
-            wire_sizes.append(HEADER_NBYTES + raw_size)
-        workspace = max(wire_sizes)
-        required = decoded_size + workspace
+        required = sum(HEADER_NBYTES + ref["layout"].payload_nbytes for _, ref in refs)
         budget.reserve(required)
-        results = {}
-        part = {}
-        total_bytes = 0
-        t0 = get_trace_time()
-        failure = None
-        attributed = 0
-        window_storage = []
-
-        def account_decode(tensor):
-            nonlocal attributed
-            window_storage.append(tensor)
-            nbytes = tensor.untyped_storage().nbytes()
-            attributed += nbytes
-            budget.attribute(decoded=nbytes)
-
-        self._decode_account = account_decode
-        self._bounded_window_storage = window_storage
         rejected_transfers = set()
         self._bounded_rejections = rejected_transfers
         try:
-            # Reserve all decoded storage plus at least one receive up front.
-            # Additional workspace uses currently free bytes, never a blocking
-            # reservation that could deadlock behind our own admitted batch.
-            extra = budget.reserve_available(sum(wire_sizes) - workspace)
-            workspace += extra
-            required += extra
-            cursor = 0
-            while cursor < len(refs):
-                if budget.closed:
-                    raise ReceiveMemoryError("NCCL receive cancelled by shutdown")
-                end, wire_bytes = cursor, 0
-                while end < len(refs) and wire_bytes + wire_sizes[end] <= workspace:
-                    wire_bytes += wire_sizes[end]
-                    end += 1
-                # The existing helper posts each matching receive immediately
-                # after rendezvous, then observes completion for the window.
-                # Never group independent communicators with ncclGroupStart.
-                window = refs[cursor:end]
-                ref = window[0][1]
-                part, nbytes, _ = self._fetch_unbounded(window)
-                if torch.cuda.is_available():
-                    torch.cuda.current_stream(self._device).synchronize()
-                results.update(part)
-                part.clear()
-                window_storage.clear()
-                current = storage_bytes(results.values())
-                budget.attribute(decoded=current - attributed)
-                attributed = current
-                total_bytes += nbytes
-                budget.attribute(raw=-budget.raw)
-                cursor = end
-            actual = storage_bytes(results.values())
-            if actual > required:
-                raise ReceiveMemoryError("Decoded storage exceeded schema reservation")
+            result = self._fetch_unbounded(
+                refs,
+                budget=budget,
+                reserved=required,
+            )
         except TransportUnusableError:
             budget.close()
-            _FAILED_RECEIVE_OWNERS.append(
-                (budget, results, part, window_storage, self._comm_cache, self._streams)
-            )
             raise
         except Exception as exc:
-            # Do not carry a traceback holding raw buffers/decoded tensors into
-            # the prefetch error queue. The recovery path already handles comms.
-            failure = f"{type(exc).__name__}: {exc}"
             logger.error(
-                "[NCCLTransportStrategy] bounded receive failed: transfer=%s "
-                "schema=%s error=%s; %s",
-                ref["transfer_id"],
-                ref["schema"],
-                failure,
+                "[NCCLTransportStrategy] bounded receive failed: error=%s: %s; %s",
+                type(exc).__name__,
+                exc,
                 budget.snapshot(),
             )
-        except BaseException:
-            # Cancellation can interrupt decoding too. Do not run native
-            # cleanup or discard operands without completion evidence.
-            budget.close()
-            _FAILED_RECEIVE_OWNERS.append(
-                (budget, results, part, window_storage, self._comm_cache, self._streams)
-            )
-            raise
-        finally:
-            self._decode_account = None
-            self._bounded_window_storage = None
-            self._bounded_rejections = None
-        if failure is not None:
-            # Outstanding decode copies must finish before their charge goes away.
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.current_stream(self._device).synchronize()
-                except Exception as exc:
-                    budget.close()
-                    _FAILED_RECEIVE_OWNERS.append(
-                        (budget, results, part, window_storage, self._comm_cache)
-                    )
-                    raise TransportUnusableError(
-                        "CUDA completion failed; receive budget is closed and its "
-                        "reservation retained. Restart the receiver."
-                    ) from exc
-            results.clear()
-            part.clear()
-            window_storage.clear()
-            budget.attribute(raw=-budget.raw, decoded=-attributed)
             budget.release(required)
-            raise ReceiveMemoryError(failure)
-        budget.release(required - actual)
-        leased = ReceivedBatch(
-            results,
-            budget,
-            actual,
-            rejected_keys={
-                idx for idx, ref in refs if ref["transfer_id"] in rejected_transfers
-            },
-        )
+            raise ReceiveMemoryError(f"{type(exc).__name__}: {exc}") from None
+        finally:
+            self._bounded_rejections = None
         logger.info("[NCCLTransportStrategy] receive memory: %s", budget.snapshot())
-        return leased, total_bytes, get_trace_time() - t0
+        return result
 
-    def _fetch_unbounded(self, refs: List[Tuple[Any, dict]]) -> Tuple[dict, int, float]:
+    def _fetch_unbounded(
+        self,
+        refs: List[Tuple[Any, dict]],
+        *,
+        budget=None,
+        reserved=0,
+    ) -> Tuple[dict, int, float]:
         """Rendezvous + ``nccl_recv``, interleaved per ref.
 
         Returns ``(results_by_idx, total_bytes, transfer_ms)``.  Each ref is
@@ -584,11 +575,12 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
         t0 = get_trace_time()
         # Declared OUTSIDE the try so the finally can always read it.
-        recvs: List[Tuple[Any, dict, int, torch.Tensor]] = []
+        recvs: List[Tuple[Any, dict, int, torch.Tensor, ReceiveBufferLease]] = []
         native_pending = False
         retain_pins = False
         stream = None
         operations = []
+        results: Dict[int, dict] = {}
         # Pins taken during phase 1 must be released on EVERY exit path,
         # including the early returns and any raise below.
         try:
@@ -611,9 +603,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 * 1000
             )
 
-            results: Dict[int, dict] = {}
             total_bytes = 0
-            posted: List[Tuple[Any, dict, int, torch.Tensor]] = []
+            posted: List[Tuple[Any, dict, int, torch.Tensor, ReceiveBufferLease]] = []
             # Serialize the NCCL recv LAUNCH on this consumer's GPU, mirroring the
             # producer's _nccl_send_lock.  Both the prefetch worker (_fetch_all off the
             # prefetch thread) and a trainer-thread cache-miss _sync_fetch can reach
@@ -671,12 +662,13 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                             recv_timeout_ms / 1000, "NCCL receive"
                         )
                     response_key = getattr(prepared, "response_key", None)
+                    lease = getattr(prepared, "lease", None)
+                    if lease is None:
+                        lease = _DetachedReceiveLease(recv_buf)
                     operations.append((operation, response_key, None))
                     # Record the pin BEFORE attempting the recv so the finally
                     # below unpins this comm even if the enqueue raises.
-                    recvs.append((idx, ref, comm_idx, recv_buf))
-                    if self._receive_budget is not None:
-                        self._bounded_window_storage.append(recv_buf)
+                    recvs.append((idx, ref, comm_idx, recv_buf, lease))
                     # Mark before issue: a raising native call may already have
                     # enqueued work or partially written the destination.
                     native_pending = True
@@ -693,10 +685,22 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                             "NCCL receive enqueue failed; native completion unknown"
                         ) from exc
                     operations[-1] = (operation, response_key, record_event(stream))
-                    posted.append((idx, ref, comm_idx, recv_buf))
+                    posted.append((idx, ref, comm_idx, recv_buf, lease))
 
                 if not posted:
-                    return {}, 0, get_trace_time() - t0
+                    if budget is not None:
+                        budget.release(reserved)
+                    rejected = {
+                        idx
+                        for idx, ref in refs
+                        if self._bounded_rejections is not None
+                        and ref["transfer_id"] in self._bounded_rejections
+                    }
+                    return (
+                        ReceivedBatch({}, budget, 0, rejected_keys=rejected),
+                        0,
+                        get_trace_time() - t0,
+                    )
 
                 # Recv-complete event gates downstream training consumption.
                 done = record_event(stream)
@@ -734,13 +738,24 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         + entry[1]["transfer_id"]
                     )
 
-            for idx, ref, _comm_idx, recv_buf in posted:
+            for idx, ref, _comm_idx, recv_buf, _lease in posted:
                 try:
+                    cached_views = _lease.bind_views(
+                        ref["layout"],
+                        offset=HEADER_NBYTES,
+                        reset_fields=VARLEN_FIELDS,
+                    )
                     if self._decode_account is None:
-                        gpu_data = _verify_and_unpack(recv_buf, ref, device)
+                        gpu_data = _verify_and_unpack(
+                            recv_buf, ref, device, views=cached_views
+                        )
                     else:
                         gpu_data = _verify_and_unpack(
-                            recv_buf, ref, device, on_allocate=self._decode_account
+                            recv_buf,
+                            ref,
+                            device,
+                            on_allocate=self._decode_account,
+                            views=cached_views,
                         )
                 except PayloadHeaderMismatch as exc:
                     # Completion alone does not make an incorrectly paired
@@ -758,18 +773,58 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             decoded = record_event(None)
             for operation, _key, _event in operations:
                 operation.wait_event(decoded)
-            return results, total_bytes, get_trace_time() - t0
+            actual = sum(
+                lease.tensor.untyped_storage().nbytes() for *_, lease in posted
+            )
+            allocated = sum(
+                lease.tensor.untyped_storage().nbytes() for *_, lease in recvs
+            )
+            if budget is not None:
+                budget.attribute(raw=-allocated, decoded=actual)
+                budget.release(reserved - actual)
+            rejected = {
+                idx
+                for idx, ref in refs
+                if self._bounded_rejections is not None
+                and ref["transfer_id"] in self._bounded_rejections
+            }
+            leases = tuple(entry[4] for entry in posted)
+
+            def release_leases():
+                for lease in leases:
+                    lease.release()
+
+            batch = ReceivedBatch(
+                results,
+                budget,
+                actual,
+                rejected_keys=rejected,
+                owners=tuple(lease.tensor for lease in leases),
+                on_release=release_leases,
+            )
+            return batch, total_bytes, get_trace_time() - t0
         except BaseException as exc:
             if native_pending:
                 retain_pins = True
-                if self._receive_budget is not None:
-                    self._receive_budget.close()
-                _FAILED_RECEIVE_OWNERS.append((recvs, cache, stream))
+                if budget is not None:
+                    budget.close()
+                for *_, lease in recvs:
+                    lease.quarantine()
+                _FAILED_RECEIVE_OWNERS.append(
+                    (recvs, cache, stream, self._receive_pool)
+                )
                 raise TransportUnusableError(
                     "Receive interrupted before native completion; "
                     "storage, communicator pins and reservation retained. "
                     "Restart the receiver."
                 ) from exc
+            allocated = sum(
+                lease.tensor.untyped_storage().nbytes() for *_, lease in recvs
+            )
+            if budget is not None and allocated:
+                budget.attribute(raw=-allocated)
+            for *_, lease in recvs:
+                lease.release()
             raise
         finally:
             # Release the eviction pins taken by _rendezvous_one.  The comm
@@ -787,7 +842,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 # must take the fatal path, not reuse this transport.
                 operation.close()
             if not retain_pins:
-                for _i, _ref, _c, _b in recvs:
+                for _i, _ref, _c, _b, _lease in recvs:
                     cache.unpin(_pair_key(_ref, receiver_rank))
 
     def _quarantine_endpoint(self, cache: Any, health_key: Any, pair: Any) -> None:
@@ -813,7 +868,9 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             self._warm_pairs.discard(pair)
 
     def _quarantine_recv_failures(
-        self, recvs: List[Tuple[Any, dict, int, torch.Tensor]], cache: Any
+        self,
+        recvs: List[Tuple[Any, dict, int, torch.Tensor, ReceiveBufferLease]],
+        cache: Any,
     ) -> None:
         """After a recv failure, quarantine only the WARM pairs.
 
@@ -825,12 +882,18 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         """
         receiver_rank = self._receiver_rank
         warm = self._warm_pairs
-        for _idx, ref, _comm_idx, _buf in recvs:
+        for _idx, ref, _comm_idx, _buf, _lease in recvs:
             pair = _pair_key(ref, receiver_rank)
             if pair not in warm:
                 continue  # still warming -> keep the comm, retry
             self._quarantine_endpoint(
-                cache, (ref["sender_replica"], ref["sender_rank"]), pair
+                cache,
+                (
+                    ref["sender_replica"],
+                    ref.get("sender_incarnation", ""),
+                    ref["sender_rank"],
+                ),
+                pair,
             )
 
     def _rendezvous_one(
@@ -850,7 +913,11 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         # Pair key + health key are keyed on the globally-unique sender
         # replica identity so distinct rollout replicas never collide.
         pair = _pair_key(ref, receiver_rank)
-        health_key = (sender_replica, sender_rank)
+        health_key = (
+            sender_replica,
+            ref.get("sender_incarnation", ""),
+            sender_rank,
+        )
         # "warming" until this pair completes its first successful transfer.
         warming = pair not in self._warm_pairs
 
@@ -889,6 +956,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 )
                 operation = TransportDeadline(remaining, f"receive {transfer_id}")
                 comm_idx = None
+                lease = None
                 try:
                     if result.response_key:
                         rv.watch_operation(result.response_key, operation)
@@ -903,12 +971,21 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         pin=True,
                         deadline=operation,
                     )
-                    recv_buf = _alloc_recv_buffer(ref["schema"], self._device)
+                    if self._receive_pool is None:
+                        self._receive_pool = ReceiveBufferPool()
+                    lease = self._receive_pool.acquire(
+                        ref["layout"].layout_id,
+                        HEADER_NBYTES + ref["layout"].payload_nbytes,
+                        self._device,
+                    )
+                    recv_buf = lease.tensor
                     if self._receive_budget is not None:
                         self._receive_budget.attribute(
                             raw=recv_buf.untyped_storage().nbytes()
                         )
                 except BaseException as e:
+                    if lease is not None:
+                        lease.release()
                     # Never returned to the caller -> nothing will unpin it here.
                     if comm_idx is not None:
                         cache.unpin(pair)
@@ -925,7 +1002,11 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         f"Accepted transfer {transfer_id} could not prepare its receive"
                     ) from e
                 return _PreparedReceive(
-                    comm_idx, recv_buf, operation, result.response_key
+                    comm_idx,
+                    recv_buf,
+                    lease,
+                    operation,
+                    result.response_key,
                 )
             if result.status is TransferStatus.MISSING:
                 # Producer recycled the buffer — non-retryable, drop now.
@@ -986,9 +1067,12 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
     @staticmethod
     def _ref_cache_key(rollout_output: Any) -> str:
-        ref = _parse_ref(rollout_output)
-        if ref is not None:
-            return ref["transfer_id"]
+        if isinstance(rollout_output, str) and rollout_output.startswith(
+            NCCL_COMPLETION_PREFIX
+        ):
+            return rollout_output[len(NCCL_COMPLETION_PREFIX) :]
+        if isinstance(rollout_output, dict) and rollout_output.get("_nccl"):
+            return str(rollout_output.get("_transfer_id", ""))
         return str(rollout_output)
 
     def _mark_known_rejection(self, ref):
@@ -1001,112 +1085,134 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 # ---------------------------------------------------------------------------
 
 
-def _parse_ref(
-    rollout_output: Any, *, default_schema: Optional[list] = None
-) -> Optional[dict]:
+def _parse_ref(rollout_output: Any) -> Optional[dict]:
     """Normalize a completion string or dict metadata into an internal ref.
 
-    Returns a dict with ``transfer_id``, ``sender_rank``, ``rollout_idx``,
-    and ``schema`` (a list of :class:`TensorSpec`), or ``None`` if the
-    input is not an NCCL reference.
+    Returns normalized transfer and layout identity, or ``None`` if the input
+    is not an NCCL reference.
     """
     if isinstance(rollout_output, str):
         if not rollout_output.startswith(NCCL_COMPLETION_PREFIX):
             return None
-        transfer_id = rollout_output[len(NCCL_COMPLETION_PREFIX) :]
-        rollout_idx = parse_transfer_rollout_idx(transfer_id)
-        # Bare "nccl:<id>" string carries no dict metadata, so there is no
-        # globally-unique replica identity -- fall back to the rollout-idx.
-        # (This form is single-node / testing only; the rl-gym producer
-        # returns dict metadata carrying _sender_replica.)
-        return {
-            "transfer_id": transfer_id,
-            "rollout_idx": rollout_idx,
-            "sender_rank": rollout_idx if rollout_idx >= 0 else 0,
-            "sender_replica": f"rollout-{rollout_idx if rollout_idx >= 0 else 0}",
-            "schema": default_schema,
-        }
+        raise ValueError(
+            "NCCL cleanup completion strings do not carry layout or sender identity"
+        )
     if isinstance(rollout_output, dict) and rollout_output.get("_nccl"):
         transfer_id = rollout_output.get("_transfer_id", "")
+        if (
+            not isinstance(transfer_id, str)
+            or not transfer_id
+            or len(transfer_id) > 1024
+        ):
+            raise ValueError("NCCL payload reference has an invalid transfer identity")
         rollout_idx = rollout_output.get(
             "_rollout_idx", parse_transfer_rollout_idx(transfer_id)
         )
-        raw_schema = rollout_output.get("_schema")
-        # Dict metadata is what a producer with a PER-PAYLOAD schema emits, and
-        # it always carries ``_schema``.  Do NOT fall back to the static default
-        # when it is absent: that would unpack the payload at another layout's
-        # offsets and hand the caller decoded garbage -- the same class of
-        # failure as a mispaired buffer, minus any way to notice.  Leaving the
-        # schema None makes the fetch paths drop the reference instead, so the
-        # episode degrades to the Redis path.  (The bare ``nccl:<id>`` string
-        # form above has no metadata channel at all and keeps the default.)
-        schema = deserialize_schema(raw_schema) if raw_schema else None
+        if (
+            not isinstance(rollout_idx, int)
+            or isinstance(rollout_idx, bool)
+            or rollout_idx < 0
+        ):
+            raise ValueError("NCCL payload reference has an invalid rollout index")
+        if parse_transfer_rollout_idx(transfer_id) != rollout_idx:
+            raise ValueError("NCCL transfer identity and rollout index do not agree")
+        if rollout_output.get("_wire_version") != WIRE_VERSION:
+            raise ValueError("NCCL payload reference has an unsupported wire version")
+        layout_id = validate_layout_id(rollout_output.get("_layout_id"))
         sender_rank = rollout_output.get(
             "_sender_rank", rollout_idx if rollout_idx >= 0 else 0
         )
+        if (
+            not isinstance(sender_rank, int)
+            or isinstance(sender_rank, bool)
+            or sender_rank < 0
+        ):
+            raise ValueError("NCCL payload reference has an invalid sender rank")
         # Globally-unique sender identity: the producer's replica id/name.
-        # Falls back to the rollout-idx form only if the producer omitted it.
-        sender_replica = rollout_output.get("_sender_replica") or (
-            f"rollout-{rollout_idx if rollout_idx >= 0 else 0}"
-        )
+        sender_replica = rollout_output.get("_sender_replica")
+        sender_incarnation = rollout_output.get("_sender_incarnation")
+        if (
+            not isinstance(sender_replica, str)
+            or not sender_replica
+            or len(sender_replica) > 256
+        ):
+            raise ValueError("NCCL payload reference has an invalid sender identity")
+        if (
+            not isinstance(sender_incarnation, str)
+            or not sender_incarnation
+            or len(sender_incarnation) > 256
+        ):
+            raise ValueError("NCCL payload reference has an invalid sender incarnation")
         return {
             "transfer_id": transfer_id,
             "rollout_idx": rollout_idx,
             "sender_rank": sender_rank,
             "sender_replica": sender_replica,
-            "schema": schema,
+            "layout_id": layout_id,
+            "sender_incarnation": sender_incarnation,
         }
     return None
 
 
-def _has_schema(ref: dict) -> bool:
-    """True if ``ref`` can be decoded; logs (and rejects) it if it cannot.
-
-    A dict reference with no ``_schema`` reaches here only when the producer
-    lost that metadata.  There is no safe way to decode the payload, so the
-    fetch paths skip it and the episode falls back to the Redis transport.
-    """
-    if ref.get("schema") is not None:
+def _has_layout(ref: dict) -> bool:
+    """Return whether a reference carries enough identity to resolve a layout."""
+    if ref.get("layout_id"):
         return True
     logger.error(
-        "[NCCLTransportStrategy] NCCL reference %s carries no schema; refusing "
+        "[NCCLTransportStrategy] NCCL reference %s carries no layout identity; refusing "
         "to decode its payload (episode falls back to the Redis path)",
         ref.get("transfer_id", "<unknown>"),
     )
     return False
 
 
+def _identity_cache_key(ref: dict) -> str:
+    """Bind a cached payload to every compact identity field it validated."""
+    return ":".join(
+        (
+            ref["sender_replica"],
+            ref["sender_incarnation"],
+            ref["transfer_id"],
+            ref["layout_id"],
+        )
+    )
+
+
 def _pair_key(ref: dict, receiver_rank: int):
     """Globally-unique comm-cache pair key for a transfer.
 
-    ``(sender_replica, sender_rank, receiver_rank)`` -- keyed on the
+    ``(sender_replica, sender_incarnation, sender_rank, receiver_rank)`` -- keyed on the
     rollout replica's globally-unique identity so two replicas sharing a
     per-replica ``sender_rank`` (e.g. both 0) map to DISTINCT communicators.
     """
-    return (ref["sender_replica"], ref["sender_rank"], receiver_rank)
+    return (
+        ref["sender_replica"],
+        ref.get("sender_incarnation", ""),
+        ref["sender_rank"],
+        receiver_rank,
+    )
 
 
-def _cache_key_from_task(tasks: List[Any], idx: int) -> str:
-    for task_idx, ro in tasks:
-        if task_idx == idx:
-            return NCCLTransportStrategy._ref_cache_key(ro)
-    return str(idx)
-
-
-def _alloc_recv_buffer(schema: Optional[list], device: Any) -> torch.Tensor:
-    """Allocate a flat uint8 GPU buffer sized for ``schema`` plus its header.
+def _alloc_recv_buffer(layout: Optional[TensorLayout], device: Any) -> torch.Tensor:
+    """Allocate a flat uint8 GPU buffer sized for ``layout`` plus its header.
 
     The producer prefixes :data:`HEADER_NBYTES` of self-describing header to
     every payload, so the wire size is header + entry size on both ends.
     """
-    if schema is None:
-        raise ValueError("cannot allocate NCCL recv buffer without a schema")
-    _, entry_size = schema_layout(schema)
-    return torch.empty(HEADER_NBYTES + entry_size, dtype=torch.uint8, device=device)
+    if layout is None:
+        raise ValueError("cannot allocate NCCL recv buffer without a layout")
+    return torch.empty(
+        HEADER_NBYTES + layout.payload_nbytes, dtype=torch.uint8, device=device
+    )
 
 
 def _verify_and_unpack(
-    recv_buf: torch.Tensor, ref: dict, device: Any, *, on_allocate=None
+    recv_buf: torch.Tensor,
+    ref: dict,
+    device: Any,
+    *,
+    on_allocate=None,
+    views=None,
 ) -> dict:
     """Check the payload header, then slice the payload region by schema.
 
@@ -1120,39 +1226,32 @@ def _verify_and_unpack(
             caller must terminate the transport -- once the stream is off by one
             subsequent transfers cannot be trusted.
     """
-    schema = ref.get("schema")
-    if schema is None:
+    layout = ref.get("layout")
+    if layout is None:
         return {}
-    _, entry_size = schema_layout(schema)
+    entry_size = layout.payload_nbytes
     header = bytes(recv_buf[:HEADER_NBYTES].cpu().numpy())
-    verify_header(header, transfer_id=ref["transfer_id"], payload_nbytes=entry_size)
-    if on_allocate is None:
-        return _unpack(recv_buf[HEADER_NBYTES:], schema, device)
-    return _unpack(recv_buf[HEADER_NBYTES:], schema, device, on_allocate=on_allocate)
+    verify_header(
+        header,
+        transfer_id=ref["transfer_id"],
+        payload_nbytes=entry_size,
+        layout_id=layout.layout_id,
+        sender_incarnation=ref.get("sender_incarnation", ""),
+    )
+    return _unpack(recv_buf[HEADER_NBYTES:], layout, device, views=views)
 
 
 def _unpack(
-    recv_buf: torch.Tensor, schema: Optional[list], device: Any, *, on_allocate=None
+    recv_buf: torch.Tensor,
+    layout: Optional[TensorLayout],
+    device: Any,
+    *,
+    views=None,
 ) -> dict:
-    """Slice a payload region (header already stripped) into schema tensors."""
-    if schema is None:
+    """Bind typed tensor views to a validated payload allocation."""
+    if layout is None:
         return {}
-    offsets, _ = schema_layout(schema)
-    out: Dict[str, Any] = {}
-    for spec in schema:
-        td = _NP_TO_TORCH.get(np.dtype(spec.dtype))
-        if td is None:
-            raise ValueError(f"unsupported dtype {spec.dtype} for '{spec.name}'")
-        off = offsets[spec.name]
-        # Clone the byte slice BEFORE reinterpreting: a sub-tensor whose
-        # storage_offset is not a multiple of the target itemsize (e.g. the
-        # int64 episode_length landing at byte 300) cannot be ``view``-ed to
-        # the wider dtype.  Cloning yields fresh storage at offset 0, which
-        # is always aligned.  (Same reason UCXX clones before its view.)
-        raw = recv_buf[off : off + spec.nbytes].clone()
-        if on_allocate is not None:
-            on_allocate(raw)
-        out[spec.name] = raw.view(td).reshape(spec.shape)
+    out = views if views is not None else layout.views(recv_buf)
     _truncate_to_episode_len(out)
     return out
 

@@ -135,16 +135,17 @@ def test_ucxx_pending_server_retains_listeners_and_buffer(monkeypatch):
 
 
 def test_ucxx_failed_join_prevents_context_reset_and_buffer_release(monkeypatch):
-    from cosmos_rl.utils.payload_transport.ucxx import mixins
+    from cosmos_rl.utils.payload_transport.ucxx import producer as producer_module
 
     reset = Mock()
-    monkeypatch.setattr(mixins, "reset_ucxx_context", reset)
-    producer = mixins.UCXXRolloutMixin()
+    monkeypatch.setattr(producer_module, "reset_ucxx_context", reset)
+    producer = producer_module.UCXXPayloadProducer()
     producer._ucxx_enabled = True
     buffer = producer._ucxx_buffer = Mock()
     buffer.stop_server.side_effect = TimeoutError("active reader")
-    with pytest.raises(TimeoutError):
-        producer.cleanup_ucxx()
+    with pytest.raises(RuntimeError, match="teardown failed") as error:
+        producer.close()
+    assert isinstance(error.value.__cause__, TimeoutError)
     assert not producer._ucxx_enabled
     assert producer._ucxx_buffer is buffer
     reset.assert_not_called()
@@ -152,14 +153,14 @@ def test_ucxx_failed_join_prevents_context_reset_and_buffer_release(monkeypatch)
 
 
 def test_ucxx_partial_start_resets_context_before_freeing_buffer(monkeypatch):
-    from cosmos_rl.utils.payload_transport.ucxx import mixins
+    from cosmos_rl.utils.payload_transport.ucxx import producer as producer_module
 
     order = Mock()
-    monkeypatch.setattr(mixins, "reset_ucxx_context", order.reset)
-    producer = mixins.UCXXRolloutMixin()
+    monkeypatch.setattr(producer_module, "reset_ucxx_context", order.reset)
+    producer = producer_module.UCXXPayloadProducer()
     producer._ucxx_server_start_attempted = True
     producer._ucxx_buffer = order.buffer
-    producer.cleanup_ucxx()
+    producer.close()
     assert [call[0] for call in order.mock_calls] == [
         "buffer.stop_server",
         "reset",
@@ -235,60 +236,57 @@ def test_ucxx_strategy_initializes_reads_and_closes_on_one_loop(monkeypatch):
 
 
 def test_producer_partial_setup_rolls_back_and_preserves_original_error(monkeypatch):
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 
-    producer = NCCLRolloutMixin()
+    producer = NCCLPayloadProducer()
     producer._nccl_registry = Mock()
     producer._nccl_comm_cache = Mock()
     failure = ValueError("after registry acquisition")
-    monkeypatch.setattr(NCCLRolloutMixin, "_setup_nccl", Mock(side_effect=failure))
+    monkeypatch.setattr(NCCLPayloadProducer, "_setup", Mock(side_effect=failure))
     with pytest.raises(ValueError) as raised:
-        producer.setup_nccl()
+        producer.setup()
     assert raised.value is failure
     producer._nccl_registry.clear.assert_called_once()
     producer._nccl_comm_cache.close.assert_called_once()
-    producer.cleanup_nccl()
+    producer.close()
     producer._nccl_registry.clear.assert_called_once()
 
 
 @pytest.mark.parametrize("backend", ["nccl", "ucxx"])
 def test_setup_does_not_dispatch_to_application_private_helper(monkeypatch, backend):
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
-    from cosmos_rl.utils.payload_transport.ucxx.mixins import UCXXRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
+    from cosmos_rl.utils.payload_transport.ucxx.producer import UCXXPayloadProducer
 
-    mixin = NCCLRolloutMixin if backend == "nccl" else UCXXRolloutMixin
+    producer_type = NCCLPayloadProducer if backend == "nccl" else UCXXPayloadProducer
     setup = Mock()
-    monkeypatch.setattr(mixin, f"_setup_{backend}", setup)
+    monkeypatch.setattr(producer_type, "_setup", setup)
 
-    class Application(mixin):
-        def _setup_nccl(self):
-            raise AssertionError("application helper is not an override hook")
-
-        def _setup_ucxx(self):
+    class Application(producer_type):
+        def _setup(self, **kwargs):
             raise AssertionError("application helper is not an override hook")
 
     producer = Application()
-    getattr(producer, f"setup_{backend}")(replica_id="application")
+    producer.setup(replica_id="application")
     setup.assert_called_once_with(producer, replica_id="application")
 
 
 def test_producer_does_not_clear_registry_until_executor_has_joined():
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 
-    producer = NCCLRolloutMixin()
+    producer = NCCLPayloadProducer()
     release = threading.Event()
     producer._nccl_registry = Mock()
     producer._nccl_executor = Mock()
     producer._nccl_executor.shutdown.side_effect = lambda **kwargs: release.wait()
     try:
         with pytest.raises(TimeoutError):
-            producer.cleanup_nccl(timeout=0.01)
+            producer.close(timeout=0.01)
         producer._nccl_registry.clear.assert_not_called()
         with pytest.raises(RuntimeError, match="still closing"):
-            producer.setup_nccl()
+            producer.setup()
     finally:
         release.set()
-        producer.cleanup_nccl()
+        producer.close()
     producer._nccl_executor.shutdown.assert_called_once_with(
         wait=True, cancel_futures=True
     )
@@ -296,9 +294,9 @@ def test_producer_does_not_clear_registry_until_executor_has_joined():
 
 
 def test_subscription_failure_is_observed_and_pubsub_closed():
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 
-    producer = NCCLRolloutMixin()
+    producer = NCCLPayloadProducer()
     producer._nccl_redis = Mock()
     pubsub = producer._nccl_redis.pubsub.return_value
     pubsub.subscribe.side_effect = ValueError("subscribe failed")
@@ -397,9 +395,9 @@ def test_worker_keeps_failed_close_owned_for_retry():
 
 
 def test_timed_out_gpu_event_keeps_buffer_owned():
-    from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+    from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 
-    producer = NCCLRolloutMixin()
+    producer = NCCLPayloadProducer()
     producer._nccl_send_timeout_ms = 0
     buffer = object()
     event = Mock()
@@ -433,7 +431,7 @@ def test_timed_out_gpu_event_keeps_buffer_owned():
     ],
 )
 def test_producer_rollback_at_each_acquisition_stage(stage, monkeypatch):
-    from cosmos_rl.utils.payload_transport.nccl import mixins
+    from cosmos_rl.utils.payload_transport.nccl import producer as producer_module
 
     factories = {}
     for name in (
@@ -444,10 +442,10 @@ def test_producer_rollback_at_each_acquisition_stage(stage, monkeypatch):
         "ThreadPoolExecutor",
     ):
         factories[name] = Mock()
-        monkeypatch.setattr(mixins, name, factories[name])
-    monkeypatch.setattr(mixins, "_resolve_prefix", lambda config: "test")
-    monkeypatch.setattr(mixins, "_resolve_max_live_comms", lambda *a, **k: 4)
-    producer = mixins.NCCLRolloutMixin()
+        monkeypatch.setattr(producer_module, name, factories[name])
+    monkeypatch.setattr(producer_module, "_resolve_prefix", lambda config: "test")
+    monkeypatch.setattr(producer_module, "_resolve_max_live_comms", lambda *a, **k: 4)
+    producer = producer_module.NCCLPayloadProducer()
     producer._start_listener = Mock()
     failure = ValueError(stage)
     if stage == "first_listener":
@@ -457,7 +455,7 @@ def test_producer_rollback_at_each_acquisition_stage(stage, monkeypatch):
     else:
         factories[stage].side_effect = failure
     with pytest.raises(ValueError) as raised:
-        producer.setup_nccl(
+        producer.setup(
             replica_id="test",
             rollout_idx=0,
             redis_client=Mock(),

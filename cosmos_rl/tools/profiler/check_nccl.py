@@ -104,8 +104,10 @@ def check_nccl(verbose: bool = False) -> int:
         from cosmos_rl.utils.payload_transport.nccl import (  # noqa: F401
             NCCL_COMPLETION_PREFIX,
             NCCLDataPackerMixin,
-            NCCLRolloutMixin,
             NcclPayloadTransport,
+        )
+        from cosmos_rl.utils.payload_transport.nccl.producer import (  # noqa: F401
+            NCCLPayloadProducer,
         )
 
         transport = PayloadTransportRegistry.get_optional("nccl")
@@ -117,7 +119,7 @@ def check_nccl(verbose: bool = False) -> int:
         else:
             print("  FAIL: 'nccl' transport not registered")
             ok = False
-        print("  mixins:       NCCLRolloutMixin + NCCLDataPackerMixin import OK")
+        print("  components:   NCCLPayloadProducer + NCCLDataPackerMixin import OK")
     except Exception as e:
         print(f"  FAIL: in-tree nccl package import failed: {e}")
         ok = False

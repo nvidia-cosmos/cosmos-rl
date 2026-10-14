@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NCCLRolloutMixin — producer side of the in-tree NCCL payload transport.
+"""Producer-side NCCL payload transport.
 
-Mirrors :class:`UCXXRolloutMixin` but moves bytes with NCCL P2P instead of
+Mirrors the UCXX producer but moves bytes with NCCL P2P instead of
 UCXX/SHM.  Responsibilities:
 
-* :meth:`setup_nccl` — build the trajectory schema, the backpressured
+* :meth:`setup` — build the trajectory schema, the backpressured
   :class:`SendBufferRegistry`, the lazy :class:`CommCache`, the transfer
   stream pool, and start the request-serving + cleanup-subscriber threads.
-* :meth:`write_to_buffer` — pack a trajectory into a fixed-schema GPU
+* :meth:`publish` — pack a trajectory into a fixed-schema GPU
   buffer, record a compute-stream ready-event, register the buffer, and
   return dict metadata (plus the ``nccl:<id>`` completion string).
 * the serve loop — a **bounded sender-thread pool** drains a per-pair FIFO
@@ -65,7 +65,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional, Set
 
-import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
@@ -97,6 +96,7 @@ from cosmos_rl.utils.payload_transport.nccl.context import (
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     NCCL_COMPLETION_PREFIX,
     build_cleanup_channel,
+    build_layout_key,
     build_request_channel,
     build_rollout_prefix,
 )
@@ -111,15 +111,23 @@ from cosmos_rl.utils.payload_transport.nccl.streams import (
     record_event,
     wait_event,
 )
-from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
+from cosmos_rl.utils.payload_transport.pack import PackStats, pack_trajectory_into
+from cosmos_rl.utils.payload_transport.layout import (
+    TensorLayout,
+    serialize_layout_descriptor,
+)
+from cosmos_rl.utils.payload_transport.receive_memory import ReceiveBufferPool
+from cosmos_rl.utils.payload_transport.storage import (
+    BorrowedPayloadLease,
+    PayloadStorageRequirements,
+    WritablePayload,
+)
 from cosmos_rl.utils.trace import get_trace_time as _trace_time
 from cosmos_rl.utils.trajectory import episode_length as _episode_length
 from cosmos_rl.utils.trajectory import (
     EPISODE_LENGTH,
     REWARDS,
     build_trajectory_schema,
-    schema_layout,
-    serialize_schema,
 )
 
 
@@ -180,28 +188,8 @@ class _PendingSend:
 _FAILED_SEND_OWNERS = []
 
 
-class NCCLRolloutMixin:
-    """Mixin for rollout workers to serve trajectory payloads over NCCL.
-
-    Usage::
-
-        class MyWorker(NCCLRolloutMixin, BaseWorker):
-            def post_init_hook(self):
-                self.setup_nccl(
-                    replica_id=self.replica_name,
-                    rollout_idx=self.replica_idx,
-                    redis_client=self.redis_client,
-                    config=self.config,
-                    max_steps=100, obs_dim=4, action_dim=2,
-                )
-
-            def generate_rollout(self):
-                traj = collect_trajectory()
-                return self.write_to_buffer(traj) or traj
-
-            def cleanup(self):
-                self.cleanup_nccl()
-    """
+class NCCLPayloadProducer:
+    """Own NCCL publication, serving and teardown for one rollout producer."""
 
     _nccl_enabled: bool = False
     _nccl_registry: Optional[SendBufferRegistry] = None
@@ -217,7 +205,7 @@ class NCCLRolloutMixin:
     _nccl_entry_size: int = 0
     _nccl_device: Any = None
     _nccl_send_timeout_ms: int = 30000
-    # Set by ``setup_nccl``; ``None`` on a bare harness that never started the
+    # Set by ``setup``; ``None`` on a bare harness that never started the
     # listener threads, which the drain loop below must tolerate.
     _nccl_shutdown: Any = None
     # Serializes the NCCL launch sequence across the sender-thread pool so
@@ -230,7 +218,123 @@ class NCCLRolloutMixin:
     _nccl_pair_queues: Optional[Dict[Any, Deque[_PendingSend]]] = None
     _nccl_pair_draining: Optional[Set[Any]] = None
 
-    def setup_nccl(self, **kwargs) -> None:
+    @property
+    def default_layout(self) -> TensorLayout:
+        """Return the layout compiled during setup."""
+        if not self._nccl_enabled:
+            raise RuntimeError("NCCL payload producer is not attached")
+        return self._nccl_layout
+
+    def metrics(self) -> Dict[str, int]:
+        """Return detached producer packing/publication counters."""
+        return dict(getattr(self, "_nccl_payload_metrics", {}))
+
+    def _record_pack(self, stats: PackStats) -> None:
+        metrics = self.__dict__.setdefault("_nccl_payload_metrics", {})
+        for name, value in (
+            ("adapter_payloads", 1),
+            ("adapter_fields", stats.fields),
+            ("adapter_bytes", stats.bytes),
+            ("adapter_copy_batches", stats.batched_calls),
+            ("adapter_fallback_fields", stats.fallback_fields),
+        ):
+            metrics[name] = metrics.get(name, 0) + value
+
+    def acquire(self, *, layout: Optional[TensorLayout] = None) -> WritablePayload:
+        """Reserve transport-owned storage and expose its typed payload views."""
+        if not self._nccl_enabled:
+            raise RuntimeError("NCCL payload producer is not attached")
+        selected = layout or self._nccl_layout
+        lease = self._nccl_send_pool.acquire(
+            selected.layout_id,
+            HEADER_NBYTES + selected.payload_nbytes,
+            self._nccl_device,
+        )
+        wire = lease.tensor
+        payload_storage = wire[HEADER_NBYTES:]
+        selected.zero_padding(payload_storage)
+        return WritablePayload(
+            owner=self,
+            layout=selected,
+            storage=payload_storage,
+            tensors=selected.views(payload_storage),
+            opaque=(wire, lease),
+            on_abandon=lease.release,
+        )
+
+    def storage_requirements(
+        self, *, layout: Optional[TensorLayout] = None
+    ) -> PayloadStorageRequirements:
+        """Describe one contiguous allocation that NCCL can borrow in place."""
+        if not self._nccl_enabled:
+            raise RuntimeError("NCCL payload producer is not attached")
+        selected = layout or self._nccl_layout
+        return PayloadStorageRequirements(
+            total_nbytes=HEADER_NBYTES + selected.payload_nbytes,
+            payload_offset=HEADER_NBYTES,
+            alignment=selected.alignment,
+            device=torch.device(
+                self._nccl_device if self._nccl_device is not None else "cpu"
+            ),
+        )
+
+    def borrow(
+        self,
+        storage: torch.Tensor,
+        *,
+        layout: Optional[TensorLayout] = None,
+        owner: Any,
+        on_release,
+    ) -> WritablePayload:
+        """Wrap a compatible application allocation without copying payload bytes."""
+        selected = layout or self._nccl_layout
+        requirements = self.storage_requirements(layout=selected)
+        if (
+            not isinstance(storage, torch.Tensor)
+            or storage.dtype != requirements.dtype
+            or storage.ndim != 1
+            or not storage.is_contiguous()
+        ):
+            raise ValueError(
+                "borrowed NCCL storage must be a contiguous one-dimensional "
+                "uint8 tensor"
+            )
+        if storage.device != requirements.device:
+            raise ValueError(
+                f"borrowed NCCL storage must be on {requirements.device}, "
+                f"not {storage.device}"
+            )
+        if storage.numel() < requirements.total_nbytes:
+            raise ValueError(
+                "borrowed NCCL storage is smaller than storage_requirements()"
+            )
+        wire = storage.narrow(0, 0, requirements.total_nbytes)
+        payload_storage = wire.narrow(
+            0, requirements.payload_offset, selected.payload_nbytes
+        )
+        if payload_storage.numel() and (
+            payload_storage.data_ptr() % requirements.alignment
+        ):
+            raise ValueError("borrowed NCCL payload storage is not aligned")
+        selected.zero_padding(payload_storage)
+        lease = BorrowedPayloadLease(owner=owner, on_release=on_release)
+        return WritablePayload(
+            owner=self,
+            layout=selected,
+            storage=payload_storage,
+            tensors=selected.views(payload_storage),
+            opaque=(wire, lease),
+            on_abandon=lease.release,
+        )
+
+    def register_layout(self, layout: TensorLayout) -> None:
+        """Make a validated layout resolvable before a reference names it."""
+        with getattr(self, "_nccl_write_lock", threading.Lock()):
+            if not self._nccl_enabled:
+                raise RuntimeError("NCCL payload producer is not attached")
+            self._publish_layout(layout)
+
+    def setup(self, **kwargs) -> None:
         """Attach once, rolling back partial acquisitions on failure.
 
         Reattachment requires a successfully completed close. Native teardown
@@ -241,19 +345,17 @@ class NCCLRolloutMixin:
         previous = getattr(self, "_nccl_close_operation", None)
         if self._nccl_enabled or (previous is not None and not previous.completed):
             raise RuntimeError("NCCL transport is already attached or still closing")
-        self._nccl_close_operation = TransportClose(self._cleanup_nccl_owned)
+        self._nccl_close_operation = TransportClose(self._close_owned)
         try:
-            # This implementation detail is not an application override hook.
-            # Existing mixin consumers may already use this private name.
-            NCCLRolloutMixin._setup_nccl(self, **kwargs)
+            NCCLPayloadProducer._setup(self, **kwargs)
         except BaseException:
             try:
-                self.cleanup_nccl()
+                self.close()
             except Exception as cleanup_error:
                 logger.error("NCCL attachment rollback failed: %s", cleanup_error)
             raise
 
-    def _setup_nccl(
+    def _setup(
         self,
         *,
         replica_id: str,
@@ -263,6 +365,7 @@ class NCCLRolloutMixin:
         max_steps: int = 100,
         obs_dim: int = 4,
         action_dim: int = 2,
+        schema: Optional[list] = None,
         sender_rank: Optional[int] = None,
         device: Any = None,
         num_sender_threads: Optional[int] = None,
@@ -302,14 +405,27 @@ class NCCLRolloutMixin:
         self._nccl_sender_rank = (
             sender_rank if sender_rank is not None else _resolve_global_rank()
         )
+        self._nccl_sender_incarnation = uuid.uuid4().hex
 
-        self._nccl_schema = build_trajectory_schema(
-            {"max_steps": max_steps, "obs_dim": obs_dim, "action_dim": action_dim}
+        self._nccl_schema = (
+            list(schema)
+            if schema is not None
+            else build_trajectory_schema(
+                {"max_steps": max_steps, "obs_dim": obs_dim, "action_dim": action_dim}
+            )
         )
-        self._nccl_offsets, self._nccl_entry_size = schema_layout(self._nccl_schema)
+        self._nccl_layout = TensorLayout.compile(self._nccl_schema)
+        self._nccl_offsets = self._nccl_layout.offsets()
+        self._nccl_entry_size = self._nccl_layout.payload_nbytes
 
         self._nccl_prefix = _resolve_prefix(config)
         self._nccl_retained_entries = {}
+        self._nccl_payload_metrics = {}
+        self._nccl_send_leases = {}
+        self._nccl_send_pool = ReceiveBufferPool(
+            max_cached_per_layout=registry_capacity,
+            max_cached_buffers=registry_capacity,
+        )
         self._nccl_registry = SendBufferRegistry(
             capacity=registry_capacity,
             block_timeout=registry_block_timeout,
@@ -317,6 +433,9 @@ class NCCLRolloutMixin:
         )
         self._nccl_comm_cache = CommCache(max_live=max_live_comms)
         self._nccl_rendezvous = NcclRendezvous(redis_client, self._nccl_prefix)
+        self._nccl_published_layouts = set()
+        self._nccl_published_layout_keys = set()
+        self._publish_layout(self._nccl_layout)
         self._nccl_streams = get_transfer_stream_pool(
             size=stream_pool_size, device=device
         )
@@ -354,8 +473,8 @@ class NCCLRolloutMixin:
         # agree on it, so log it where an operator comparing a rollout and a
         # policy log can see at a glance whether they are running one build.
         logger.info(
-            "[NCCLRolloutMixin] Worker '%s' ready (rollout_idx=%d, sender_rank=%d, "
-            "entry_size=%.1f MB, sender_threads=%d, capacity=%d, payload_header=v%d)",
+            "[NCCLPayloadProducer] Worker '%s' ready (rollout_idx=%d, sender_rank=%d, "
+            "entry_size=%.1f MB, sender_threads=%d, capacity=%d, payload_header=%d)",
             replica_id,
             rollout_idx,
             self._nccl_sender_rank,
@@ -369,12 +488,24 @@ class NCCLRolloutMixin:
     # Producer: pack + register
     # ------------------------------------------------------------------
 
-    def write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def publish(
+        self,
+        trajectory: Dict[str, Any],
+        *,
+        layout: Optional[TensorLayout] = None,
+        copy_policy: str = "batched",
+    ) -> Optional[Dict[str, Any]]:
         """Serialize producer admission against final buffer release."""
         with getattr(self, "_nccl_write_lock", threading.Lock()):
-            return self._write_to_buffer(trajectory)
+            return self._publish(trajectory, layout=layout, copy_policy=copy_policy)
 
-    def _write_to_buffer(self, trajectory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _publish(
+        self,
+        trajectory: Dict[str, Any],
+        *,
+        layout: Optional[TensorLayout] = None,
+        copy_policy: str = "batched",
+    ) -> Optional[Dict[str, Any]]:
         """Pack ``trajectory`` into a GPU send buffer; return dict metadata.
 
         The returned dict is the consumer-facing reference; its
@@ -386,47 +517,67 @@ class NCCLRolloutMixin:
         if not self._nccl_enabled or self._nccl_registry is None:
             return None
         try:
+            layout = layout or self._nccl_layout
+            self._publish_layout(layout)
+            schema = layout.schema()
             t0 = _trace_time()
-            ep_len = _episode_length(trajectory, self._nccl_schema)
+            ep_len = _episode_length(trajectory, schema)
             # The transfer id is minted BEFORE packing: it is stamped into the
             # payload header so the receiver can prove the bytes it got belong
             # to the transfer it asked for.
             transfer_id = f"{self._nccl_rollout_idx}:{uuid.uuid4().hex}"
-            gpu_buf, ready_event = self._pack(trajectory, ep_len, transfer_id)
-            self._nccl_registry.register(
+            reference = self._build_reference(transfer_id, layout, trajectory, ep_len)
+            gpu_buf, ready_event, storage_lease = self._pack(
+                trajectory,
+                ep_len,
                 transfer_id,
-                gpu_buf,
-                ready_event=ready_event,
-                nbytes=HEADER_NBYTES + self._nccl_entry_size,
+                layout=layout,
+                copy_policy=copy_policy,
             )
+            self._nccl_send_leases[transfer_id] = storage_lease
+            try:
+                self._nccl_registry.register(
+                    transfer_id,
+                    gpu_buf,
+                    ready_event=ready_event,
+                    nbytes=HEADER_NBYTES + layout.payload_nbytes,
+                )
+            except BaseException:
+                self._nccl_send_leases.pop(transfer_id, None)
+                if ready_event is None:
+                    storage_lease.release()
+                else:
+                    try:
+                        complete = ready_event.query()
+                    except BaseException:
+                        complete = False
+                    if complete:
+                        storage_lease.release()
+                    else:
+                        # Registration never transferred ownership, but queued
+                        # packing may still hold this allocation. Do not reuse
+                        # it without proof that the producer stream completed.
+                        storage_lease.quarantine()
+                        _FAILED_SEND_OWNERS.append(
+                            (self, trajectory, gpu_buf, storage_lease, ready_event)
+                        )
+                raise
             # Producer-side trace, mirroring UCXX's op=ucxx_write, so the
             # rl-gym log_analyzer can attribute per-rollout payload bytes.
             logger.debug(
                 "[Trace] thread=%s op=nccl_write pack_ms=%.1f bytes=%d",
                 threading.current_thread().name,
                 _trace_time() - t0,
-                self._nccl_entry_size,
+                layout.payload_nbytes,
             )
-            rewards = trajectory.get(REWARDS)
-            return {
-                "_nccl": True,
-                "_transfer_id": transfer_id,
-                # Globally-unique sender identity so the receiver routes the
-                # request + keys the comm cache per rollout replica (not just
-                # per sender_rank, which is 0 for every single-GPU replica).
-                "_sender_replica": self._nccl_replica_id,
-                "_sender_rank": self._nccl_sender_rank,
-                "_rollout_idx": self._nccl_rollout_idx,
-                "_schema": serialize_schema(self._nccl_schema),
-                "completion": f"{NCCL_COMPLETION_PREFIX}{transfer_id}",
-                REWARDS: rewards.tolist() if hasattr(rewards, "tolist") else rewards,
-                EPISODE_LENGTH: ep_len,
-            }
+            return reference
         except Exception as e:
+            if copy_policy == "strict_batched":
+                raise
             # Name the rollout so a disk fallback is attributable; the packer
             # already names the offending schema field in its message.
             logger.error(
-                "[NCCLRolloutMixin] write_to_buffer failed for replica=%s "
+                "[NCCLPayloadProducer] publish failed for replica=%s "
                 "rollout_idx=%s; falling back to the plain trajectory: %s",
                 self._nccl_replica_id,
                 self._nccl_rollout_idx,
@@ -434,12 +585,121 @@ class NCCLRolloutMixin:
             )
             return None
 
-    def _pack(self, trajectory: Dict[str, Any], ep_len: int, transfer_id: str):
+    def publish_storage(
+        self,
+        payload: WritablePayload,
+        *,
+        ready_event: Any = None,
+    ) -> Dict[str, Any]:
+        """Publish an acquired payload without gathering its tensor fields."""
+        with getattr(self, "_nccl_write_lock", threading.Lock()):
+            if not self._nccl_enabled or self._nccl_registry is None:
+                raise RuntimeError("NCCL payload producer is not attached")
+            wire, storage_lease = payload._submit(self)
+            layout = payload.layout
+            transfer_id = f"{self._nccl_rollout_idx}:{uuid.uuid4().hex}"
+            try:
+                self._publish_layout(layout)
+                if ready_event is not None:
+                    # Join application production before reading scalar/list
+                    # metadata or writing the header. The publication event
+                    # recorded below therefore covers both caller writes and
+                    # transport framing.
+                    wait_event(None, ready_event)
+                ep_len = _episode_length(payload.tensors, layout.schema())
+                reference = self._build_reference(
+                    transfer_id, layout, payload.tensors, ep_len
+                )
+                header = build_header(
+                    transfer_id=transfer_id,
+                    payload_nbytes=layout.payload_nbytes,
+                    layout_id=layout.layout_id,
+                    sender_incarnation=self._nccl_sender_incarnation,
+                )
+                wire[:HEADER_NBYTES] = torch.frombuffer(
+                    bytearray(header), dtype=torch.uint8
+                ).to(self._nccl_device)
+                publication_ready = record_event()
+                self._nccl_send_leases[transfer_id] = storage_lease
+                self._nccl_registry.register(
+                    transfer_id,
+                    wire,
+                    ready_event=publication_ready,
+                    nbytes=wire.numel(),
+                )
+                metric = (
+                    "borrowed_payloads"
+                    if isinstance(storage_lease, BorrowedPayloadLease)
+                    else "direct_payloads"
+                )
+                metrics = self.__dict__.setdefault("_nccl_payload_metrics", {})
+                metrics[metric] = metrics.get(metric, 0) + 1
+            except BaseException:
+                self._nccl_send_leases.pop(transfer_id, None)
+                # The caller may have queued writes before publication, and
+                # header construction may also have issued CUDA work. A Python
+                # exception is not proof that either stopped using this slot.
+                # Keep it out of the reusable pool for process lifetime.
+                storage_lease.quarantine()
+                _FAILED_SEND_OWNERS.append(
+                    (self, payload, wire, storage_lease, ready_event)
+                )
+                raise
+            return reference
+
+    def _build_reference(
+        self,
+        transfer_id: str,
+        layout: TensorLayout,
+        values: Any,
+        ep_len: int,
+    ) -> Dict[str, Any]:
+        rewards = values.get(REWARDS)
+        return {
+            "_nccl": True,
+            "_transfer_id": transfer_id,
+            "_sender_replica": self._nccl_replica_id,
+            "_sender_rank": self._nccl_sender_rank,
+            "_rollout_idx": self._nccl_rollout_idx,
+            "_wire_version": HEADER_VERSION,
+            "_layout_id": layout.layout_id,
+            "_sender_incarnation": self._nccl_sender_incarnation,
+            "completion": f"{NCCL_COMPLETION_PREFIX}{transfer_id}",
+            REWARDS: rewards.tolist() if hasattr(rewards, "tolist") else rewards,
+            EPISODE_LENGTH: ep_len,
+        }
+
+    def _publish_layout(self, layout: TensorLayout) -> None:
+        """Register a static descriptor before any reference can name it."""
+        if layout.layout_id in self._nccl_published_layouts:
+            return
+        key = build_layout_key(
+            self._nccl_prefix,
+            self._nccl_replica_id,
+            self._nccl_sender_incarnation,
+            layout.layout_id,
+        )
+        self._nccl_redis.set(key, serialize_layout_descriptor(layout))
+        self._nccl_published_layouts.add(layout.layout_id)
+        published_keys = getattr(self, "_nccl_published_layout_keys", None)
+        if published_keys is None:
+            published_keys = self._nccl_published_layout_keys = set()
+        published_keys.add(key)
+
+    def _pack(
+        self,
+        trajectory: Dict[str, Any],
+        ep_len: int,
+        transfer_id: str,
+        *,
+        layout: Optional[TensorLayout] = None,
+        copy_policy: str = "batched",
+    ):
         """Coalesce the schema tensors into one contiguous GPU uint8 buffer.
 
         The buffer is ``HEADER_NBYTES + entry_size`` long: a self-describing
         header (transfer id digest + payload size, see :mod:`.header`) followed
-        by the schema-defined region the consumer slices.  The header costs 32
+        by the schema-defined region the consumer slices.  The header costs 64
         bytes on a payload measured in hundreds of MB and is what lets the
         receiver reject a buffer that belongs to a different transfer instead
         of decoding it as garbage.
@@ -448,27 +708,46 @@ class NCCLRolloutMixin:
         recorded on the compute stream once packing enqueues, so the
         transfer stream can wait on it before ``nccl_send``.
         """
+        layout = layout or self._nccl_layout
         device = self._nccl_device
-        entry_size = self._nccl_entry_size
-        gpu_packed = torch.zeros(
-            HEADER_NBYTES + entry_size, dtype=torch.uint8, device=device
+        entry_size = layout.payload_nbytes
+        storage_lease = self._nccl_send_pool.acquire(
+            layout.layout_id,
+            HEADER_NBYTES + entry_size,
+            device,
         )
-        header = build_header(transfer_id=transfer_id, payload_nbytes=entry_size)
-        gpu_packed[:HEADER_NBYTES] = torch.frombuffer(
-            bytearray(header), dtype=torch.uint8
-        ).to(device)
-        # A slice is a VIEW, so the packer writes straight into the payload
-        # region and its schema offsets stay header-relative on both ends.
-        pack_trajectory_into(
-            gpu_packed[HEADER_NBYTES:],
-            trajectory,
-            self._nccl_schema,
-            self._nccl_offsets,
-            ep_len,
-            device=device,
-        )
-        ready_event = record_event()  # on the current (compute) stream
-        return gpu_packed, ready_event
+        gpu_packed = storage_lease.tensor
+        try:
+            header = build_header(
+                transfer_id=transfer_id,
+                payload_nbytes=entry_size,
+                layout_id=layout.layout_id,
+                sender_incarnation=self._nccl_sender_incarnation,
+            )
+            gpu_packed[:HEADER_NBYTES] = torch.frombuffer(
+                bytearray(header), dtype=torch.uint8
+            ).to(device)
+            layout.zero_padding(gpu_packed[HEADER_NBYTES:])
+            # A slice is a VIEW, so the packer writes straight into the payload
+            # region and its schema offsets stay header-relative on both ends.
+            stats = pack_trajectory_into(
+                gpu_packed[HEADER_NBYTES:],
+                trajectory,
+                layout.schema(),
+                layout.offsets(),
+                ep_len,
+                device=device,
+                copy_policy=copy_policy,
+            )
+            self._record_pack(stats)
+            ready_event = record_event()  # on the current (compute) stream
+            return gpu_packed, ready_event, storage_lease
+        except BaseException:
+            # Some field copies may already be queued even though packing did
+            # not reach its completion event. Their raw pointers remain live.
+            storage_lease.quarantine()
+            _FAILED_SEND_OWNERS.append((self, trajectory, gpu_packed, storage_lease))
+            raise
 
     # ------------------------------------------------------------------
     # Serve loop (bounded sender pool)
@@ -538,7 +817,7 @@ class NCCLRolloutMixin:
             float(req_deadline) - _accept_margin(msg.get("req_timeout"))
         ):
             logger.debug(
-                "[NCCLRolloutMixin] dropping expired request %s (receiver "
+                "[NCCLPayloadProducer] dropping expired request %s (receiver "
                 "deadline passed; not sending a late unmatched ACCEPTED)",
                 transfer_id,
             )
@@ -585,7 +864,7 @@ class NCCLRolloutMixin:
         except Exception as e:
             registry.abandon_inflight(entry)  # release lease: never reached _send
             logger.warning(
-                "[NCCLRolloutMixin] request setup failed for %s: %s", transfer_id, e
+                "[NCCLPayloadProducer] request setup failed for %s: %s", transfer_id, e
             )
             return
         if renegotiate:
@@ -660,12 +939,12 @@ class NCCLRolloutMixin:
     def _ensure_pair_state(self) -> Any:
         """Return the per-pair queue lock, materialising it if setup was skipped.
 
-        ``setup_nccl`` builds this state; bare harnesses that assemble a
+        ``setup`` builds this state; bare harnesses that assemble a
         producer attribute-by-attribute do not, and the queue must not be the
         thing that breaks them.
         """
         if self._nccl_pair_lock is None:
-            with NCCLRolloutMixin._nccl_pair_state_init_lock:
+            with NCCLPayloadProducer._nccl_pair_state_init_lock:
                 if self._nccl_pair_lock is None:
                     self._nccl_pair_queues = {}
                     self._nccl_pair_draining = set()
@@ -751,7 +1030,7 @@ class NCCLRolloutMixin:
                     # receiver's lease on the same buffer).  Just end the pair's
                     # stream: we cannot tell whether the send launched.
                     logger.error(
-                        "[NCCLRolloutMixin] send handler for %s raised %s; "
+                        "[NCCLPayloadProducer] send handler for %s raised %s; "
                         "aborting pair %s",
                         pending.transfer_id,
                         e,
@@ -786,7 +1065,7 @@ class NCCLRolloutMixin:
         if pending.operation is not None:
             pending.operation.close()
         logger.warning(
-            "[NCCLRolloutMixin] dropping accepted send %s (%s); aborting pair %s "
+            "[NCCLPayloadProducer] dropping accepted send %s (%s); aborting pair %s "
             "so both halves rebuild rather than run one transfer out of step",
             pending.transfer_id,
             reason,
@@ -799,9 +1078,9 @@ class NCCLRolloutMixin:
     def _abandon_queued_sends(self) -> None:
         """Release every still-queued send (teardown).
 
-        ``cleanup_nccl`` shuts the pool down with ``cancel_futures=True``, so a
+        ``close`` shuts the pool down with ``cancel_futures=True``, so a
         drain task that never started leaves its pair's queue populated and its
-        leases held.  Comms are aborted separately by ``cleanup_nccl``.
+        leases held. Comms are aborted separately by ``close``.
         """
         with self._ensure_pair_state():
             queues = self._nccl_pair_queues or {}
@@ -819,7 +1098,7 @@ class NCCLRolloutMixin:
                 pending.operation.close()
         if orphans:
             logger.debug(
-                "[NCCLRolloutMixin] released %d queued send(s) at teardown",
+                "[NCCLPayloadProducer] released %d queued send(s) at teardown",
                 len(orphans),
             )
 
@@ -852,7 +1131,7 @@ class NCCLRolloutMixin:
                 self._nccl_sender_rank, receiver_replica, receiver_rank
             )
             logger.warning(
-                "[NCCLRolloutMixin] send failed for %s: %s; quarantining %s",
+                "[NCCLPayloadProducer] send failed for %s: %s; quarantining %s",
                 transfer_id,
                 e,
                 pair,
@@ -1064,7 +1343,7 @@ class NCCLRolloutMixin:
                 while not query():
                     if time.monotonic() >= deadline:
                         logger.error(
-                            "[NCCLRolloutMixin] send event for %s still pending "
+                            "[NCCLPayloadProducer] send event for %s still pending "
                             "after %.1fs; retaining buffer",
                             entry.transfer_id,
                             self._nccl_send_timeout_ms / 1000.0,
@@ -1076,7 +1355,23 @@ class NCCLRolloutMixin:
                     "Cannot confirm payload %s is idle; retaining it", entry.transfer_id
                 )
                 return
+        storage_lease = getattr(self, "_nccl_send_leases", {}).pop(
+            entry.transfer_id, None
+        )
         entry.buffer = None
+        if storage_lease is not None:
+            try:
+                storage_lease.release()
+            except Exception:
+                if not isinstance(storage_lease, BorrowedPayloadLease):
+                    raise
+                # The owner is already detached before the application callback
+                # runs. A callback bug must not strand a safely retired entry or
+                # kill the cleanup listener.
+                logger.exception(
+                    "Borrowed payload release callback failed for %s",
+                    entry.transfer_id,
+                )
         retained.pop(entry.transfer_id, None)
 
     # ------------------------------------------------------------------
@@ -1121,7 +1416,7 @@ class NCCLRolloutMixin:
                 )
             except Exception as e:  # pragma: no cover - transient redis error
                 logger.debug(
-                    "[NCCLRolloutMixin] get_message error on %s: %s", channel, e
+                    "[NCCLPayloadProducer] get_message error on %s: %s", channel, e
                 )
                 continue
             if not message:
@@ -1130,7 +1425,9 @@ class NCCLRolloutMixin:
             try:
                 handler(data)
             except Exception as e:  # pragma: no cover - handler isolation
-                logger.warning("[NCCLRolloutMixin] handler error on %s: %s", channel, e)
+                logger.warning(
+                    "[NCCLPayloadProducer] handler error on %s: %s", channel, e
+                )
         try:
             pubsub.close()
         except Exception:
@@ -1140,7 +1437,7 @@ class NCCLRolloutMixin:
     # Teardown
     # ------------------------------------------------------------------
 
-    def cleanup_nccl(self, timeout: float = 5.0) -> None:
+    def close(self, timeout: float = 5.0) -> None:
         """Close with a caller deadline; never free buffers under live senders."""
         from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
 
@@ -1151,11 +1448,11 @@ class NCCLRolloutMixin:
         operation = getattr(self, "_nccl_close_operation", None)
         if operation is None:
             operation = get_close_operation(
-                self, "_nccl_close_operation", self._cleanup_nccl_owned
+                self, "_nccl_close_operation", self._close_owned
             )
         operation.close(timeout)
 
-    def _cleanup_nccl_owned(self) -> None:
+    def _close_owned(self) -> None:
         """Owned teardown sequence; retained intact if the caller times out."""
         if self._nccl_device is not None:
             bind_thread_device(self._nccl_device)
@@ -1191,26 +1488,23 @@ class NCCLRolloutMixin:
             self._on_buffer_free(entry)
         if getattr(self, "_nccl_retained_entries", {}):
             raise RuntimeError("NCCL buffers remain live after transport shutdown")
+        send_pool = getattr(self, "_nccl_send_pool", None)
+        if send_pool is not None:
+            send_pool.close()
+        # Layout keys include a unique producer incarnation. They cannot be
+        # reused by a later process, so retire them after every local payload
+        # and sender has drained instead of leaking one key per layout/run.
+        published_keys = getattr(self, "_nccl_published_layout_keys", set())
+        if published_keys:
+            try:
+                self._nccl_redis.delete(*sorted(published_keys))
+            except Exception as error:
+                logger.warning(
+                    "Failed to retire NCCL payload layout descriptors: %s", error
+                )
+            published_keys.clear()
         self._nccl_enabled = False
         logger.info(
-            "[NCCLRolloutMixin] Worker '%s' cleaned up",
+            "[NCCLPayloadProducer] Worker '%s' cleaned up",
             getattr(self, "_nccl_replica_id", "?"),
         )
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-
-def _torch_dtype(np_dtype) -> torch.dtype:
-    mapping = {
-        np.dtype("float32"): torch.float32,
-        np.dtype("float64"): torch.float64,
-        np.dtype("float16"): torch.float16,
-        np.dtype("int64"): torch.int64,
-        np.dtype("int32"): torch.int32,
-        np.dtype("bool"): torch.bool,
-        np.dtype("uint8"): torch.uint8,
-    }
-    return mapping[np.dtype(np_dtype)]

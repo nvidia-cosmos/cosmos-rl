@@ -12,7 +12,7 @@ from cosmos_rl.utils.payload_transport.nccl import strategy as nccl
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import RendezvousResult
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 from cosmos_rl.utils.payload_transport.receive_memory import ReceiveMemoryError
-from cosmos_rl.utils.trajectory import serialize_schema
+from cosmos_rl.utils.payload_transport.layout import WIRE_VERSION
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
 
@@ -31,28 +31,27 @@ def wire_ref(ref):
     return {
         "_nccl": True,
         "_transfer_id": ref["transfer_id"],
+        "_rollout_idx": int(ref["transfer_id"].split(":", 1)[0]),
         "_sender_replica": ref["sender_replica"],
         "_sender_rank": ref["sender_rank"],
-        "_schema": serialize_schema(ref["schema"]),
+        "_sender_incarnation": ref["sender_incarnation"],
+        "_wire_version": WIRE_VERSION,
+        "_layout_id": ref["layout_id"],
     }
 
 
 @pytest.mark.parametrize("prepared", [False, True])
-@pytest.mark.parametrize("outcome", ["missing", "no_schema"])
-def test_known_rejection_skips_without_unleased_refetch(monkeypatch, outcome, prepared):
+def test_known_rejection_skips_without_unleased_refetch(monkeypatch, prepared):
     receiver, _, _ = make_receiver(monkeypatch)
-    ref = wire_ref(refs_for([3])[0][1])
-    if outcome == "missing":
-        receiver._rendezvous = SimpleNamespace(
-            initiate=lambda **kwargs: RendezvousResult(
-                status=nccl.TransferStatus.MISSING
-            )
-        )
-        receiver._rendezvous_one = MethodType(
-            nccl.NCCLTransportStrategy._rendezvous_one, receiver
-        )
-    else:
-        ref.pop("_schema")
+    source = refs_for([3])[0][1]
+    receiver._layout_cache.register(source["layout"])
+    ref = wire_ref(source)
+    receiver._rendezvous = SimpleNamespace(
+        initiate=lambda **kwargs: RendezvousResult(status=nccl.TransferStatus.MISSING)
+    )
+    receiver._rendezvous_one = MethodType(
+        nccl.NCCLTransportStrategy._rendezvous_one, receiver
+    )
     batch = receiver.fetch_batch([(4, ref)])
     packer = Packer()
     packer._transport_strategy = receiver
@@ -70,6 +69,13 @@ def test_known_rejection_skips_without_unleased_refetch(monkeypatch, outcome, pr
     assert receiver._receive_budget.used == 0
 
 
+def test_missing_layout_fails_before_rendezvous(monkeypatch):
+    receiver, _, _ = make_receiver(monkeypatch)
+    ref = wire_ref(refs_for([3])[0][1])
+    with pytest.raises(TransportUnusableError, match="layout registry"):
+        receiver.fetch_batch([(4, ref)])
+
+
 def test_header_mismatch_remains_terminal_after_native_completion(monkeypatch):
     receiver, _, _ = make_receiver(monkeypatch)
     original = receiver._rendezvous_one
@@ -81,7 +87,9 @@ def test_header_mismatch_remains_terminal_after_native_completion(monkeypatch):
 
     receiver._rendezvous_one = wrong_header
     receiver._resync_pair = Mock()
-    ref = wire_ref(refs_for([3])[0][1])
+    source = refs_for([3])[0][1]
+    receiver._layout_cache.register(source["layout"])
+    ref = wire_ref(source)
     with pytest.raises(
         TransportUnusableError, match="Accepted payload identity mismatch"
     ):
@@ -93,7 +101,9 @@ def test_header_mismatch_remains_terminal_after_native_completion(monkeypatch):
 def test_unknown_absence_still_cannot_refetch_outside_lease(monkeypatch):
     receiver, _, _ = make_receiver(monkeypatch)
     receiver._rendezvous_one = lambda *args: None  # No proof of a safe rejection.
-    ref = wire_ref(refs_for([3])[0][1])
+    source = refs_for([3])[0][1]
+    receiver._layout_cache.register(source["layout"])
+    ref = wire_ref(source)
     batch = receiver.fetch_batch([(4, ref)])
     packer = Packer()
     packer._transport_strategy = receiver
@@ -118,10 +128,13 @@ def test_mixed_received_and_rejected_batch_keeps_lease_and_clears_outcomes(
     missing = MethodType(nccl.NCCLTransportStrategy._rendezvous_one, receiver)
     receiver._rendezvous_one = lambda ref, pynccl: (
         missing(ref, pynccl)
-        if all_rejected or ref["transfer_id"] == "episode-0"
+        if all_rejected or ref["transfer_id"] == f"0:{0:032x}"
         else receive(ref, pynccl)
     )
-    tasks = [(i, wire_ref(ref)) for i, ref in refs_for([3, 5])]
+    sources = refs_for([3, 5])
+    for _, ref in sources:
+        receiver._layout_cache.register(ref["layout"])
+    tasks = [(i, wire_ref(ref)) for i, ref in sources]
     packer = Packer()
     packer._transport_strategy = receiver
     packer._filter_prefetch_tasks = lambda tasks: tasks
@@ -145,8 +158,9 @@ def test_mixed_received_and_rejected_batch_keeps_lease_and_clears_outcomes(
         else:
             assert set(values[1]) == {"odd", "aligned"}
         batch = packer._prefetch_cache
+        task_keys = [receiver.cache_key(ref) for _, ref in tasks]
         assert batch.rejected_keys == (
-            {"episode-0", "episode-1"} if all_rejected else {"episode-0"}
+            set(task_keys) if all_rejected else {task_keys[0]}
         )
         assert (batch.nbytes == 0) == all_rejected
         assert receiver._receive_budget.used == batch.nbytes

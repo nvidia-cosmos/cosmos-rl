@@ -20,7 +20,7 @@ import redis
 import torch
 import torch.distributed as dist
 
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 from cosmos_rl.utils.payload_transport.receive_memory import ReceiveMemoryError
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 from test_nccl_e2e import _ConsumerPacker, _make_trajectory
@@ -101,8 +101,8 @@ def main():
             },
         )
         if rank == 0:
-            producer = NCCLRolloutMixin()
-            producer.setup_nccl(
+            producer = NCCLPayloadProducer()
+            producer.setup(
                 replica_id=f"producer-{run_id}",
                 rollout_idx=0,
                 redis_client=client,
@@ -132,27 +132,20 @@ def main():
             packer._sync_fetch = unexpected_refetch
 
         for prepared in (False, True):
-            for outcome in ("missing", "no_schema"):
+            for outcome in ("missing",):
                 for mixed in (False, True):
                     for healthy in (False, True):
                         transfer = [None]
                         if rank == 0:
-                            bad = producer.write_to_buffer(_make_trajectory(device))
+                            bad = producer.publish(_make_trajectory(device))
                             assert bad is not None
                             if not healthy:
                                 entry = producer._nccl_registry.get(bad["_transfer_id"])
                                 assert entry is not None
-                                if outcome == "missing":
-                                    assert producer._nccl_registry.free(
-                                        bad["_transfer_id"]
-                                    )
-                                else:
-                                    bad.pop("_schema")
+                                assert producer._nccl_registry.free(bad["_transfer_id"])
                             refs = [bad]
                             if mixed:
-                                good = producer.write_to_buffer(
-                                    _make_trajectory(device)
-                                )
+                                good = producer.publish(_make_trajectory(device))
                                 assert good is not None
                                 refs.append(good)
                             torch.cuda.synchronize(device)
@@ -163,7 +156,7 @@ def main():
                             values = resolve(packer, refs, prepared)
                             lease = packer._prefetch_cache
                             expected_rejected = (
-                                set() if healthy else {refs[0]["_transfer_id"]}
+                                set() if healthy else {packer._cache_key(refs[0])}
                             )
                             assert lease.rejected_keys == expected_rejected
                             for i, value in enumerate(values):
@@ -209,7 +202,7 @@ def main():
         # the test can inspect its retained closed-budget state before exit.
         transfer = [None]
         if rank == 0:
-            meta = producer.write_to_buffer(_make_trajectory(device))
+            meta = producer.publish(_make_trajectory(device))
             assert meta is not None
             entry = producer._nccl_registry.get(meta["_transfer_id"])
             assert entry is not None
@@ -231,7 +224,7 @@ def main():
         if packer is not None:
             packer.shutdown_nccl_data_packer()
         if producer is not None:
-            producer.cleanup_nccl()
+            producer.close()
         if client is not None:
             client.close()
         if server is not None:

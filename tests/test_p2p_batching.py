@@ -31,6 +31,7 @@ def _communicator(*, max_retry: int = 3) -> dist_utils.HighAvailabilitylNccl:
     communicator.is_comm_ready = threading.Event()
     communicator.is_comm_ready.set()
     communicator.build_mesh_lock = threading.RLock()
+    communicator._operation_depth = 0
     communicator.api_client = SimpleNamespace(post_nccl_comm_error=lambda *_: None)
     communicator.wait_comm_ready = lambda timeout=0: None
     return communicator

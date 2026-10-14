@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from cosmos_rl.utils.payload_transport.pack import NP_TO_TORCH, pack_trajectory_into
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
 from cosmos_rl.utils.payload_transport.nccl.strategy import _unpack
 from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
     BufferConfig,
@@ -27,18 +28,78 @@ from cosmos_rl.utils.trajectory import (
     schema_layout,
     truncate_trajectory,
 )
-from test_ucxx_rollout_mixin import _make_producer
+from test_ucxx_payload_producer import _make_producer
 
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 
 
 def packed(data, schema, length=0, device="cpu"):
-    offsets, size = schema_layout(schema)
+    layout = TensorLayout.compile(schema)
+    offsets, size = layout.offsets(), layout.payload_nbytes
     # Verify optional fields are zeroed even with reused/nonzero storage.
     buffer = torch.full((size,), 255, dtype=torch.uint8, device=device)
     pack_trajectory_into(buffer, data, schema, offsets, length, device)
     return buffer
+
+
+def test_adapter_batches_field_copies_and_reports_work():
+    schema = [
+        TensorSpec((2,), np.float32, "first"),
+        TensorSpec((3,), np.int64, "second"),
+        TensorSpec((), np.bool_, "third"),
+    ]
+    layout = TensorLayout.compile(schema)
+    buffer = torch.empty(layout.payload_nbytes, dtype=torch.uint8)
+    values = {
+        "first": torch.tensor([1.0, 2.0]),
+        "second": torch.tensor([3, 4, 5]),
+        "third": torch.tensor(True),
+    }
+
+    with patch("cosmos_rl.utils.payload_transport.pack._MAX_COPY_BATCH_FIELDS", 2):
+        stats = pack_trajectory_into(
+            buffer,
+            values,
+            schema,
+            layout.offsets(),
+            0,
+            device="cpu",
+        )
+
+    assert stats.fields == 3
+    assert stats.bytes == 2 * 4 + 3 * 8 + 1
+    assert stats.batched_calls == 2
+    assert stats.fallback_fields == 0
+
+
+def test_adapter_fallback_is_visible_and_strict_policy_rejects_it():
+    schema = [TensorSpec((2,), np.float32, "value")]
+    layout = TensorLayout.compile(schema)
+    buffer = torch.empty(layout.payload_nbytes, dtype=torch.uint8)
+    values = {"value": torch.tensor([1.0, 2.0])}
+
+    with patch.object(torch, "_foreach_copy_", side_effect=RuntimeError("unsupported")):
+        stats = pack_trajectory_into(
+            buffer,
+            values,
+            schema,
+            layout.offsets(),
+            0,
+            device="cpu",
+        )
+        assert stats.batched_calls == 0
+        assert stats.fallback_fields == 1
+        with pytest.raises(RuntimeError, match="batched tensor copy is unavailable"):
+            pack_trajectory_into(
+                buffer,
+                values,
+                schema,
+                layout.offsets(),
+                0,
+                device="cpu",
+                copy_policy="strict_batched",
+            )
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -47,7 +108,11 @@ def packed(data, schema, length=0, device="cpu"):
 def test_all_wire_dtypes_and_shapes(dtype, shape, device):
     schema = [TensorSpec(shape, dtype, "value")]
     value = torch.ones(shape, dtype=NP_TO_TORCH[dtype], device=device)
-    restored = _unpack(packed({"value": value}, schema, device=device), schema, device)
+    restored = _unpack(
+        packed({"value": value}, schema, device=device),
+        TensorLayout.compile(schema),
+        device,
+    )
     torch.testing.assert_close(restored["value"], value)
 
 
@@ -71,7 +136,11 @@ def test_layout_and_dtype_conversion(kind, device):
         else torch.tensor(value.copy())
     )
     schema = [TensorSpec(tuple(value.shape), np.float32, "value")]
-    restored = _unpack(packed({"value": value}, schema, device=device), schema, device)
+    restored = _unpack(
+        packed({"value": value}, schema, device=device),
+        TensorLayout.compile(schema),
+        device,
+    )
     torch.testing.assert_close(restored["value"].cpu(), expected)
 
 
@@ -141,10 +210,20 @@ def test_producer_bytes_match_shared_packer(ring, device):
         "observations": torch.ones(2, 3, dtype=torch.bfloat16, device=device),
         "episode_length": 2,
     }
-    metadata = producer.write_to_buffer(data)
+    metadata = producer.publish(data)
     assert metadata is not None
     raw = ring.read_raw(metadata["_slot"])
-    expected = packed(data, ring.schema, 2).cpu().numpy()
+    expected = torch.empty(ring.layout.payload_nbytes, dtype=torch.uint8)
+    ring.layout.zero_padding(expected)
+    pack_trajectory_into(
+        expected,
+        data,
+        ring.layout.schema(),
+        ring.layout.offsets(),
+        2,
+        device="cpu",
+    )
+    expected = expected.numpy()
     np.testing.assert_array_equal(raw, expected)
 
 
@@ -177,9 +256,9 @@ def test_partial_copy_failure_releases_slot_and_allows_retry(ring):
 def test_bad_then_valid_producer_write(ring):
     producer = _make_producer(buffer=ring)
     ring.ports = [7000]
-    assert producer.write_to_buffer({"observations": torch.ones(2, 1)}) is None
+    assert producer.publish({"observations": torch.ones(2, 1)}) is None
     assert ring.get_slot_state(0) == SlotState.FREE
-    assert producer.write_to_buffer({"observations": torch.ones(2, 3)}) is not None
+    assert producer.publish({"observations": torch.ones(2, 3)}) is not None
 
 
 @pytest.mark.parametrize(
@@ -188,7 +267,7 @@ def test_bad_then_valid_producer_write(ring):
 def test_cpu_producer_accepts_list_inputs_before_publication(ring, rewards):
     producer = _make_producer(buffer=ring)
     ring.ports = [7000]
-    metadata = producer.write_to_buffer(
+    metadata = producer.publish(
         {"observations": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], "rewards": rewards}
     )
     assert metadata is not None and metadata["rewards"] == [1.0, 2.0]
@@ -202,10 +281,10 @@ def test_custom_scalars_keep_nccl_reference(device):
     producer = TestProducerKeepsNcclPath()._producer()
     producer._nccl_device = torch.device(device)
     producer._nccl_schema[-1] = TensorSpec((), np.int64, "sampled_mode")
-    producer._nccl_offsets, producer._nccl_entry_size = schema_layout(
-        producer._nccl_schema
-    )
-    metadata = producer.write_to_buffer(
+    producer._nccl_layout = TensorLayout.compile(producer._nccl_schema)
+    producer._nccl_offsets = producer._nccl_layout.offsets()
+    producer._nccl_entry_size = producer._nccl_layout.payload_nbytes
+    metadata = producer.publish(
         {
             "observations": torch.zeros(2, 2, device=device),
             "sampled_mode": torch.tensor(3, device=device),
@@ -217,11 +296,17 @@ def test_custom_scalars_keep_nccl_reference(device):
 
 def test_misaligned_fields_scalar_and_empty_episode():
     schema = [TensorSpec((1,), np.bool_, "flag"), TensorSpec((), np.float64, "scalar")]
-    restored = _unpack(packed({"flag": [True], "scalar": 2.5}, schema), schema, "cpu")
+    restored = _unpack(
+        packed({"flag": [True], "scalar": 2.5}, schema),
+        TensorLayout.compile(schema),
+        "cpu",
+    )
     assert restored["scalar"].shape == () and restored["scalar"].item() == 2.5
     schema = build_trajectory_schema(dict(max_steps=4, obs_dim=3, action_dim=1))
     restored = _unpack(
-        packed({"observations": torch.empty(0, 3)}, schema, 0), schema, "cpu"
+        packed({"observations": torch.empty(0, 3)}, schema, 0),
+        TensorLayout.compile(schema),
+        "cpu",
     )
     assert restored["observations"].shape == (0, 3)
 
@@ -244,9 +329,9 @@ def test_raw_copy_failure_releases_slot(ring):
     read_header, write_header = ring._read_header, ring._write_header
     read_meta, write_meta = ring._read_entry_meta, ring._write_entry_meta
 
-    def on_real_shm(fn, *args):
+    def on_real_shm(fn, *args, **kwargs):
         with patch.object(ring, "_shm", shm):
-            return fn(*args)
+            return fn(*args, **kwargs)
 
     with (
         patch.object(ring, "_shm", SimpleNamespace(buf=BrokenBuffer())),
@@ -262,7 +347,7 @@ def test_raw_copy_failure_releases_slot(ring):
         patch.object(
             ring,
             "_write_entry_meta",
-            side_effect=lambda *a: on_real_shm(write_meta, *a),
+            side_effect=lambda *a, **k: on_real_shm(write_meta, *a, **k),
         ),
     ):
         with pytest.raises(RuntimeError, match="injected raw"):

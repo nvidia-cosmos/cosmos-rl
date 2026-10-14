@@ -60,23 +60,43 @@ def _make_trajectory(device, ep_len=_EP_LEN):
     }
 
 
-def _producer(meta_q, done_q, err_q):
+def _producer(meta_q, done_q, err_q, direct: bool):
     """Rank 0: serve one trajectory out of a real UCXX endpoint."""
     try:
-        from cosmos_rl.utils.payload_transport.ucxx import UCXXRolloutMixin
+        from cosmos_rl.utils.payload_transport.ucxx.producer import (
+            UCXXPayloadProducer,
+        )
+        from cosmos_rl.utils.payload_transport import PayloadContext
 
         torch.cuda.set_device(0)
         device = torch.device("cuda:0")
 
-        rollout = UCXXRolloutMixin()
-        rollout.setup_ucxx(
+        rollout = UCXXPayloadProducer()
+        rollout.setup(
             replica_id="rollout-0",
             max_steps=_EP_LEN,
             obs_dim=_OBS_DIM,
             action_dim=_ACTION_DIM,
             port=0,
         )
-        meta = rollout.write_to_buffer(_make_trajectory(device))
+        if direct:
+            context = PayloadContext("ucxx", rollout, rollout.default_layout)
+            payload = context.acquire()
+            trajectory = _make_trajectory("cpu")
+            for name, target in payload.tensors.items():
+                source = trajectory.get(name)
+                if source is None:
+                    target.zero_()
+                    continue
+                if isinstance(source, torch.Tensor):
+                    target.copy_(source)
+                else:
+                    target.fill_(source)
+            payload.mark_all_written()
+            meta = context.publish(payload).to_dict()
+        else:
+            context = None
+            meta = rollout.publish(_make_trajectory(device))
         assert meta is not None, "producer failed to write the trajectory"
         assert meta.get("_ucxx"), f"metadata is not a UCXX reference: {meta!r}"
         port = meta.get("_ucxx_port")
@@ -87,7 +107,10 @@ def _producer(meta_q, done_q, err_q):
         assert isinstance(ports, list) and len(ports) == 4
         assert len(set(ports)) == len(ports)
         assert port in ports and all(p > 1024 for p in ports)
-        assert meta["_buffer_handle"]["ucxx_ports"] == ports
+        assert "_buffer_handle" not in meta
+        assert meta["_layout_id"] == rollout.default_layout.layout_id
+        assert isinstance(meta["_slot_generation"], int)
+        assert meta["_sender_incarnation"]
         meta_q.put(meta)
 
         # Serve until the consumer confirms, bounded so a dead peer cannot hang
@@ -96,7 +119,10 @@ def _producer(meta_q, done_q, err_q):
             done_q.get(timeout=120)
         except Exception:
             pass
-        rollout.cleanup_ucxx()
+        if context is not None:
+            context.close()
+        else:
+            rollout.close()
     except Exception as e:  # pragma: no cover - surfaced to the parent
         import traceback
 
@@ -181,13 +207,13 @@ def _consumer(meta_q, done_q, err_q, composed: bool):
 )
 @unittest.skipUnless(UCXX_AVAILABLE, "requires the 'ucxx' extra")
 class TestUcxxE2E(unittest.TestCase):
-    def _run_roundtrip(self, composed: bool):
+    def _run_roundtrip(self, composed: bool, direct: bool = False):
         import torch.multiprocessing as mp
 
         ctx = mp.get_context("spawn")
         meta_q, done_q, err_q = ctx.Queue(), ctx.Queue(), ctx.Queue()
         procs = [
-            ctx.Process(target=_producer, args=(meta_q, done_q, err_q)),
+            ctx.Process(target=_producer, args=(meta_q, done_q, err_q, direct)),
             ctx.Process(target=_consumer, args=(meta_q, done_q, err_q, composed)),
         ]
         for p in procs:
@@ -211,6 +237,10 @@ class TestUcxxE2E(unittest.TestCase):
     def test_two_process_roundtrip_composed(self):
         """Consumer built by COMPOSING the transport -- no UCXX ancestry."""
         self._run_roundtrip(composed=True)
+
+    def test_two_process_direct_storage_roundtrip(self):
+        """Public owned-storage publication commits the shared-memory slot."""
+        self._run_roundtrip(composed=True, direct=True)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import torch
 from cosmos_rl.utils.payload_transport.ucxx import operation as module
 from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer
 from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
 from cosmos_rl.utils.trajectory import TensorSpec
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
@@ -97,7 +98,7 @@ def install_endpoint(monkeypatch, endpoint):
 
 
 def schema():
-    return [TensorSpec((4,), np.uint8, "x")]
+    return TensorLayout.compile([TensorSpec((4,), np.uint8, "x")])
 
 
 def test_healthy_completion_reuses_endpoint_and_buffer(client, monkeypatch, terminal):
@@ -229,7 +230,7 @@ def test_failed_batch_retains_other_concurrent_read_tasks(terminal):
         release, entered = asyncio.Event(), asyncio.Event()
         cancelled = []
 
-        async def read(host, port, slot, schema, **kwargs):
+        async def read(host, port, slot, layout, **kwargs):
             if slot == 1:
                 entered.set()
                 try:
@@ -245,8 +246,21 @@ def test_failed_batch_retains_other_concurrent_read_tasks(terminal):
         strategy._device = "cpu"
         strategy._read_timeout = 1
         strategy._client = SimpleNamespace(read=read)
+        layout = schema()
+        strategy._layout_cache.register(layout)
         tasks = [
-            (slot, {"_worker_ip": "host", "_ucxx_port": 1, "_slot": slot})
+            (
+                slot,
+                {
+                    "_wire_version": WIRE_VERSION,
+                    "_worker_ip": "host",
+                    "_ucxx_port": 1,
+                    "_slot": slot,
+                    "_slot_generation": 1,
+                    "_sender_incarnation": "sender",
+                    "_layout_id": layout.layout_id,
+                },
+            )
             for slot in (1, 2)
         ]
         with pytest.raises(TransportUnusableError):
@@ -309,19 +323,11 @@ def test_invalid_budget_rejected_before_allocation(client, timeout):
     client._acquire_pinned.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "specs",
-    [
-        [TensorSpec((-1,), np.uint8, "x")],
-        [TensorSpec((4,), object, "x")],
-        [TensorSpec((4,), np.uint8, "_pinned_buf")],
-        schema() + schema(),
-    ],
-)
-def test_invalid_schema_rejected_before_allocation(client, specs):
+@pytest.mark.parametrize("invalid_layout", [None, [], {}, object()])
+def test_invalid_layout_rejected_before_allocation(client, invalid_layout):
     client._acquire_pinned = Mock(side_effect=AssertionError("must not allocate"))
-    with pytest.raises(ValueError, match="schema"):
-        asyncio.run(client.read("host", 1, 2, specs))
+    with pytest.raises(TypeError, match="validated tensor layout"):
+        asyncio.run(client.read("host", 1, 2, invalid_layout))
     client._acquire_pinned.assert_not_called()
 
 
@@ -346,12 +352,34 @@ def device_copy(monkeypatch):
     event = Mock()
     event.query.return_value = True
     monkeypatch.setattr(torch.cuda, "Event", lambda: event)
-    pinned = torch.arange(4, dtype=torch.uint8)
-    payload = {"x": pinned.numpy(), "_pinned_buf": pinned}
+    layout = schema()
+    pinned = torch.zeros(layout.payload_nbytes, dtype=torch.uint8)
+    pinned[:4] = torch.arange(4, dtype=torch.uint8)
+    payload = {
+        "x": pinned.numpy(),
+        "_pinned_buf": pinned,
+        "_layout": layout,
+    }
+    lease = SimpleNamespace(
+        tensor=torch.empty(layout.payload_nbytes, dtype=torch.uint8),
+        release=Mock(),
+    )
+    lease.bind_views = lambda selected, **kwargs: selected.views(lease.tensor)
+    consumer._receive_pool = SimpleNamespace(acquire=Mock(return_value=lease))
     return consumer, payload, event
 
 
-def test_device_completion_precedes_buffer_recycle(device_copy, terminal):
+def test_device_completion_precedes_buffer_recycle(device_copy, terminal, monkeypatch):
+    # This probe checks ownership ordering, not elapsed time. Keep the real
+    # deadline state machine, but exclude host scheduling and timer races.
+    # Timeout/failure probes below retain their real clock and watchdog.
+    deadline_type = module.TransportDeadline
+    monkeypatch.setattr(threading.Timer, "start", lambda self: None)
+    monkeypatch.setattr(
+        module,
+        "TransportDeadline",
+        lambda *args, **kwargs: deadline_type(*args, **kwargs, clock=lambda: 0.0),
+    )
     consumer, payload, event = device_copy
     consumer._client.return_pinned.side_effect = lambda buf: event.query.assert_called()
     data = consumer._copy_to_device(payload)
@@ -369,7 +397,7 @@ def test_device_failure_never_falls_back_or_recycles(
     consumer, payload, event = device_copy
     if failure == "copy":
         monkeypatch.setattr(
-            torch.Tensor, "to", Mock(side_effect=RuntimeError("issued"))
+            torch.Tensor, "copy_", Mock(side_effect=RuntimeError("issued"))
         )
     elif failure == "pending":
         event.query.return_value = False
@@ -391,6 +419,26 @@ def test_malformed_array_rejected_before_any_device_work(device_copy, terminal):
     with pytest.raises(ValueError, match="Unsupported"):
         consumer._copy_to_device(payload)
     event.record.assert_not_called()
+    consumer._client.return_pinned.assert_called_once_with(payload["_pinned_buf"])
+    assert not consumer._failure and terminal == ([], [])
+
+
+def test_post_copy_decode_rejection_releases_completed_storage(
+    device_copy, terminal, monkeypatch
+):
+    consumer, payload, event = device_copy
+    lease = consumer._receive_pool.acquire.return_value
+    monkeypatch.setattr(
+        "cosmos_rl.utils.payload_transport.ucxx.strategy.truncate_trajectory",
+        Mock(side_effect=ValueError("invalid decoded trajectory")),
+    )
+
+    with pytest.raises(ValueError, match="invalid decoded trajectory"):
+        consumer._copy_to_device(payload)
+
+    event.record.assert_called_once()
+    consumer._client.return_pinned.assert_called_once_with(payload["_pinned_buf"])
+    lease.release.assert_called_once_with()
     assert not consumer._failure and terminal == ([], [])
 
 
@@ -414,12 +462,11 @@ def test_allocation_failure_is_recoverable_only_after_proven_drain(
     device_copy, terminal, monkeypatch
 ):
     consumer, payload, event = device_copy
-    copy = Mock(side_effect=torch.OutOfMemoryError("allocation rejected"))
-    monkeypatch.setattr(torch.Tensor, "to", copy)
-    with pytest.raises(ValueError, match="after safe drain"):
+    acquire = Mock(side_effect=torch.OutOfMemoryError("allocation rejected"))
+    consumer._receive_pool.acquire = acquire
+    with pytest.raises(ValueError, match="before native issue"):
         consumer._copy_to_device(payload)
-    copy.assert_called_once()
-    event.record.assert_called_once()
-    event.query.assert_called()
+    acquire.assert_called_once()
+    event.record.assert_not_called()
     consumer._client.return_pinned.assert_called_once()
     assert not consumer._failure and terminal == ([], [])

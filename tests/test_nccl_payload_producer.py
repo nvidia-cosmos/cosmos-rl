@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the producer-side :class:`NCCLRolloutMixin` (CPU-only).
+"""Tests for the producer-side :class:`NCCLPayloadProducer` (CPU-only).
 
 The pack path and the request/cleanup handlers are exercised without any
 NCCL traffic: buffers are plain CPU tensors, ``_send`` is stubbed, and the
@@ -33,11 +33,14 @@ from cosmos_rl.utils.payload_transport.nccl.header import (
     HEADER_NBYTES,
     verify_header,
 )
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
+import cosmos_rl.utils.payload_transport.nccl.producer as producer_mod
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
+from cosmos_rl.utils.payload_transport.context import PayloadContext, PayloadRef
+from cosmos_rl.utils.payload_transport.receive_memory import ReceiveBufferPool
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import TransferStatus
 from cosmos_rl.utils.trajectory import (
     build_trajectory_schema,
-    schema_layout,
 )
 
 
@@ -89,7 +92,7 @@ class _InlineExecutor:
 
 
 def _make_producer(capacity=8):
-    p = NCCLRolloutMixin()
+    p = NCCLPayloadProducer()
     p._nccl_enabled = True
     p._nccl_replica_id = "rollout-test-0"
     p._nccl_rollout_idx = 0
@@ -98,7 +101,18 @@ def _make_producer(capacity=8):
     p._nccl_schema = build_trajectory_schema(
         {"max_steps": 10, "obs_dim": 4, "action_dim": 2}
     )
-    p._nccl_offsets, p._nccl_entry_size = schema_layout(p._nccl_schema)
+    p._nccl_layout = TensorLayout.compile(p._nccl_schema)
+    p._nccl_offsets = p._nccl_layout.offsets()
+    p._nccl_entry_size = p._nccl_layout.payload_nbytes
+    p._nccl_sender_incarnation = "sender-test"
+    p._nccl_prefix = "test"
+    p._nccl_redis = mock.Mock()
+    p._nccl_published_layouts = set()
+    p._nccl_published_layout_keys = set()
+    p._nccl_send_pool = ReceiveBufferPool(max_cached_per_layout=capacity)
+    p._nccl_send_leases = {}
+    p._nccl_retained_entries = {}
+    p._nccl_write_lock = threading.Lock()
     p._nccl_registry = SendBufferRegistry(capacity=capacity, on_free=p._on_buffer_free)
     p._nccl_rendezvous = _FakeRendezvous()
     # Real cache so _handle_request's cache.get(pair) works; tests that need a
@@ -123,7 +137,7 @@ class TestWriteToBuffer(unittest.TestCase):
             "rewards": torch.ones(6),
             "episode_length": 6,
         }
-        meta = p.write_to_buffer(traj)
+        meta = p.publish(traj)
         self.assertIsNotNone(meta)
         self.assertTrue(meta["_nccl"])
         # Globally-unique sender identity is carried for multi-replica addressing.
@@ -134,18 +148,268 @@ class TestWriteToBuffer(unittest.TestCase):
         # Completion string carries the nccl: prefix + transfer id.
         self.assertTrue(meta["completion"].startswith("nccl:"))
         self.assertEqual(meta["completion"], "nccl:" + meta["_transfer_id"])
-        # Schema was serialized for the consumer.
+        # The compact reference names the separately registered layout.
         self.assertEqual(
-            [s["name"] for s in meta["_schema"]],
-            [s.name for s in p._nccl_schema],
+            meta["_layout_id"],
+            p._nccl_layout.layout_id,
         )
+        self.assertNotIn("_layout", meta)
+        self.assertEqual(meta["_layout_id"], p._nccl_layout.layout_id)
+        p._nccl_redis.set.assert_called_once()
         # Buffer registered under the transfer id.
         self.assertIn(meta["_transfer_id"], p._nccl_registry)
+        metrics = p.metrics()
+        self.assertEqual(metrics["adapter_payloads"], 1)
+        self.assertEqual(metrics["adapter_fields"], len(p._nccl_layout.fields))
+        self.assertGreaterEqual(metrics["adapter_copy_batches"], 1)
+        self.assertEqual(metrics["adapter_fallback_fields"], 0)
+
+    def test_context_direct_storage_publishes_without_payload_repack(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        payload = context.acquire()
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(3)
+        payload.tensors["rewards"][:3] = torch.tensor([1.0, 2.0, 3.0])
+        payload.mark_all_written()
+        storage_pointer = payload.storage.untyped_storage().data_ptr()
+
+        with mock.patch.object(producer_mod, "record_event", return_value=None):
+            reference = context.publish(payload)
+
+        self.assertIsInstance(reference, PayloadRef)
+        raw = reference.to_dict()
+        entry = p._nccl_registry.get(raw["_transfer_id"])
+        self.assertEqual(entry.buffer.untyped_storage().data_ptr(), storage_pointer)
+        self.assertEqual(raw["episode_length"], 3)
+        self.assertNotIn("_layout", raw)
+        self.assertEqual(context.metrics()["direct_payloads"], 1)
+
+    def test_context_borrows_compatible_application_storage_until_retirement(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        requirements = context.storage_requirements()
+        external = torch.empty(
+            requirements.total_nbytes,
+            dtype=requirements.dtype,
+            device=requirements.device,
+        )
+        released = []
+        owner = object()
+        payload = context.borrow(
+            external,
+            owner=owner,
+            on_release=lambda: released.append(owner),
+        )
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(2)
+        payload.mark_all_written()
+
+        with mock.patch.object(producer_mod, "record_event", return_value=None):
+            reference = context.publish(payload)
+
+        raw = reference.to_dict()
+        entry = p._nccl_registry.get(raw["_transfer_id"])
+        self.assertEqual(entry.buffer.data_ptr(), external.data_ptr())
+        self.assertEqual(
+            payload.storage.data_ptr(),
+            external.data_ptr() + requirements.payload_offset,
+        )
+        self.assertEqual(released, [])
+        self.assertTrue(p._nccl_registry.free(raw["_transfer_id"]))
+        self.assertEqual(released, [owner])
+        self.assertEqual(context.metrics()["borrowed_payloads"], 1)
+
+    def test_borrowed_release_callback_failure_does_not_strand_retired_entry(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        requirements = context.storage_requirements()
+        payload = context.borrow(
+            torch.empty(requirements.total_nbytes, dtype=torch.uint8),
+            on_release=lambda: (_ for _ in ()).throw(RuntimeError("callback failed")),
+        )
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(1)
+        payload.mark_all_written()
+
+        with mock.patch.object(producer_mod, "record_event", return_value=None):
+            reference = context.publish(payload)
+
+        self.assertTrue(p._nccl_registry.free(reference["_transfer_id"]))
+        self.assertNotIn(reference["_transfer_id"], p._nccl_retained_entries)
+
+    def test_abandoned_borrowed_storage_releases_once(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        requirements = context.storage_requirements()
+        external = torch.empty(requirements.total_nbytes, dtype=torch.uint8)
+        released = []
+
+        payload = context.borrow(external, on_release=lambda: released.append(1))
+        payload.close()
+        payload.close()
+
+        self.assertEqual(released, [1])
+
+    def test_borrow_rejects_payload_only_allocation(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+
+        with self.assertRaisesRegex(ValueError, "smaller than storage_requirements"):
+            context.borrow(
+                torch.empty(p._nccl_layout.payload_nbytes, dtype=torch.uint8)
+            )
+
+    def test_borrow_contract_preserves_numeric_cuda_device_zero(self):
+        p = _make_producer()
+        p._nccl_device = 0
+
+        self.assertEqual(p.storage_requirements().device, torch.device("cuda:0"))
+
+    def test_borrow_rejects_noncallable_release_callback(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        requirements = context.storage_requirements()
+
+        with self.assertRaisesRegex(TypeError, "on_release must be callable"):
+            context.borrow(
+                torch.empty(requirements.total_nbytes, dtype=torch.uint8),
+                on_release=object(),
+            )
+
+    def test_direct_storage_publication_event_covers_input_and_header(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        payload = context.acquire()
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(1)
+        payload.mark_all_written()
+        input_ready = object()
+        publication_ready = object()
+        episode_length = producer_mod._episode_length
+
+        def read_metadata(*args, **kwargs):
+            wait.assert_called_once_with(None, input_ready)
+            return episode_length(*args, **kwargs)
+
+        with (
+            mock.patch.object(producer_mod, "wait_event") as wait,
+            mock.patch.object(
+                producer_mod, "_episode_length", side_effect=read_metadata
+            ),
+            mock.patch.object(
+                producer_mod, "record_event", return_value=publication_ready
+            ) as record,
+        ):
+            reference = context.publish(payload, ready_event=input_ready)
+
+        wait.assert_called_once_with(None, input_ready)
+        record.assert_called_once_with()
+        entry = p._nccl_registry.get(reference["_transfer_id"])
+        self.assertIs(entry.ready_event, publication_ready)
+
+    def test_failed_direct_publication_quarantines_submitted_storage(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        payload = context.acquire()
+        lease = payload._opaque[1]
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(1)
+        payload.mark_all_written()
+
+        with (
+            mock.patch.object(p._nccl_registry, "register", side_effect=RuntimeError),
+            mock.patch.object(producer_mod, "record_event", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError):
+                context.publish(payload)
+
+        self.assertTrue(lease.released)
+        self.assertTrue(
+            any(item is lease.buffer for item in p._nccl_send_pool._quarantined)
+        )
+        retained = producer_mod._FAILED_SEND_OWNERS.pop()
+        self.assertIs(retained[1], payload)
+
+    def test_failed_borrowed_publication_retains_owner_without_callback(self):
+        p = _make_producer()
+        context = PayloadContext("nccl", p, p._nccl_layout)
+        requirements = context.storage_requirements()
+        released = []
+        owner = object()
+        payload = context.borrow(
+            torch.empty(requirements.total_nbytes, dtype=torch.uint8),
+            owner=owner,
+            on_release=lambda: released.append(owner),
+        )
+        lease = payload._opaque[1]
+        for tensor in payload.tensors.values():
+            tensor.zero_()
+        payload.tensors["episode_length"].fill_(1)
+        payload.mark_all_written()
+
+        with (
+            mock.patch.object(p._nccl_registry, "register", side_effect=RuntimeError),
+            mock.patch.object(producer_mod, "record_event", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError):
+                context.publish(payload)
+
+        self.assertTrue(lease.quarantined)
+        self.assertFalse(lease.released)
+        self.assertEqual(released, [])
+        retained = producer_mod._FAILED_SEND_OWNERS.pop()
+        self.assertIs(retained[1], payload)
+
+    def test_failed_registration_does_not_reuse_inflight_packed_storage(self):
+        p = _make_producer()
+        trajectory = {
+            "observations": torch.zeros(3, 4),
+            "actions": torch.zeros(3, 2),
+            "rewards": torch.ones(3),
+            "episode_length": 3,
+        }
+        ready = mock.Mock()
+        ready.query.return_value = False
+        with (
+            mock.patch.object(producer_mod, "record_event", return_value=ready),
+            mock.patch.object(p._nccl_registry, "register", side_effect=RuntimeError),
+        ):
+            self.assertIsNone(p.publish(trajectory))
+
+        self.assertEqual(len(p._nccl_send_pool._quarantined), 1)
+        retained = producer_mod._FAILED_SEND_OWNERS.pop()
+        self.assertIs(retained[1], trajectory)
+        self.assertIs(retained[-1], ready)
+
+    def test_failed_registration_releases_completed_packed_storage(self):
+        p = _make_producer()
+        trajectory = {
+            "observations": torch.zeros(3, 4),
+            "actions": torch.zeros(3, 2),
+            "rewards": torch.ones(3),
+            "episode_length": 3,
+        }
+        ready = mock.Mock()
+        ready.query.return_value = True
+        with (
+            mock.patch.object(producer_mod, "record_event", return_value=ready),
+            mock.patch.object(p._nccl_registry, "register", side_effect=RuntimeError),
+        ):
+            self.assertIsNone(p.publish(trajectory))
+
+        self.assertEqual(len(p._nccl_send_pool._quarantined), 0)
+        self.assertEqual(p._nccl_send_pool._cached_buffers, 1)
 
     def test_disabled_returns_none(self):
         p = _make_producer()
         p._nccl_enabled = False
-        self.assertIsNone(p.write_to_buffer({"observations": torch.zeros(3, 4)}))
+        self.assertIsNone(p.publish({"observations": torch.zeros(3, 4)}))
 
 
 class TestHandleRequest(unittest.TestCase):
@@ -306,13 +570,15 @@ class TestHandleCleanup(unittest.TestCase):
             "rewards": torch.zeros(10),
             "episode_length": 10,
         }
-        buf, _ = p._pack(traj, 10, "0:pack-roundtrip")
+        buf, _, lease = p._pack(traj, 10, "0:pack-roundtrip")
         # Wire size is the self-describing header plus the schema region.
         self.assertEqual(buf.numel(), HEADER_NBYTES + p._nccl_entry_size)
         verify_header(
             bytes(buf[:HEADER_NBYTES].numpy()),
             transfer_id="0:pack-roundtrip",
             payload_nbytes=p._nccl_entry_size,
+            layout_id=p._nccl_layout.layout_id,
+            sender_incarnation="sender-test",
         )
         # Slice observations back out of the payload region and compare.
         payload = buf[HEADER_NBYTES:]
@@ -320,6 +586,7 @@ class TestHandleCleanup(unittest.TestCase):
         nbytes = p._nccl_schema[0].nbytes
         recovered = payload[off : off + nbytes].view(torch.float32).reshape(10, 4)
         self.assertTrue(torch.equal(recovered, obs))
+        lease.release()
 
 
 class TestRenegotiation(unittest.TestCase):
@@ -360,7 +627,7 @@ class TestRenegotiation(unittest.TestCase):
 
     def test_no_uid_but_cached_comm_accepts(self):
         from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
-        from cosmos_rl.utils.payload_transport.nccl.mixins import _producer_pair_key
+        from cosmos_rl.utils.payload_transport.nccl.producer import _producer_pair_key
         from cosmos_rl.utils.payload_transport.nccl.rendezvous import TransferStatus
 
         p = _make_producer()
@@ -456,7 +723,7 @@ class TestSendLaunchSerialized(unittest.TestCase):
     on one GPU deadlock natively at N_POLICY>=2 (Codex root cause)."""
 
     def test_concurrent_sends_do_not_overlap_launch(self):
-        import cosmos_rl.utils.payload_transport.nccl.mixins as mixins_mod
+        import cosmos_rl.utils.payload_transport.nccl.producer as mixins_mod
         from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
             SendBufferEntry,
         )
@@ -530,7 +797,7 @@ class TestSendLaunchSerialized(unittest.TestCase):
 
 class TestProducerFailureDiagnostics(unittest.TestCase):
     def test_prenative_failure_logs_the_actual_receiver_pair(self):
-        from cosmos_rl.utils.payload_transport.nccl import mixins
+        from cosmos_rl.utils.payload_transport.nccl import producer as producer_module
         from cosmos_rl.utils.payload_transport.nccl.buffer_registry import (
             SendBufferEntry,
         )
@@ -539,7 +806,7 @@ class TestProducerFailureDiagnostics(unittest.TestCase):
         producer._send = mock.Mock(side_effect=ValueError("injected setup failure"))
         producer._nccl_comm_cache.quarantine = mock.Mock()
         entry = SendBufferEntry("0:diagnostic", buffer=object())
-        with mock.patch.object(mixins.logger, "warning") as warning:
+        with mock.patch.object(producer_module.logger, "warning") as warning:
             producer._send_and_quarantine_on_failure(
                 entry, 3, [1], "policy-b", entry.transfer_id, resp_key="response"
             )
@@ -683,7 +950,7 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
             "episode_length": ep_len,
         }
 
-        buf, ready_event = p._pack(traj, ep_len, "0:gpu-roundtrip")
+        buf, ready_event, lease = p._pack(traj, ep_len, "0:gpu-roundtrip")
         self.assertEqual(buf.device.type, "cuda")
         self.assertEqual(buf.numel(), HEADER_NBYTES + p._nccl_entry_size)
 
@@ -691,7 +958,11 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
         # of the first 32 bytes) followed by the schema slice.
         out = _verify_and_unpack(
             buf,
-            {"transfer_id": "0:gpu-roundtrip", "schema": p._nccl_schema},
+            {
+                "transfer_id": "0:gpu-roundtrip",
+                "layout": p._nccl_layout,
+                "sender_incarnation": "sender-test",
+            },
             device,
         )
         # A buffer stamped for another transfer must not decode, even though
@@ -703,11 +974,15 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
         with self.assertRaises(PayloadHeaderMismatch):
             _verify_and_unpack(
                 buf,
-                {"transfer_id": "0:some-other-episode", "schema": p._nccl_schema},
+                {
+                    "transfer_id": "0:some-other-episode",
+                    "layout": p._nccl_layout,
+                    "sender_incarnation": "sender-test",
+                },
                 device,
             )
         self.assertEqual(
-            _unpack(buf[HEADER_NBYTES:], p._nccl_schema, device)["observations"].shape,
+            _unpack(buf[HEADER_NBYTES:], p._nccl_layout, device)["observations"].shape,
             out["observations"].shape,
         )
         # Unpacked tensors live on the GPU and are truncated to the episode.
@@ -717,6 +992,7 @@ class TestGpuPackUnpackRoundtrip(unittest.TestCase):
         self.assertTrue(torch.allclose(out["actions"], actions))
         self.assertTrue(torch.allclose(out["rewards"], rewards))
         self.assertEqual(int(out["episode_length"][0].item()), ep_len)
+        lease.release()
 
 
 class TestControlPlaneNotBlockedBySends(unittest.TestCase):
@@ -844,6 +1120,8 @@ class TestControlPlaneNotBlockedBySends(unittest.TestCase):
         p, started, release, _sent = self._producer_with_blocking_send()
         p._nccl_shutdown = threading.Event()
         p._nccl_threads = []
+        p._publish_layout(p._nccl_layout)
+        published_key = next(iter(p._nccl_published_layout_keys))
         released = []
         p._nccl_registry._on_free = lambda entry: released.append(entry.transfer_id)
         try:
@@ -856,11 +1134,13 @@ class TestControlPlaneNotBlockedBySends(unittest.TestCase):
             entry = p._nccl_registry.get("0:second")
             self.assertEqual(entry.inflight, 1)
             release.set()  # let the parked send finish so cleanup is not slow
-            p.cleanup_nccl()
+            p.close()
             # The lease came back (so the registry could reap it) and the
             # buffer was actually freed rather than pinned forever.
             self.assertEqual(entry.inflight, 0)
             self.assertIn("0:second", released)
+            p._nccl_redis.delete.assert_called_once_with(published_key)
+            self.assertEqual(p._nccl_published_layout_keys, set())
         finally:
             release.set()
             p._nccl_executor.shutdown(wait=True)

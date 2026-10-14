@@ -34,7 +34,7 @@ def worker(rank, port, run_id, batch_size, steps, bounded, results):
     try:
         import redis
         from test_nccl_e2e import _ConsumerPacker
-        from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+        from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
         from cosmos_rl.utils.payload_transport.receive_memory import storage_bytes
         from cosmos_rl.utils.trajectory import build_trajectory_schema, schema_layout
 
@@ -57,8 +57,8 @@ def worker(rank, port, run_id, batch_size, steps, bounded, results):
             ),
         )
         if rank == 0:
-            producer = NCCLRolloutMixin()
-            producer.setup_nccl(
+            producer = NCCLPayloadProducer()
+            producer.setup(
                 replica_id="probe-producer",
                 rollout_idx=0,
                 redis_client=client,
@@ -75,9 +75,7 @@ def worker(rank, port, run_id, batch_size, steps, bounded, results):
                     "rewards": torch.full((1024,), 0.5, device=device),
                     "episode_length": 1024,
                 }
-                metas = [
-                    producer.write_to_buffer(trajectory) for _ in range(batch_size)
-                ]
+                metas = [producer.publish(trajectory) for _ in range(batch_size)]
                 assert all(meta is not None for meta in metas)
                 client.set(f"{run_id}:batch:{step}", json.dumps(metas), ex=1800)
                 wait_key(client, f"{run_id}:ack:{step}")
@@ -172,7 +170,7 @@ def worker(rank, port, run_id, batch_size, steps, bounded, results):
         if packer is not None:
             packer.shutdown_nccl_data_packer()
         if producer is not None:
-            producer.cleanup_nccl()
+            producer.close()
 
 
 def main():
