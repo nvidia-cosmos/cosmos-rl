@@ -122,6 +122,156 @@ def test_healthy_completion_reuses_endpoint_and_buffer(client, monkeypatch, term
     assert terminal == ([], [])
 
 
+def test_concurrent_reads_reuse_bounded_endpoint_pool(client, monkeypatch, terminal):
+    async def run():
+        release = asyncio.Event()
+        created = []
+
+        async def create(host, port):
+            endpoint = Endpoint(release=release)
+            created.append(endpoint)
+            return endpoint
+
+        monkeypatch.setattr(ucxx_buffer.ucxx, "create_endpoint", create, raising=False)
+        tasks = [
+            asyncio.create_task(client.read("host", 1, slot, schema()))
+            for slot in range(32)
+        ]
+        results = []
+        try:
+            # All reads are queued; hold the first payloads in native receive
+            # so the connection bound is observable without network timing.
+            while len(created) < client._pool_size:
+                await asyncio.sleep(0)
+            await asyncio.gather(*(ep.entered.wait() for ep in created[:2]))
+            assert len(created) == client._pool_size
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks)
+            for result in results:
+                assert (result["x"] == 7).all()
+                client.return_pinned(result["_pinned_buf"])
+            await client.close()
+        assert len(created) == client._pool_size
+        assert all(endpoint.closed for endpoint in created)
+
+    asyncio.run(run())
+    assert terminal == ([], [])
+
+
+def test_endpoint_admission_is_per_listener(client, monkeypatch, terminal):
+    async def run():
+        release = asyncio.Event()
+        created = []
+
+        async def create(host, port):
+            endpoint = Endpoint(release=release if port == 1 else None)
+            created.append((port, endpoint))
+            return endpoint
+
+        monkeypatch.setattr(ucxx_buffer.ucxx, "create_endpoint", create, raising=False)
+        blocked = [
+            asyncio.create_task(client.read("host", 1, slot, schema()))
+            for slot in range(3)
+        ]
+        results = []
+        try:
+            while len(created) < 2:
+                await asyncio.sleep(0)
+            await asyncio.gather(*(ep.entered.wait() for _, ep in created[:2]))
+            # A saturated listener must not hold up an independent listener.
+            other = await client.read("host", 2, 4, schema())
+            results.append(other)
+            assert [port for port, _ in created] == [1, 1, 2]
+            assert not any(task.done() for task in blocked)
+        finally:
+            release.set()
+            results.extend(await asyncio.gather(*blocked))
+            for result in results:
+                client.return_pinned(result["_pinned_buf"])
+            await client.close()
+
+    asyncio.run(run())
+    assert terminal == ([], [])
+
+
+@pytest.mark.parametrize("mode", ["timeout", "cancel"])
+def test_queued_endpoint_admission_retains_ownership(
+    client, monkeypatch, terminal, mode
+):
+    async def run():
+        release = asyncio.Event()
+        created = []
+
+        async def create(host, port):
+            endpoint = Endpoint(release=release)
+            created.append(endpoint)
+            return endpoint
+
+        monkeypatch.setattr(ucxx_buffer.ucxx, "create_endpoint", create, raising=False)
+        active = [
+            asyncio.create_task(client.read("host", 1, slot, schema(), timeout=30))
+            for slot in range(2)
+        ]
+        while len(created) < 2:
+            await asyncio.sleep(0)
+        await asyncio.gather(*(ep.entered.wait() for ep in created))
+        try:
+            # Check nonterminal close rejection BEFORE starting the short
+            # queued deadline: after expiry, close correctly reports the
+            # terminal failure instead of the active-operation precondition.
+            with pytest.raises(RuntimeError, match="active native operations"):
+                await client.close()
+            # Reopen only this fixture so the next read can exercise queued
+            # timeout/cancellation behind the two held native receives.
+            client._closing = False
+            original_wait = asyncio.wait
+            admission_entered = asyncio.Event()
+
+            async def admission_wait(tasks, *, timeout):
+                # Inject expiry at the queued-admission boundary, after the
+                # real operation has retained its waiter. A tiny read budget
+                # can expire before that boundary on a loaded machine and
+                # exercises a different (no waiter yet) ownership contract.
+                admission_entered.set()
+                return await original_wait(
+                    tasks, timeout=0 if mode == "timeout" else timeout
+                )
+
+            monkeypatch.setattr(module.asyncio, "wait", admission_wait)
+            queued = asyncio.create_task(
+                client.read("host", 1, 3, schema(), timeout=30)
+            )
+            await asyncio.wait_for(admission_entered.wait(), timeout=5)
+            # Restore before releasing either active read: only the queued
+            # admission wait receives this injected completion timeout.
+            monkeypatch.setattr(module.asyncio, "wait", original_wait)
+            if mode == "cancel":
+                queued.cancel()
+            with pytest.raises(TransportUnusableError):
+                await queued
+            failures, retained = terminal
+            assert len(failures) == len(retained) == 1
+            owner = retained[0]
+            assert owner in client._operations
+            waiters = [v for v in owner.owners if isinstance(v, asyncio.Task)]
+            assert len(waiters) == 1 and not waiters[0].cancelled()
+            assert len(created) == 2
+            assert not client._pinned_pool
+        finally:
+            release.set()
+            await asyncio.gather(*active)
+        # The semaphore waiter may complete late; it never creates a new
+        # endpoint or clears the terminal latch / retained destination.
+        await asyncio.gather(*waiters)
+        assert owner.failure and owner.owners
+        assert len(created) == 2
+        with pytest.raises(TransportUnusableError):
+            await client.read("host", 1, 4, schema())
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("mode", ["timeout", "cancel"])
 def test_pending_read_never_cancelled_recycled_closed_or_retried(
     client, monkeypatch, terminal, mode

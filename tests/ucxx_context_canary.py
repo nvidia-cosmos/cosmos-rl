@@ -132,7 +132,11 @@ async def partial_start():
     module.ucxx.create_listener = create
     try:
         try:
-            producer.start_server(timeout=0.3)
+            # The injected listener failure guarantees startup cannot succeed.
+            # This timeout also bounds native cleanup inside start_server();
+            # 300 ms made the test depend on thread/context startup latency.
+            # Keep a finite budget without turning this into a timing test.
+            producer.start_server(timeout=2)
             raise AssertionError("partial startup must remain observable")
         except RuntimeError as error:
             assert "failed to start" in str(error)
