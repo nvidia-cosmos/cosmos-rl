@@ -24,6 +24,7 @@ def sdk(monkeypatch):
     sdk.init.side_effect = initialize
     monkeypatch.setattr(logger, "wandb", sdk)
     monkeypatch.setattr(logger, "wandb_run", None)
+    monkeypatch.setattr(logger, "_explicit_run", False)
     return sdk
 
 
@@ -136,3 +137,81 @@ def test_vision_config_preserves_legacy_identity(sdk):
     assert kwargs["name"] == config.job.name
     assert kwargs["id"] == config.job.timestamp
     assert kwargs["resume"] == "allow"
+
+
+@pytest.mark.parametrize(
+    "name,run_id", [("exact", None), (None, "id"), ("exact", "id")]
+)
+def test_independent_overrides_leave_timestamp_unchanged(sdk, config, name, run_id):
+    config.logging.experiment_name = "experiment"
+    config.logging.wandb_run_name = name
+    config.logging.wandb_run_id = run_id
+    for _ in range(2):
+        sdk.run = None
+        logger.init_wandb(config)
+        args = sdk.init.call_args.kwargs
+        assert args["name"] == (name or "experiment/timestamp")
+        assert args["id"] == (run_id or "timestamp")
+        assert args["resume"] == "allow"
+        assert config.train.timestamp == "timestamp"
+
+
+@pytest.mark.parametrize("active_global", [False, True])
+def test_explicit_run_receives_scalar_and_media_in_order(sdk, config, active_global):
+    external = Mock(name="external")
+    other = Mock(name="other")
+    sdk.run = other if active_global else None
+    config.logging.wandb_run_name = "ignored"
+    config.logging.wandb_run_id = "ignored"
+    for _ in range(2):
+        assert logger.init_wandb(config, run=external) is external
+    media = object()
+    logger.log_wandb({"loss": 1}, 4)
+    sdk.run = Mock(name="replacement")
+    logger.log_wandb({"video": media}, 4)
+    assert external.log.call_args_list == [
+        (({"loss": 1},), {"step": 4}),
+        (({"video": media},), {"step": 4}),
+    ]
+    sdk.init.assert_not_called()
+    external.finish.assert_not_called()
+    external.config.update.assert_not_called()
+    other.log.assert_not_called()
+
+
+def test_invalid_explicit_run_clears_binding(sdk, config):
+    old = Mock()
+    logger.init_wandb(config, run=old)
+    with pytest.raises(TypeError, match="log"):
+        logger.init_wandb(config, run=object())
+    logger.log_wandb({}, 1)
+    old.log.assert_not_called()
+    assert logger.wandb_run is None
+
+
+def test_rebind_to_implicit_run_restores_global_lifetime_checks(sdk, config):
+    explicit = Mock()
+    logger.init_wandb(config, run=explicit)
+    implicit = logger.init_wandb(config)
+    assert implicit is sdk.run
+    sdk.run = None
+    logger.log_wandb({}, 1)
+    implicit.log.assert_not_called()
+    explicit.log.assert_not_called()
+
+
+def test_failed_sdk_init_does_not_retain_explicit_run(sdk, config):
+    explicit = Mock()
+    logger.init_wandb(config, run=explicit)
+    sdk.init.side_effect = RuntimeError("failed")
+    assert logger.init_wandb(config) is None
+    logger.log_wandb({}, 1)
+    explicit.log.assert_not_called()
+
+
+def test_explicit_run_needs_no_optional_sdk(sdk, config, monkeypatch):
+    monkeypatch.setattr(logger, "wandb", None)
+    explicit = Mock()
+    assert logger.init_wandb(config, run=explicit) is explicit
+    logger.log_wandb({}, 1)
+    explicit.log.assert_called_once_with({}, step=1)

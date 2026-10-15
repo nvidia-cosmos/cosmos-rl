@@ -39,6 +39,19 @@ error and continues without W&B logging; it does not fail training. This setting
 governs W&B resume behavior, not a requirement that telemetry be available for
 training to proceed. Application-owned runs retain their application's policy.
 
-This logger targets the SDK's single active global run. Concurrent independent
-W&B runs (`reinit="create_new"`) are not supported by this global logger; use
-application-owned run handles for that use case.
+An embedding application can instead explicitly bind its own SDK run:
+
+```python
+from cosmos_rl.utils.report.wandb_logger import init_wandb
+
+init_wandb(config, run=application_run)
+```
+
+This binds the existing reporting path without initializing, renaming, configuring
+or finishing that run, even when it differs from `wandb.run`. Identity overrides
+are ignored for borrowed runs. Scalar/media values, steps and SDK default commit
+ordering are forwarded unchanged. Only one reporting target is bound at a time;
+this is not a multi-run router. The application owns the explicitly supplied
+run's lifetime and must rebind before finishing it. Calling `init_wandb(config)`
+without `run` restores the legacy active-global-run behavior. An invalid explicit
+handle raises `TypeError` and clears the previous binding.

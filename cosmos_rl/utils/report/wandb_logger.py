@@ -45,17 +45,28 @@ def is_wandb_available() -> bool:
 
 
 wandb_run = None
+_explicit_run = False
 
 
-def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
+def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig], *, run=None):
     """Create or borrow the active SDK run; never finish an application run.
 
     An existing run owns its identity/configuration. Call this again explicitly
     to adopt a replacement run. Failed initialization must not retain an old
     cached handle.
+
+    A supplied ``run`` is borrowed independently of ``wandb.run``. Its caller
+    owns its lifetime and must rebind (or clear) it before finishing it.
     """
-    global wandb_run
+    global wandb_run, _explicit_run
     wandb_run = None
+    _explicit_run = False
+    if run is not None:
+        if not callable(getattr(run, "log", None)):
+            raise TypeError("An explicitly supplied W&B run must provide log().")
+        wandb_run = run
+        _explicit_run = True
+        return run
     if wandb is None:
         logger.warning("Wandb is not installed; logging is disabled.")
         return None
@@ -118,7 +129,7 @@ def log_wandb(data: dict, step: int):
     global wandb_run
     # Finishing/replacing a run in the host application invalidates our borrowed
     # handle. Do not log to a finished run or silently adopt an unrelated run.
-    if wandb is None or wandb_run is not wandb.run:
+    if not _explicit_run and (wandb is None or wandb_run is not wandb.run):
         wandb_run = None
     if wandb_run is not None:
         wandb_run.log(data, step=step)

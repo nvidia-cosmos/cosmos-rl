@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn",
     "transformers>=4.51.1,!=4.52.*,!=4.53.*,<5.0.0", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
     "datasets>=4.4.1",
+    "av<19", # PyAV 19 is incompatible with the supported video decoder path.
     "pydantic",
     "math_verify",
     "nest_asyncio",
