@@ -49,33 +49,6 @@ except Exception:  # pragma: no cover - package absent entirely
     UCXX_AVAILABLE = False
 
 
-def _free_base_port(span: int = 8) -> int:
-    """Find a base port with `span` consecutive free ports above it.
-
-    The UCXX server binds base+0..base+n_server_threads-1, so a single free
-    port is not enough.
-    """
-    import socket
-
-    for _ in range(50):
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            base = probe.getsockname()[1]
-        socks = []
-        try:
-            for off in range(span):
-                sk = socket.socket()
-                sk.bind(("127.0.0.1", base + off))
-                socks.append(sk)
-        except OSError:
-            continue
-        finally:
-            for sk in socks:
-                sk.close()
-        return base
-    raise RuntimeError("no run of free ports found")
-
-
 def _make_trajectory(device, ep_len=_EP_LEN):
     return {
         "observations": torch.arange(
@@ -101,23 +74,20 @@ def _producer(meta_q, done_q, err_q):
             max_steps=_EP_LEN,
             obs_dim=_OBS_DIM,
             action_dim=_ACTION_DIM,
-            # A BASE port, not a request to auto-assign: the server runs
-            # n_server_threads listeners at base+0..base+n-1, so passing 0
-            # binds the reserved low ports and the consumer has nothing to
-            # reach. Reserve a run of free ports and hand over the first.
-            port=_free_base_port(),
+            port=0,
         )
         meta = rollout.write_to_buffer(_make_trajectory(device))
         assert meta is not None, "producer failed to write the trajectory"
         assert meta.get("_ucxx"), f"metadata is not a UCXX reference: {meta!r}"
-        # Fail here, not later as an opaque "could not resolve": the server
-        # binds base+0..base+n-1, so a bad base port advertises something the
-        # consumer can never reach.
         port = meta.get("_ucxx_port")
+        ports = meta.get("_ports")
         assert isinstance(port, int) and port > 1024, (
-            f"producer advertised an unusable port {port!r}; setup_ucxx takes a "
-            "BASE port, not a request to auto-assign"
+            f"producer advertised an unusable auto-assigned port {port!r}"
         )
+        assert isinstance(ports, list) and len(ports) == 4
+        assert len(set(ports)) == len(ports)
+        assert port in ports and all(p > 1024 for p in ports)
+        assert meta["_buffer_handle"]["ucxx_ports"] == ports
         meta_q.put(meta)
 
         # Serve until the consumer confirms, bounded so a dead peer cannot hang
