@@ -24,7 +24,7 @@ accepts it, sets the sticky ``weight_synced`` bit, and generates against base
 weights while reporting the current version -- silently.
 
 These tests pin the guard that stops it, and the cancellation path that keeps
-the peers from paying the 120 s barrier timeout plus a full
+the peers from paying the barrier timeout plus a full
 ``COSMOS_NCCL_TIMEOUT_MS`` inside ``ncclBroadcast``.
 """
 
@@ -125,8 +125,8 @@ def make_last_arriver(worker, weight_step=7, world_size=3):
 
     ``r2r_barrier`` returns as soon as the last arriver publishes the go
     signal.  A non-final arriver instead waits out the real
-    ``_R2R_BARRIER_TIMEOUT_S`` and only then proceeds, so a test that cares
-    about the abort check rather than the wait would take two minutes and
+    ``_R2R_BARRIER_TIMEOUT_S`` and then cancels the round, so a test that
+    cares about the abort check rather than the wait would take minutes and
     reach its assertion down the timeout path instead of the intended one.
     """
     barrier_key, _, _ = ws._round_keys(worker._r2r_barrier_prefix, weight_step)
@@ -278,6 +278,59 @@ class TestWaitingWorkersLearnQuickly(unittest.TestCase):
         with self.assertRaises(ws.R2RAborted) as caught:
             ws.r2r_barrier(worker, 7, expected_world_size=3)
         self.assertIn("raced in", str(caught.exception))
+
+
+class TestAShortQuorumCancelsTheRound(unittest.TestCase):
+    """A barrier that times out short of its quorum cancels the round.
+
+    A rollout replica that crashes mid-run keeps its name in the controller's
+    recipient set until it is reaped or unregisters, so the survivors expect
+    one arrival that never comes.  Proceeding into ``ncclBroadcast`` anyway
+    parks every survivor inside NCCL for ``COSMOS_NCCL_TIMEOUT_MS`` while the
+    trainers wait on transfers that are never acknowledged. Cancelling instead
+    ends the job within the barrier timeout, with the arrival count in the
+    reason.
+    """
+
+    def test_timeout_short_of_quorum_raises_with_the_count(self):
+        worker = FakeWorker()
+        with mock.patch.object(ws, "_R2R_BARRIER_TIMEOUT_S", 0.05):
+            with self.assertRaises(ws.R2RAborted) as caught:
+                ws.r2r_barrier(worker, 7, expected_world_size=3)
+        self.assertIn("1/3", str(caught.exception))
+        self.assertIn("step 7", str(caught.exception))
+
+    def test_the_cancellation_reaches_the_other_participants(self):
+        worker = FakeWorker()
+        with mock.patch.object(ws, "_R2R_BARRIER_TIMEOUT_S", 0.05):
+            with self.assertRaises(ws.R2RAborted):
+                ws.r2r_barrier(worker, 7, expected_world_size=3)
+        stored = worker._r2r_redis.store["cosmos:r2r:abort:7"]
+        self.assertTrue(stored.startswith(ws._R2R_ABORT_MARKER))
+        self.assertIn(
+            ("cosmos:r2r:go:7", ws._R2R_ABORT_SIGNAL), worker._r2r_redis.published
+        )
+
+    def test_a_quorum_completed_at_the_deadline_still_proceeds(self):
+        """The go message can land after the last poll; the counter decides."""
+        worker = FakeWorker()
+        redis = worker._r2r_redis
+        barrier_key, _, _ = ws._round_keys(worker._r2r_barrier_prefix, 7)
+        real_get = redis.get
+        reads = {"n": 0}
+
+        def get_completing_the_quorum_late(key):
+            if key == barrier_key:
+                reads["n"] += 1
+                # The first read is the recheck right after subscribing; the
+                # second is the post-timeout read.
+                return "3" if reads["n"] >= 2 else real_get(key)
+            return real_get(key)
+
+        redis.get = get_completing_the_quorum_late
+        with mock.patch.object(ws, "_R2R_BARRIER_TIMEOUT_S", 0.05):
+            self.assertTrue(ws.r2r_barrier(worker, 7, expected_world_size=3))
+        self.assertNotIn("cosmos:r2r:abort:7", redis.store)
 
 
 class TestOnlyAnAbortRecordCancelsARound(unittest.TestCase):

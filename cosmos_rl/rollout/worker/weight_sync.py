@@ -112,7 +112,11 @@ class AsyncR2RSyncMode(Enum):
     INFERENCE = "inference"
 
 
-_R2R_BARRIER_TIMEOUT_S = 120
+# How long a participant waits for the rest of the round before cancelling it.
+# A worker that consumes the R2R command only after finishing a long episode
+# arrives legitimately late, and a false cancellation ends the job, so the
+# margin is generous compared with the healthy wait of a few seconds.
+_R2R_BARRIER_TIMEOUT_S = 300
 _SYNC_NOOP_LOG_INTERVAL = 50
 
 # Payload published on the barrier's go-channel to cancel a round, and the
@@ -1107,12 +1111,22 @@ def r2r_barrier(
                         )
                     break
             else:
-                logger.warning(
-                    "[R2R Barrier] Timed out after %ds waiting for go signal "
-                    "(step=%d). Proceeding anyway.",
-                    _R2R_BARRIER_TIMEOUT_S,
-                    weight_step,
-                )
+                # The go message may have been published just as the deadline
+                # passed; the counter is authoritative.
+                arrived = int(r2r_redis.get(barrier_key) or 0)
+                if arrived < world_size:
+                    # Entering the broadcast short of a participant blocks every
+                    # arrived worker inside NCCL for COSMOS_NCCL_TIMEOUT_MS, and
+                    # the missing one was often already gone.  Cancel the round
+                    # for everyone instead so the job fails within the barrier
+                    # timeout with the count on record.
+                    reason = (
+                        f"R2R barrier for step {weight_step} timed out after "
+                        f"{_R2R_BARRIER_TIMEOUT_S}s with {arrived}/{world_size} "
+                        f"workers arrived"
+                    )
+                    abort_r2r_round(worker, weight_step, reason)
+                    raise R2RAborted(reason)
         finally:
             pubsub.unsubscribe(go_channel)
             pubsub.close()
