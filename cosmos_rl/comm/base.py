@@ -468,6 +468,9 @@ class CommMixin:
 
         self.shutdown_signal = threading.Event()
         self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        # Zero during normal work. Rollout teardown grants a finite grace period
+        # that the heartbeat process can enforce even if its parent is stuck.
+        self._heartbeat_shutdown_deadline = mp.Value("d", 0.0)
 
         if self.global_rank == 0:
             logger.info(
@@ -584,15 +587,25 @@ class CommMixin:
                 e,
             )
 
-        while True:
-            self.api_client.post_heartbeat(self.replica_name)
+        def should_stop():
+            if shutdown_signal.is_set():
+                return True
+            deadline = getattr(self, "_heartbeat_shutdown_deadline", None)
+            if deadline is not None and 0 < deadline.value <= time.monotonic():
+                logger.error("[heartbeat] shutdown grace expired; stopping liveness")
+                shutdown_signal.set()
+                return True
+            return False
+
+        while not should_stop():
+            self.api_client.post_heartbeat(self.replica_name, should_stop=should_stop)
 
             # If the heartbeat interval is greater than 1, we need to check the shutdown signal every second
             # for faster shutdown check
             if constant.COSMOS_HEARTBEAT_SEND_INTERVAL > 1:
                 early_break = False
                 for _ in range(int(constant.COSMOS_HEARTBEAT_SEND_INTERVAL)):
-                    if shutdown_signal.is_set():
+                    if should_stop():
                         early_break = True
                         break
                     else:
@@ -601,7 +614,7 @@ class CommMixin:
                     break
             else:
                 time.sleep(constant.COSMOS_HEARTBEAT_SEND_INTERVAL)
-                if shutdown_signal.is_set():
+                if should_stop():
                     break
 
 

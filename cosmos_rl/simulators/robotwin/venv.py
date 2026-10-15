@@ -284,7 +284,9 @@ class SubEnv:
             task_descriptions = generate_episode_descriptions(
                 task_name, self.episode_info_list, 1, self.env_seed
             )
-            instruction = np.random.choice(task_descriptions[0][self.instruction_type])
+            instruction = np.random.default_rng(self.env_seed).choice(
+                task_descriptions[0][self.instruction_type]
+            )
             return instruction
         except ImportError:
             logger.warning(
@@ -381,26 +383,10 @@ class SubEnv:
         if env_seed is not None:
             self.env_seed = env_seed
 
-        # Only setup task metadata if task changed (cached otherwise)
-        if task_name != self.current_task_name:
-            try:
-                self.setup_task(task_name)
-                self.instruction = self.create_instruction(task_name)
-                self.current_task_name = task_name
-                # Close existing task if task name changed
-                if self.task is not None and hasattr(self.task, "close_env"):
-                    try:
-                        self.task.close_env()
-                    except Exception:
-                        pass  # Ignore errors when closing
-                    self.task = None
-            except Exception as e:
-                logger.error(
-                    f"SubEnv {self.env_id} failed to setup task {task_name}: {e}"
-                )
-                raise
-
-        self.task_args["instruction"] = self.instruction
+        # Instruction placeholders can depend on the current scene (e.g. which
+        # arm should grasp the hammer). Generate them after the actual reset;
+        # cached metadata from a different seed can describe the wrong task.
+        self.task_args["instruction"] = None
 
         # Try to create and setup task with retries
         trial_seed = self.env_seed
@@ -432,6 +418,12 @@ class SubEnv:
             raise RuntimeError(
                 f"SubEnv {self.env_id} failed to reset after {max_retries} attempts"
             )
+
+        self.current_task_name = task_name
+        self.env_seed = trial_seed
+        self.episode_info_list = [self.task.get_info()]
+        self.instruction = self.create_instruction(task_name)
+        self.task.set_instruction(self.instruction)
 
         # Get initial observation
         obs = _update_obs(self.task.get_obs())

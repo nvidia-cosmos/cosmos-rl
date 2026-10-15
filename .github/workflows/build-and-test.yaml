@@ -49,6 +49,18 @@ jobs:
 
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
+          ${DOCKER_RUN} python -m pip install 'pytest>=8,<9'
+          # Mocked pipeline contracts need VLA dependencies, but no assets or checkpoints.
+          ${DOCKER_RUN} python -m pytest -q \
+            tests/test_colocated_on_policy_queue.py \
+            tests/test_colocated_resume_version.py \
+            tests/test_colocated_first_checkpoint.py \
+            tests/test_robotwin_reset_observation.py \
+            tests/test_robotwin_scene_instruction.py \
+            tests/test_vla_action_contract.py \
+            tests/test_vla_prompt_padding.py \
+            tests/test_vla_proprio_replay.py \
+            tests/test_vla_weight_converter.py
           # ${DOCKER_RUN} python tests/test_env_manager_libero.py
           # ${DOCKER_RUN} python tests/test_env_manager_maniskill.py
           # ${DOCKER_RUN} ROBOTWIN_PATH=/RoboTwin python tests/test_env_manager_robotwin.py

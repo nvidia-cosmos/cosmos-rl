@@ -119,6 +119,8 @@ class OpenVLA(BaseModel):
         self.norm_stats = self.hf_config.norm_stats
 
         self.model_input_keys = ["input_ids", "pixel_values", "attention_mask"]
+        if getattr(self.hf_config, "use_proprio", False):
+            self.model_input_keys.append("proprio")
         self.model_output_keys = ["responses", "old_log_probs"]
         self.model_train_keys = self.model_input_keys + self.model_output_keys
 
@@ -537,6 +539,14 @@ class OpenVLA(BaseModel):
                     raise FileNotFoundError(
                         f"No safetensors or pytorch_model.bin found in {model_path}"
                     )
+
+            from cosmos_rl.policy.model.vla.weight_converter import (
+                normalize_vla_checkpoint_keys,
+            )
+
+            state_dict = normalize_vla_checkpoint_keys(
+                state_dict, self.model.state_dict().keys()
+            )
 
             # Load proprio_projector weights from separate checkpoint if available
             # These are stored in a separate file (e.g., proprio_projector-10000_checkpoint.pt)
@@ -971,6 +981,7 @@ class OpenVLA(BaseModel):
         is_valid: bool = False,
         temperature: float = 0.0,
         unnorm_key: str = "libero_10_no_noops",
+        simulator_type: str = "libero",
         **kwargs,
     ) -> Dict[str, Any]:
         """Generate one step for OpenVLA-OFT (matching SimpleVLA-RL)"""
@@ -991,7 +1002,11 @@ class OpenVLA(BaseModel):
                 temperature=temperature,
             )
 
-            actions = _postprocess_gripper(actions)
+            # RoboTwin consumes both ALOHA grippers in the checkpoint's native
+            # [0, 1] range. LIBERO's last-dimension inversion reverses the right
+            # gripper when applied to a 14-dimensional ALOHA action.
+            if simulator_type != "robotwin":
+                actions = _postprocess_gripper(actions)
             return {
                 "action": actions,
                 "responses": responses,

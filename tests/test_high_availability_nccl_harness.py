@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import signal
+import tomllib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -67,6 +70,81 @@ def test_scale_down_ignores_stale_or_same_size_wrong_membership():
 def test_missing_expected_membership_has_bounded_diagnostic():
     with pytest.raises(TimeoutError, match="last observed.*a"):
         mesh_helper()(lambda **kw: [Mesh("a")], {"a", "b"}, timeout=0.03)
+
+
+def test_generated_config_disables_resume_as_boolean(tmp_path):
+    namespace = {"os": os, "WORK_DIR": str(tmp_path)}
+    load_nodes(
+        lambda node: isinstance(node, ast.FunctionDef)
+        and node.name == "write_train_config",
+        namespace,
+    )
+    path = namespace["write_train_config"]()
+    config = tomllib.loads(Path(path).read_text())
+    # A string is an explicit checkpoint path, not a false boolean. Fail-fast
+    # resume correctly rejects the old fixture's nonexistent path "False".
+    assert config["train"]["resume"] is False
+
+
+def test_controller_launch_owns_the_python_process():
+    process = Mock()
+    popen = Mock(return_value=process)
+    owners = []
+    namespace = {
+        "os": os,
+        "sys": sys,
+        "CTRL_PORT": 8010,
+        "logger": Mock(),
+        "subprocess": SimpleNamespace(Popen=popen),
+        "_controller_processes": owners,
+    }
+    load_nodes(
+        lambda node: isinstance(node, ast.FunctionDef)
+        and node.name == "launch_controller",
+        namespace,
+    )
+    assert namespace["launch_controller"]("config with spaces.toml") == [process]
+    args, kwargs = popen.call_args
+    assert args[0] == [
+        sys.executable,
+        "-m",
+        "cosmos_rl.dispatcher.run_web_panel",
+        "--port",
+        "8010",
+        "--config",
+        "config with spaces.toml",
+    ]
+    assert not kwargs.get("shell", False)
+    assert owners == [process]
+
+
+@pytest.mark.parametrize("stalled", [False, True])
+def test_cleanup_only_stops_owned_live_controller_and_is_idempotent(stalled):
+    running, exited = Mock(), Mock()
+    running.poll.return_value = None
+    exited.poll.return_value = 0
+    if stalled:
+        running.wait.side_effect = [subprocess.TimeoutExpired("controller", 10), 0]
+    owners = [running, exited]
+    namespace = {
+        "_controller_processes": owners,
+        "signal": signal,
+        "subprocess": subprocess,
+    }
+    load_nodes(
+        lambda node: isinstance(node, ast.FunctionDef) and node.name == "cleanup",
+        namespace,
+    )
+    namespace["cleanup"]()
+    namespace["cleanup"]()
+    running.send_signal.assert_called_once_with(signal.SIGINT)
+    if stalled:
+        running.kill.assert_called_once_with()
+    else:
+        running.kill.assert_not_called()
+    exited.send_signal.assert_not_called()
+    exited.kill.assert_not_called()
+    assert not owners
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])

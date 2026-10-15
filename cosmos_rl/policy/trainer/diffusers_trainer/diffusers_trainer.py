@@ -18,7 +18,6 @@ import os
 import json
 import random
 import shutil
-import threading
 import numpy as np
 from typing import Optional, Dict
 from safetensors.torch import save_file
@@ -39,6 +38,12 @@ from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.ema import EMAModuleWrapper
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.s3_utils import upload_folder_to_s3
+from cosmos_rl.utils.model_export import (
+    ModelExportThread,
+    finish_model_export,
+    staged_export_path,
+    publish_export_directory,
+)
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 
@@ -202,7 +207,7 @@ class DiffusersTrainer(Trainer):
             tensor = tensor.detach()
             if dtype is not None:
                 tensor = tensor.to(dtype=dtype)
-            return tensor.cpu()
+            return tensor.to(device="cpu", copy=True)
 
         def _save_state_dict_with_sharding(
             state_dict: Dict[str, torch.Tensor],
@@ -270,7 +275,8 @@ class DiffusersTrainer(Trainer):
             max_size_bytes: int,
             max_retries: int = 3,
         ):
-            path = os.path.join(output_dir, rel_path)
+            destination = os.path.join(output_dir, rel_path)
+            path = staged_export_path(destination)
             # Save the weights to local
             if is_lora:
                 # Save lora weight
@@ -337,6 +343,8 @@ class DiffusersTrainer(Trainer):
                         f"[Policy] Exported full pipeline to {save_pipeline_path}"
                     )
 
+            path = publish_export_directory(path, destination)
+
             # Upload the weights to huggingface
             if config.train.ckpt.upload_hf and is_final:
                 username = whoami()["name"]
@@ -402,9 +410,8 @@ class DiffusersTrainer(Trainer):
 
         if self.global_rank == 0:
             # If the upload thread is already running, wait for it to finish
-            if self.upload_thread is not None:
-                self.upload_thread.join()
-            self.upload_thread = threading.Thread(
+            finish_model_export(self)
+            self.upload_thread = ModelExportThread(
                 target=save_and_upload_handler,
                 args=(
                     output_dir,

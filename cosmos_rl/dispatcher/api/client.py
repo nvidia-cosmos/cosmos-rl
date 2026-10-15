@@ -235,28 +235,25 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to unregister from controller: {e}")
 
-    def post_heartbeat(self, replica_name: str):
-        # Per-attempt timeout matters here too: the heartbeat daemon
-        # blocks shutdown_signal polling while inside ``requests.post``,
-        # so an unresponsive controller would keep the heartbeat
-        # process alive (and ``heartbeat_thread.join()`` hung) for the
-        # full configurable retry chain.  10s is generous relative to a
-        # healthy controller round-trip while still ensuring the daemon
-        # checks shutdown_signal at most every ~10s.
-        try:
-            make_request_with_retry(
-                partial(
-                    requests.post,
+    def post_heartbeat(self, replica_name: str, should_stop=None):
+        # The periodic heartbeat loop is already the retry mechanism. Do not
+        # enter the operational request backoff chain: it can refresh liveness
+        # after the shutdown grace expires (e.g. a processed but lost reply).
+        # Try each controller address once and recheck liveness before every
+        # attempt. An already-issued request keeps its bounded HTTP timeout.
+        for url in self.get_alternative_urls(COSMOS_API_HEARTBEAT_SUFFIX):
+            if should_stop is not None and should_stop():
+                return
+            try:
+                response = requests.post(
+                    url,
                     json={"replica_name": replica_name},
-                    # Bounded so a stuck heartbeat post cannot block the heartbeat
-                    # process indefinitely (which would also wedge its join()).
                     timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT,
-                ),
-                self.get_alternative_urls(COSMOS_API_HEARTBEAT_SUFFIX),
-                max_retries=self.max_retries,
-            )
-        except Exception as e:
-            logger.error(f"Failed to send heartbeat to controller: {e}")
+                )
+                response.raise_for_status()
+                return
+            except Exception as e:
+                logger.warning(f"Failed to send heartbeat to controller {url}: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         try:

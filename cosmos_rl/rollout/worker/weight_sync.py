@@ -412,7 +412,6 @@ def process_wst_deferred_actions(worker) -> None:
         if worker.validation_flag.is_set():
             worker.do_validation()
         worker.shutdown_signal.set()
-        worker.shutdown_mp_signal.set()
 
 
 # ---------------------------------------------------------------------------

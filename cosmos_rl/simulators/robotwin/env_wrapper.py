@@ -67,6 +67,7 @@ class RoboTwinEnvWrapper(gym.Env):
 
         # Initialize environment states
         self.env_states = [EnvStates(env_idx=i) for i in range(self.num_envs)]
+        self._pending_reset_obs = {}
 
         self._init_env()
 
@@ -143,7 +144,7 @@ class RoboTwinEnvWrapper(gym.Env):
             trial_ids: List of trial/seed IDs
 
         Returns:
-            List of task descriptions/instructions
+            Tuple of initial observations and task descriptions/instructions
         """
         # Reset environments with Libero-style interface
         obs_list = self.env.reset(
@@ -166,7 +167,7 @@ class RoboTwinEnvWrapper(gym.Env):
             )
             task_descriptions.append(instruction)
 
-        return task_descriptions
+        return obs_list, task_descriptions
 
     def reset(
         self,
@@ -197,10 +198,10 @@ class RoboTwinEnvWrapper(gym.Env):
             do_validation = [do_validation] * len(env_ids)
 
         # Setup tasks (this also resets and gets initial observations)
-        task_descriptions = self._setup_task(env_ids, task_ids, trial_ids)
+        obs_list, task_descriptions = self._setup_task(env_ids, task_ids, trial_ids)
 
-        # Get initial observations again for proper formatting
-        obs_list = self.env.get_obs(env_ids)
+        # Rendering can advance domain randomization. Use the observation
+        # produced by reset instead of taking a second, different observation.
         images_and_states = self._extract_image_and_state(obs_list)
 
         # Setup validation tracking and store initial observations
@@ -262,7 +263,8 @@ class RoboTwinEnvWrapper(gym.Env):
                 }
 
         # Setup tasks and get descriptions
-        task_descriptions = self._setup_task(env_ids, task_ids, trial_ids)
+        obs_list, task_descriptions = self._setup_task(env_ids, task_ids, trial_ids)
+        self._pending_reset_obs.update(zip(env_ids, obs_list))
 
         # Store descriptions in env states
         for i, env_id in enumerate(env_ids):
@@ -277,8 +279,8 @@ class RoboTwinEnvWrapper(gym.Env):
         Returns:
             Tuple of (observations_dict, task_descriptions)
         """
-        # Get observations after reset
-        obs_list = self.env.get_obs(env_ids)
+        # Preserve the exact observations produced by reset_async.
+        obs_list = [self._pending_reset_obs.pop(env_id) for env_id in env_ids]
         images_and_states = self._extract_image_and_state(obs_list)
 
         # Update environment states

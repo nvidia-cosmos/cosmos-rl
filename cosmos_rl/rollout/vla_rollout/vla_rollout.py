@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import hashlib
+import json
 import time
 from types import SimpleNamespace
 import torch
@@ -135,6 +137,13 @@ class OpenVLARollout(RolloutBase):
         self.num_envs = config.vla.num_envs
 
         self.obs_keys = ["full_images", "wrist_images", "states"]
+
+    def shutdown(self):
+        """Reap simulator children before Python joins them at process exit."""
+        manager = getattr(self, "env_manager", None)
+        if manager is not None:
+            manager.stop_simulator(preserve_state=False)
+            self.env_manager = None
 
     def post_init_hook(self, **kwargs):
         self._model_param_map = None  # Required by RolloutBase.model_param_map()
@@ -481,6 +490,7 @@ class OpenVLARollout(RolloutBase):
                     is_valid=is_validation,
                     temperature=self.config.rollout.sampling_config.temperature,
                     unnorm_key=self.config.vla.unnorm_key,
+                    simulator_type=get_simulator_type(self.config),
                 )
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
@@ -574,6 +584,35 @@ class OpenVLARollout(RolloutBase):
                 payload_idx = i * n_generation + j
                 if task_records[payload_idx]["complete"]:
                     successes[i] += 1
+        if os.getenv("COSMOS_VLA_AUDIT") == "1" and not is_validation:
+            for group in range(n_payloads):
+                fingerprints = []
+                for index in range(group * n_generation, (group + 1) * n_generation):
+                    record = task_records[index]
+                    parts = {}
+                    for key in ("input_ids", "pixel_values", "proprio"):
+                        if key not in record or not record[key]:
+                            continue
+                        first = record[key][0]
+                        if key == "input_ids":
+                            first = first[record["attention_mask"][0].bool()]
+                        parts[key] = hashlib.sha256(
+                            first.detach().float().cpu().contiguous().numpy().tobytes()
+                        ).hexdigest()
+                    fingerprints.append(parts)
+                logger.info(
+                    "VLA_GROUP_AUDIT "
+                    + json.dumps(
+                        {
+                            "trial": task_records[group * n_generation]["trial_id"],
+                            "fingerprints": fingerprints,
+                            "identical_initial_conditioning": all(
+                                item == fingerprints[0] for item in fingerprints
+                            ),
+                        }
+                    )
+                )
+
         success_rates = [successes[i] / n_generation for i in range(n_payloads)]
         avg_success_rate = sum(success_rates) / n_payloads * 100
 

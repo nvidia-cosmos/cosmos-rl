@@ -23,6 +23,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.resume import NoCheckpointFound
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
@@ -106,9 +107,11 @@ class DPOTrainer(LLMTrainer):
                     ckpt_extra_vars = self.model_resume_from_checkpoint()
                     ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
                     train_step = ckpt_extra_vars.get("step", 0)
-                except Exception as e:
-                    logger.error(
-                        f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                except NoCheckpointFound:
+                    if isinstance(self.config.train.resume, str):
+                        raise
+                    logger.info(
+                        "No committed checkpoint found; starting from HuggingFace."
                     )
                     self.lr_schedulers = None
                     self.build_optimizers()

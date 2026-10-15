@@ -28,6 +28,7 @@ from cosmos_rl.utils.model_config import load_model_config
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.dist_signal_handler import DistributedSignalHandler
+from cosmos_rl.utils.model_export import finish_checkpoint_writes
 
 
 class PolicyWorkerBase(WorkerBase, CommMixin):
@@ -182,15 +183,14 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             traceback.print_exc()
             raise e
         finally:
-            # Ensure any async checkpoint uploads are flushed before exit.
-            ckpt_manager = getattr(self.trainer, "ckpt_manager", None)
-            if ckpt_manager is not None and hasattr(ckpt_manager, "finalize"):
+            # Export ownership lives on the trainer, also on the error path.
+            try:
+                finish_checkpoint_writes(self.trainer)
+            finally:
                 try:
-                    ckpt_manager.finalize()
-                except Exception as e:
-                    logger.error(f"Failed to finalize checkpoint manager: {e}")
-            self.close_payload_transports()
-            self.destroy_worker()
+                    self.close_payload_transports()
+                finally:
+                    self.destroy_worker()
 
     def handle_shutdown(self):
         pass

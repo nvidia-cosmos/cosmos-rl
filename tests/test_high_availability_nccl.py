@@ -24,6 +24,7 @@ import subprocess
 import torch.distributed as dist
 import threading
 import atexit
+import signal
 from queue import Queue, Empty
 
 from cosmos_rl.utils.logging import logger
@@ -40,6 +41,7 @@ from cosmos_rl.utils.distributed import cosmos_device_type
 
 WORK_DIR = f"/tmp/{os.path.basename(__file__)}"
 CTRL_PORT = 8010
+_controller_processes = []
 
 
 os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{CTRL_PORT}"
@@ -72,7 +74,7 @@ def write_train_config():
 redis = "12808"
 
 [train]
-resume = "False"
+resume = false
 epoch = 1
 output_dir = "{WORK_DIR}"
 
@@ -117,15 +119,21 @@ def launch_controller(config: str):
     env = os.environ.copy()
     env["COSMOS_ROLE"] = "Controller"
     p = subprocess.Popen(
-        "python -m cosmos_rl.dispatcher.run_web_panel "
-        f"--port {CTRL_PORT} --config {config}",
-        shell=True,
+        [
+            sys.executable,
+            "-m",
+            "cosmos_rl.dispatcher.run_web_panel",
+            "--port",
+            str(CTRL_PORT),
+            "--config",
+            config,
+        ],
         stdout=sys.stdout,
         stderr=sys.stderr,
         text=True,
         env=env,
     )
-
+    _controller_processes.append(p)
     return [p]
 
 
@@ -375,18 +383,16 @@ class TestHANccl(CommMixin):
 
 
 def cleanup():
-    """
-    Cleanup function to kill all processes.
-    """
-    # try kill created processes
-    login_user = "root"
-    try:
-        login_user = os.getlogin()
-    except Exception:
-        pass
-    subprocess.run(f"pkill -u {login_user} -f 'redis'", shell=True)
-    subprocess.run(f"pkill -u {login_user} -f 'dispatcher.run_web_panel'", shell=True)
-    # subprocess.run(f"pkill -u {login_user} -f 'torchrun'", shell=True)
+    """Stop only controllers launched by this rank, allowing owned Redis cleanup."""
+    for process in _controller_processes:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    _controller_processes.clear()
 
 
 atexit.register(cleanup)
@@ -426,8 +432,7 @@ def main():
     dist.barrier()
 
     # finally, wait for all ranks to finish the test
-    for hdl in ctrl_hdl:
-        hdl.kill()
+    cleanup()
     dist.destroy_process_group()
 
 
