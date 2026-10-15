@@ -152,14 +152,17 @@ class TestTeacherModel(unittest.TestCase):
         uuids = redis_controller.publish_teacher_request(data, "test_client")
         for uuid in uuids:
             teacher_result = msgpack.unpackb(redis_controller.get_teacher_result(uuid))
+            redis_controller.acknowledge_teacher_result(uuid)
             assert len(teacher_result["teacher_logprobs"]) + 1 == len(
                 tokenizer_prompt
             ) + len(tokenizer_reference_answer), (
                 f"Teacher logprobs + 1 must be the same length as the prompt and reference answer, got {len(teacher_result['teacher_logprobs'])} != {len(tokenizer_prompt) + len(tokenizer_reference_answer)}"
             )
 
-        data["is_end"] = True
-        redis_controller.publish_teacher_request(data, "test_client")
+        redis_controller.publish_teacher_request(
+            {"is_end": True, "prompt_idx": -1, "completion_token_ids": []},
+            "test_client",
+        )
         wait_all_or_fail(
             self,
             processes,

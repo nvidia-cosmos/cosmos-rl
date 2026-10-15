@@ -18,6 +18,7 @@ import math
 import os
 import time
 import threading
+from contextlib import contextmanager
 from collections import defaultdict
 from queue import Queue, Empty
 from datetime import timedelta
@@ -562,7 +563,8 @@ class HighAvailabilitylNccl:
         self.replica_name_to_rank: Dict[str, int] = {}
 
         # For background thread
-        self.build_mesh_lock = threading.Lock()
+        self.build_mesh_lock = threading.RLock()
+        self._operation_depth = 0
         self.shutdown_event = threading.Event()
         self.is_single_peer = threading.Event()
         self.is_single_peer.clear()
@@ -748,6 +750,13 @@ class HighAvailabilitylNccl:
                 # mark the communicator is not ready
                 self.is_comm_ready.clear()
 
+                if getattr(self, "_operation_depth", 0):
+                    # A sealed training decision cannot be replayed on a new
+                    # membership. The caller must fail, not restart half an update.
+                    raise RuntimeError(
+                        "Collective failed inside a sealed update"
+                    ) from e
+
                 # report the error to the controller
                 # the communicator will destroy before buildmesh
                 try:
@@ -769,6 +778,19 @@ class HighAvailabilitylNccl:
 
     def destroy_nccl_comm(self):
         self.cmd_queue.put(self.DESTROY_CMD)
+
+    @contextmanager
+    def operation_scope(self):
+        """Pin membership from the update's readiness vote through completion."""
+        self.wait_comm_ready()
+        with self.build_mesh_lock:
+            if not self.is_comm_ready.is_set():
+                raise RuntimeError("Collective mesh changed before operation entry")
+            self._operation_depth += 1
+            try:
+                yield
+            finally:
+                self._operation_depth -= 1
 
     def push_cmd(self, cmd: BuildMeshCommand):
         self.cmd_queue.put(cmd)

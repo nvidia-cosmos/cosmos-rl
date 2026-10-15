@@ -239,6 +239,8 @@ run python tests/test_policy_variant.py
 run python tests/test_deepep.py
 run python tests/test_colocated.py
 run python tests/test_teacher_model.py
+run python -m pytest -q tests/test_teacher_channel.py
+run python -m pytest -q tests/test_teacher_update.py
 run /bin/bash -c "torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py"
 run python tests/test_vllm_rollout_async.py
 run python tests/test_custom_args.py
