@@ -30,6 +30,8 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -82,7 +84,21 @@ from cosmos_rl.utils.payload_transport.receive_memory import (
     storage_bytes,
 )
 from cosmos_rl.utils.trace import get_trace_time
-from cosmos_rl.utils.transport_failure import TransportUnusableError
+from cosmos_rl.utils.transport_failure import TransportUnusableError, TransportDeadline
+
+
+@dataclass
+class _PreparedReceive:
+    comm_idx: int
+    buffer: torch.Tensor
+    operation: TransportDeadline
+    response_key: Optional[str]
+
+    def __iter__(self):
+        return iter((self.comm_idx, self.buffer))
+
+    def __getitem__(self, index):
+        return (self.comm_idx, self.buffer)[index]
 
 
 _LOG_INTERVAL = 50
@@ -257,7 +273,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             self._receive_budget.close()
         if self._comm_cache is not None:
             try:
-                self._comm_cache.abort_all()
+                self._comm_cache.close()
             except Exception as e:  # pragma: no cover - teardown best-effort
                 logger.warning("[NCCLTransportStrategy] comm abort failed: %s", e)
 
@@ -345,11 +361,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
     def sync_fetch(self, rollout_output: Any) -> Optional[Dict[str, torch.Tensor]]:
         """Blocking single-episode NCCL fetch (cache-miss fallback).
 
-        Returns ``None`` on any failure rather than propagating: the base
-        mixin calls this on the cache-miss path inside ``get_policy_input``
-        without its own containment, so a raised rendezvous/recv error would
-        crash the training step instead of degrading to the packer's fallback.
-        Mirrors the UCXX consumer's sync-fallback contract.
+        Missing/rejected data may fall back. Terminal native failure must retain
+        its meaning in both synchronous and prefetched execution.
         """
         if self._receive_budget is not None:
             raise ReceiveMemoryError(
@@ -364,6 +377,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             if ref is None or not _has_schema(ref):
                 return None
             results, _, _ = self._fetch_all([(0, ref)])
+        except TransportUnusableError:
+            raise
         except Exception as e:
             logger.warning("[NCCLTransportStrategy] Sync fallback failed: %s", e)
             return None
@@ -574,6 +589,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         native_pending = False
         retain_pins = False
         stream = None
+        operations = []
         # Pins taken during phase 1 must be released on EVERY exit path,
         # including the early returns and any raise below.
         try:
@@ -650,6 +666,13 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                     if prepared is None:
                         continue
                     comm_idx, recv_buf = prepared
+                    operation = getattr(prepared, "operation", None)
+                    if operation is None:
+                        operation = TransportDeadline(
+                            recv_timeout_ms / 1000, "NCCL receive"
+                        )
+                    response_key = getattr(prepared, "response_key", None)
+                    operations.append((operation, response_key, None))
                     # Record the pin BEFORE attempting the recv so the finally
                     # below unpins this comm even if the enqueue raises.
                     recvs.append((idx, ref, comm_idx, recv_buf))
@@ -664,30 +687,13 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                             SENDER_LOCAL_RANK,  # peer in the 2-rank comm is the sender
                             comm_idx,
                             stream=stream,
-                            timeout_ms=recv_timeout_ms,
+                            timeout_ms=operation.remaining_ms(),
                         )
                     except Exception as exc:
-                        if self._receive_budget is not None:
-                            raise TransportUnusableError(
-                                "Bounded NCCL receive enqueue failed; native "
-                                "completion is unknown"
-                            ) from exc
-                        logger.warning(
-                            "[NCCLTransportStrategy] recv failed for %s: %s",
-                            ref["transfer_id"],
-                            exc,
-                        )
-                        # Isolate the failure to this pair (quarantine only if
-                        # warm) BEFORE the resync, which clears the warm marker
-                        # quarantine keys off.  Then resync unconditionally: the
-                        # sender ACCEPTED this transfer, so its send is coming
-                        # and we have no recv to take it -- left cached, this
-                        # pair's next recv would take that orphaned send.
-                        self._quarantine_recv_failures(
-                            [(idx, ref, comm_idx, recv_buf)], cache
-                        )
-                        self._resync_pair(cache, ref, reason="recv enqueue failed")
-                        continue
+                        raise TransportUnusableError(
+                            "NCCL receive enqueue failed; native completion unknown"
+                        ) from exc
+                    operations[-1] = (operation, response_key, record_event(stream))
                     posted.append((idx, ref, comm_idx, recv_buf))
 
                 if not posted:
@@ -696,41 +702,16 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 # Recv-complete event gates downstream training consumption.
                 done = record_event(stream)
 
+            for operation, response_key, event in operations:
+                operation.wait_event(
+                    event,
+                    check_peer=(
+                        (lambda key=response_key: rv.check_failure(key))
+                        if response_key
+                        else None
+                    ),
+                )
             wait_event(None, done)  # current (compute) stream waits before reads
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.current_stream().synchronize()
-                except Exception as exc:
-                    if self._receive_budget is not None:
-                        raise TransportUnusableError(
-                            "Bounded NCCL receive completion is unknown"
-                        ) from exc
-                    # A recv that ENQUEUED cleanly but whose peer never sent (dead /
-                    # hung producer) surfaces HERE at completion, not at the enqueue
-                    # try/except above.  Do NOT let it propagate: an uncaught raise
-                    # unwinds _fetch_all -> the prefetch worker marks the WHOLE batch
-                    # failed -> wait_prefetch wipes the cache -> every episode drops to
-                    # fallback AND the offending pair is never quarantined (quarantine
-                    # is only reachable from the enqueue path).  A single stream sync
-                    # can't attribute the failure to one recv, so conservatively
-                    # quarantine every posted (warm) pair and drop just this batch to
-                    # fallback; the dead pair(s) now cool down instead of re-storming.
-                    logger.warning(
-                        "[NCCLTransportStrategy] recv completion sync failed "
-                        "(%d posted pairs): %s; quarantining posted pairs",
-                        len(posted),
-                        exc,
-                    )
-                    self._quarantine_recv_failures(posted, cache)
-                    # A recv that never completed leaves its sender's send
-                    # outstanding, so every posted pair may now be off by one.
-                    # Resync them ALL (not just the warm ones quarantine covers)
-                    # before any later transfer can be taken by an orphaned recv.
-                    for _idx, ref, _comm_idx, _buf in posted:
-                        self._resync_pair(
-                            cache, ref, reason="recv completion sync failed"
-                        )
-                    return {}, 0, get_trace_time() - t0
 
             native_pending = False
 
@@ -747,18 +728,12 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             # pair (recv enqueue failure, recv-buffer alloc failure, quarantine
             # from any path).  Anything that no longer maps to the comm_idx we
             # posted on is dead.
-            live: List[Tuple[Any, dict, int, torch.Tensor]] = []
             for entry in posted:
-                if cache.get(_pair_key(entry[1], receiver_rank)) == entry[2]:
-                    live.append(entry)
-                else:
-                    logger.warning(
-                        "[NCCLTransportStrategy] dropping %s: its pair's comm was "
-                        "aborted after the recv was posted, so the buffer was "
-                        "never written (not a desync)",
-                        entry[1]["transfer_id"],
+                if cache.get(_pair_key(entry[1], receiver_rank)) != entry[2]:
+                    raise TransportUnusableError(
+                        "Accepted receive communicator was invalidated: "
+                        + entry[1]["transfer_id"]
                     )
-            posted = live
 
             for idx, ref, _comm_idx, recv_buf in posted:
                 try:
@@ -769,38 +744,30 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                             recv_buf, ref, device, on_allocate=self._decode_account
                         )
                 except PayloadHeaderMismatch as exc:
-                    if self._receive_budget is not None:
-                        # Completed bytes with the wrong identity do not prove
-                        # the accepted stream is reusable. Keep this terminal,
-                        # consistent with the accepted-operation contract.
-                        raise TransportUnusableError(
-                            f"Accepted payload identity mismatch: {exc}"
-                        ) from exc
-                    # The bytes we got belong to some OTHER transfer: this pair's
-                    # send/recv stream is out of step.  Everything still queued on
-                    # it is wrong too, so drop this episode to fallback and tear
-                    # the comm down rather than unpack a foreign payload.
-                    logger.error(
-                        "[NCCLTransportStrategy] %s; dropping the episode and "
-                        "resyncing the pair",
-                        exc,
-                    )
-                    self._resync_pair(cache, ref, reason="payload header mismatch")
-                    continue
+                    # Completion alone does not make an incorrectly paired
+                    # stream reusable. Rebuilding one half cannot prove that
+                    # queued peer work is settled; never replay as a cache miss.
+                    raise TransportUnusableError(
+                        f"Accepted payload identity mismatch: {exc}"
+                    ) from exc
                 results[idx] = gpu_data
                 total_bytes += recv_buf.numel() * recv_buf.element_size()
                 # First successful transfer -> this pair is warm (tight timeouts +
                 # normal quarantine from here on).
                 warm.add(_pair_key(ref, receiver_rank))
 
+            decoded = record_event(None)
+            for operation, _key, _event in operations:
+                operation.wait_event(decoded)
             return results, total_bytes, get_trace_time() - t0
         except BaseException as exc:
-            if self._receive_budget is not None and native_pending:
+            if native_pending:
                 retain_pins = True
-                self._receive_budget.close()
+                if self._receive_budget is not None:
+                    self._receive_budget.close()
                 _FAILED_RECEIVE_OWNERS.append((recvs, cache, stream))
                 raise TransportUnusableError(
-                    "Bounded receive interrupted before native completion; "
+                    "Receive interrupted before native completion; "
                     "storage, communicator pins and reservation retained. "
                     "Restart the receiver."
                 ) from exc
@@ -811,42 +778,18 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             # synchronize above), so unpinning earlier would reopen the
             # mid-collective eviction window.
             receiver_rank = self._receiver_rank
+            for operation, response_key, _event in operations:
+                if native_pending and response_key:
+                    try:
+                        rv.respond(resp_key=response_key, status=TransferStatus.FAILED)
+                    except Exception:
+                        logger.exception("Failed to notify payload sender")
+                # Retained operands survive exception propagation. The caller
+                # must take the fatal path, not reuse this transport.
+                operation.close()
             if not retain_pins:
                 for _i, _ref, _c, _b in recvs:
                     cache.unpin(_pair_key(_ref, receiver_rank))
-
-    def _resync_pair(self, cache: Any, ref: dict, *, reason: str) -> None:
-        """Tear down a pair whose ordered send/recv stream may be out of step.
-
-        A cached 2-rank comm matches the k-th send to the k-th recv and carries
-        no tag to check that with, so ANY transfer that is accepted but not
-        completed end-to-end -- a recv we could not post, a recv that never
-        landed, a payload whose header names a different transfer -- shifts
-        every later transfer on that pair by one.  Aborting our half is the
-        resync: the pair leaves the cache, so the next request mints a fresh
-        unique-ID, the sender sees a UID it did not build with (or replies
-        NEED_UID), and both halves rebuild with empty queues.
-
-        Cheap and safe to over-apply: the cost is one comm rebuild, versus
-        silently decoding another episode's bytes.  Also demotes the pair to
-        "warming" so the rebuild gets the cold-start budget.
-        """
-        pair = _pair_key(ref, self._receiver_rank)
-        logger.warning(
-            "[NCCLTransportStrategy] resyncing pair %s (%s): aborting our comm "
-            "half so both sides rebuild",
-            pair,
-            reason,
-        )
-        try:
-            cache.abort(pair)
-        except Exception as exc:  # pragma: no cover - best-effort teardown
-            logger.debug(
-                "[NCCLTransportStrategy] abort %s raised %s; continuing",
-                pair,
-                type(exc).__name__,
-            )
-        self._warm_pairs.discard(pair)
 
     def _quarantine_endpoint(self, cache: Any, health_key: Any, pair: Any) -> None:
         """Quarantine a warm endpoint AND demote its pair back to 'warming'.
@@ -939,8 +882,17 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 timeout=timeout,
                 attempt=attempt,
             )
-            if result.status is TransferStatus.ACCEPTED:
+            if result.accepted:
+                remaining = (
+                    result.deadline - time.monotonic()
+                    if result.deadline is not None
+                    else timeout
+                )
+                operation = TransportDeadline(remaining, f"receive {transfer_id}")
+                comm_idx = None
                 try:
+                    if result.response_key:
+                        rv.watch_operation(result.response_key, operation)
                     # PIN the comm: the caller holds this comm_idx until its
                     # recv completes, so an unpinned entry could be evicted +
                     # aborted mid-collective by a concurrent build for another
@@ -950,47 +902,32 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         uid_chars=result.uid_chars or [],
                         local_rank=RECEIVER_LOCAL_RANK,
                         pin=True,
+                        deadline=operation,
                     )
-                except Exception as e:
-                    logger.warning(
-                        "[NCCLTransportStrategy] comm build failed for %s: %s%s",
-                        transfer_id,
-                        e,
-                        "; retry next round (warming)" if warming else "; quarantining",
-                    )
-                    if not warming:
-                        self._quarantine_endpoint(cache, health_key, pair)
-                    return None
-                try:
                     recv_buf = _alloc_recv_buffer(ref["schema"], self._device)
                     if self._receive_budget is not None:
                         self._receive_budget.attribute(
                             raw=recv_buf.untyped_storage().nbytes()
                         )
-                except Exception as e:
+                except BaseException as e:
                     # Never returned to the caller -> nothing will unpin it here.
-                    cache.unpin(pair)
-                    # We are past ACCEPTED: the sender is going to send this
-                    # payload and we have no buffer to receive it into.  Resync
-                    # the pair rather than raise -- raising would fail the whole
-                    # batch AND leave the orphaned send to be taken by the next
-                    # transfer's recv.
-                    logger.warning(
-                        "[NCCLTransportStrategy] recv buffer alloc failed for %s: %s",
-                        transfer_id,
-                        e,
-                    )
-                    self._resync_pair(cache, ref, reason="recv buffer alloc failed")
-                    if self._receive_budget is not None:
-                        logger.error(
-                            "NCCL allocation context: transfer=%s schema=%s budget=%s",
-                            transfer_id,
-                            ref["schema"],
-                            self.receive_memory_stats(),
-                        )
-                        raise
-                    return None
-                return comm_idx, recv_buf
+                    if comm_idx is not None:
+                        cache.unpin(pair)
+                    if result.response_key:
+                        try:
+                            rv.respond(
+                                resp_key=result.response_key,
+                                status=TransferStatus.FAILED,
+                            )
+                        except Exception:
+                            logger.exception("Failed to notify accepted sender")
+                    operation.close()
+                    raise TransportUnusableError(
+                        f"Accepted transfer {transfer_id} could not prepare its receive"
+                    ) from e
+                return _PreparedReceive(
+                    comm_idx, recv_buf, operation, result.response_key
+                )
             if result.status is TransferStatus.MISSING:
                 # Producer recycled the buffer — non-retryable, drop now.
                 logger.debug(
@@ -1012,15 +949,11 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 continue
             # CANCELLED (timeout).
             if result.late_accept:
-                # The sender's ACCEPTED arrived after we stopped waiting: it
-                # believes it owes us a send that no recv will take.  Abort the
-                # pair so that send dies with the old comm instead of being
-                # matched to the next transfer's recv.  Retrying on this attempt
-                # would just race the same orphaned send.
-                self._resync_pair(
-                    cache, ref, reason="sender accepted after our deadline"
+                # The sender may owe an unmatched send. A local abort is not
+                # proof that peer work is settled; do not retry this attempt.
+                raise TransportUnusableError(
+                    "Sender accepted after the receiver deadline"
                 )
-                return None
             if attempt == self._max_attempts:
                 if not warming:
                     # A WARM pair (has transferred before) that stops
@@ -1185,8 +1118,8 @@ def _verify_and_unpack(
 
     Raises:
         PayloadHeaderMismatch: if the buffer does not belong to ``ref``.  The
-            caller must resync the pair -- once the stream is off by one every
-            subsequent transfer on it is wrong too.
+            caller must terminate the transport -- once the stream is off by one
+            subsequent transfers cannot be trusted.
     """
     schema = ref.get("schema")
     if schema is None:

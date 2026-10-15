@@ -22,10 +22,13 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.transport_failure import TransportDeadline, fail_transport
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
+    nccl_abort,
+    nccl_comm_is_registered,
     nccl_send,
     nccl_recv,
 )
@@ -33,8 +36,6 @@ from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils import network_util as net
 from cosmos_rl.utils.ipc.tensor_util import tensor_ipc_serialize, tensor_ipc_deserialize
-
-import cosmos_rl.utils.distributed as dist_util
 
 
 class P2RCollectiveManager:
@@ -77,51 +78,69 @@ class P2RCollectiveManager:
         # ipc socket cache
         self.ipc_comm_cache = {}
 
+    def _wait_transfer_ready(self, command, *, needs_build):
+        source = self.role != Role.ROLLOUT
+        expected_name = command.src_replica_name if source else command.dst_replica_name
+        expected_size = command.src_replica_size if source else command.dst_replica_size
+        if self.replica_name != expected_name or self.world_size != expected_size:
+            raise ValueError(
+                "P2R command does not match this replica's identity/topology"
+            )
+        # Every rank declares readiness from the actual transfer entrypoint, not
+        # when rank zero merely receives/queues the command. Source rank zero's
+        # candidate UID is shared if ANY participant needs a fresh communicator.
+        return self.api_client.wait_p2r_ready(
+            {
+                "operation_id": command.uuid_value,
+                "src": command.src_replica_name,
+                "dst": command.dst_replica_name,
+                "src_size": command.src_replica_size,
+                "dst_size": command.dst_replica_size,
+                "side": "source" if source else "receiver",
+                "rank": self.global_rank,
+                "expires_at": command.ready_deadline,
+                "needs_build": needs_build,
+                "uid": create_nccl_uid() if source and self.global_rank == 0 else None,
+            }
+        )
+
+    def _create_nccl_comm(self, uid, rank, size):
+        operation = TransportDeadline(
+            constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS / 1000,
+            "P2R native communicator initialization",
+        )
+        try:
+            return create_nccl_comm(
+                uid, rank, size, timeout_ms=operation.remaining_ms()
+            )
+        except BaseException as error:
+            # No reusable native generation is established after partial init.
+            fail_transport(
+                f"P2R initialization failed: {type(error).__name__}: {error}"
+            )
+        finally:
+            operation.close()
+
     def _setup_inter_replica_communicators(
         self, command: PolicyToRolloutUnicastCommand
     ):
         # init replica to replica communicators
         mesh_key = self.generate_mesh_key(command)
-        nccl_unique_id = None
-        if self.role != Role.ROLLOUT:
-            # policy initialization
-            assert command.src_replica_size == self.world_size, (
-                "The source replica size should be the same as the world size."
-            )
-            if not command.src_replica_name == self.replica_name:
-                raise RuntimeError(
-                    f"[Policy] Replica {self.replica_name} doesn't match command source: {command.src_replica_name}"
-                )
-            # create the communication group ID
-            if mesh_key not in self.unique_ids_cache:
-                if self.global_rank == 0:
-                    nccl_unique_id = create_nccl_uid()
-                    logger.debug(
-                        f"[Policy] Created nccl group id for {mesh_key} in {self.role} side."
-                    )
-                    self.api_client.post_nccl_comm_initiator(mesh_key, nccl_unique_id)
-
-                # broadcast the nccl group id to all ranks
-                nccl_unique_id = dist_util.broadcast_object_cpu(nccl_unique_id)
-                self.unique_ids_cache[mesh_key] = nccl_unique_id
-            else:
-                nccl_unique_id = self.unique_ids_cache[mesh_key]
-        else:
-            # rollout initialization
-            if command.dst_replica_name != self.replica_name:
-                raise RuntimeError(
-                    f"[Rollout] Replica {self.replica_name} doesn't match command destionation: {command.dst_replica_name}"
-                )
-            if mesh_key not in self.unique_ids_cache:
-                # query the nccl group id from controller
-                nccl_unique_id = self.api_client.post_nccl_comm_acceptor(mesh_key)
-                if nccl_unique_id is None:
-                    raise RuntimeError(
-                        f"[Rollout] Failed to query nccl group_id from controller for {mesh_key}"
-                    )
-                self.unique_ids_cache[mesh_key] = nccl_unique_id
-            else:
-                nccl_unique_id = self.unique_ids_cache[mesh_key]
+        cached = self.nccl_comm_cache.get(mesh_key)
+        # A prior abort removes the native handle but may leave this manager's
+        # index cached. Advertise that miss through the existing all-rank
+        # readiness agreement, so both sides rebuild with one fresh shared UID.
+        # Never silently rebuild only the side that observed the abort.
+        ready = self._wait_transfer_ready(
+            command,
+            needs_build=cached is None or not nccl_comm_is_registered(cached),
+        )
+        if ready["build"]:
+            previous = self.nccl_comm_cache.pop(mesh_key, None)
+            self.unique_ids_cache[mesh_key] = ready["uid"]
+            if previous is not None:
+                nccl_abort(previous)
+        nccl_unique_id = self.unique_ids_cache.get(mesh_key)
 
         if self.role == Role.ROLLOUT:
             group_size = self.world_size + command.src_replica_size
@@ -134,11 +153,10 @@ class P2RCollectiveManager:
             # Multi-party collective sized from the command, so a participant
             # that dies before reaching its own call blocks the rest. An unset
             # budget resolves to the 10-minute COSMOS_NCCL_TIMEOUT_MS.
-            nccl_comm_index = create_nccl_comm(
+            nccl_comm_index = self._create_nccl_comm(
                 nccl_unique_id,
                 rank_in_group,
                 group_size,
-                timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
             )
             self.nccl_comm_cache[mesh_key] = nccl_comm_index
             logger.info(
@@ -146,6 +164,7 @@ class P2RCollectiveManager:
             )
 
     def _setup_p2p_communicators(self, command: PolicyToRolloutUnicastCommand):
+        self._wait_transfer_ready(command, needs_build=False)
         # init p2p communicators, in colocated separated mode, policy and rollout shares the same devices.
         if self.role != Role.ROLLOUT:
             if command.src_replica_name != self.replica_name:
@@ -170,11 +189,10 @@ class P2RCollectiveManager:
 
                     # create communicator for each non-same device pair
                     if mesh_key not in self.nccl_comm_cache:
-                        nccl_comm_index = create_nccl_comm(
-                            p2p_unique_id,
+                        nccl_comm_index = self._create_nccl_comm(
+                            self.unique_ids_cache[mesh_key],
                             0,  # policy rank is always 0
                             2,  # group size of two devices is always 2
-                            timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
                         )
                         self.nccl_comm_cache[mesh_key] = nccl_comm_index
                         logger.debug(
@@ -205,11 +223,10 @@ class P2RCollectiveManager:
                         nccl_unique_id = self.unique_ids_cache[mesh_key]
 
                     if mesh_key not in self.nccl_comm_cache:
-                        nccl_comm_index = create_nccl_comm(
+                        nccl_comm_index = self._create_nccl_comm(
                             nccl_unique_id,
                             1,  # rollout rank is always 1
                             2,  # group size of two devices is always 2
-                            timeout_ms=constant.COSMOS_ROLLOUT_MESH_BUILD_TIMEOUT_MS,
                         )
                         self.nccl_comm_cache[mesh_key] = nccl_comm_index
                         logger.debug(

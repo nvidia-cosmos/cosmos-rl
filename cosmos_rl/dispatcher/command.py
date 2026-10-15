@@ -16,12 +16,14 @@
 from typing import Dict, List, Optional, Type, Callable
 import copy
 import uuid
+import time
 from abc import ABC
 from strenum import StrEnum
 import msgpack
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
+from cosmos_rl.utils.constant import COSMOS_P2R_READY_TIMEOUT_S
 
 
 class CommandType(StrEnum):
@@ -303,6 +305,7 @@ class PolicyToRolloutUnicastCommand(Command):
         trainable_only: bool = False,
         weight_step: Optional[int] = None,
         total_steps: Optional[int] = None,
+        ready_deadline: Optional[float] = None,
         **kwargs,
     ):
         kwargs["scope"] = CommandScope.LOCAL
@@ -317,6 +320,11 @@ class PolicyToRolloutUnicastCommand(Command):
         self.trainable_only = trainable_only
         self.weight_step = weight_step
         self.total_steps = total_steps
+        self.ready_deadline = (
+            time.time() + COSMOS_P2R_READY_TIMEOUT_S
+            if ready_deadline is None
+            else ready_deadline
+        )
 
     src_replica_name: str
     dst_replica_name: str

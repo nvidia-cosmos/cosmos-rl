@@ -30,6 +30,10 @@ import threading
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.background import BackgroundTask
 from cosmos_rl.utils.resume import ResumeMetadataMismatch
+from cosmos_rl.dispatcher.transfer_readiness import (
+    TransferReadiness,
+    TransferReadyRequest,
+)
 from typing import Dict, List, Optional, Callable, Union, Iterable
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.command import StopCommand
@@ -84,6 +88,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_UNREGISTER_SUFFIX,
     COSMOS_API_HEARTBEAT_SUFFIX,
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
+    COSMOS_API_P2R_READY_SUFFIX,
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
     COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX,
     COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
@@ -390,6 +395,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+transfer_readiness = TransferReadiness()
 
 
 @app.get(COSMOS_API_PANEL_SUFFIX)
@@ -673,6 +679,14 @@ async def comm_initiator(request: HandshakeInitiatorRequest):
 
     await controller.update_kv_store(request.unique_pair_name, request.handle_base64)
     return {"message": "Handshake initiator received"}
+
+
+@app.post(COSMOS_API_P2R_READY_SUFFIX)
+async def p2r_ready(request: TransferReadyRequest):
+    try:
+        return transfer_readiness.arrive(request)
+    except ValueError as error:
+        return JSONResponse(status_code=400, content={"error": str(error)})
 
 
 @app.post(COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX)
