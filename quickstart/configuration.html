@@ -5412,7 +5412,7 @@
 <td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="53"><ul class="simple">
+<tr class="row-odd"><td rowspan="59"><ul class="simple">
 <li><p>VLAConfig</p></li>
 </ul>
 </td>
@@ -5422,6 +5422,27 @@
 <td colspan="5"><p><em>object</em></p></td>
 </tr>
 <tr class="row-odd"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>objective_weighting</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Objective Weighting</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>Opt-in GRPO objective: equal action-chunk samples or nonempty episodes. Unset preserves each trainer’s existing loss normalization.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>enum</p></td>
+<td colspan="3"><p>sample, episode</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>vla_type</p></li>
