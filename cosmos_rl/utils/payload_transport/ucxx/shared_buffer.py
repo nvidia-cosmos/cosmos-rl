@@ -36,10 +36,10 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.trajectory import TensorSpec
+from cosmos_rl.utils.trajectory import TensorSpec, episode_length
+from cosmos_rl.utils.payload_transport.pack import normalize_trajectory
 
 
 class SlotError(Exception):
@@ -274,6 +274,12 @@ class SharedRingBuffer:
         Raises:
             SlotError: If buffer is full and overwrite_if_full=False.
         """
+        if self.schema:
+            # Validate/cast/pad before touching a slot (including an old READY
+            # payload). Share exactly the GPU producer's normalization rules.
+            data = normalize_trajectory(
+                data, self.schema, episode_length(data, self.schema), device="cpu"
+            )
         with self._lock:
             write_idx, read_idx, entry_count = self._read_header()
 
@@ -305,23 +311,27 @@ class SharedRingBuffer:
 
             data_offset = self._entry_data_offset(slot)
 
-            if self.schema:
-                # Fast path: write tensors directly
-                self._write_tensors(data, data_offset)
-                size = self.entry_data_size
-            else:
-                # Fallback: pickle (for backward compatibility)
-                import pickle
+            try:
+                if self.schema:
+                    self._write_tensors(data, data_offset)
+                    size = self.entry_data_size
+                else:
+                    import pickle
 
-                serialized = pickle.dumps(data)
-                size = len(serialized)
-                if size > self.entry_data_size:
-                    # Reset state on error
-                    self._write_entry_meta(slot, 0, SlotState.FREE)
-                    raise SlotError(
-                        f"Data size {size} exceeds entry size {self.entry_data_size}"
-                    )
-                self._shm.buf[data_offset : data_offset + size] = serialized
+                    serialized = pickle.dumps(data)
+                    size = len(serialized)
+                    if size > self.entry_data_size:
+                        raise SlotError(
+                            f"Data size {size} exceeds entry size {self.entry_data_size}"
+                        )
+                    self._shm.buf[data_offset : data_offset + size] = serialized
+            except BaseException:
+                # A partial copy cannot be published or restored as READY.
+                # Keep the write cursor so a later valid write can retry it.
+                self._write_entry_meta(slot, 0, SlotState.FREE)
+                if current_state == SlotState.READY:
+                    self._write_header(write_idx, read_idx, max(0, entry_count - 1))
+                raise
 
             # Transition to READY state
             self._write_entry_meta(slot, size, SlotState.READY)
@@ -378,7 +388,13 @@ class SharedRingBuffer:
             self._write_entry_meta(slot, 0, SlotState.WRITING)
 
             data_offset = self._entry_data_offset(slot)
-            self._shm.buf[data_offset : data_offset + self.entry_data_size] = buf
+            try:
+                self._shm.buf[data_offset : data_offset + self.entry_data_size] = buf
+            except BaseException:
+                self._write_entry_meta(slot, 0, SlotState.FREE)
+                if current_state == SlotState.READY:
+                    self._write_header(write_idx, read_idx, max(0, entry_count - 1))
+                raise
 
             self._write_entry_meta(slot, self.entry_data_size, SlotState.READY)
             new_count = min(entry_count + 1, self.max_entries)
@@ -387,41 +403,14 @@ class SharedRingBuffer:
             return slot
 
     def _write_tensors(self, data: Dict[str, Any], base_offset: int) -> None:
-        """Write tensors directly to shared memory (no serialization)."""
+        """Copy already-normalized CPU tensors; no independent packing policy."""
         for spec in self.schema:
-            if spec.name not in data:
-                raise SlotError(f"Missing tensor '{spec.name}' in data")
-
-            tensor = data[spec.name]
-
-            # Convert to numpy if needed
-            if isinstance(tensor, torch.Tensor):
-                arr = tensor.detach().cpu().numpy()
-            elif isinstance(tensor, np.ndarray):
-                arr = tensor
-            else:
-                # Scalar or other - convert to numpy
-                arr = np.array(tensor, dtype=spec.dtype)
-
-            # Ensure correct dtype and contiguous
-            if arr.dtype != spec.dtype:
-                arr = arr.astype(spec.dtype)
-            if not arr.flags["C_CONTIGUOUS"]:
-                arr = np.ascontiguousarray(arr)
-
-            # Create view into shared memory and copy directly (memcpy, no tobytes())
+            arr = data[spec.name].numpy()
             offset = base_offset + self._tensor_offsets[spec.name]
-
-            # Get destination as numpy array view
             dst = np.ndarray(
                 shape=spec.shape, dtype=spec.dtype, buffer=self._shm.buf, offset=offset
             )
-
-            # Reshape source to match destination
-            src = arr.reshape(spec.shape) if arr.shape != spec.shape else arr
-
-            # Direct memcpy via numpy (TRUE fast write)
-            np.copyto(dst, src)
+            np.copyto(dst, arr, casting="no")
 
     def is_ready(self, index: int) -> bool:
         """Check if an entry is ready to read."""

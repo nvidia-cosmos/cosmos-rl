@@ -11,6 +11,20 @@ from collections.abc import Iterable, Iterator, Sequence
 import torch
 
 
+def canonical_byte_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Canonical storage, preserving shape; flatten *before* viewing as bytes.
+
+    Contiguity ignores singleton strides. Resolve lazy view bits as well so
+    wire bytes represent logical values, not their underlying storage.
+    """
+    tensor = tensor.resolve_conj().resolve_neg()
+    if tensor.is_contiguous() and (tensor.ndim == 0 or tensor.stride(-1) == 1):
+        return tensor
+    canonical = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+    canonical.copy_(tensor)
+    return canonical
+
+
 def tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
@@ -55,7 +69,7 @@ def pack_tensors_into_buffer(
     for tensor in tensors:
         if not tensor.is_contiguous():
             raise ValueError("tensor packing requires contiguous tensors")
-        tensor_bytes = tensor.view(-1).view(torch.uint8)
+        tensor_bytes = canonical_byte_tensor(tensor).reshape(-1).view(torch.uint8)
         end = offset + tensor_bytes.numel()
         payload[offset:end].copy_(tensor_bytes)
         offset = end
@@ -73,7 +87,10 @@ def unpack_tensors_from_buffer(
     for tensor in tensors:
         if not tensor.is_contiguous():
             raise ValueError("tensor unpacking requires contiguous tensors")
-        tensor_bytes = tensor.view(-1).view(torch.uint8)
+        canonical = canonical_byte_tensor(tensor)
+        tensor_bytes = canonical.reshape(-1).view(torch.uint8)
         end = offset + tensor_bytes.numel()
         tensor_bytes.copy_(buffer[offset:end])
+        if canonical is not tensor:
+            tensor.copy_(canonical)
         offset = end

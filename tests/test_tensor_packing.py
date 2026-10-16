@@ -94,12 +94,17 @@ def test_production_r2r_packing_round_trips_and_reduces_collectives() -> None:
         "bf16": torch.arange(8, dtype=torch.bfloat16),
         "noncontiguous": torch.arange(6, dtype=torch.float32).reshape(2, 3).t(),
         "scalar": torch.tensor(17, dtype=torch.int64),
+        "singleton": torch.arange(8, dtype=torch.float32).reshape(1, 8)[:, 2],
     }
     destination_tensors = {
         name: torch.zeros_like(tensor) for name, tensor in source_tensors.items()
     }
+    singleton_backing = torch.full((1, 8), -1.0)
+    destination_tensors["singleton"] = singleton_backing[:, 5]
     source = _r2r_worker(0, source_tensors, pack=True)
     destination = _r2r_worker(1, destination_tensors, pack=True)
+    source.config.rollout.r2r_sync_bucket_size_bytes = 128
+    destination.config.rollout.r2r_sync_bucket_size_bytes = 128
     payloads: list[torch.Tensor] = []
     receiving = False
     receive_index = 0
@@ -125,6 +130,8 @@ def test_production_r2r_packing_round_trips_and_reduces_collectives() -> None:
     assert len(payloads) < len(source_tensors)
     for name, expected in source_tensors.items():
         torch.testing.assert_close(destination_tensors[name], expected, rtol=0, atol=0)
+    assert torch.all(singleton_backing[:, :5] == -1)
+    assert torch.all(singleton_backing[:, 6:] == -1)
 
 
 def test_r2r_packing_is_disabled_by_default() -> None:

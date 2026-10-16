@@ -198,6 +198,8 @@ run python tests/test_nccl_rollout_mixin.py
 run python tests/test_nccl_streams.py
 run python tests/test_nccl_transport.py
 run python tests/test_pack_canonical_stride.py
+run python -m pytest -q tests/test_payload_normalization.py tests/test_p2p_batching.py
+run torchrun --standalone --nproc-per-node=2 tests/payload_normalization_canary.py
 run python tests/test_payload_rotation.py
 run python tests/test_payload_transport.py
 run python tests/test_profiler_ucxx.py

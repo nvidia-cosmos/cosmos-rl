@@ -28,15 +28,27 @@ scheduler can import it without pulling in a GPU stack.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence, Set, Tuple
+from typing import Any, Dict, Iterator, Sequence, Set, Tuple
 
 import numpy as np
 import torch
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.trajectory import EPISODE_LENGTH, VARLEN_FIELDS, TensorSpec
+from cosmos_rl.utils.tensor_packing import canonical_byte_tensor
+from cosmos_rl.utils.trajectory import (
+    EPISODE_LENGTH,
+    VARLEN_FIELDS,
+    TensorSpec,
+    schema_layout,
+    validate_episode_length,
+)
 
-__all__ = ["NP_TO_TORCH", "pack_trajectory_into", "torch_dtype_for"]
+__all__ = [
+    "NP_TO_TORCH",
+    "normalize_trajectory",
+    "pack_trajectory_into",
+    "torch_dtype_for",
+]
 
 
 NP_TO_TORCH = {
@@ -75,8 +87,7 @@ def _coerce(tensor: torch.Tensor, spec: TensorSpec) -> torch.Tensor:
     """
     target = torch_dtype_for(spec.dtype)
     if tensor.dtype != target:
-        src = np.dtype(str(tensor.dtype).removeprefix("torch."))
-        if src.itemsize > np.dtype(spec.dtype).itemsize:
+        if tensor.element_size() > np.dtype(spec.dtype).itemsize:
             key = (spec.name, str(tensor.dtype), str(target))
             if key not in _WARNED_NARROWING:
                 _WARNED_NARROWING.add(key)
@@ -121,13 +132,76 @@ def _canonical_for_byte_view(tensor: torch.Tensor) -> torch.Tensor:
     Tensors that already satisfy the byte-view rule are returned as-is, so the
     common case still packs without an extra copy.
     """
-    if tensor.is_contiguous() and (tensor.dim() == 0 or tensor.stride(-1) == 1):
-        return tensor
-    # Explicitly allocate canonical storage: a fresh empty + copy_ is the only
-    # form guaranteed to produce unit last stride for every legal input layout.
-    canonical = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
-    canonical.copy_(tensor)
-    return canonical
+    return canonical_byte_tensor(tensor)
+
+
+def _normalized_fields(
+    trajectory: Dict[str, Any],
+    schema: Sequence[TensorSpec],
+    ep_len: int,
+    device: Any = None,
+) -> Iterator[Tuple[str, torch.Tensor]]:
+    """Normalize every field before publication, identically on CPU and GPU.
+
+    Missing optional fields are zero. Present fields must match their schema;
+    only sequence leading dimensions may be shorter and receive zero padding.
+    Source values are detached, cast, and canonicalized without mutation.
+    """
+    schema_layout(schema)  # Validate the metadata wire contract too.
+    capacities = [s.shape[0] for s in schema if s.name in VARLEN_FIELDS and s.shape]
+    ep_len = validate_episode_length(ep_len, capacities)
+    for spec in schema:
+        raw = trajectory.get(spec.name)
+        if spec.name == EPISODE_LENGTH:
+            tensor = torch.full(spec.shape, ep_len, dtype=torch.int64, device=device)
+        elif raw is None:
+            tensor = torch.zeros(
+                spec.shape, dtype=torch_dtype_for(spec.dtype), device=device
+            )
+        else:
+            if isinstance(raw, np.ndarray) and any(
+                stride < 0 for stride in raw.strides
+            ):
+                raw = raw.copy()
+            tensor = (
+                raw.detach() if isinstance(raw, torch.Tensor) else torch.as_tensor(raw)
+            )
+            if device is not None:
+                tensor = tensor.to(device)
+            tensor = _coerce(tensor, spec)
+            if spec.name in VARLEN_FIELDS:
+                if (
+                    not spec.shape
+                    or tensor.ndim != len(spec.shape)
+                    or tuple(tensor.shape[1:]) != tuple(spec.shape[1:])
+                    or not ep_len <= tensor.shape[0] <= spec.shape[0]
+                ):
+                    raise ValueError(
+                        f"[pack] field '{spec.name}' shape {tuple(tensor.shape)} "
+                        f"does not match schema {spec.shape} and episode_length {ep_len}"
+                    )
+                if tensor.shape[0] < spec.shape[0]:
+                    padded = torch.zeros(
+                        spec.shape, dtype=tensor.dtype, device=tensor.device
+                    )
+                    padded[: tensor.shape[0]].copy_(tensor)
+                    tensor = padded
+            elif tuple(tensor.shape) != tuple(spec.shape):
+                raise ValueError(
+                    f"[pack] field '{spec.name}' shape {tuple(tensor.shape)} "
+                    f"does not match schema {spec.shape}"
+                )
+        yield spec.name, _canonical_for_byte_view(tensor)
+
+
+def normalize_trajectory(
+    trajectory: Dict[str, Any],
+    schema: Sequence[TensorSpec],
+    ep_len: int,
+    device: Any = None,
+) -> Dict[str, torch.Tensor]:
+    """Validate all fields before claiming a shared-memory slot."""
+    return dict(_normalized_fields(trajectory, schema, ep_len, device))
 
 
 def pack_trajectory_into(
@@ -140,34 +214,22 @@ def pack_trajectory_into(
 ) -> None:
     """Write ``trajectory`` into the preallocated ``flat`` uint8 buffer.
 
-    ``flat`` must already be zeroed and sized to the schema's entry size --
-    absent optional fields are left as zeros.
+    ``flat`` must be sized to the schema's entry size. Absent optional fields
+    are written as zeros, including when the destination is reused. The caller
+    must not publish it until this function returns successfully.
 
     ``episode_length`` is checked BEFORE the missing-field skip and is always
     written from the resolved ``ep_len``: the producer knows the true length
     even when the trajectory dict omits the key, and leaving that slot zero
     makes the consumer truncate the episode to nothing.
     """
-    for spec in schema:
-        raw = trajectory.get(spec.name)
-        if spec.name == EPISODE_LENGTH:
-            tensor = torch.tensor([ep_len], dtype=torch.int64, device=device)
-        elif raw is None:
-            continue
-        else:
-            tensor = raw if isinstance(raw, torch.Tensor) else torch.as_tensor(raw)
-            if device is not None:
-                tensor = tensor.to(device)
-            tensor = _coerce(tensor, spec)
-            if spec.name in VARLEN_FIELDS and tensor.shape[0] < spec.shape[0]:
-                padded = torch.zeros(
-                    spec.shape, dtype=tensor.dtype, device=tensor.device
-                )
-                padded[: tensor.shape[0]] = tensor
-                tensor = padded
-        tensor = _canonical_for_byte_view(tensor.reshape(spec.shape))
+    # Stream normalization into private storage, retaining at most one field's
+    # cast/padding temporary rather than another whole payload on the GPU.
+    for spec, (_, tensor) in zip(
+        schema, _normalized_fields(trajectory, schema, ep_len, device)
+    ):
         try:
-            chunk = tensor.view(torch.uint8).reshape(-1)
+            chunk = tensor.reshape(-1).view(torch.uint8)
         except RuntimeError as e:  # pragma: no cover - defensive
             raise RuntimeError(_layout_error(spec, tensor, e)) from e
         off = offsets[spec.name]
