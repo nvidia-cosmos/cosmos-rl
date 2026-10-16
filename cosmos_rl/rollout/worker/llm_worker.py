@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+import torch.distributed as dist
 
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.policy.config import Config as RolloutConfig
@@ -35,6 +36,8 @@ class LLMRolloutWorker(WorkerBase):
     def __init__(self, **kwargs):
         # For LLM, config is retrieved from controller, so we pass None to the base class.
         super().__init__(None)
+        self.rollout_worker = None
+        self._owned_process_group = None
 
         api_client = APIClient(role="ROLLOUT")
         metadata = api_client.get_controller_metadata()
@@ -60,19 +63,26 @@ class LLMRolloutWorker(WorkerBase):
         )
         self.config = cosmos_rollout_config
 
-        self.build_runner(**kwargs)
+        try:
+            self.build_runner(**kwargs)
+        except BaseException:
+            try:
+                self.destroy_worker()
+            except BaseException:
+                logger.exception("[Rollout] Cleanup after construction failure failed")
+            raise
 
     def execute(self):
         try:
             self.rollout_worker.work()
             logger.info("[Rollout] execute: work() returned")
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            raise e
-        finally:
-            logger.info("[Rollout] execute: entering destroy_worker()")
+        except BaseException:
+            try:
+                self.destroy_worker()
+            except BaseException:
+                logger.exception("[Rollout] Cleanup after work failure failed")
+            raise
+        else:
             self.destroy_worker()
 
     def build_runner(self, **kwargs):
@@ -83,15 +93,25 @@ class LLMRolloutWorker(WorkerBase):
             parallel_dims = ParallelDims.from_config(
                 parallelism_config=self.config.rollout.parallelism
             )
-            init_distributed()
+            already_initialized = dist.is_initialized()
+            try:
+                init_distributed()
+            finally:
+                # init_process_group can acquire a group before a later setup
+                # failure. Never claim the caller's pre-existing group.
+                if not already_initialized and dist.is_initialized():
+                    self._owned_process_group = dist.group.WORLD
             logger.info("Rollout build runner normal.")
             parallel_dims.build_mesh(device_type=cosmos_device_type)
             if self.config.rollout.mode == "async":
                 # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.
                 unsafe_enable_nest_asyncio()
-            self.rollout_worker = DisaggregatedRolloutControlWorker(
-                self.config, parallel_dims, **kwargs
+            # Retain the partial owner if its constructor's rollback fails;
+            # distributed state must outlive any still-live owned resource.
+            self.rollout_worker = DisaggregatedRolloutControlWorker.__new__(
+                DisaggregatedRolloutControlWorker
             )
+            self.rollout_worker.__init__(self.config, parallel_dims, **kwargs)
         elif rollout_backend == "trtllm":
             try:
                 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
@@ -101,13 +121,26 @@ class LLMRolloutWorker(WorkerBase):
                 logger.error(f"[Rollout] TRTLLMRolloutWrapper importing failed! {e}")
                 raise e
             # if backend is trtllm, we leave distribution initialization to trtllm executor.
-            self.rollout_worker = TRTLLMRolloutWrapper(self.config, **kwargs)
+            self.rollout_worker = TRTLLMRolloutWrapper.__new__(TRTLLMRolloutWrapper)
+            self.rollout_worker.__init__(self.config, **kwargs)
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
 
     def destroy_worker(self):
         if self.rollout_worker is not None:
             logger.info("[Teardown] destroy_worker: shutting down rollout_worker")
-            del self.rollout_worker
+            # On failure retain the owner and its dependencies for diagnosis /
+            # safe retry. Never retire distributed state under live consumers.
+            try:
+                self.rollout_worker.handle_shutdown()
+            finally:
+                if getattr(self.rollout_worker, "_shutdown_resources_released", False):
+                    self._destroy_owned_process_group()
             self.rollout_worker = None
-        destroy_distributed()
+        self._destroy_owned_process_group()
+
+    def _destroy_owned_process_group(self):
+        if self._owned_process_group is not None:
+            if dist.is_initialized() and dist.group.WORLD is self._owned_process_group:
+                destroy_distributed()
+            self._owned_process_group = None

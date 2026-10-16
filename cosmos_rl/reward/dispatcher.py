@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from queue import Queue
+import threading
 from typing import List, Optional, Callable, Tuple
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 
@@ -39,6 +40,56 @@ class RewardDispatcher:
     def __init__(self, payload_per_task: int = 1):
         self.task_queue = Queue()
         self.payload_per_task = payload_per_task
+        self.executor = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_thread = None
+        self._shutdown_error = None
+
+    def shutdown(self, timeout_s: float = 15.0) -> None:
+        """Stop owned reward workers without blocking teardown indefinitely.
+
+        ``concurrent.futures`` has no bounded ``shutdown(wait=True)`` API. Run
+        that ownership boundary in one daemon helper and wait for it with a
+        finite budget. A timeout deliberately leaves ``executor`` attached so
+        the caller can retain every resource that a still-running reward task
+        may reference.
+        """
+        if timeout_s < 0:
+            raise ValueError("timeout_s must be non-negative")
+
+        with self._shutdown_lock:
+            executor = self.executor
+            if executor is None:
+                return
+            thread = self._shutdown_thread
+            if thread is None:
+
+                def shutdown_executor():
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except BaseException as exc:
+                        self._shutdown_error = exc
+
+                thread = threading.Thread(
+                    target=shutdown_executor,
+                    daemon=True,
+                    name="RewardDispatcherShutdown",
+                )
+                self._shutdown_thread = thread
+                thread.start()
+
+        thread.join(timeout=timeout_s)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"Reward executor did not stop within {timeout_s:g} seconds"
+            )
+
+        with self._shutdown_lock:
+            error = self._shutdown_error
+            if error is None:
+                self.executor = None
+        if error is not None:
+            raise RuntimeError("Reward executor shutdown failed") from error
 
     def setup(
         self,

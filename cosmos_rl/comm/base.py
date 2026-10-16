@@ -464,6 +464,11 @@ class CommMixin:
             host_name=host_name,
         )
 
+        # Registration is already acquired even if the following barrier or
+        # heartbeat startup fails. Constructor rollback must be able to undo it.
+        self._is_registered = True
+        atexit.register(self.unregister_from_controller)
+
         dist.barrier()  # wait all the atoms registered.
 
         self.shutdown_signal = threading.Event()
@@ -482,13 +487,10 @@ class CommMixin:
                 args=(self.shutdown_mp_signal,),
                 daemon=True,  # Dies when main process exits
             )
-            process.start()
             self.heartbeat_thread = process
+            process.start()
         else:
             self.heartbeat_thread = None
-
-        self._is_registered = True
-        atexit.register(self.unregister_from_controller)
 
     def unregister_from_controller(self):
         if not hasattr(self, "_is_registered"):

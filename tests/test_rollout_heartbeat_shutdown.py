@@ -103,6 +103,11 @@ def test_actual_heartbeat_posts_continue_during_essential_cleanup(owner):
                 scheduler=SimpleNamespace(stop=cleanup) if owner == "async" else None,
                 rollout=SimpleNamespace(shutdown=cleanup),
                 unregister_from_controller=lambda: unregistered.append(True),
+                _cleanup_payload_server=lambda: None,
+                close_payload_transports=lambda: None,
+            )
+            worker.handle_shutdown = (
+                lambda: DisaggregatedRolloutControlWorker.handle_shutdown(worker)
             )
             DisaggregatedRolloutControlWorker.handle_shutdown(worker)
             assert unregistered == [True]

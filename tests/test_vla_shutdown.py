@@ -7,6 +7,18 @@ from unittest.mock import Mock
 import pytest
 
 
+def control_worker(**kwargs):
+    from cosmos_rl.rollout.worker.rollout_control import (
+        DisaggregatedRolloutControlWorker,
+    )
+
+    worker = object.__new__(DisaggregatedRolloutControlWorker)
+    worker.__dict__.update(kwargs)
+    worker._cleanup_payload_server = lambda: None
+    worker.close_payload_transports = lambda: None
+    return worker
+
+
 def test_vla_shutdown_is_safe_before_initialization_and_idempotent():
     from cosmos_rl.rollout.vla_rollout import OpenVLARollout
 
@@ -27,7 +39,7 @@ def test_sync_worker_shuts_down_engine_before_unregister():
     events = []
     engine = Mock()
     engine.shutdown.side_effect = lambda: events.append("engine")
-    worker = SimpleNamespace(
+    worker = control_worker(
         shutdown_signal=threading.Event(),
         shutdown_mp_signal=threading.Event(),
         replica_name="test",
@@ -43,13 +55,16 @@ def test_sync_worker_shuts_down_engine_before_unregister():
     assert events == ["engine", "unregister"]
 
 
-def test_async_scheduler_retains_engine_shutdown_ownership():
+def test_async_scheduler_quiesces_before_owner_shuts_down_engine():
     from cosmos_rl.rollout.worker.rollout_control import (
         DisaggregatedRolloutControlWorker,
     )
 
     scheduler, engine = Mock(), Mock()
-    worker = SimpleNamespace(
+    events = []
+    scheduler.stop.side_effect = lambda **_: events.append("scheduler")
+    engine.shutdown.side_effect = lambda: events.append("engine")
+    worker = control_worker(
         shutdown_signal=threading.Event(),
         shutdown_mp_signal=threading.Event(),
         replica_name="test",
@@ -61,8 +76,9 @@ def test_async_scheduler_retains_engine_shutdown_ownership():
         unregister_from_controller=Mock(),
     )
     DisaggregatedRolloutControlWorker.handle_shutdown(worker)
-    scheduler.stop.assert_called_once_with(wait=False)
-    engine.shutdown.assert_not_called()
+    scheduler.stop.assert_called_once_with(wait=True, shutdown_engine=False)
+    engine.shutdown.assert_called_once_with()
+    assert events == ["scheduler", "engine"]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -83,7 +99,7 @@ def test_engine_shutdown_error_still_joins_heartbeat_and_unregisters(asynchronou
     scheduler.stop.side_effect = fail_shutdown
     heartbeat.join.side_effect = lambda **kwargs: events.append("heartbeat")
     heartbeat.is_alive.return_value = False
-    worker = SimpleNamespace(
+    worker = control_worker(
         shutdown_signal=threading.Event(),
         shutdown_mp_signal=threading.Event(),
         replica_name="test",
@@ -96,10 +112,14 @@ def test_engine_shutdown_error_still_joins_heartbeat_and_unregisters(asynchronou
     )
     with pytest.raises(RuntimeError) as caught:
         DisaggregatedRolloutControlWorker.handle_shutdown(worker)
-    assert caught.value is failure
+    assert caught.value.__cause__ is failure
+    if asynchronous:
+        engine.shutdown.assert_not_called()
     assert events == ["shutdown", "unregister", "heartbeat"]
     heartbeat.join.assert_called_once_with(timeout=15.0)
-    DisaggregatedRolloutControlWorker.handle_shutdown(worker)
+    with pytest.raises(RuntimeError) as repeated:
+        DisaggregatedRolloutControlWorker.handle_shutdown(worker)
+    assert repeated.value is caught.value
     assert events == ["shutdown", "unregister", "heartbeat"]
 
 
@@ -128,7 +148,7 @@ def test_cleanup_liveness_and_finally_on_unregister_failure(terminal, unregister
     heartbeat = Mock()
     heartbeat.is_alive.return_value = False
     heartbeat.join.side_effect = lambda **_: events.append("joined")
-    worker = SimpleNamespace(
+    worker = control_worker(
         shutdown_signal=threading.Event(),
         shutdown_mp_signal=stopped,
         _heartbeat_shutdown_deadline=SimpleNamespace(value=0),
@@ -141,14 +161,20 @@ def test_cleanup_liveness_and_finally_on_unregister_failure(terminal, unregister
         unregister_from_controller=unregister,
     )
     if unregister_error:
-        with pytest.raises(RuntimeError, match="unregister failed"):
+        with pytest.raises(RuntimeError, match="unregister") as caught:
             DisaggregatedRolloutControlWorker.handle_shutdown(worker)
+        assert str(caught.value.__cause__) == "unregister failed"
     else:
         DisaggregatedRolloutControlWorker.handle_shutdown(worker)
     assert stopped.is_set()
     assert worker._heartbeat_shutdown_deadline.value > 0
     assert events == ["cleanup", "unregister", "joined"]
-    DisaggregatedRolloutControlWorker.handle_shutdown(worker)
+    if unregister_error:
+        with pytest.raises(RuntimeError) as repeated:
+            DisaggregatedRolloutControlWorker.handle_shutdown(worker)
+        assert repeated.value is caught.value
+    else:
+        DisaggregatedRolloutControlWorker.handle_shutdown(worker)
     assert events == ["cleanup", "unregister", "joined"]
     heartbeat.join.assert_called_once_with(timeout=15.0)
 
@@ -179,14 +205,15 @@ def test_grace_begins_before_payload_cleanup_and_is_not_renewed():
     def cleanup():
         assert deadline.value > 0
 
-    worker = SimpleNamespace(
-        config=SimpleNamespace(rollout=SimpleNamespace(async_r2r_sync="disabled")),
-        _is_async_rollout=False,
-        _main_loop_impl=lambda: None,
-        _cleanup_payload_server=cleanup,
+    worker = control_worker(
+        shutdown_signal=threading.Event(),
+        shutdown_mp_signal=threading.Event(),
+        unregister_from_controller=Mock(),
         _heartbeat_shutdown_deadline=deadline,
     )
-    DisaggregatedRolloutControlWorker.main_loop(worker)
+    worker._cleanup_payload_server = cleanup
+    DisaggregatedRolloutControlWorker.handle_shutdown(worker)
     original = deadline.value
+    DisaggregatedRolloutControlWorker.handle_shutdown(worker)
     _begin_shutdown_heartbeat_grace(worker)
     assert deadline.value == original

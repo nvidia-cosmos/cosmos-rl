@@ -21,6 +21,7 @@ import torch
 import threading
 import uuid
 import functools
+from unittest.mock import Mock
 from typing import Optional, Tuple, List, Any, Dict
 import numpy as np
 from transformers import AutoTokenizer
@@ -387,6 +388,44 @@ class TestAsyncRolloutWorker(unittest.TestCase):
             )
         finally:
             # clean the test environment
+            worker.handle_shutdown()
+
+    def test_work_failure_after_real_engine_initialization(self):
+        """A real allocated vLLM engine is released, not just mock resources."""
+        config = getMockConfig()
+        config.rollout.parallelism.dp_shard_size = 1
+        config.rollout.parallelism.tp_size = 1
+        config.rollout.parallelism.pp_size = 1
+        dims = ParallelDims.from_config(config.rollout.parallelism)
+        dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
+        from cosmos_rl.rollout.worker.rollout_control import (
+            DisaggregatedRolloutControlWorker,
+        )
+
+        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        DisaggregatedRolloutControlWorker.init_redis = dummy
+        worker = DisaggregatedRolloutControlWorker(config, dims)
+        worker.query_command_from_controller = functools.partial(dummy, worker)
+        worker.shutdown_signal = threading.Event()
+        worker.shutdown_mp_signal = threading.Event()
+        worker.heartbeat_thread = None
+        worker.state.set_weight_synced()
+        injected = RuntimeError("injected work failure after engine allocation")
+        try:
+            worker.lazy_initialize_rollout_engine("auto")
+            self.assertTrue(worker.rollout.is_engine_initialized())
+            worker.rollout.shutdown = Mock(wraps=worker.rollout.shutdown)
+            worker.main_loop = Mock(side_effect=injected)
+            with self.assertRaises(RuntimeError) as failure:
+                worker.work()
+            self.assertIs(failure.exception, injected)
+            worker.rollout.shutdown.assert_called_once()
+            self.assertFalse(worker.rollout.is_engine_initialized())
+            self.assertIsNone(worker.rollout.rollout_engine)
+            self.assertFalse(worker.scheduler._worker_thread.is_alive())
+            worker.handle_shutdown()
+            worker.rollout.shutdown.assert_called_once()
+        finally:
             worker.handle_shutdown()
 
 
