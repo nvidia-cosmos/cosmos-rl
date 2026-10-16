@@ -47,6 +47,7 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="single_node_example.html">Single node example</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Configuration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#trajectory-payload-normalization">Trajectory payload normalization</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#policy-to-policy-state-packing">Policy-to-policy state packing</a></li>
 </ul>
 </li>
@@ -5876,6 +5877,27 @@
 </tr>
 </tbody>
 </table>
+<section id="trajectory-payload-normalization">
+<h2>Trajectory payload normalization<a class="headerlink" href="#trajectory-payload-normalization" title="Link to this heading"></a></h2>
+<p>NCCL and UCXX trajectory producers share the same schema normalization rules:</p>
+<ul class="simple">
+<li><p>Present fields are cast to the declared wire dtype. Scalar shapes, singleton
+strides, non-contiguous tensors and reversed NumPy views are supported. BF16
+source tensors can be converted to supported wire types such as float32.</p></li>
+<li><p>Fixed-size fields must match their declared shape. Sequence fields may be
+shorter only in their leading dimension; trailing dimensions must match.
+They are zero-padded without broadcasting. Absent optional fields are zero.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">episode_length</span></code> is a nonnegative integer, encoded as an int64 scalar or
+one-element vector. It cannot exceed the schema capacity or the available
+rows of a supplied sequence field. Consumers validate it before truncation.</p></li>
+</ul>
+<p>Invalid payloads are rejected through the existing producer failure/fallback
+path. A failed shared-memory write does not leave a slot permanently claimed.
+These rules do not alter training objectives or transport recovery policy.
+Packed policy-to-policy state and rollout-to-rollout weight synchronization
+also share the byte-layout helpers, including copy-back into singleton-strided
+destination views. Their opt-in flags and transfer schedules are unchanged.</p>
+</section>
 <section id="policy-to-policy-state-packing">
 <h2>Policy-to-policy state packing<a class="headerlink" href="#policy-to-policy-state-packing" title="Link to this heading"></a></h2>
 <p>Policy initialization and dynamic scaling can pack small state tensors into
