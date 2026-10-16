@@ -15,7 +15,7 @@
 
 """Per-process transfer-stream pool + CUDA event helpers for NCCL payload.
 
-Both the rollout sender (:class:`NCCLRolloutMixin`) and the trainer
+Both the rollout producer and the trainer
 receiver (:class:`NCCLDataPackerMixin`) move payload bytes on **dedicated
 CUDA streams**, separate from the compute stream *and* the weight-sync
 stream, so payload NCCL kernels overlap compute and cannot false-serialize

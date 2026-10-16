@@ -25,6 +25,7 @@ from ucxx_operation_canary import supervise
 def worker(args):
     import cosmos_rl
     from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
+    from cosmos_rl.utils.payload_transport.layout import WIRE_VERSION, identity_key
     from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer as module
     from cosmos_rl.utils.payload_transport.ucxx.strategy import compose_ucxx_transport
 
@@ -56,7 +57,16 @@ def worker(args):
         endpoint = await module.ucxx.create_endpoint(
             item["_worker_ip"], item["_ucxx_port"]
         )
-        await endpoint.send(np.array([item["_slot"]], dtype=np.int64))
+        await endpoint.send(
+            np.array(
+                [
+                    item["_slot"],
+                    item["_slot_generation"],
+                    identity_key(item["_sender_incarnation"]),
+                ],
+                dtype=np.uint64,
+            )
+        )
         status = np.empty(1, dtype=np.uint8)
         await endpoint.recv(status)
         assert status[0] == 0
@@ -69,7 +79,14 @@ def worker(args):
 
     def run():
         producer = (
-            server(elements=1 << 20, threads=2, send_timeout=3) if rank == 0 else None
+            server(
+                elements=1 << 20,
+                threads=2,
+                send_timeout=3,
+                sender_incarnation="canary-producer",
+            )
+            if rank == 0
+            else None
         )
         packer = None
         if rank == 1 and args.case == "healthy":
@@ -88,7 +105,10 @@ def worker(args):
                     "_ucxx_port": producer.port,
                     "_ports": producer.ports,
                     "_slot": slot,
-                    "_buffer_handle": producer.get_handle(),
+                    "_slot_generation": producer.get_slot_generation(slot),
+                    "_sender_incarnation": "canary-producer",
+                    "_wire_version": WIRE_VERSION,
+                    "_layout_id": producer._buffer.layout.layout_id,
                 }
             dist.broadcast_object_list(metadata, src=0)
             if rank == 1:

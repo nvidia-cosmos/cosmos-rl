@@ -10,7 +10,9 @@ import pytest
 import torch
 
 from cosmos_rl.utils.payload_transport.ucxx import operation as module
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
 from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+from cosmos_rl.utils.trajectory import TensorSpec
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
 
@@ -29,21 +31,18 @@ def candidate():
         "episode_length": np.array([3], dtype=np.int64),
         "mask": np.array([True, False, True], dtype=np.bool_),
     }
-    pinned = torch.empty(
-        sum(array.nbytes for array in arrays.values()),
-        dtype=torch.uint8,
-        pin_memory=True,
+    layout = TensorLayout.compile(
+        [
+            TensorSpec(name=key, shape=value.shape, dtype=value.dtype)
+            for key, value in arrays.items()
+        ]
     )
-    offset = 0
-    payload = {}
+    pinned = torch.empty(layout.payload_nbytes, dtype=torch.uint8, pin_memory=True)
+    payload = {"_pinned_buf": pinned, "_layout": layout}
+    views = layout.views(pinned)
     for key, array in arrays.items():
-        target = np.frombuffer(
-            pinned.numpy()[offset : offset + array.nbytes], dtype=array.dtype
-        ).reshape(array.shape)
-        target[:] = array
-        payload[key] = target
-        offset += array.nbytes
-    payload["_pinned_buf"] = pinned
+        views[key].copy_(torch.from_numpy(array))
+        payload[key] = views[key].numpy()
     return strategy, payload
 
 
@@ -101,31 +100,21 @@ def test_uncertain_cuda_completion_retains_host_and_device_storage(
         stream.synchronize()
 
 
-def test_allocation_failure_after_copy_issue_is_safe_only_after_device_drain(
-    monkeypatch,
-):
+def test_device_copy_path_does_not_clone_fields(monkeypatch):
     strategy, payload = candidate()
-    failure = Mock()
-    monkeypatch.setattr(module, "fail_transport", failure)
-    clone = torch.Tensor.clone
+    original_clone = torch.Tensor.clone
+    clones = []
 
-    def fail_device_clone(value, *args, **kwargs):
+    def record_device_clone(value, *args, **kwargs):
         if value.is_cuda:
-            raise torch.OutOfMemoryError("decoded allocation rejected after H2D issue")
-        return clone(value, *args, **kwargs)
+            clones.append(value)
+        return original_clone(value, *args, **kwargs)
 
-    monkeypatch.setattr(torch.Tensor, "clone", fail_device_clone)
-    stream = torch.cuda.Stream()
-    try:
-        with torch.cuda.stream(stream):
-            torch.cuda._sleep(100_000_000)
-            with pytest.raises(ValueError, match="after safe drain"):
-                strategy._copy_to_device(payload)
-            assert stream.query(), (
-                "pinned storage was released before native completion"
-            )
-            strategy._client.return_pinned.assert_called_once()
-            failure.assert_not_called()
-            assert not strategy._failure
-    finally:
-        stream.synchronize()
+    monkeypatch.setattr(torch.Tensor, "clone", record_device_clone)
+    output = strategy._copy_to_device(payload)
+    assert clones == []
+    strategy._client.return_pinned.assert_called_once()
+    torch.testing.assert_close(
+        output["observations"],
+        torch.arange(20, dtype=torch.float32, device="cuda").reshape(5, 4)[:3],
+    )

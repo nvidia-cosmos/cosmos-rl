@@ -11,6 +11,10 @@ import math
 import threading
 import time
 from collections.abc import Mapping
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+
+import torch
 
 
 class ReceiveMemoryError(RuntimeError):
@@ -131,7 +135,16 @@ class ReceivedBatch(dict):
     No implicit destructor release: forgetting a lease must not undercount memory.
     """
 
-    def __init__(self, values, budget, nbytes, *, rejected_keys=()):
+    def __init__(
+        self,
+        values,
+        budget=None,
+        nbytes=0,
+        *,
+        rejected_keys=(),
+        owners=(),
+        on_release=None,
+    ):
         super().__init__(values)
         # Explicit safe outcomes, scoped to this batch's lifetime. Absence from
         # the values dictionary alone is not proof that a transfer was rejected.
@@ -140,6 +153,8 @@ class ReceivedBatch(dict):
         self.nbytes = nbytes
         self.released = False
         self.consumer_owned = False
+        self._owners = tuple(owners)
+        self._on_release = on_release
         # The consumer can reshape, pop, or replace dictionary entries. Lease
         # ownership must survive those mutations until all readers complete.
         storages = {}
@@ -148,16 +163,23 @@ class ReceivedBatch(dict):
                 storage = tensor.untyped_storage()
                 storages[(str(tensor.device), storage.data_ptr())] = storage
         self._storages = tuple(storages.values())
+        self._state_lock = threading.RLock()
 
     def claim_consumer(self):
         """Mark an actual handoff, not merely a queued or prepared result."""
-        with self.budget.condition:
-            if self.released:
-                raise ReceiveMemoryError("Cannot consume a released payload batch")
-            if not self.consumer_owned:
-                self.budget.consumer_bytes += self.nbytes
+        with self._state_lock:
+            if self.budget is None:
+                if self.released:
+                    raise ReceiveMemoryError("Cannot consume a released payload batch")
                 self.consumer_owned = True
-                self.budget.condition.notify_all()
+                return
+            with self.budget.condition:
+                if self.released:
+                    raise ReceiveMemoryError("Cannot consume a released payload batch")
+                if not self.consumer_owned:
+                    self.budget.consumer_bytes += self.nbytes
+                    self.consumer_owned = True
+                    self.budget.condition.notify_all()
 
     def check_returned_metrics(self, value):
         """A training report must not keep payload storage/autograd alive."""
@@ -180,34 +202,263 @@ class ReceivedBatch(dict):
                 self.check_returned_metrics(item)
 
     def release(self, *, streams=()):
-        if self.released:
-            return
-        import torch
+        with self._state_lock:
+            if self.released:
+                return
+            # The current stream is always included. Additional reader streams must
+            # be supplied by the consumer; record all events before waiting on any.
+            devices = {
+                storage.device
+                for storage in self._storages
+                if storage.device.type == "cuda"
+            }
+            readers = list(streams) + [torch.cuda.current_stream(d) for d in devices]
+            events = []
+            for stream in readers:
+                event = torch.cuda.Event()
+                event.record(stream)
+                events.append(event)
+            for event in events:
+                event.synchronize()
+            self.clear()
+            self.rejected_keys.clear()
+            self._storages = ()
+            self._owners = ()
+            if self._on_release is not None:
+                self._on_release()
+                self._on_release = None
+            if self.budget is not None:
+                with self.budget.condition:
+                    if self.consumer_owned:
+                        self.budget.consumer_bytes -= self.nbytes
+                    self.budget.attribute(decoded=-self.nbytes)
+                    self.budget.release(self.nbytes)
+            self.released = True
 
-        # The current stream is always included. Additional reader streams must
-        # be supplied by the consumer; record all events before waiting on any.
-        devices = {
-            storage.device
-            for storage in self._storages
-            if storage.device.type == "cuda"
-        }
-        readers = list(streams) + [torch.cuda.current_stream(d) for d in devices]
-        events = []
-        for stream in readers:
-            event = torch.cuda.Event()
-            event.record(stream)
-            events.append(event)
-        for event in events:
-            event.synchronize()
-        self.clear()
-        self.rejected_keys.clear()
-        self._storages = ()
-        with self.budget.condition:
-            if self.consumer_owned:
-                self.budget.consumer_bytes -= self.nbytes
-            self.budget.attribute(decoded=-self.nbytes)
-            self.budget.release(self.nbytes)
-        self.released = True
+
+class ReusableViewMap(dict):
+    """Cached tensor-view mapping that repairs only keys changed by a consumer."""
+
+    def __init__(self, base):
+        self._base = base
+        self._dirty = set()
+        dict.__init__(self, base)
+
+    def __setitem__(self, key, value):
+        self._dirty.add(key)
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key):
+        self._dirty.add(key)
+        dict.__delitem__(self, key)
+
+    def clear(self):
+        self._dirty.update(self)
+        dict.clear(self)
+
+    def pop(self, key, *default):
+        self._dirty.add(key)
+        return dict.pop(self, key, *default)
+
+    def popitem(self):
+        key, value = dict.popitem(self)
+        self._dirty.add(key)
+        return key, value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self._dirty.add(key)
+        return dict.setdefault(self, key, default)
+
+    def update(self, *args, **kwargs):
+        incoming = dict(*args, **kwargs)
+        self._dirty.update(incoming)
+        dict.update(self, incoming)
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def reset(self, names=()):
+        self._dirty.update(names)
+        for name in self._dirty:
+            if name in self._base:
+                dict.__setitem__(self, name, self._base[name])
+            elif name in self:
+                dict.__delitem__(self, name)
+        self._dirty.clear()
+        return self
+
+    def retain(self, *, owner, release):
+        """Attach the current storage owner without copying this mapping."""
+        self.owner = owner
+        self.release_storage = release
+        return self
+
+
+@dataclass
+class _ReusableBuffer:
+    tensor: torch.Tensor
+    bindings: dict
+
+
+@dataclass
+class ReceiveBufferLease:
+    """Exclusive ownership of one reusable receive allocation."""
+
+    pool: "ReceiveBufferPool"
+    key: tuple
+    buffer: _ReusableBuffer
+    generation: int
+    released: bool = False
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
+
+    @property
+    def tensor(self) -> torch.Tensor:
+        return self.buffer.tensor
+
+    def bind_views(self, layout, *, offset=0, reset_fields=()):
+        """Reuse typed tensor wrappers for this backing allocation."""
+        binding_key = (layout.layout_id, offset)
+        binding = self.buffer.bindings.get(binding_key)
+        if binding is None:
+            storage = self.tensor.narrow(0, offset, layout.payload_nbytes)
+            base_views = layout.views(storage)
+            active_views = ReusableViewMap(base_views)
+            binding = (base_views, active_views)
+            self.buffer.bindings[binding_key] = binding
+        _, active_views = binding
+        return active_views.reset(reset_fields)
+
+    def release(self) -> None:
+        with self._lock:
+            if self.released:
+                return
+            self.pool._release(self)
+            self.released = True
+
+    def quarantine(self) -> None:
+        with self._lock:
+            if self.released:
+                return
+            self.pool._quarantine(self)
+            self.released = True
+
+
+class ReceiveBufferPool:
+    """Reuse exact-layout receive buffers after their final readers finish."""
+
+    def __init__(
+        self,
+        *,
+        max_cached_per_layout: int = 64,
+        max_cached_buffers: int = 64,
+        max_cached_bytes: int | None = None,
+    ):
+        if (
+            isinstance(max_cached_per_layout, bool)
+            or not isinstance(max_cached_per_layout, int)
+            or max_cached_per_layout < 0
+        ):
+            raise ValueError("receive pool cache size must be a nonnegative integer")
+        if (
+            isinstance(max_cached_buffers, bool)
+            or not isinstance(max_cached_buffers, int)
+            or max_cached_buffers < 0
+        ):
+            raise ValueError("receive pool total cache size must be nonnegative")
+        if max_cached_bytes is not None and (
+            isinstance(max_cached_bytes, bool)
+            or not isinstance(max_cached_bytes, int)
+            or max_cached_bytes < 0
+        ):
+            raise ValueError("receive pool byte limit must be nonnegative")
+        self._max_cached_per_layout = max_cached_per_layout
+        self._max_cached_buffers = max_cached_buffers
+        self._max_cached_bytes = max_cached_bytes
+        self._free = defaultdict(deque)
+        self._cached_buffers = 0
+        self._cached_bytes = 0
+        self._next_generation = 0
+        self._lock = threading.Lock()
+        self._closed = False
+        self._quarantined = []
+
+    def acquire(self, layout_id: str, nbytes: int, device) -> ReceiveBufferLease:
+        if not layout_id or nbytes < 0:
+            raise ValueError("receive allocation requires a layout and valid size")
+        resolved_device = (
+            torch.device(device) if device is not None else torch.device("cpu")
+        )
+        key = (layout_id, str(resolved_device), nbytes)
+        evicted = []
+        with self._lock:
+            if self._closed:
+                raise ReceiveMemoryError("receive buffer pool is closed")
+            self._next_generation += 1
+            generation = self._next_generation
+            free = self._free.get(key)
+            buffer = free.popleft() if free else None
+            if buffer is not None:
+                self._cached_buffers -= 1
+                self._cached_bytes -= buffer.tensor.untyped_storage().nbytes()
+                if not free:
+                    del self._free[key]
+            else:
+                while self._free and (
+                    self._cached_buffers >= self._max_cached_buffers
+                    or (
+                        self._max_cached_bytes is not None
+                        and self._cached_bytes + nbytes > self._max_cached_bytes
+                    )
+                ):
+                    stale_key = next(iter(self._free))
+                    stale = self._free[stale_key].pop()
+                    if not self._free[stale_key]:
+                        del self._free[stale_key]
+                    self._cached_buffers -= 1
+                    self._cached_bytes -= stale.tensor.untyped_storage().nbytes()
+                    evicted.append(stale)
+        # Drop evicted CUDA allocations outside the bookkeeping lock.
+        evicted.clear()
+        if buffer is None:
+            buffer = _ReusableBuffer(
+                torch.empty(nbytes, dtype=torch.uint8, device=resolved_device),
+                {},
+            )
+        return ReceiveBufferLease(self, key, buffer, generation)
+
+    def _release(self, lease: ReceiveBufferLease) -> None:
+        with self._lock:
+            nbytes = lease.buffer.tensor.untyped_storage().nbytes()
+            if (
+                self._closed
+                or self._max_cached_per_layout == 0
+                or self._cached_buffers >= self._max_cached_buffers
+                or (
+                    self._max_cached_bytes is not None
+                    and self._cached_bytes + nbytes > self._max_cached_bytes
+                )
+            ):
+                return
+            free = self._free[lease.key]
+            if len(free) < self._max_cached_per_layout:
+                free.append(lease.buffer)
+                self._cached_buffers += 1
+                self._cached_bytes += nbytes
+
+    def _quarantine(self, lease: ReceiveBufferLease) -> None:
+        with self._lock:
+            self._quarantined.append(lease.buffer)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._free.clear()
+            self._cached_buffers = 0
+            self._cached_bytes = 0
 
 
 def storage_bytes(payloads):

@@ -38,6 +38,7 @@ is what the prefetch worker actually calls, and it spins its own event loop.
 import asyncio
 import unittest
 from typing import Any, Dict, List
+from unittest.mock import Mock
 
 import numpy as np
 import torch
@@ -50,8 +51,13 @@ from cosmos_rl.utils.payload_transport.ucxx.data_packer_mixin import (
 # now composes; these tests drive that engine directly.
 from cosmos_rl.utils.payload_transport.ucxx.strategy import (
     _MAX_FETCH_ROUNDS,
+    _PlacedPayload,
     UCXXTransportStrategy,
 )
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
+from cosmos_rl.utils.payload_transport.receive_memory import ReusableViewMap
+from cosmos_rl.utils.transport_failure import TransportUnusableError
+from cosmos_rl.utils.trajectory import TensorSpec
 
 # Imported from the data-packer layer, which owns the trajectory field names
 # and exposes them on every branch (the transport packages mirror them).
@@ -97,8 +103,24 @@ class _FakeClient:
         self.script = {k: list(v) for k, v in script.items()}
         self.calls: List[int] = []
         self.returned_pinned: List[Any] = []
+        self.layout_reads = 0
+        self._bindings = {}
 
-    async def read(self, worker_ip, port, slot, schema, ports=None, timeout=None):
+    async def read_layout(self, *args, **kwargs):
+        self.layout_reads += 1
+        return _layout().descriptor()
+
+    async def read(
+        self,
+        worker_ip,
+        port,
+        slot,
+        layout,
+        ports=None,
+        timeout=None,
+        generation=0,
+        sender_incarnation="",
+    ):
         self.calls.append(slot)
         outcomes = self.script.get(slot)
         if not outcomes:
@@ -111,25 +133,66 @@ class _FakeClient:
     def return_pinned(self, buf):
         self.returned_pinned.append(buf)
 
+    def bind_pinned_views(self, buf, layout, *, reset_fields=()):
+        key = (buf.untyped_storage().data_ptr(), layout.layout_id)
+        views = self._bindings.get(key)
+        if views is None:
+            views = ReusableViewMap(layout.views(buf))
+            self._bindings[key] = views
+        return views.reset(reset_fields)
+
 
 def _payload(n_steps=3, max_steps=5):
     """A decoded slot: numpy arrays padded to max_steps, as the server sends."""
-    obs = np.zeros((max_steps, 2), dtype=np.float32)
-    obs[:n_steps] = 1.0
-    act = np.zeros((max_steps, 1), dtype=np.float32)
-    act[:n_steps] = 2.0
-    rew = np.zeros((max_steps,), dtype=np.float32)
-    rew[:n_steps] = 3.0
+    layout = _layout(max_steps)
+    pinned = torch.empty(layout.payload_nbytes, dtype=torch.uint8)
+    tensor_views = layout.views(pinned)
+    tensor_views[OBSERVATIONS].zero_()
+    tensor_views[OBSERVATIONS][:n_steps] = 1.0
+    tensor_views[ACTIONS].zero_()
+    tensor_views[ACTIONS][:n_steps] = 2.0
+    tensor_views[REWARDS].zero_()
+    tensor_views[REWARDS][:n_steps] = 3.0
+    tensor_views[EPISODE_LENGTH].fill_(n_steps)
+    raw = pinned.numpy()
+    result = {
+        field.name: np.frombuffer(
+            raw[field.offset : field.offset + field.nbytes], dtype=field.dtype
+        ).reshape(field.shape)
+        for field in layout.fields
+    }
+    result["_pinned_buf"] = pinned
+    result["_layout"] = layout
+    return result
+
+
+def _layout(max_steps=5):
+    return TensorLayout.compile(
+        [
+            TensorSpec((max_steps, 2), np.float32, OBSERVATIONS),
+            TensorSpec((max_steps, 1), np.float32, ACTIONS),
+            TensorSpec((max_steps,), np.float32, REWARDS),
+            TensorSpec((1,), np.int64, EPISODE_LENGTH),
+        ]
+    )
+
+
+def _meta(slot=1, ip="10.0.0.1", port=7000, generation=1, max_steps=5):
+    layout = _layout(max_steps)
     return {
-        OBSERVATIONS: obs,
-        ACTIONS: act,
-        REWARDS: rew,
-        EPISODE_LENGTH: np.array([n_steps], dtype=np.int64),
+        "_ucxx": True,
+        "_worker_ip": ip,
+        "_ucxx_port": port,
+        "_slot": slot,
+        "_slot_generation": generation,
+        "_sender_incarnation": "sender-1",
+        "_wire_version": WIRE_VERSION,
+        "_layout_id": layout.layout_id,
     }
 
 
-def _meta(slot=1, ip="10.0.0.1", port=7000):
-    return {"_ucxx": True, "_worker_ip": ip, "_ucxx_port": port, "_slot": slot}
+def _key(slot=1, ip="10.0.0.1", port=7000, generation=1, max_steps=5):
+    return f"{ip}:{port}:sender-1:{slot}:{generation}:{_layout(max_steps).layout_id}"
 
 
 def _make_consumer(client, *, max_attempts=2, device="cpu"):
@@ -215,19 +278,52 @@ class TestFailureIsolation(unittest.TestCase):
         p = _make_consumer(client)
         out = _fetch(p, [_meta(slot=1), _meta(slot=2), _meta(slot=3)])
         self.assertEqual(len(out), 2, "a single stale slot took down the batch")
-        self.assertIn("10.0.0.1:7000:1", out)
-        self.assertIn("10.0.0.1:7000:3", out)
-        self.assertNotIn("10.0.0.1:7000:2", out)
+        self.assertIn(_key(1), out)
+        self.assertIn(_key(3), out)
+        self.assertNotIn(_key(2), out)
+
+    def test_terminal_copy_failure_retires_earlier_completed_placements(self):
+        client = _FakeClient({1: [_payload()], 2: [_payload()]})
+        p = _make_consumer(client)
+        release = Mock()
+        completed = _PlacedPayload(
+            {"x": torch.zeros(1)}, owner=object(), release=release
+        )
+        p._copy_to_device = Mock(
+            side_effect=[completed, TransportUnusableError("terminal copy failure")]
+        )
+
+        with self.assertRaisesRegex(TransportUnusableError, "terminal copy failure"):
+            _fetch(p, [_meta(slot=1), _meta(slot=2)])
+
+        release.assert_called_once_with()
 
 
 class TestMetadataFiltering(unittest.TestCase):
-    def test_incomplete_metadata_is_skipped_not_read(self):
+    def test_incomplete_tagged_metadata_fails_before_read(self):
         client = _FakeClient({1: [_payload()]})
         p = _make_consumer(client)
         bad = {"_ucxx": True, "_worker_ip": "10.0.0.1"}  # no port, no slot
-        out = _fetch(p, [bad, _meta(slot=1)])
-        self.assertEqual(len(out), 1)
-        self.assertEqual(client.calls, [1])
+        with self.assertRaisesRegex(TransportUnusableError, "server port"):
+            _fetch(p, [bad, _meta(slot=1)])
+        self.assertEqual(client.calls, [])
+
+    def test_invalid_port_list_fails_before_read(self):
+        client = _FakeClient({1: [_payload()]})
+        p = _make_consumer(client)
+        bad = _meta(slot=1) | {"_ports": [7000, True]}
+        with self.assertRaisesRegex(TransportUnusableError, "port list"):
+            _fetch(p, [bad])
+        self.assertEqual(client.calls, [])
+
+    def test_invalid_layout_identity_fails_before_control_plane_lookup(self):
+        client = _FakeClient({1: [_payload()]})
+        p = _make_consumer(client)
+        bad = _meta(slot=1) | {"_layout_id": "not-a-layout-id"}
+        with self.assertRaisesRegex(TransportUnusableError, "layout identity"):
+            _fetch(p, [bad])
+        self.assertEqual(client.layout_reads, 0)
+        self.assertEqual(client.calls, [])
 
     def test_slot_zero_is_a_valid_slot(self):
         # The guard is `slot is not None`, not truthiness -- ring-buffer slot 0
@@ -237,14 +333,14 @@ class TestMetadataFiltering(unittest.TestCase):
         p = _make_consumer(client)
         out = _fetch(p, [_meta(slot=0)])
         self.assertEqual(len(out), 1)
-        self.assertIn("10.0.0.1:7000:0", out)
+        self.assertIn(_key(0), out)
 
 
 class TestEpisodeLengthTruncation(unittest.TestCase):
     def test_varlen_fields_are_cut_to_the_episode_length(self):
         client = _FakeClient({1: [_payload(n_steps=3, max_steps=5)]})
         p = _make_consumer(client)
-        data = _fetch(p, [_meta(slot=1)])["10.0.0.1:7000:1"]
+        data = _fetch(p, [_meta(slot=1)])[_key(1)]
         self.assertEqual(data[OBSERVATIONS].shape[0], 3)
         self.assertEqual(data[ACTIONS].shape[0], 3)
         self.assertEqual(data[REWARDS].shape[0], 3)
@@ -254,33 +350,38 @@ class TestEpisodeLengthTruncation(unittest.TestCase):
     def test_no_truncation_when_the_episode_fills_the_buffer(self):
         client = _FakeClient({1: [_payload(n_steps=5, max_steps=5)]})
         p = _make_consumer(client)
-        data = _fetch(p, [_meta(slot=1)])["10.0.0.1:7000:1"]
+        data = _fetch(p, [_meta(slot=1)])[_key(1)]
         self.assertEqual(data[OBSERVATIONS].shape[0], 5)
 
 
-class _ExplodingPinned:
-    """A pinned buffer whose bulk device copy fails."""
-
-    def to(self, *a, **kw):
-        raise RuntimeError("bulk D2H failed")
-
-
 class TestCpuCopyOwnership(unittest.TestCase):
-    def test_cpu_copy_is_independent_and_returns_the_pinned_buffer(
-        self,
-    ):
-        # CPU copies do not call CUDA or retain views into pooled pinned storage.
-        pinned = _ExplodingPinned()
+    def test_cpu_views_hold_pinned_buffer_until_batch_release(self):
         payload = _payload()
-        payload["_pinned_buf"] = pinned
+        pinned = payload["_pinned_buf"]
         client = _FakeClient({1: [payload]})
         p = _make_consumer(client)
 
-        data = _fetch(p, [_meta(slot=1)])["10.0.0.1:7000:1"]
+        batch = _fetch(p, [_meta(slot=1)])
+        data = batch[_key(1)]
         self.assertEqual(data[OBSERVATIONS].shape[0], 3)  # delivered anyway
-        self.assertEqual(client.returned_pinned, [pinned], "pinned buffer leaked")
+        self.assertEqual(client.returned_pinned, [])
         payload[OBSERVATIONS][:] = 9
-        self.assertTrue(torch.all(data[OBSERVATIONS] == 1))
+        self.assertTrue(torch.all(data[OBSERVATIONS] == 9))
+        batch.release()
+        self.assertEqual(client.returned_pinned, [pinned])
+
+    def test_consumer_mapping_mutation_is_repaired_on_buffer_reuse(self):
+        payload = _payload()
+        client = _FakeClient({1: [payload, payload]})
+        p = _make_consumer(client)
+
+        first = _fetch(p, [_meta(slot=1)])
+        first[_key(1)][EPISODE_LENGTH] = torch.tensor([999])
+        first.release()
+
+        second = _fetch(p, [_meta(slot=1)])
+        self.assertEqual(second[_key(1)][EPISODE_LENGTH].item(), 3)
+        second.release()
 
 
 class TestSyncFetchContainment(unittest.TestCase):

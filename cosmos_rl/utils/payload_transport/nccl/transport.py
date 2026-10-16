@@ -147,9 +147,18 @@ class NcclPayloadTransport(PayloadTransport):
     completion_prefix = NCCL_COMPLETION_PREFIX
 
     def close_producer(self, producer: Any, *, timeout: float = 5.0) -> None:
-        close = getattr(producer, "cleanup_nccl", None)
-        if callable(close):
-            close(timeout=timeout)
+        context = getattr(producer, "payload_context", None) or getattr(
+            producer, "_payload_context", None
+        )
+        if context is not None:
+            context.close(timeout=timeout)
+            return
+        cleanup = getattr(producer, "cleanup_nccl", None)
+        if callable(cleanup):
+            cleanup(timeout=timeout)
+            return
+        if hasattr(producer, "_nccl_close_operation"):
+            producer.close(timeout=timeout)
 
     def close_data_packer(self, packer: Any, *, timeout: float = 5.0) -> None:
         super().close_data_packer(packer, timeout=timeout)

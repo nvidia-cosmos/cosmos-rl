@@ -43,6 +43,7 @@ from cosmos_rl.utils.payload_transport import (
     PayloadTransportRegistry,
     get_payload_transfer_mode,
 )
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
 
 # Import side-effect: registers the UCXX backend.
 import cosmos_rl.utils.payload_transport.ucxx as ucxx_pkg
@@ -134,6 +135,13 @@ class TestSharedRingBufferBasics(_BufferTestBase):
         for s in states.values():
             self.assertEqual(s, SlotState.FREE)
 
+    def test_direct_slot_payloads_satisfy_layout_alignment(self):
+        slot, generation, raw = self.buf.acquire_write_slot()
+        try:
+            self.assertEqual(raw.ctypes.data % self.buf.layout.alignment, 0)
+        finally:
+            self.buf.abandon_write_slot(slot, generation)
+
     def test_write_then_read_roundtrip(self):
         data = {
             "observations": np.arange(12, dtype=np.float32).reshape(4, 3),
@@ -164,7 +172,7 @@ class TestSharedRingBufferBasics(_BufferTestBase):
         slot = self.buf.write(data)
         raw = self.buf.read_raw(slot)
         # raw should have entry_data_size bytes total.
-        expected_size = sum(s.nbytes for s in self.schema)
+        expected_size = self.buf.layout.payload_nbytes
         self.assertEqual(raw.nbytes, expected_size)
         self.buf.mark_consumed(slot)
 
@@ -316,6 +324,28 @@ class TestSharedRingBufferBasics(_BufferTestBase):
         self.assertEqual(metrics.writes_total, 5)
         self.assertEqual(metrics.drops_total, 1)
 
+    def test_stale_generation_cannot_read_or_release_reused_slot(self):
+        payload = {
+            "observations": np.zeros((4, 3), dtype=np.float32),
+            "actions": np.zeros(4, dtype=np.int64),
+            "rewards": np.zeros(4, dtype=np.float32),
+            "episode_length": np.array([1], dtype=np.int64),
+        }
+        slot = self.buf.write(payload)
+        first_generation = self.buf.get_slot_generation(slot)
+        self.buf.read_raw(slot, generation=first_generation)
+        self.buf.mark_consumed(slot, generation=first_generation)
+
+        for _ in range(self.buf.max_entries):
+            reused = self.buf.write(payload)
+        self.assertEqual(reused, slot)
+        current_generation = self.buf.get_slot_generation(slot)
+        self.assertGreater(current_generation, first_generation)
+        with self.assertRaises(SlotError):
+            self.buf.read_raw(slot, generation=first_generation)
+        self.buf.mark_consumed(slot, generation=first_generation)
+        self.assertEqual(self.buf.get_slot_state(slot), SlotState.READY)
+
     def test_write_raises_when_full_and_overwrite_disabled(self):
         for _ in range(4):
             self.buf.write(
@@ -353,6 +383,27 @@ class TestSharedRingBufferBasics(_BufferTestBase):
             np.testing.assert_array_equal(out["observations"], data["observations"])
         finally:
             attached.close()
+
+    def test_schema_less_handle_roundtrip_remains_supported(self):
+        name = f"cosmos_rl_pickle_test_{os.getpid()}_{id(self)}"
+        source = SharedRingBuffer(
+            BufferConfig(
+                buffer_name=name,
+                max_entries=2,
+                entry_size_bytes=1024,
+            ),
+            create=True,
+        )
+        attached = None
+        try:
+            slot = source.write({"metadata": [1, 2, 3]})
+            attached = SharedRingBuffer.from_handle(source.get_handle())
+            self.assertEqual(attached.read(slot), {"metadata": [1, 2, 3]})
+        finally:
+            if attached is not None:
+                attached.close()
+            source.unlink()
+            source.close()
 
     def test_metrics_track_writes_and_reads(self):
         data = {
@@ -450,9 +501,9 @@ class TestUCXXTransportRegistration(unittest.TestCase):
         )
 
     def test_module_exports(self):
-        # The package __init__ should re-export everything callers need
-        # (minus the deliberately-removed UCXX_COMPLETION_PREFIX and the
-        # deprecated ``UCXXTrainerMixin``).
+        # The package exports the supported consumer and transport surface.
+        # Producer applications compose PayloadContext instead of importing
+        # the backend implementation class.
         for symbol in [
             "TensorSpec",
             "SharedRingBuffer",
@@ -460,7 +511,6 @@ class TestUCXXTransportRegistration(unittest.TestCase):
             "UCXXClient",
             "UCXX_AVAILABLE",
             "UCXXPayloadTransport",
-            "UCXXRolloutMixin",
             "UCXXDataPackerMixin",
         ]:
             self.assertTrue(
@@ -474,6 +524,10 @@ class TestUCXXTransportRegistration(unittest.TestCase):
             hasattr(ucxx_pkg, "UCXXTrainerMixin"),
             "UCXXTrainerMixin was removed -- new code should use "
             "UCXXDataPackerMixin instead",
+        )
+        self.assertFalse(
+            hasattr(ucxx_pkg, "UCXXPayloadProducer"),
+            "producer applications should use PayloadContext",
         )
 
 
@@ -629,6 +683,39 @@ class TestOptionalUcxxExtra(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_low_level_metadata_carries_remote_read_identity(self):
+        from cosmos_rl.utils.payload_transport.layout import WIRE_VERSION
+        from cosmos_rl.utils.payload_transport.ucxx import (
+            UCXXBuffer,
+            UCXXBufferConfig,
+        )
+
+        incarnation = "metadata-test-incarnation"
+        cfg = UCXXBufferConfig(
+            buffer_name=f"cosmos_rl_metadata_{os.getpid()}_{id(self)}",
+            max_entries=2,
+            schema=_make_schema(),
+            sender_incarnation=incarnation,
+        )
+        buf = UCXXBuffer(cfg)
+        try:
+            slot = buf.write(
+                {
+                    "observations": np.zeros((4, 3), dtype=np.float32),
+                    "actions": np.zeros(4, dtype=np.int64),
+                    "rewards": np.zeros(4, dtype=np.float32),
+                    "episode_length": np.array([1], dtype=np.int64),
+                }
+            )
+            metadata = buf.get_metadata(slot)
+            self.assertEqual(metadata["slot_generation"], 1)
+            self.assertEqual(metadata["sender_incarnation"], incarnation)
+            self.assertEqual(metadata["wire_version"], WIRE_VERSION)
+            self.assertEqual(metadata["layout_id"], buf._buffer.layout.layout_id)
+        finally:
+            buf._buffer.unlink()
+            buf.close()
+
 
 class TestResetUCXXContext(unittest.TestCase):
     """``reset_ucxx_context`` must deterministically tear down the global
@@ -711,9 +798,9 @@ class TestResetUCXXContext(unittest.TestCase):
         worker = mock.Mock()
         # Two requests still canceling, then drained.
         sizes = [2, 1, 0]
-        worker.get_canceling_size.side_effect = lambda: events.append(
-            ("size", sizes[0])
-        ) or sizes.pop(0)
+        worker.get_canceling_size.side_effect = lambda: (
+            events.append(("size", sizes[0])) or sizes.pop(0)
+        )
         worker.cancel_inflight_requests.side_effect = lambda *a, **k: events.append(
             "cancel"
         )
@@ -798,6 +885,10 @@ class TestResetUCXXContext(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class UCXXConnectionResetError(RuntimeError):
+    """Stand-in whose name matches UCXX's clean connection-reset error."""
+
+
 class TestUCXXClientPortRotation(unittest.TestCase):
     """Per-call port rotation + transport-class fallback in ``UCXXClient.read``."""
 
@@ -810,6 +901,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
         self.addCleanup(lambda: __import__("asyncio").run(self.client.close()))
         # Tiny schema so ``_acquire_pinned`` allocates a few bytes.
         self.schema = [TensorSpec(shape=(4,), dtype=np.float32, name="x")]
+        self.layout = TensorLayout.compile(self.schema)
         self.ports = [13620, 13621, 13622, 13623]
         self.worker_ip = "127.0.0.1"
 
@@ -818,15 +910,13 @@ class TestUCXXClientPortRotation(unittest.TestCase):
 
         ``fail_on_ports`` is an iterable of port numbers; calls whose
         ``target_port`` is in that set raise ``fail_with`` (default:
-        ``asyncio.TimeoutError``).  All other calls succeed silently.
+        ``UCXXConnectionResetError``).  All other calls succeed silently.
         Returns a list to which the stub appends every call's
         ``(port, slot)`` tuple in invocation order.
         """
-        import asyncio as _asyncio
-
         recorded: list[tuple] = []
         bad_ports = set(fail_on_ports or ())
-        exc = fail_with or _asyncio.TimeoutError("synthetic timeout")
+        exc = fail_with or UCXXConnectionResetError("synthetic connection reset")
 
         async def _stub(
             self_unused,
@@ -835,6 +925,9 @@ class TestUCXXClientPortRotation(unittest.TestCase):
             slot,
             recv_buf,
             timeout,
+            *,
+            generation,
+            sender_incarnation,
         ):
             recorded.append((port, slot))
             if port in bad_ports:
@@ -853,6 +946,89 @@ class TestUCXXClientPortRotation(unittest.TestCase):
 
         return _asyncio.new_event_loop().run_until_complete(coro)
 
+    def test_layout_lookup_rotates_after_clean_transport_failure(self):
+        recorded = []
+
+        async def _stub(
+            self_unused,
+            worker_ip,
+            port,
+            *,
+            sender_incarnation,
+            timeout,
+        ):
+            recorded.append(port)
+            if len(recorded) == 1:
+                raise UCXXConnectionResetError("synthetic connection reset")
+            return {"layout_id": "resolved"}
+
+        self.client._rr_counter = 0
+        with mock.patch.object(type(self.client), "_read_layout_once", _stub):
+            result = self._run(
+                self.client.read_layout(
+                    self.worker_ip,
+                    self.ports[0],
+                    sender_incarnation="producer-incarnation",
+                    ports=self.ports,
+                )
+            )
+
+        self.assertEqual(result, {"layout_id": "resolved"})
+        self.assertEqual(recorded, self.ports[:2])
+        self.assertIn((self.worker_ip, self.ports[0]), self.client._port_skip_until)
+
+    def test_layout_identity_rejection_does_not_retry(self):
+        from cosmos_rl.utils.payload_transport.ucxx.ucxx_buffer import (
+            PayloadIdentityError,
+        )
+
+        recorded = []
+
+        async def _stub(
+            self_unused,
+            worker_ip,
+            port,
+            *,
+            sender_incarnation,
+            timeout,
+        ):
+            recorded.append(port)
+            raise PayloadIdentityError("sender incarnation mismatch")
+
+        self.client._rr_counter = 0
+        with mock.patch.object(type(self.client), "_read_layout_once", _stub):
+            with self.assertRaises(PayloadIdentityError):
+                self._run(
+                    self.client.read_layout(
+                        self.worker_ip,
+                        self.ports[0],
+                        sender_incarnation="producer-incarnation",
+                        ports=self.ports,
+                    )
+                )
+
+        self.assertEqual(recorded, [self.ports[0]])
+
+    def test_timeout_is_not_rotated(self):
+        recorded = self._install_recording_stub(
+            fail_on_ports=[self.ports[0]],
+            fail_with=TimeoutError("completion is uncertain"),
+        )
+        self.client._rr_counter = 0
+
+        with self.assertRaises(TimeoutError):
+            self._run(
+                self.client.read(
+                    self.worker_ip,
+                    self.ports[0],
+                    slot=42,
+                    layout=self.layout,
+                    ports=self.ports,
+                )
+            )
+
+        self.assertEqual(recorded, [(self.ports[0], 42)])
+
     # -- rotation across calls --------------------------------------------
 
     def test_rotates_starting_port_across_calls(self):
@@ -867,7 +1043,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                     self.worker_ip,
                     self.ports[0],
                     slot=slot,
-                    schema=self.schema,
+                    layout=self.layout,
                     ports=self.ports,
                 )
             )
@@ -892,7 +1068,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                 self.worker_ip,
                 self.ports[0],
                 slot=42,
-                schema=self.schema,
+                layout=self.layout,
                 ports=self.ports,
             )
         )
@@ -926,7 +1102,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                     self.worker_ip,
                     self.ports[0],
                     slot=42,
-                    schema=self.schema,
+                    layout=self.layout,
                     ports=self.ports,
                 )
             )
@@ -948,20 +1124,18 @@ class TestUCXXClientPortRotation(unittest.TestCase):
         # a single call attempt-1's rotation still draws from the
         # original ``available_ports``.  The skip-list affects future
         # calls (covered by ``test_quarantine_excludes_failed_port_*``).
-        import asyncio as _asyncio
-
         recorded = self._install_recording_stub(
             fail_on_ports=[self.ports[0], self.ports[1]]
         )
         self.client._rr_counter = 0
 
-        with self.assertRaises(_asyncio.TimeoutError):
+        with self.assertRaises(UCXXConnectionResetError):
             self._run(
                 self.client.read(
                     self.worker_ip,
                     self.ports[0],
                     slot=99,
-                    schema=self.schema,
+                    layout=self.layout,
                     ports=self.ports,
                 )
             )
@@ -998,7 +1172,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                 self.worker_ip,
                 self.ports[0],
                 slot=0,
-                schema=self.schema,
+                layout=self.layout,
                 ports=self.ports,
             )
         )
@@ -1019,7 +1193,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                     self.worker_ip,
                     self.ports[0],
                     slot=slot,
-                    schema=self.schema,
+                    layout=self.layout,
                     ports=self.ports,
                 )
             )
@@ -1058,7 +1232,7 @@ class TestUCXXClientPortRotation(unittest.TestCase):
                     self.worker_ip,
                     self.ports[0],
                     slot=slot,
-                    schema=self.schema,
+                    layout=self.layout,
                     ports=self.ports,
                 )
             )

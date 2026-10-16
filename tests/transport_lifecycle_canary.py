@@ -23,7 +23,7 @@ import redis
 import torch
 import torch.distributed as dist
 
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 from cosmos_rl.utils.payload_transport.nccl.strategy import compose_nccl_transport
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
 
@@ -114,7 +114,9 @@ def main():
             custom={"nccl_max_steps": 8, "nccl_obs_dim": 4, "nccl_action_dim": 2},
         )
         if backend == "ucxx":
-            from cosmos_rl.utils.payload_transport.ucxx.mixins import UCXXRolloutMixin
+            from cosmos_rl.utils.payload_transport.ucxx.producer import (
+                UCXXPayloadProducer,
+            )
             from cosmos_rl.utils.payload_transport.ucxx.strategy import (
                 compose_ucxx_transport,
             )
@@ -125,15 +127,15 @@ def main():
                 UCXXPayloadTransport,
             )
 
-            producer = UCXXRolloutMixin() if rank == 0 else None
+            producer = UCXXPayloadProducer() if rank == 0 else None
         else:
-            producer = NCCLRolloutMixin() if rank == 0 else None
+            producer = NCCLPayloadProducer() if rank == 0 else None
         packer = Packer() if rank == 1 else None
         for cycle in range(3):
             metadata = [None]
             if rank == 0:
                 if backend == "ucxx":
-                    producer.setup_ucxx(
+                    producer.setup(
                         replica_id=f"lifecycle-{os.getpid()}-{cycle}",
                         max_steps=8,
                         obs_dim=4,
@@ -146,7 +148,7 @@ def main():
                         ),
                     )
                 else:
-                    producer.setup_nccl(
+                    producer.setup(
                         replica_id="lifecycle-producer",
                         rollout_idx=0,
                         redis_client=client,
@@ -157,7 +159,7 @@ def main():
                         obs_dim=4,
                         action_dim=2,
                     )
-                metadata[0] = producer.write_to_buffer(trajectory(device))
+                metadata[0] = producer.publish(trajectory(device))
                 assert metadata[0] is not None
             else:
                 packer._nccl_dp_receiver_replica = "lifecycle-consumer"
@@ -195,8 +197,8 @@ def main():
                     assert not buffer._server_threads
                     buffer.unlink()
                 else:
-                    producer.cleanup_nccl(timeout=30)
-                    producer.cleanup_nccl(timeout=0)
+                    producer.close(timeout=30)
+                    producer.close(timeout=0)
                     assert all(
                         not thread.is_alive() for thread in producer._nccl_threads
                     )
@@ -217,7 +219,7 @@ def main():
                 if backend == "ucxx":
                     UCXXPayloadTransport().close_producer(producer, timeout=30)
                 else:
-                    producer.cleanup_nccl(timeout=30)
+                    producer.close(timeout=30)
         except Exception as error:
             print(f"rank={rank} explicit cleanup failed: {error!r}", flush=True)
             if not active_error:

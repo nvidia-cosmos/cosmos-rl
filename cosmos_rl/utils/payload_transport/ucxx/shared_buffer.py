@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
 from cosmos_rl.utils.trajectory import TensorSpec, episode_length
 from cosmos_rl.utils.payload_transport.pack import normalize_trajectory
 
@@ -93,6 +94,7 @@ class BufferConfig:
     # Schema: list of TensorSpecs defining what tensors are stored
     # If empty, falls back to pickle-based serialization
     schema: List[TensorSpec] = field(default_factory=list)
+    layout: Optional[TensorLayout] = None
 
     def __post_init__(self):
         if not self.buffer_name:
@@ -122,31 +124,38 @@ class SharedRingBuffer:
         Read:  return view into shared memory (true fast read)
 
     Memory layout:
-        [Header: 24 bytes (write_idx, read_idx, entry_count)]
-        [Entry 0 metadata: 16 bytes][Entry 0 tensors...]
-        [Entry 1 metadata: 16 bytes][Entry 1 tensors...]
+        [Header: 64 bytes (write_idx, read_idx, entry_count, padding)]
+        [Entry 0 metadata: 64 bytes][Entry 0 tensors...]
+        [Entry 1 metadata: 64 bytes][Entry 1 tensors...]
         ...
 
-    Entry metadata: (size: u64, state: u8 (SlotState), padding)
+    Entry metadata: (size: u64, generation: u64, state: u8, padding)
 
     Slot State Machine:
         FREE -> WRITING -> READY -> READING -> FREE
         (Overwrite path: READY -> WRITING when buffer full)
     """
 
-    HEADER_SIZE = 24  # write_idx, read_idx, entry_count (3 x u64)
-    ENTRY_META_SIZE = 16  # size (u64) + state (u8) + padding (7 bytes)
+    # Keep both the first payload and every subsequent payload aligned to the
+    # layout's default boundary. The active metadata remains at the beginning.
+    HEADER_SIZE = 64
+    ENTRY_META_SIZE = 64
 
     def __init__(self, config: BufferConfig, create: bool = False):
+        self._is_creator = create
+        self._shm: Optional[shared_memory.SharedMemory] = None
         self.config = config
         self.buffer_name = config.buffer_name
         self.max_entries = config.max_entries
         self.schema = config.schema
+        self.layout = config.layout
 
         # Calculate sizes
         if self.schema:
-            # Schema-based: fixed layout for each entry
-            self.entry_data_size = sum(spec.nbytes for spec in self.schema)
+            self.layout = self.layout or TensorLayout.compile(self.schema)
+            if self.layout.schema() != self.schema:
+                raise ValueError("shared-buffer schema and tensor layout disagree")
+            self.entry_data_size = self.layout.payload_nbytes
         else:
             # Fallback: variable size entries (still uses pickle)
             self.entry_data_size = config.entry_size_bytes
@@ -155,22 +164,16 @@ class SharedRingBuffer:
         self.total_size = self.HEADER_SIZE + (self.max_entries * self.entry_size)
 
         # Create/attach shared memory
-        self._shm: Optional[shared_memory.SharedMemory] = None
         self._lock = Lock()
-        self._is_creator = create
-
         # Metrics (local to this process, not shared)
         self._metrics = BufferMetrics()
 
         self._init_shm(create)
 
         # Pre-compute tensor offsets within each entry
-        self._tensor_offsets: Dict[str, int] = {}
-        if self.schema:
-            offset = 0
-            for spec in self.schema:
-                self._tensor_offsets[spec.name] = offset
-                offset += spec.nbytes
+        self._tensor_offsets: Dict[str, int] = (
+            self.layout.offsets() if self.layout is not None else {}
+        )
 
     def _init_shm(self, create: bool) -> None:
         """Initialize shared memory segment."""
@@ -192,7 +195,7 @@ class SharedRingBuffer:
 
                 # Initialize all slots to FREE state
                 for i in range(self.max_entries):
-                    self._write_entry_meta(i, 0, SlotState.FREE)
+                    self._write_entry_meta(i, 0, SlotState.FREE, generation=0)
 
                 logger.info(
                     f"[SharedRingBuffer] Created '{self.buffer_name}' "
@@ -221,17 +224,25 @@ class SharedRingBuffer:
         """Get byte offset for entry data."""
         return self._entry_offset(index) + self.ENTRY_META_SIZE
 
-    def _write_entry_meta(self, index: int, size: int, state: SlotState) -> None:
+    def _write_entry_meta(
+        self,
+        index: int,
+        size: int,
+        state: SlotState,
+        *,
+        generation: Optional[int] = None,
+    ) -> None:
         """Write entry metadata with state."""
         offset = self._entry_offset(index)
-        # Format: Q (u64 size) + B (u8 state) + 7 bytes padding = 16 bytes
-        struct.pack_into("QB", self._shm.buf, offset, size, state)
+        if generation is None:
+            generation = struct.unpack_from("Q", self._shm.buf, offset + 8)[0]
+        struct.pack_into("QQB7x", self._shm.buf, offset, size, generation, state)
 
-    def _read_entry_meta(self, index: int) -> Tuple[int, SlotState]:
+    def _read_entry_meta(self, index: int) -> Tuple[int, int, SlotState]:
         """Read entry metadata."""
         offset = self._entry_offset(index)
-        size, state_val = struct.unpack_from("QB", self._shm.buf, offset)
-        return size, SlotState(state_val)
+        size, generation, state_val = struct.unpack_from("QQB7x", self._shm.buf, offset)
+        return size, generation, SlotState(state_val)
 
     def _try_transition(
         self, index: int, from_state: SlotState, to_state: SlotState
@@ -248,7 +259,7 @@ class SharedRingBuffer:
             True if transition succeeded, False if current state didn't match.
         """
         with self._lock:
-            size, current_state = self._read_entry_meta(index)
+            size, _, current_state = self._read_entry_meta(index)
             if current_state != from_state:
                 return False
             self._write_entry_meta(index, size, to_state)
@@ -256,8 +267,13 @@ class SharedRingBuffer:
 
     def get_slot_state(self, index: int) -> SlotState:
         """Get the current state of a slot."""
-        _, state = self._read_entry_meta(index)
+        _, _, state = self._read_entry_meta(index)
         return state
+
+    def get_slot_generation(self, index: int) -> int:
+        """Return the identity of the payload currently occupying ``index``."""
+        _, generation, _ = self._read_entry_meta(index)
+        return generation
 
     def write(self, data: Dict[str, Any], overwrite_if_full: bool = True) -> int:
         """
@@ -287,7 +303,7 @@ class SharedRingBuffer:
             slot = write_idx % self.max_entries
 
             # Check slot state and handle appropriately
-            _, current_state = self._read_entry_meta(slot)
+            _, previous_generation, current_state = self._read_entry_meta(slot)
 
             if current_state == SlotState.READY:
                 # Slot has unconsumed data
@@ -307,9 +323,11 @@ class SharedRingBuffer:
                 raise SlotError(f"Slot {slot} is being read, cannot overwrite")
 
             # Transition to WRITING state
-            self._write_entry_meta(slot, 0, SlotState.WRITING)
+            generation = previous_generation + 1
+            self._write_entry_meta(slot, 0, SlotState.WRITING, generation=generation)
 
             data_offset = self._entry_data_offset(slot)
+            self._zero_padding(data_offset)
 
             try:
                 if self.schema:
@@ -348,7 +366,7 @@ class SharedRingBuffer:
     def write_raw(self, buf: bytes, overwrite_if_full: bool = True) -> int:
         """Write a pre-packed contiguous buffer to the next slot.
 
-        This is the fast path used by ``UCXXRolloutMixin.write_to_buffer``:
+        This is the fast path used by the UCXX payload producer:
         the caller has already coalesced all tensors into a single
         byte-buffer matching the schema layout, so we skip per-tensor
         iteration and do a single ``memoryview`` copy (one ``memmove``).
@@ -370,7 +388,7 @@ class SharedRingBuffer:
             write_idx, read_idx, entry_count = self._read_header()
             slot = write_idx % self.max_entries
 
-            _, current_state = self._read_entry_meta(slot)
+            _, previous_generation, current_state = self._read_entry_meta(slot)
             if current_state == SlotState.READY:
                 if entry_count >= self.max_entries:
                     if not overwrite_if_full:
@@ -385,11 +403,13 @@ class SharedRingBuffer:
             elif current_state == SlotState.READING:
                 raise SlotError(f"Slot {slot} is being read, cannot overwrite")
 
-            self._write_entry_meta(slot, 0, SlotState.WRITING)
+            generation = previous_generation + 1
+            self._write_entry_meta(slot, 0, SlotState.WRITING, generation=generation)
 
             data_offset = self._entry_data_offset(slot)
             try:
                 self._shm.buf[data_offset : data_offset + self.entry_data_size] = buf
+                self._zero_padding(data_offset)
             except BaseException:
                 self._write_entry_meta(slot, 0, SlotState.FREE)
                 if current_state == SlotState.READY:
@@ -402,6 +422,66 @@ class SharedRingBuffer:
             self._metrics.writes_total += 1
             return slot
 
+    def acquire_write_slot(
+        self, *, overwrite_if_full: bool = True
+    ) -> Tuple[int, int, np.ndarray]:
+        """Reserve one slot and return its generation and writable byte view."""
+        if not self.schema:
+            raise SlotError("direct payload storage requires a tensor layout")
+        with self._lock:
+            write_idx, read_idx, entry_count = self._read_header()
+            slot = write_idx % self.max_entries
+            _, previous_generation, state = self._read_entry_meta(slot)
+            if state == SlotState.READY:
+                if entry_count >= self.max_entries and not overwrite_if_full:
+                    raise SlotError(f"Buffer full, slot {slot} not consumed")
+                self._metrics.drops_total += 1
+                entry_count = max(0, entry_count - 1)
+            elif state == SlotState.WRITING:
+                raise SlotError(f"Slot {slot} is being written by another producer")
+            elif state == SlotState.READING:
+                raise SlotError(f"Slot {slot} is being read, cannot overwrite")
+
+            generation = previous_generation + 1
+            self._write_entry_meta(slot, 0, SlotState.WRITING, generation=generation)
+            # Advance admission immediately so another reservation cannot select
+            # the same in-progress slot. Publication accounts the READY entry.
+            self._write_header(write_idx + 1, read_idx, entry_count)
+            data_offset = self._entry_data_offset(slot)
+            raw = np.ndarray(
+                shape=(self.entry_data_size,),
+                dtype=np.uint8,
+                buffer=self._shm.buf,
+                offset=data_offset,
+            )
+            self._zero_padding(data_offset)
+            return slot, generation, raw
+
+    def publish_write_slot(self, slot: int, generation: int) -> None:
+        """Make a fully populated direct-write reservation visible to readers."""
+        with self._lock:
+            _, current_generation, state = self._read_entry_meta(slot)
+            if state != SlotState.WRITING or current_generation != generation:
+                raise SlotError(f"Slot {slot} is not owned by generation {generation}")
+            self._write_entry_meta(
+                slot,
+                self.entry_data_size,
+                SlotState.READY,
+                generation=generation,
+            )
+            write_idx, read_idx, entry_count = self._read_header()
+            self._write_header(
+                write_idx, read_idx, min(entry_count + 1, self.max_entries)
+            )
+            self._metrics.writes_total += 1
+
+    def abandon_write_slot(self, slot: int, generation: int) -> None:
+        """Release an unpublished direct-write reservation."""
+        with self._lock:
+            _, current_generation, state = self._read_entry_meta(slot)
+            if state == SlotState.WRITING and current_generation == generation:
+                self._write_entry_meta(slot, 0, SlotState.FREE, generation=generation)
+
     def _write_tensors(self, data: Dict[str, Any], base_offset: int) -> None:
         """Copy already-normalized CPU tensors; no independent packing policy."""
         for spec in self.schema:
@@ -412,9 +492,17 @@ class SharedRingBuffer:
             )
             np.copyto(dst, arr, casting="no")
 
+    def _zero_padding(self, base_offset: int) -> None:
+        if self.layout is None:
+            return
+        for offset, nbytes in self.layout.padding:
+            self._shm.buf[base_offset + offset : base_offset + offset + nbytes] = bytes(
+                nbytes
+            )
+
     def is_ready(self, index: int) -> bool:
         """Check if an entry is ready to read."""
-        _, state = self._read_entry_meta(index)
+        _, _, state = self._read_entry_meta(index)
         return state == SlotState.READY
 
     def get_ready_count(self) -> int:
@@ -452,7 +540,7 @@ class SharedRingBuffer:
             SlotError: If entry is not ready.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            size, _, state = self._read_entry_meta(index)
 
             if state != SlotState.READY:
                 raise SlotError(f"Entry {index} not ready (state={state.name})")
@@ -511,7 +599,7 @@ class SharedRingBuffer:
             Dict of numpy arrays, or None if entry not ready.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            size, _, state = self._read_entry_meta(index)
 
             if state != SlotState.READY:
                 return None
@@ -543,7 +631,7 @@ class SharedRingBuffer:
         """
         ready_indices = []
         for i in range(self.max_entries):
-            _, state = self._read_entry_meta(i)
+            _, _, state = self._read_entry_meta(i)
             if state == SlotState.READY:
                 ready_indices.append(i)
         return ready_indices
@@ -568,7 +656,7 @@ class SharedRingBuffer:
             SlotError: If entry is not ready.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            size, _, state = self._read_entry_meta(index)
 
             if state != SlotState.READY:
                 raise SlotError(f"Entry {index} not ready (state={state.name})")
@@ -595,7 +683,7 @@ class SharedRingBuffer:
 
         return result
 
-    def read_raw(self, index: int) -> np.ndarray:
+    def read_raw(self, index: int, *, generation: Optional[int] = None) -> np.ndarray:
         """Return the raw bytes of a slot as a contiguous uint8 array view.
 
         Transitions slot state: READY -> READING on first call.
@@ -604,21 +692,23 @@ class SharedRingBuffer:
         server's :meth:`UCXXBuffer._handle_connection` for the single
         coalesced ``send(raw_buf)`` per slot.  Each slot read has a
         single intended owner: the handler that performed the
-        ``READY -> READING`` transition is responsible for finalising
-        with :meth:`mark_consumed` (success) or
-        :meth:`release_reading` (failure).
+        ``READY -> READING`` transition finalises with
+        :meth:`mark_consumed` only after native send completion is proven.
 
-        Re-entry from ``READING`` is **tolerated, not encouraged** --
-        if a stale orphan handler is still mid-``send`` when the
-        client times out and rotates to a fresh server thread, the
-        new handler can re-acquire a view (the writer cannot recycle
-        a READING slot, so the bytes are stable).  The defensive
-        guards in :meth:`mark_consumed` and :meth:`release_reading`
-        make the duplicate-finalise call from the orphan handler a
-        no-op.
+        Re-entry from ``READING`` remains available to low-level callers that
+        can prove the previous reader retired. The transport server does not
+        use it to recover an uncertain accepted send: that case retains the
+        slot and fails the process because Python timeout or cancellation is
+        not a native completion fence.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            size, current_generation, state = self._read_entry_meta(index)
+
+            if generation is not None and generation != current_generation:
+                raise SlotError(
+                    f"Entry {index} generation {current_generation} does not match "
+                    f"requested generation {generation}"
+                )
 
             if state == SlotState.READY:
                 if not self.schema:
@@ -636,7 +726,7 @@ class SharedRingBuffer:
             offset=data_offset,
         )
 
-    def mark_consumed(self, index: int) -> None:
+    def mark_consumed(self, index: int, *, generation: Optional[int] = None) -> None:
         """
         Mark entry as consumed (slot can be reused).
 
@@ -651,7 +741,14 @@ class SharedRingBuffer:
         payload, dropping data.
         """
         with self._lock:
-            _, state = self._read_entry_meta(index)
+            _, current_generation, state = self._read_entry_meta(index)
+
+            if generation is not None and generation != current_generation:
+                logger.warning(
+                    f"[SharedRingBuffer] ignoring stale consume for slot {index} "
+                    f"generation={generation}; current={current_generation}"
+                )
+                return
 
             if state != SlotState.READING:
                 logger.warning(
@@ -667,18 +764,26 @@ class SharedRingBuffer:
                 f"[SharedRingBuffer] mark_consumed slot={index} (READING->FREE)"
             )
 
-    def release_reading(self, index: int) -> None:
+    def release_reading(self, index: int, *, generation: Optional[int] = None) -> None:
         """
         Release slot from READING back to READY (data preserved for retry).
 
-        Called when a send fails mid-transfer. The data is still valid in
-        shared memory, so transitioning back to READY allows a new handler
-        to read_view() the same slot on the client's retry.
+        This low-level transition is safe only when the caller has proof that
+        no native operation still references the slot. The UCXX transport does
+        not call it after an accepted send becomes uncertain; it retains the
+        READING slot until process exit instead.
 
         Transitions slot state: READING -> READY.
         """
         with self._lock:
-            size, state = self._read_entry_meta(index)
+            size, current_generation, state = self._read_entry_meta(index)
+
+            if generation is not None and generation != current_generation:
+                logger.warning(
+                    f"[SharedRingBuffer] ignoring stale read release for slot {index} "
+                    f"generation={generation}; current={current_generation}"
+                )
+                return
 
             if state != SlotState.READING:
                 logger.warning(
@@ -710,7 +815,7 @@ class SharedRingBuffer:
         """
         states = {}
         for i in range(self.max_entries):
-            _, state = self._read_entry_meta(i)
+            _, _, state = self._read_entry_meta(i)
             states[i] = state
         return states
 
@@ -728,27 +833,31 @@ class SharedRingBuffer:
             ]
             if self.schema
             else None,
+            "layout": self.layout.descriptor() if self.layout is not None else None,
         }
 
     @classmethod
     def from_handle(cls, handle: Dict[str, Any]) -> "SharedRingBuffer":
         """Create buffer from handle (attach to existing)."""
-        schema = []
-        if handle.get("schema"):
-            for s in handle["schema"]:
-                schema.append(
-                    TensorSpec(
-                        name=s["name"],
-                        shape=tuple(s["shape"]),
-                        dtype=np.dtype(s["dtype"]),
-                    )
-                )
+        raw_layout = handle.get("layout")
+        if raw_layout is None:
+            if handle.get("schema"):
+                raise ValueError("schema-backed handle carries no tensor layout")
+            # Variable-size pickle buffers have no tensor schema or layout.
+            # They remain a supported SharedRingBuffer mode even though the
+            # payload transports require a canonical tensor layout.
+            layout = None
+            schema = []
+        else:
+            layout = TensorLayout.from_descriptor(raw_layout)
+            schema = layout.schema()
 
         config = BufferConfig(
             buffer_name=handle["buffer_name"],
             max_entries=handle["max_entries"],
             entry_size_bytes=handle["entry_size"],
             schema=schema,
+            layout=layout,
         )
         return cls(config, create=False)
 

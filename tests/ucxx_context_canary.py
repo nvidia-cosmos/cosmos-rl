@@ -13,11 +13,19 @@ import uuid
 import numpy as np
 
 from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer as module
+from cosmos_rl.utils.payload_transport.layout import identity_key
 from cosmos_rl.utils.trajectory import TensorSpec
 import cosmos_rl
 
 
-def server(*, elements=4, threads=2, send_timeout=30, start=True):
+def server(
+    *,
+    elements=4,
+    threads=2,
+    send_timeout=30,
+    start=True,
+    sender_incarnation="",
+):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -30,6 +38,7 @@ def server(*, elements=4, threads=2, send_timeout=30, start=True):
             port=port,
             n_server_threads=threads,
             send_timeout=send_timeout,
+            sender_incarnation=sender_incarnation,
         )
     )
     buffer._local_ip = "127.0.0.1"
@@ -46,7 +55,13 @@ async def main():
     async def fetch(producer):
         for port in producer.ports:
             slot = producer.write({"x": expected})
-            result = await client.read("127.0.0.1", port, slot, producer.config.schema)
+            result = await client.read(
+                "127.0.0.1",
+                port,
+                slot,
+                producer._buffer.layout,
+                generation=producer.get_slot_generation(slot),
+            )
             np.testing.assert_array_equal(result["x"], expected)
             client.return_pinned(result["_pinned_buf"])
 
@@ -77,7 +92,12 @@ async def producer_send(case):
     module._acquire_ucxx_context(peer_owner)
     endpoint = await module.ucxx.create_endpoint("127.0.0.1", producer.port)
     slot = producer.write({"x": expected})
-    await endpoint.send(np.array([slot], dtype=np.int64))
+    await endpoint.send(
+        np.array(
+            [slot, producer.get_slot_generation(slot), identity_key("")],
+            dtype=np.uint64,
+        )
+    )
     status = np.empty(1, dtype=np.uint8)
     await endpoint.recv(status)
     assert status[0] == 0
@@ -126,7 +146,13 @@ async def partial_start():
     client = module.UCXXClient()
     expected = np.arange(4, dtype=np.float32)
     slot = producer.write({"x": expected})
-    result = await client.read("127.0.0.1", producer.port, slot, producer.config.schema)
+    result = await client.read(
+        "127.0.0.1",
+        producer.port,
+        slot,
+        producer._buffer.layout,
+        generation=producer.get_slot_generation(slot),
+    )
     np.testing.assert_array_equal(result["x"], expected)
     await client.close()
     await asyncio.to_thread(producer.stop_server, timeout=5)

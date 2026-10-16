@@ -1,5 +1,8 @@
 # In-tree NCCL Payload Transport
 
+For the shared aligned-layout, direct-publication, reusable receive-buffer, and
+lease model, see [Efficient tensor payload transport](efficient_tensor_transport.md).
+
 By default Cosmos-RL ships rollout completion payloads (token IDs,
 log-probs, reward/action tensors, …) from rollout workers to the
 controller over **Redis streams**. For large payloads — e.g. VLA policies
@@ -47,7 +50,7 @@ collects its result. See [completion deadlines](../prefetch_completion_deadline.
 | `nccl/streams.py` | Per-process transfer-stream pool + CUDA event helpers. |
 | `nccl/header.py` | Self-describing payload header stamped on every transfer, and the receiver's check of it. |
 | `utils/trajectory.py` | Flat trajectory schema (`TensorSpec`) shared by sender + receiver. |
-| `nccl/mixins.py` | `NCCLRolloutMixin` — producer. |
+| `context.py`, `nccl/producer.py` | `PayloadContext` composition and the owned NCCL producer. |
 | `nccl/strategy.py` | `NCCLTransportStrategy` — the consumer's rendezvous + recv engine. |
 | `nccl/data_packer_mixin.py` | `NCCLDataPackerMixin` — trainer-side consumer (subclass of `PrefetchDataPackerMixin`). |
 
@@ -66,22 +69,24 @@ collects its result. See [completion deadlines](../prefetch_completion_deadline.
    late acceptance, corrupt identity or uncertain native completion is terminal;
    it cannot become an ordinary missing episode or a new send attempt.
 
-`TensorSpec` describes the flat schema; the same layout is used to pack
-(producer) and unpack (consumer).
+`TensorSpec` describes the flat schema. `TensorLayout` compiles it into aligned,
+cached offsets shared by packing and received tensor views. See
+[efficient tensor transport](efficient_tensor_transport.md).
 
 ## Payload framing and per-pair ordering
 
 A payload on the wire is a header followed by the schema region:
 
 ```
-[ 32-byte header ][ schema entry_size bytes ]
+[ 64-byte header ][ aligned payload bytes ]
   magic | version | payload_nbytes | transfer_key
+  layout_key | sender_incarnation_key | reserved
 ```
 
-`transfer_key` is a 64-bit digest of the `transfer_id`.  The receiver checks
-both it and `payload_nbytes` before unpacking. A disagreement after acceptance is
-terminal (`nccl/header.py`), even if the receive event has completed: completed
-bytes alone do not prove the ordered stream is reusable.
+The receiver checks transfer, layout, sender incarnation, and payload size before
+exposing cached typed views. A disagreement after acceptance is terminal
+(`nccl/header.py`), even if the receive event completed: completed bytes alone do
+not prove the ordered stream is reusable.
 
 The check exists because a cached 2-rank communicator is an **ordered stream
 with no tags**: its k-th `nccl_send` is taken by the k-th `nccl_recv`, and
@@ -135,7 +140,8 @@ depend on Redis making progress. See the
   `(sender_rank, receiver_replica, receiver_rank)` cache key. The producer does
   not use that cooldown as an admission gate; accepted-operation ownership and
   deadlines govern its sends.
-- **Registry capacity is not a hard GPU-memory limit:** retired entries with
+- **Registry capacity is not a hard GPU-memory limit:** reusable send and receive
+  pools are bounded across layouts, but retired entries with
   pending native readers retain their storage. Uncertain work cannot be freed
   merely to meet an entry-count or memory target.
 
@@ -182,11 +188,10 @@ their storage owned until terminal process exit.
 
 ## Deprecated: the `redis_client` / `post_redis_injection` packer contract
 
-Before the in-tree mixin, NCCL-aware data packers exposed a
+NCCL-aware data packers historically exposed a
 `redis_client` attribute and an optional `post_redis_injection()` hook
 (PR #670). `attach_data_packer` still honors that path as a **deprecated
-fallback** so in-flight downstream forks keep working, but new code should
-subclass `NCCLDataPackerMixin` (which exposes `_setup_nccl_data_packer`,
-the path `attach_data_packer` prefers). The legacy path logs a deprecation
-warning and will be removed no earlier than two minor releases after the
-in-tree transport lands.
+fallback** for AlpaGym's independent cleanup lifecycle. New producer code owns a
+`PayloadContext`; trainer-side consumers may continue to subclass
+`NCCLDataPackerMixin`. The lifecycle hook is retained and is not a wire-format
+compatibility path.

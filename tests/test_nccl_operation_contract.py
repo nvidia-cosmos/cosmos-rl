@@ -15,7 +15,7 @@ import torch
 
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import SendBufferRegistry
 from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
 from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
     NcclRendezvous,
     TransferStatus,
@@ -138,7 +138,7 @@ def test_lost_publish_reply_resolves_same_operation(redis_client):
 
 
 def test_accepted_request_captures_uid_and_duplicate_does_not_lease_twice(redis_client):
-    producer = NCCLRolloutMixin()
+    producer = NCCLPayloadProducer()
     producer._nccl_sender_rank = 0
     producer._nccl_registry = SendBufferRegistry(capacity=4)
     producer._nccl_comm_cache = CommCache(

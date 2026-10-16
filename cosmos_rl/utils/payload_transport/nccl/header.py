@@ -43,7 +43,9 @@ Wire format (little-endian, :data:`HEADER_NBYTES` bytes)::
     4       4     version (:data:`HEADER_VERSION`)
     8       8     payload_nbytes -- the schema entry size that follows
     16      8     transfer_key -- 64-bit digest of the transfer id
-    24      8     reserved (zero)
+    24      8     layout_key -- 64-bit digest of the layout ID
+    32      8     sender_key -- 64-bit digest of the producer incarnation
+    40      24    reserved (zero)
 
 Both ends of the transport live in this package, so the format is internal:
 a producer and a consumer are always deployed from the same cosmos-rl build.
@@ -53,6 +55,8 @@ from __future__ import annotations
 
 import hashlib
 import struct
+
+from cosmos_rl.utils.payload_transport.layout import WIRE_VERSION, identity_key
 
 __all__ = [
     "HEADER_NBYTES",
@@ -66,14 +70,14 @@ __all__ = [
 
 #: Size of the header region prefixed to every payload buffer.  8-byte aligned
 #: so the schema region that follows keeps the alignment the packer assumes.
-HEADER_NBYTES = 32
+HEADER_NBYTES = 64
 
 #: Bumped only if the layout above changes.  A mismatch is reported rather than
 #: tolerated: the two ends ship together, so it means a corrupt buffer.
-HEADER_VERSION = 1
+HEADER_VERSION = WIRE_VERSION
 
 _MAGIC = 0x4E43_5031  # 'NCP1'
-_STRUCT = struct.Struct("<IIQQQ")
+_STRUCT = struct.Struct("<IIQQQQ")
 
 
 class PayloadHeaderMismatch(RuntimeError):
@@ -95,15 +99,23 @@ def transfer_key(transfer_id: str) -> int:
     return int.from_bytes(digest, "little")
 
 
-def build_header(*, transfer_id: str, payload_nbytes: int) -> bytes:
+def build_header(
+    *,
+    transfer_id: str,
+    payload_nbytes: int,
+    layout_id: str = "",
+    sender_incarnation: str = "",
+) -> bytes:
     """Serialize the header a producer prefixes to ``transfer_id``'s payload."""
-    return _STRUCT.pack(
+    packed = _STRUCT.pack(
         _MAGIC,
         HEADER_VERSION,
         int(payload_nbytes),
         transfer_key(transfer_id),
-        0,
+        identity_key(layout_id),
+        identity_key(sender_incarnation),
     )
+    return packed + bytes(HEADER_NBYTES - len(packed))
 
 
 def parse_header(raw: bytes) -> dict:
@@ -116,18 +128,27 @@ def parse_header(raw: bytes) -> dict:
         raise PayloadHeaderMismatch(
             f"payload header truncated: got {len(raw)} bytes, need {HEADER_NBYTES}"
         )
-    magic, version, payload_nbytes, key, _reserved = _STRUCT.unpack(
-        bytes(raw[:HEADER_NBYTES])
+    magic, version, payload_nbytes, key, layout_key, sender_key = _STRUCT.unpack(
+        bytes(raw[: _STRUCT.size])
     )
     return {
         "magic": magic,
         "version": version,
         "payload_nbytes": payload_nbytes,
         "transfer_key": key,
+        "layout_key": layout_key,
+        "sender_key": sender_key,
     }
 
 
-def verify_header(raw: bytes, *, transfer_id: str, payload_nbytes: int) -> None:
+def verify_header(
+    raw: bytes,
+    *,
+    transfer_id: str,
+    payload_nbytes: int,
+    layout_id: str = "",
+    sender_incarnation: str = "",
+) -> None:
     """Check that ``raw`` heads the payload of ``transfer_id``.
 
     Args:
@@ -165,4 +186,14 @@ def verify_header(raw: bytes, *, transfer_id: str, payload_nbytes: int) -> None:
         raise PayloadHeaderMismatch(
             f"payload for {transfer_id} declares {fields['payload_nbytes']} "
             f"bytes but the receiver's schema describes {int(payload_nbytes)}"
+        )
+    expected_layout_key = identity_key(layout_id)
+    if fields["layout_key"] != expected_layout_key:
+        raise PayloadHeaderMismatch(
+            f"payload for {transfer_id} carries a different tensor layout"
+        )
+    expected_sender_key = identity_key(sender_incarnation)
+    if fields["sender_key"] != expected_sender_key:
+        raise PayloadHeaderMismatch(
+            f"payload for {transfer_id} belongs to a different sender incarnation"
         )

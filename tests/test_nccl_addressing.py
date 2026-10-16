@@ -30,7 +30,8 @@ from cosmos_rl.utils.payload_transport.nccl.strategy import (
     _pair_key,
     _parse_ref,
 )
-from cosmos_rl.utils.payload_transport.nccl.mixins import _producer_pair_key
+from cosmos_rl.utils.payload_transport.nccl.producer import _producer_pair_key
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     build_nccl_prefix,
     build_pair_uid_key,
@@ -43,12 +44,16 @@ from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
 
 
 def _ref(replica, rank, tid):
+    layout = TensorLayout.compile([])
     return _parse_ref(
         {
             "_nccl": True,
             "_transfer_id": tid,
             "_sender_replica": replica,
             "_sender_rank": rank,
+            "_sender_incarnation": f"{replica}-incarnation",
+            "_wire_version": WIRE_VERSION,
+            "_layout_id": layout.layout_id,
         }
     )
 
@@ -88,12 +93,9 @@ class TestMultiReplicaAddressing(unittest.TestCase):
         k_b = build_pair_uid_key(self.prefix, "rollout-B", 0, "policy-A", 5)
         self.assertNotEqual(k_a, k_b)
 
-    def test_string_completion_ref_has_no_replica_but_still_parses(self):
-        # Bare "nccl:<id>" string (no dict metadata) -- sender_replica falls
-        # back to the rollout-idx-derived id so it still resolves single-node.
-        ref = _parse_ref("nccl:2:deadbeef")
-        self.assertIsNotNone(ref)
-        self.assertIn("sender_replica", ref)
+    def test_cleanup_completion_string_is_not_a_payload_reference(self):
+        with self.assertRaisesRegex(ValueError, "do not carry"):
+            _parse_ref("nccl:2:deadbeef")
 
 
 class TestMultiPolicyReplicaAddressing(unittest.TestCase):

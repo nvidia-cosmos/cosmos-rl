@@ -40,6 +40,23 @@ from cosmos_rl.utils.payload_transport.ucxx.data_packer_mixin import (
     UCXXDataPackerMixin,
 )
 from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
+from cosmos_rl.utils.transport_failure import TransportUnusableError
+
+
+def _valid_ref(**updates):
+    ref = {
+        "_ucxx": True,
+        "_worker_ip": "10.0.0.1",
+        "_ucxx_port": 7000,
+        "_slot": 5,
+        "_slot_generation": 9,
+        "_sender_incarnation": "worker-a",
+        "_wire_version": WIRE_VERSION,
+        "_layout_id": TensorLayout.compile([]).layout_id,
+    }
+    ref.update(updates)
+    return ref
 
 
 class _StubDataPacker:
@@ -181,12 +198,7 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
         fetch returns None and the mixin skips the episode (returns
         None without delegating to super()).  This is the documented
         behavior in :meth:`UCXXDataPackerMixin.get_policy_input`."""
-        ref = {
-            "_ucxx": True,
-            "_worker_ip": "10.0.0.1",
-            "_ucxx_port": 7000,
-            "_slot": 5,
-        }
+        ref = _valid_ref()
         out = self.p.get_policy_input(rollout_output=ref)
         self.assertIsNone(out)
         # super() was never invoked because nothing was resolvable.
@@ -197,13 +209,8 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
         forwards the resolved dict to super() instead of the original
         UCXX metadata."""
         resolved = {"observations": [1, 2, 3], "rewards": [0.1, 0.2]}
-        ref = {
-            "_ucxx": True,
-            "_worker_ip": "10.0.0.1",
-            "_ucxx_port": 7000,
-            "_slot": 5,
-        }
-        cache_key = UCXXTransportStrategy._ref_cache_key(ref)
+        ref = _valid_ref()
+        cache_key = self.p._transport_strategy.cache_key(ref)
         # Inject directly into the cache (bypass UCXX entirely).
         self.p._ucxx_dp_prefetch_cache = {cache_key: resolved}
 
@@ -221,20 +228,24 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
 
 class TestCacheKey(unittest.TestCase):
     def test_cache_key_format(self):
-        key = UCXXTransportStrategy._ref_cache_key(
-            {
-                "_worker_ip": "10.0.0.1",
-                "_ucxx_port": 7000,
-                "_slot": 5,
-            }
+        ref = _valid_ref()
+        key = UCXXTransportStrategy().cache_key(ref)
+        self.assertEqual(
+            key,
+            f"10.0.0.1:7000:worker-a:5:9:{ref['_layout_id']}",
         )
-        self.assertEqual(key, "10.0.0.1:7000:5")
 
-    def test_cache_key_handles_missing_fields(self):
-        # Missing fields should yield a still-deterministic string so
-        # collisions show up rather than crashes.
-        key = UCXXTransportStrategy._ref_cache_key({"_worker_ip": "x"})
-        self.assertIn("x:", key)
+    def test_public_cache_key_rejects_missing_fields(self):
+        with self.assertRaisesRegex(TransportUnusableError, "server port"):
+            UCXXTransportStrategy().cache_key({"_worker_ip": "x"})
+
+    def test_public_cache_key_binds_layout_identity(self):
+        strategy = UCXXTransportStrategy()
+        ref = _valid_ref()
+        self.assertNotEqual(
+            strategy.cache_key(ref),
+            strategy.cache_key(ref | {"_layout_id": "f" * 32}),
+        )
 
 
 # ---------------------------------------------------------------------------

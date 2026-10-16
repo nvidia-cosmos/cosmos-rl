@@ -460,17 +460,17 @@ def check_ucxx(verbose=False):
                     f"  {dev}:{port}  {info['state']:<20s}  {info['link_layer']:<12s}  {info['rate']}"
                 )
 
-    # 8. Network — use the same _get_local_ip() that UCXX uses at runtime
+    # 8. Network — use the same address selection that UCXX uses at runtime
     print("\n=== Network ===")
     print(f"  hostname:          {socket.getfqdn()}")
     try:
-        from rl_gym.common.ucxx.mixins import _get_local_ip
+        from cosmos_rl.utils.payload_transport.ucxx.producer import _get_local_ip
 
         ip = _get_local_ip()
-        print(f"  _get_local_ip():   {ip}  (from rl_gym.common.ucxx.mixins)")
+        print(f"  _get_local_ip():   {ip}  (from Cosmos-RL UCXX producer)")
     except ImportError:
         ip = socket.gethostbyname(socket.getfqdn())
-        print(f"  _get_local_ip():   {ip}  (fallback — could not import mixins)")
+        print(f"  _get_local_ip():   {ip}  (fallback — producer unavailable)")
 
     # 9. UCX env vars
     ucx_vars = sorted((k, v) for k, v in os.environ.items() if k.startswith("UCX_"))

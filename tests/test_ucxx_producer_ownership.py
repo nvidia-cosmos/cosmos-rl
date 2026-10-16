@@ -40,6 +40,7 @@ def test_slot_owned_until_accepted_send_completes(monkeypatch, outcome, phase):
         owner._active_endpoints = []
         owner._thread_metrics_lock = threading.Lock()
         owner._thread_metrics = {}
+        owner._sender_incarnation_key = 0
         raw = np.arange(8, dtype=np.uint8)
         owner._buffer = SimpleNamespace(
             schema=[object()],
@@ -56,7 +57,7 @@ def test_slot_owned_until_accepted_send_completes(monkeypatch, outcome, phase):
                 pass
 
             async def recv(self, array):
-                array[0] = 0
+                array.fill(0)
 
             async def send(self, array):
                 if (array.size == 1) != (phase == "status"):
@@ -85,7 +86,7 @@ def test_slot_owned_until_accepted_send_completes(monkeypatch, outcome, phase):
         try:
             if outcome == "healthy":
                 await asyncio.wait_for(future, 1)
-                owner._buffer.mark_consumed.assert_called_once_with(0)
+                owner._buffer.mark_consumed.assert_called_once_with(0, generation=0)
                 assert not failures
             else:
                 with pytest.raises(TransportUnusableError):

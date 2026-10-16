@@ -14,6 +14,7 @@ import torch
 
 from cosmos_rl.utils.payload_transport.ucxx import ucxx_buffer
 from cosmos_rl.utils.payload_transport.ucxx.strategy import UCXXTransportStrategy
+from cosmos_rl.utils.payload_transport.layout import TensorLayout, WIRE_VERSION
 from cosmos_rl.utils.trajectory import TensorSpec
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
@@ -72,7 +73,7 @@ def test_uncertain_read_is_terminal_without_cancelling_native_waiter(monkeypatch
                 "host",
                 1,
                 2,
-                [TensorSpec((4,), np.uint8, "x")],
+                TensorLayout.compile([TensorSpec((4,), np.uint8, "x")]),
                 timeout=0.04,
                 ports=[1, 2],
             )
@@ -94,29 +95,54 @@ def test_uncertain_read_is_terminal_without_cancelling_native_waiter(monkeypatch
 
 @pytest.mark.parametrize("prefetch", [False, True])
 def test_copy_error_does_not_fall_back_and_recycle_live_storage(monkeypatch, prefetch):
-    backing = torch.arange(4, dtype=torch.uint8)
-    payload = {"x": backing.numpy(), "_pinned_buf": backing}
+    layout = TensorLayout.compile([TensorSpec((4,), np.uint8, "x")])
+    backing = torch.zeros(layout.payload_nbytes, dtype=torch.uint8)
+    backing[:4] = torch.arange(4, dtype=torch.uint8)
+    payload = {
+        "x": backing.numpy(),
+        "_pinned_buf": backing,
+        "_layout": layout,
+    }
 
     async def read(*args, **kwargs):
         return dict(payload)
 
-    client = SimpleNamespace(read=read, return_pinned=Mock())
+    client = SimpleNamespace(
+        read=read,
+        return_pinned=Mock(),
+        _closing=False,
+        _failure=None,
+    )
     strategy = UCXXTransportStrategy()
     strategy._client = client
     strategy._device = "cuda:0"
     strategy._read_timeout = 2
+    strategy._layout_cache.register(layout)
     monkeypatch.setattr(torch.cuda, "device", lambda device: contextlib.nullcontext())
     monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: object())
     calls = []
 
-    def partial_copy(value, *args, **kwargs):
+    def partial_copy(tensor, value, *args, **kwargs):
         calls.append(value)
         if len(calls) == 1:
             raise RuntimeError("copy failed after native issue")
-        return value.clone()
+        return tensor
 
-    monkeypatch.setattr(torch.Tensor, "to", partial_copy)
-    metadata = {"_ucxx": True, "_worker_ip": "host", "_ucxx_port": 1, "_slot": 2}
+    monkeypatch.setattr(torch.Tensor, "copy_", partial_copy)
+    lease = SimpleNamespace(
+        tensor=torch.empty(layout.payload_nbytes, dtype=torch.uint8), release=Mock()
+    )
+    strategy._receive_pool = SimpleNamespace(acquire=Mock(return_value=lease))
+    metadata = {
+        "_ucxx": True,
+        "_wire_version": WIRE_VERSION,
+        "_worker_ip": "host",
+        "_ucxx_port": 1,
+        "_slot": 2,
+        "_slot_generation": 1,
+        "_sender_incarnation": "sender",
+        "_layout_id": layout.layout_id,
+    }
     with pytest.raises(TransportUnusableError):
         if prefetch:
             strategy.fetch_batch([(0, metadata)])

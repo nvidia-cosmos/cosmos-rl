@@ -30,7 +30,13 @@ from unittest import mock
 from cosmos_rl.utils.payload_transport.nccl.data_packer_mixin import (
     NCCLDataPackerMixin,
 )
+from cosmos_rl.utils.payload_transport.nccl.header import HEADER_NBYTES
 from cosmos_rl.utils.payload_transport.nccl.strategy import NCCLTransportStrategy
+from cosmos_rl.utils.payload_transport.layout import (
+    LayoutCache,
+    TensorLayout,
+    WIRE_VERSION,
+)
 
 
 class _StubDataPacker:
@@ -70,6 +76,9 @@ _FORWARDED_STATE = [
     "first_transfer_timeout",
     "warm_pairs",
     "schema",
+    "default_layout",
+    "layout_cache",
+    "receive_pool",
     "total_nccl",
     "total_fallback",
     "total_bytes",
@@ -238,13 +247,23 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
         self.assertEqual(len(self.p.calls), 1)
 
     def test_nccl_string_cache_miss_skips_episode(self):
-        # No setup -> _fetch_all returns nothing -> sync fetch None -> skip.
-        out = self.p.get_policy_input(rollout_output="nccl:0:abc")
-        self.assertIsNone(out)
+        with self.assertRaisesRegex(TransportUnusableError, "cleanup completion"):
+            self.p.get_policy_input(rollout_output="nccl:0:abc")
         self.assertEqual(len(self.p.calls), 0)
 
     def test_nccl_dict_cache_miss_skips_episode(self):
-        ref = {"_nccl": True, "_transfer_id": "0:abc", "_sender_rank": 0}
+        layout = TensorLayout.compile([])
+        self.p._nccl_dp_layout_cache = LayoutCache()
+        self.p._nccl_dp_layout_cache.register(layout)
+        ref = {
+            "_nccl": True,
+            "_transfer_id": "0:abc",
+            "_sender_rank": 0,
+            "_sender_replica": "sender",
+            "_sender_incarnation": "test",
+            "_wire_version": WIRE_VERSION,
+            "_layout_id": layout.layout_id,
+        }
         out = self.p.get_policy_input(rollout_output=ref)
         self.assertIsNone(out)
         self.assertEqual(len(self.p.calls), 0)
@@ -253,15 +272,24 @@ class TestGetPolicyInputDispatch(unittest.TestCase):
         resolved = {"observations": [1, 2, 3]}
         key = NCCLTransportStrategy._ref_cache_key("nccl:0:abc")
         self.p._nccl_dp_prefetch_cache = {key: resolved}
-        out = self.p.get_policy_input(rollout_output="nccl:0:abc")
-        self.assertIs(out, resolved)
-        self.assertEqual(len(self.p.calls), 1)
-        self.assertIs(self.p.calls[0]["rollout_output"], resolved)
+        with self.assertRaisesRegex(TransportUnusableError, "cleanup completion"):
+            self.p.get_policy_input(rollout_output="nccl:0:abc")
+        self.assertEqual(len(self.p.calls), 0)
 
     def test_nccl_dict_cache_hit_delegates_to_super(self):
         resolved = {"observations": [9]}
-        ref = {"_nccl": True, "_transfer_id": "1:xyz"}
-        key = NCCLTransportStrategy._ref_cache_key(ref)
+        layout = TensorLayout.compile([])
+        ref = {
+            "_nccl": True,
+            "_transfer_id": "1:xyz",
+            "_rollout_idx": 1,
+            "_sender_rank": 0,
+            "_sender_replica": "sender",
+            "_sender_incarnation": "test",
+            "_wire_version": WIRE_VERSION,
+            "_layout_id": layout.layout_id,
+        }
+        key = self.p._transport_strategy.cache_key(ref)
         self.p._nccl_dp_prefetch_cache = {key: resolved}
         out = self.p.get_policy_input(rollout_output=ref)
         self.assertIs(out, resolved)
@@ -283,6 +311,26 @@ class TestCacheKey(unittest.TestCase):
 
     def test_non_ref_falls_back_to_str(self):
         self.assertEqual(NCCLTransportStrategy._ref_cache_key(42), "42")
+
+    def test_public_cache_key_binds_sender_and_layout_identity(self):
+        layout = TensorLayout.compile([])
+        strategy = NCCLTransportStrategy()
+        ref = {
+            "_nccl": True,
+            "_transfer_id": "3:deadbeef",
+            "_rollout_idx": 3,
+            "_sender_rank": 0,
+            "_sender_replica": "sender-a",
+            "_sender_incarnation": "incarnation-a",
+            "_wire_version": WIRE_VERSION,
+            "_layout_id": layout.layout_id,
+        }
+        first = strategy.cache_key(ref)
+        assert first != strategy.cache_key(ref | {"_sender_replica": "sender-b"})
+        assert first != strategy.cache_key(
+            ref | {"_sender_incarnation": "incarnation-b"}
+        )
+        assert first != strategy.cache_key(ref | {"_layout_id": "f" * 32})
 
 
 class _FakeRv:
@@ -324,11 +372,21 @@ def _consumer(rv, cache):
     p._warm_pairs = set()
     p._device = None
     p._schema = build_trajectory_schema({"max_steps": 4, "obs_dim": 2, "action_dim": 1})
+    p._default_layout = TensorLayout.compile(p._schema)
+    p._layout_cache = LayoutCache()
+    p._layout_cache.register(p._default_layout)
     return p
 
 
 def _ref():
-    return {"sender_replica": "rA", "sender_rank": 0, "transfer_id": "0:x"}
+    layout = TensorLayout.compile([])
+    return {
+        "sender_replica": "rA",
+        "sender_rank": 0,
+        "sender_incarnation": "",
+        "transfer_id": "0:x",
+        "layout": layout,
+    }
 
 
 class TestQuarantineClearsWarmMarker(unittest.TestCase):
@@ -345,10 +403,10 @@ class TestQuarantineClearsWarmMarker(unittest.TestCase):
                 quarantined.append(health_key)
 
         p = _consumer(_FakeRv(None), _RecordingCache())
-        pair = ("rA", 0, 0)
+        pair = ("rA", "", 0, 0)
         p._warm_pairs.add(pair)
-        p._quarantine_endpoint(p._comm_cache, ("rA", 0), pair)
-        self.assertEqual(quarantined, [("rA", 0)])  # endpoint quarantined
+        p._quarantine_endpoint(p._comm_cache, ("rA", "", 0), pair)
+        self.assertEqual(quarantined, [("rA", "", 0)])  # endpoint quarantined
         self.assertNotIn(pair, p._warm_pairs)  # demoted to warming
 
     def test_quarantine_survives_cache_raising(self):
@@ -357,9 +415,9 @@ class TestQuarantineClearsWarmMarker(unittest.TestCase):
                 raise RuntimeError("abort failed")
 
         p = _consumer(_FakeRv(None), _BoomCache())
-        pair = ("rA", 0, 0)
+        pair = ("rA", "", 0, 0)
         p._warm_pairs.add(pair)
-        p._quarantine_endpoint(p._comm_cache, ("rA", 0), pair)  # no raise
+        p._quarantine_endpoint(p._comm_cache, ("rA", "", 0), pair)  # no raise
         self.assertNotIn(pair, p._warm_pairs)  # still demoted
 
 
@@ -378,7 +436,22 @@ class TestSyncFetchContainment(unittest.TestCase):
         p._schema = build_trajectory_schema(
             {"max_steps": 4, "obs_dim": 2, "action_dim": 1}
         )
+        p._default_layout = TensorLayout.compile(p._schema)
+        p._layout_cache = LayoutCache()
+        p._layout_cache.register(p._default_layout)
         return p
+
+    def _reference(self, p):
+        return {
+            "_nccl": True,
+            "_transfer_id": "0:x",
+            "_rollout_idx": 0,
+            "_sender_rank": 0,
+            "_sender_replica": "sender",
+            "_sender_incarnation": "test",
+            "_wire_version": WIRE_VERSION,
+            "_layout_id": p._default_layout.layout_id,
+        }
 
     def test_returns_none_on_fetch_error(self):
         p = self._packer()
@@ -387,25 +460,23 @@ class TestSyncFetchContainment(unittest.TestCase):
             raise RuntimeError("rendezvous exploded")
 
         p._fetch_all = boom
-        # "nccl:0:x" parses to a real ref, so _fetch_all IS reached and raises.
-        self.assertIsNone(p.sync_fetch("nccl:0:x"))
+        self.assertIsNone(p.sync_fetch(self._reference(p)))
 
     def test_returns_none_on_unparseable_ref(self):
         p = self._packer()
         # Not an NCCL reference -> None without touching _fetch_all.
         self.assertIsNone(p.sync_fetch(12345))
 
-    def test_returns_none_on_malformed_schema(self):
-        # A corrupt dict ref raises from _parse_ref/deserialize_schema, which is
-        # now INSIDE the containment (base get_policy_input has none above it).
+    def test_fails_fast_on_malformed_layout(self):
         p = self._packer()
         bad = {"_nccl": True, "_transfer_id": "0:x", "_schema": "not-a-schema"}
-        self.assertIsNone(p.sync_fetch(bad))
+        with self.assertRaises(TransportUnusableError):
+            p.sync_fetch(bad)
 
     def test_returns_result_on_success(self):
         p = self._packer()
         p._fetch_all = lambda refs: ({0: {"ok": 1}}, 4, 1.0)
-        self.assertEqual(p.sync_fetch("nccl:0:x"), {"ok": 1})
+        self.assertEqual(p.sync_fetch(self._reference(p)), {"ok": 1})
 
 
 class TestColdStartTolerance(unittest.TestCase):
@@ -438,7 +509,7 @@ class TestColdStartTolerance(unittest.TestCase):
         # Both attempts used the long first-transfer budget (pair never cached).
         self.assertEqual(rv.timeouts, [30.0, 30.0])
         # Cold-start timeout must NOT quarantine a healthy-but-warming sender.
-        self.assertFalse(cache.is_quarantined(("rA", 0)))
+        self.assertFalse(cache.is_quarantined(("rA", "", 0)))
 
     def test_warm_comm_timeout_quarantines(self):
         from cosmos_rl.utils.payload_transport.nccl.rendezvous import (
@@ -447,17 +518,17 @@ class TestColdStartTolerance(unittest.TestCase):
 
         aborted = []
         cache = self._cache(aborted)
-        built = cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        built = cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
         rv = _FakeRv(TransferStatus.CANCELLED)
         p = _consumer(rv, cache)
         # Mark the pair WARM (has transferred before) -> tight timeout + a
         # timeout now is a genuine failure.
-        p._warm_pairs.add(("rA", 0, 0))
+        p._warm_pairs.add(("rA", "", 0, 0))
 
         out = p._rendezvous_one(_ref(), None)
         self.assertIsNone(out)
         self.assertEqual(rv.timeouts, [5.0, 5.0])  # warm -> tight budget
-        self.assertTrue(cache.is_quarantined(("rA", 0)))  # quarantine + abort
+        self.assertTrue(cache.is_quarantined(("rA", "", 0)))  # quarantine + abort
         self.assertEqual(aborted, [built])
 
     def test_warming_built_comm_not_quarantined_or_aborted(self):
@@ -470,15 +541,15 @@ class TestColdStartTolerance(unittest.TestCase):
 
         aborted = []
         cache = self._cache(aborted)
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)  # built
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)  # built
         rv = _FakeRv(TransferStatus.CANCELLED)
         p = _consumer(rv, cache)  # warm_pairs empty -> warming
 
         out = p._rendezvous_one(_ref(), None)
         self.assertIsNone(out)
         self.assertEqual(rv.timeouts, [30.0, 30.0])  # warming -> long budget
-        self.assertFalse(cache.is_quarantined(("rA", 0)))  # NOT quarantined
-        self.assertIn(("rA", 0, 0), cache)  # comm KEPT
+        self.assertFalse(cache.is_quarantined(("rA", "", 0)))  # NOT quarantined
+        self.assertIn(("rA", "", 0, 0), cache)  # comm KEPT
         self.assertEqual(aborted, [])  # NOT aborted
 
 
@@ -502,7 +573,7 @@ class TestRecvFailureIsolation(unittest.TestCase):
         cache = CommCache(
             build_fn=lambda u, r: 55, abort_fn=lambda i: aborted.append(i)
         )
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
 
         p = NCCLTransportStrategy()
         p._rendezvous = object()
@@ -512,7 +583,7 @@ class TestRecvFailureIsolation(unittest.TestCase):
         p._receiver_rank = 0
         p._recv_timeout = 5.0
         p._first_transfer_timeout = 30.0
-        p._warm_pairs = {("rA", 0, 0)} if warm else set()
+        p._warm_pairs = {("rA", "", 0, 0)} if warm else set()
         # Skip the real rendezvous; hand _fetch_all one accepted recv.
         p._rendezvous_one = lambda ref, pynccl: (0, torch.zeros(4, dtype=torch.uint8))
 
@@ -526,15 +597,15 @@ class TestRecvFailureIsolation(unittest.TestCase):
 
     def test_warm_pair_failure_isolated_and_quarantined(self):
         cache, aborted = self._run(warm=True)
-        self.assertIn(("rA", 0, 0), cache)
+        self.assertIn(("rA", "", 0, 0), cache)
         self.assertEqual(aborted, [])  # terminal owner retains native operands
 
     def test_warming_pair_failure_not_quarantined_but_resynced(self):
         cache, aborted = self._run(warm=False)
-        self.assertFalse(cache.is_quarantined(("rA", 0)))  # warming -> no cooldown
+        self.assertFalse(cache.is_quarantined(("rA", "", 0)))  # warming -> no cooldown
         # ...but the comm still goes, so the accepted-yet-unreceived send
         # cannot be taken by the next recv on this pair.
-        self.assertIn(("rA", 0, 0), cache)
+        self.assertIn(("rA", "", 0, 0), cache)
         self.assertEqual(aborted, [])
 
 
@@ -554,7 +625,7 @@ class TestRecvLaunchSerialized(unittest.TestCase):
         from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
 
         cache = CommCache(build_fn=lambda u, r: 7, abort_fn=lambda i: None)
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
 
         p = NCCLTransportStrategy()
         p._rendezvous = object()
@@ -592,7 +663,7 @@ class TestRecvLaunchSerialized(unittest.TestCase):
         from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
 
         cache = CommCache(build_fn=lambda u, r: 1, abort_fn=lambda i: None)
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
 
         p = NCCLTransportStrategy()
         p._rendezvous = object()
@@ -633,7 +704,7 @@ class TestRecvSyncFailureContained(unittest.TestCase):
 
         aborted = []
         cache = CommCache(build_fn=lambda u, r: 9, abort_fn=lambda i: aborted.append(i))
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
 
         p = NCCLTransportStrategy()
         p._rendezvous = object()
@@ -643,7 +714,7 @@ class TestRecvSyncFailureContained(unittest.TestCase):
         p._receiver_rank = 0
         p._recv_timeout = 5.0
         p._first_transfer_timeout = 30.0
-        p._warm_pairs = {("rA", 0, 0)}  # warm -> eligible for quarantine
+        p._warm_pairs = {("rA", "", 0, 0)}  # warm -> eligible for quarantine
         p._recv_lock = threading.Lock()
         p._rendezvous_one = lambda ref, pynccl: (0, torch.zeros(4, dtype=torch.uint8))
 
@@ -661,7 +732,7 @@ class TestRecvSyncFailureContained(unittest.TestCase):
                 p._fetch_all([(0, _ref())])
 
         self.assertEqual(aborted, [])
-        self.assertIn(("rA", 0, 0), cache)  # retained until terminal process exit
+        self.assertIn(("rA", "", 0, 0), cache)  # retained until terminal process exit
 
 
 class TestReceiverRenegotiation(unittest.TestCase):
@@ -689,14 +760,15 @@ class TestReceiverRenegotiation(unittest.TestCase):
         cache = CommCache(build_fn=lambda u, r: 9, abort_fn=lambda i: None)
         # Pre-cache the receiver pair (sender_replica, sender_rank, recv_rank)
         # so attempt 1 sends need_uid=False.
-        cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
         rv = _SeqRv([TransferStatus.NEED_UID, TransferStatus.ACCEPTED])
         p = _consumer(rv, cache)
         ref = {
             "sender_replica": "rA",
             "sender_rank": 0,
+            "sender_incarnation": "",
             "transfer_id": "0:x",
-            "schema": p._schema,
+            "layout": p._default_layout,
         }
 
         out = p._rendezvous_one(ref, None)
@@ -916,11 +988,13 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
     @staticmethod
     def _ref(transfer_id):
         # Every ref names the SAME producer: that is the deadlocking case.
+        layout = TensorLayout.compile([])
         return {
             "sender_replica": "rA",
             "sender_rank": 0,
+            "sender_incarnation": "",
             "transfer_id": transfer_id,
-            "schema": None,  # _unpack is stubbed; only the key lookup matters
+            "layout": layout,
         }
 
     def _strategy(self):
@@ -931,7 +1005,7 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
         p = NCCLTransportStrategy()
         p._rendezvous = object()  # never called: _rendezvous_one is stubbed
         p._comm_cache = CommCache(build_fn=lambda u, r: 55, abort_fn=lambda i: None)
-        p._comm_cache.get_or_create(("rA", 0, 0), uid_chars=[1], local_rank=1)
+        p._comm_cache.get_or_create(("rA", "", 0, 0), uid_chars=[1], local_rank=1)
         p._device = None
         p._streams = None
         p._recv_lock = threading.Lock()
@@ -957,7 +1031,7 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
 
         def fake_rendezvous(ref, _pynccl):
             events.append(("rendezvous", ref["transfer_id"]))
-            buf = torch.zeros(4, dtype=torch.uint8)
+            buf = torch.zeros(HEADER_NBYTES, dtype=torch.uint8)
             id_of[id(buf)] = ref["transfer_id"]
             return pair_comm, buf
 
@@ -972,7 +1046,11 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
             mock.patch.object(pynccl_mod, "nccl_recv", fake_recv),
             mock.patch.object(dpm, "record_event", lambda stream=None: None),
             mock.patch.object(dpm, "wait_event", lambda s, e: None),
-            mock.patch.object(dpm, "_unpack", lambda b, s, d: {"ok": True}),
+            mock.patch.object(
+                dpm,
+                "_verify_and_unpack",
+                lambda b, r, d, **k: {"ok": torch.tensor(True)},
+            ),
             # Pin the completion path off so the assertion is the call order,
             # not whether the host running the suite has a GPU.
             mock.patch("torch.cuda.is_available", return_value=False),
@@ -1010,7 +1088,7 @@ class TestRendezvousRecvInterleaved(unittest.TestCase):
 
             def __init__(self):
                 self.unpinned = []
-                self.comms = {("rA", 0, 0): 55}
+                self.comms = {("rA", "", 0, 0): 55}
 
             def unpin(self, pair):
                 self.unpinned.append(pair)

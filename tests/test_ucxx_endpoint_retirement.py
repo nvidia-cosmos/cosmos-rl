@@ -65,6 +65,9 @@ def test_pool_close_observes_native_request_before_releasing_endpoint(
         client._closing = False
         client._operations = set()
         client._pool = {("host", 1): deque([endpoint])}
+        client._pinned_pool = deque()
+        client._pinned_numpy_views = {}
+        client._pinned_torch_views = {}
         task = asyncio.create_task(client.close())
         if outcome == "healthy":
             release.set()

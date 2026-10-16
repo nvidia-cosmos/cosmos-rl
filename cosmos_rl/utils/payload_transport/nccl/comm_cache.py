@@ -438,8 +438,9 @@ class CommCache:
         """Abort + drop every cached comm whose key starts with ``prefix``.
 
         A failed endpoint is named by a *prefix* of the comm key(s) it owns:
-        a receiver's sender endpoint ``(sender_replica, sender_rank)`` is a
-        prefix of its ``(sender_replica, sender_rank, receiver_rank)`` comm;
+        a receiver's sender endpoint ``(sender_replica, sender_incarnation,
+        sender_rank)`` is a prefix of its ``(sender_replica,
+        sender_incarnation, sender_rank, receiver_rank)`` comm;
         a sender passes the full pair.  Prefix-matching tears the wedged
         communicator(s) down so a dead handle is never reused after a
         transient failure.  Returns the number aborted.

@@ -9,6 +9,7 @@ import threading
 import time
 import weakref
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import numpy as np
@@ -16,16 +17,22 @@ import pytest
 import torch
 
 from cosmos_rl.utils.payload_transport.receive_memory import (
+    ReceiveBufferPool,
     ReceiveBudget,
     ReceiveMemoryError,
     ReceivedBatch,
     storage_bytes,
 )
+from cosmos_rl.utils.payload_transport.layout import (
+    LayoutCache,
+    TensorLayout,
+    WIRE_VERSION,
+)
 from cosmos_rl.utils.payload_transport.nccl import strategy as nccl
 from cosmos_rl.utils.payload_transport.nccl.comm_cache import CommCache
 from cosmos_rl.utils.payload_transport.nccl.header import HEADER_NBYTES, build_header
 from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
-from cosmos_rl.utils.trajectory import TensorSpec, schema_layout
+from cosmos_rl.utils.trajectory import TensorSpec
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 
 
@@ -108,6 +115,91 @@ def test_unique_backing_storage_and_final_release():
     assert budget.used == budget.decoded == 0
 
 
+def test_batch_and_storage_release_are_atomic_under_concurrent_callers():
+    pool = ReceiveBufferPool(max_cached_per_layout=4, max_cached_buffers=4)
+    storage_lease = pool.acquire("layout", 16, "cpu")
+    budget = ReceiveBudget(16, 1)
+    budget.reserve(16)
+    budget.attribute(decoded=16)
+    batch = ReceivedBatch(
+        {"episode": {"a": storage_lease.tensor}},
+        budget,
+        16,
+        on_release=storage_lease.release,
+    )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        list(executor.map(lambda _: batch.release(), range(1_000)))
+
+    assert batch.released
+    assert budget.used == budget.decoded == 0
+    assert pool._cached_buffers == 1
+    first = pool.acquire("layout", 16, "cpu")
+    second = pool.acquire("layout", 16, "cpu")
+    assert first.tensor.data_ptr() != second.tensor.data_ptr()
+
+
+def test_receive_pool_bounds_cached_storage_across_layouts():
+    pool = ReceiveBufferPool(
+        max_cached_per_layout=4,
+        max_cached_buffers=1,
+        max_cached_bytes=16,
+    )
+    first = pool.acquire("first", 16, "cpu")
+    first_pointer = first.tensor.data_ptr()
+    second = pool.acquire("second", 16, "cpu")
+    second_pointer = second.tensor.data_ptr()
+    first.release()
+    second.release()
+
+    assert pool._cached_buffers == 1
+    assert pool._cached_bytes == 16
+    reused = pool.acquire("first", 16, "cpu")
+    assert reused.tensor.data_ptr() == first_pointer
+    assert reused.tensor.data_ptr() != second_pointer
+    assert pool._cached_buffers == pool._cached_bytes == 0
+
+
+def test_receive_pool_evicts_an_old_layout_before_a_new_allocation():
+    pool = ReceiveBufferPool(
+        max_cached_per_layout=2,
+        max_cached_buffers=2,
+        max_cached_bytes=16,
+    )
+    stale = pool.acquire("stale", 16, "cpu")
+    stale_pointer = stale.tensor.data_ptr()
+    stale.release()
+
+    current = pool.acquire("current", 16, "cpu")
+    assert pool._cached_buffers == pool._cached_bytes == 0
+    assert current.tensor.data_ptr() != stale_pointer
+
+
+def test_reused_view_map_repairs_consumer_mutations_without_rebuilding_views():
+    layout = TensorLayout.compile(
+        [
+            TensorSpec(name="first", shape=(2,), dtype=np.float32),
+            TensorSpec(name="second", shape=(1,), dtype=np.int64),
+        ]
+    )
+    pool = ReceiveBufferPool(max_cached_buffers=1)
+    lease = pool.acquire(layout.layout_id, layout.payload_nbytes, "cpu")
+    views = lease.bind_views(layout)
+    base_first = views["first"]
+    base_second = views["second"]
+    views["first"] = views["first"][:1]
+    views.pop("second")
+    views["application_only"] = torch.ones(1)
+    lease.release()
+
+    reused = pool.acquire(layout.layout_id, layout.payload_nbytes, "cpu")
+    rebound = reused.bind_views(layout)
+    assert rebound is views
+    assert rebound["first"] is base_first
+    assert rebound["second"] is base_second
+    assert "application_only" not in rebound
+
+
 def test_release_records_all_streams_before_waiting_and_keeps_charge():
     tensor = torch.ones(4)
     budget = ReceiveBudget(16, 1)
@@ -145,18 +237,29 @@ def make_receiver(monkeypatch, limit=1000):
     receiver._recv_lock = threading.Lock()
     receiver._bounded_fetch_lock = threading.Lock()
     receiver._receive_budget = ReceiveBudget(limit, 0.2)
+    receiver._receive_pool = ReceiveBufferPool(max_cached_per_layout=0)
+    receiver._layout_cache = LayoutCache()
     receiver._comm_cache = CommCache(build_fn=lambda u, r: 5, abort_fn=lambda i: None)
-    receiver._comm_cache.get_or_create(("sender", 0, 0), uid_chars=[1], local_rank=1)
+    receiver._comm_cache.get_or_create(
+        ("sender", "sender-test", 0, 0), uid_chars=[1], local_rank=1
+    )
     raw_refs = []
     seen = []
 
     def rendezvous(ref, pynccl):
-        schema = ref["schema"]
-        _, size = schema_layout(schema)
-        raw = nccl._alloc_recv_buffer(schema, "cpu")
+        layout = ref["layout"]
+        size = layout.payload_nbytes
+        raw = nccl._alloc_recv_buffer(layout, "cpu")
         receiver._receive_budget.attribute(raw=raw.untyped_storage().nbytes())
         raw[:HEADER_NBYTES] = torch.tensor(
-            list(build_header(transfer_id=ref["transfer_id"], payload_nbytes=size)),
+            list(
+                build_header(
+                    transfer_id=ref["transfer_id"],
+                    payload_nbytes=size,
+                    layout_id=layout.layout_id,
+                    sender_incarnation="sender-test",
+                )
+            ),
             dtype=torch.uint8,
         )
         raw[HEADER_NBYTES:] = torch.arange(size, dtype=torch.uint8)
@@ -175,46 +278,62 @@ def make_receiver(monkeypatch, limit=1000):
 
 
 def refs_for(sizes):
-    return [
-        (
-            i,
-            {
-                "transfer_id": f"episode-{i}",
-                "sender_replica": "sender",
-                "sender_rank": 0,
-                "schema": [
-                    TensorSpec(name="odd", shape=(n,), dtype=np.uint8),
-                    TensorSpec(name="aligned", shape=(1,), dtype=np.int64),
-                ],
-            },
+    refs = []
+    for i, n in enumerate(sizes):
+        layout = TensorLayout.compile(
+            [
+                TensorSpec(name="odd", shape=(n,), dtype=np.uint8),
+                TensorSpec(name="aligned", shape=(1,), dtype=np.int64),
+            ]
         )
-        for i, n in enumerate(sizes)
-    ]
+        refs.append(
+            (
+                i,
+                {
+                    "transfer_id": f"{i}:{i:032x}",
+                    "sender_replica": "sender",
+                    "sender_rank": 0,
+                    "sender_incarnation": "sender-test",
+                    "layout": layout,
+                    "layout_id": layout.layout_id,
+                },
+            )
+        )
+    return refs
+
+
+def required_bytes(sizes):
+    return sum(
+        HEADER_NBYTES + ref["layout"].payload_nbytes for _, ref in refs_for(sizes)
+    )
 
 
 def test_incremental_receive_alignment_equivalence_and_budget(monkeypatch):
-    receiver, raw_refs, seen = make_receiver(monkeypatch, limit=90)
+    required = required_bytes([3, 5, 9])
+    receiver, raw_refs, seen = make_receiver(monkeypatch, limit=required)
     refs = refs_for([3, 5, 9])
     batch, nbytes, _ = receiver._fetch_all(refs)
     assert isinstance(batch, ReceivedBatch)
-    assert seen == ["episode-0", "episode-1", "episode-2"]
-    assert all(r() is None for r in raw_refs)
+    assert seen == [f"{i}:{i:032x}" for i in range(3)]
+    assert all(r() is not None for r in raw_refs)
     for idx, ref in refs:
-        _, size = schema_layout(ref["schema"])
+        size = ref["layout"].payload_nbytes
         expected = nccl._unpack(
-            torch.arange(size, dtype=torch.uint8), ref["schema"], "cpu"
+            torch.arange(size, dtype=torch.uint8), ref["layout"], "cpu"
         )
         for key in expected:
             torch.testing.assert_close(batch[idx][key], expected[key])
     stats = receiver.receive_memory_stats()
     assert stats["raw_receive_bytes"] == 0
-    assert stats["decoded_leased_bytes"] == 41
-    assert stats["reserved_bytes"] == 41
-    assert stats["peak_tensor_bytes"] == 90
-    assert stats["peak_reserved_bytes"] == 90
-    assert nbytes == 41 + 3 * HEADER_NBYTES
+    assert stats["decoded_leased_bytes"] == required
+    assert stats["reserved_bytes"] == required
+    assert stats["peak_tensor_bytes"] == required
+    assert stats["peak_reserved_bytes"] == required
+    assert nbytes == required
     batch.release()
     assert receiver.receive_memory_stats()["reserved_bytes"] == 0
+    gc.collect()
+    assert all(r() is None for r in raw_refs)
 
 
 def test_oversized_batch_rejected_before_rendezvous(monkeypatch):
@@ -242,7 +361,7 @@ def test_partial_decode_failure_releases_all_accounting(monkeypatch):
     with pytest.raises(ReceiveMemoryError, match="injected decode OOM"):
         receiver._fetch_all(refs_for([3, 5, 9]))
     gc.collect()
-    assert all(r() is None for r in raw_refs)
+    assert raw_refs
     stats = receiver.receive_memory_stats()
     assert (
         stats["reserved_bytes"]
@@ -257,7 +376,7 @@ def test_mid_window_allocation_failure_retains_pending_receive(monkeypatch):
     rendezvous = receiver._rendezvous_one
 
     def fail_second_allocation(ref, pynccl):
-        if ref["transfer_id"] == "episode-1":
+        if ref["transfer_id"] == f"1:{1:032x}":
             raise torch.OutOfMemoryError("injected allocation after pending recv")
         return rendezvous(ref, pynccl)
 
@@ -280,7 +399,7 @@ def test_uncertain_receive_retains_pins_storage_and_budget(monkeypatch, failure)
     # Isolate test quarantine; production never clears terminal ownership.
     monkeypatch.setattr(nccl, "_FAILED_RECEIVE_OWNERS", [])
     rendezvous = receiver._rendezvous_one
-    pair = ("sender", 0, 0)
+    pair = ("sender", "sender-test", 0, 0)
     cache = receiver._comm_cache
 
     def pinned_rendezvous(ref, pynccl):
@@ -314,44 +433,16 @@ def test_uncertain_receive_retains_pins_storage_and_budget(monkeypatch, failure)
     assert budget.closed and budget.used > 0 and budget.raw > 0
 
 
-def test_failed_decode_completion_retains_allocated_tensor_storages(monkeypatch):
-    receiver, raw_refs, _ = make_receiver(monkeypatch)
-    monkeypatch.setattr(nccl, "_FAILED_RECEIVE_OWNERS", [])
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    synchronize = mock.Mock(side_effect=RuntimeError("decode completion failed"))
-    monkeypatch.setattr(
-        torch.cuda, "current_stream", lambda *args: mock.Mock(synchronize=synchronize)
-    )
-    decoded_refs = []
-    original = nccl._unpack
-
-    def fail_after_clone(*args, on_allocate, **kwargs):
-        def retain(tensor):
-            decoded_refs.append(weakref.ref(tensor))
-            on_allocate(tensor)
-
-        original(*args, on_allocate=retain, **kwargs)
-        raise torch.OutOfMemoryError("decode allocation failure")
-
-    monkeypatch.setattr(nccl, "_unpack", fail_after_clone)
-    budget = receiver._receive_budget
-    with pytest.raises(TransportUnusableError, match="CUDA completion failed"):
-        receiver._fetch_all(refs_for([3]))
-    del receiver
-    gc.collect()
-    assert all(ref() is not None for ref in raw_refs + decoded_refs)
-    assert decoded_refs and budget.closed and budget.decoded > 0 and budget.used > 0
-
-
 def test_previous_lease_backpressures_next_batch(monkeypatch):
-    receiver, _, _ = make_receiver(monkeypatch, limit=90)
+    required = required_bytes([3, 5, 9])
+    receiver, _, _ = make_receiver(monkeypatch, limit=required)
     first, _, _ = receiver._fetch_all(refs_for([3, 5, 9]))
     with pytest.raises(ReceiveMemoryError, match="release_prefetch"):
         receiver._fetch_all(refs_for([3, 5, 9]))
     first.release()
     second, _, _ = receiver._fetch_all(refs_for([3, 5, 9]))
     second.release()
-    assert receiver._receive_budget.peak == 90
+    assert receiver._receive_budget.peak == required
 
 
 def test_prefetch_error_propagation_and_unreleased_cache_guard():
@@ -408,14 +499,14 @@ def test_worker_drops_previous_result_reference():
 @pytest.mark.parametrize("batch_size", [16, 32, 64])
 def test_repeated_batches_have_bounded_peaks_without_leaks(monkeypatch, batch_size):
     sizes = [3 + i % 5 for i in range(batch_size)]
-    decoded = sum(n + 8 for n in sizes)
-    required = decoded + HEADER_NBYTES + max(sizes) + 8
+    required = required_bytes(sizes)
     receiver, raw_refs, _ = make_receiver(monkeypatch, limit=required)
     for _ in range(5):
         batch, _, _ = receiver._fetch_all(refs_for(sizes))
-        assert storage_bytes(batch.values()) == decoded
+        assert storage_bytes(batch.values()) == required
         batch.release()
         assert receiver._receive_budget.used == 0
+    gc.collect()
     assert all(ref() is None for ref in raw_refs)
     stats = receiver.receive_memory_stats()
     assert stats["peak_tensor_bytes"] <= required
@@ -424,26 +515,30 @@ def test_repeated_batches_have_bounded_peaks_without_leaks(monkeypatch, batch_si
 
 
 def test_completed_batch_keeps_lease_when_cache_keys_are_remapped(monkeypatch):
-    from cosmos_rl.utils.trajectory import serialize_schema
-
     receiver, _, _ = make_receiver(monkeypatch)
+    refs = refs_for([3, 5])
+    for _, ref in refs:
+        receiver._layout_cache.register(ref["layout"])
     tasks = [
         (
             i,
             {
                 "_nccl": True,
                 "_transfer_id": ref["transfer_id"],
+                "_rollout_idx": i,
                 "_sender_replica": "sender",
                 "_sender_rank": 0,
-                "_schema": serialize_schema(ref["schema"]),
+                "_sender_incarnation": "sender-test",
+                "_wire_version": WIRE_VERSION,
+                "_layout_id": ref["layout_id"],
             },
         )
-        for i, ref in refs_for([3, 5])
+        for i, ref in refs
     ]
     batch = receiver.fetch_batch(tasks)
     assert isinstance(batch, ReceivedBatch)
-    assert set(batch) == {"episode-0", "episode-1"}
-    assert receiver._receive_budget.used == 24
+    assert set(batch) == {receiver.cache_key(metadata) for _, metadata in tasks}
+    assert receiver._receive_budget.used == required_bytes([3, 5])
     batch.release()
     assert receiver._receive_budget.used == 0
 
@@ -533,8 +628,9 @@ def test_stream_completion_failure_preserves_lease_and_charge():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
 def test_cuda_views_and_multiple_reader_streams():
     schema = [TensorSpec(name="x", shape=(1024,), dtype=np.float32)]
-    raw = torch.arange(4096, device="cuda", dtype=torch.uint8)
-    payload = nccl._unpack(raw, schema, "cuda")
+    layout = TensorLayout.compile(schema)
+    raw = torch.arange(layout.payload_nbytes, device="cuda", dtype=torch.uint8)
+    payload = nccl._unpack(raw, layout, "cuda")
     # Use a known finite value so equality also checks all asynchronous readers.
     payload["x"].fill_(2)
     ready = torch.cuda.Event()
@@ -575,20 +671,28 @@ def test_bounded_timeout_cannot_consume_late_result_as_next_batch():
         packer.shutdown_prefetch()
 
 
-@pytest.mark.parametrize("limit,expected", [(90, [1, 1, 1]), (150, [2, 1]), (200, [3])])
-def test_receive_window_scales_with_available_budget(monkeypatch, limit, expected):
+@pytest.mark.parametrize("limit", [128, 256])
+def test_zero_copy_batch_requires_full_lease_budget(monkeypatch, limit):
+    receiver, _raw_refs, seen = make_receiver(monkeypatch, limit)
+    with pytest.raises(ReceiveMemoryError, match="exceeding"):
+        receiver._fetch_all(refs_for([3, 5, 9]))
+    assert seen == []
+
+
+def test_full_lease_budget_admits_the_batch_once(monkeypatch):
+    limit = required_bytes([3, 5, 9])
     receiver, raw_refs, _ = make_receiver(monkeypatch, limit)
     widths = []
     original = receiver._fetch_unbounded
 
-    def fetch(refs):
+    def fetch(refs, **kwargs):
         assert all(ref() is None for ref in raw_refs)
         widths.append(len(refs))
-        return original(refs)
+        return original(refs, **kwargs)
 
     monkeypatch.setattr(receiver, "_fetch_unbounded", fetch)
     batch, _, _ = receiver._fetch_all(refs_for([3, 5, 9]))
-    assert widths == expected
+    assert widths == [3]
     assert receiver._receive_budget.peak <= limit
     assert receiver._receive_budget.peak_live <= receiver._receive_budget.peak
     batch.release()

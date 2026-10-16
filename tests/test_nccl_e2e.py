@@ -104,6 +104,7 @@ def _worker(
     strided: bool = False,
     run_id: str = "",
     action_dim: int = 2,
+    direct: bool = False,
 ):
     """Entry point for each spawned rank.  Reports failures via err_queue.
 
@@ -117,7 +118,8 @@ def _worker(
     try:
         import redis
 
-        from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
+        from cosmos_rl.utils.payload_transport.nccl.producer import NCCLPayloadProducer
+        from cosmos_rl.utils.payload_transport import PayloadContext
 
         os.environ["RANK"] = str(rank)
         os.environ["SLURM_JOB_ID"] = "nccl_e2e_job"
@@ -140,7 +142,7 @@ def _worker(
                 # change: the producer ships the schema in its metadata.
                 import numpy as np
 
-                import cosmos_rl.utils.payload_transport.nccl.mixins as _mixins
+                import cosmos_rl.utils.payload_transport.nccl.producer as _mixins
                 from cosmos_rl.utils.trajectory import TensorSpec
 
                 _base_build = _mixins.build_trajectory_schema
@@ -153,8 +155,8 @@ def _worker(
                     return schema
 
                 _mixins.build_trajectory_schema = _build_with_strided_field
-            producer = NCCLRolloutMixin()
-            producer.setup_nccl(
+            producer = NCCLPayloadProducer()
+            producer.setup(
                 replica_id="rollout-0",
                 rollout_idx=0,
                 redis_client=client,
@@ -164,14 +166,35 @@ def _worker(
                 **dims,
             )
             traj = build(device)
-            meta = producer.write_to_buffer(traj)
+            if direct:
+                context = PayloadContext("nccl", producer, producer.default_layout)
+                payload = context.acquire()
+                for name, target in payload.tensors.items():
+                    source = traj.get(name)
+                    if source is None:
+                        target.zero_()
+                        continue
+                    if isinstance(source, torch.Tensor):
+                        target.copy_(source)
+                    else:
+                        target.fill_(source)
+                payload.mark_all_written()
+                produced = torch.cuda.Event()
+                produced.record()
+                meta = context.publish(payload, ready_event=produced).to_dict()
+            else:
+                context = None
+                meta = producer.publish(traj)
             assert meta is not None, "producer failed to pack buffer"
             client.set(meta_key, json.dumps(meta))
             # Serve until the consumer signals completion (bounded).
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline and not client.get(done_key):
                 time.sleep(0.05)
-            producer.cleanup_nccl()
+            if context is not None:
+                context.close()
+            else:
+                producer.close()
         else:
             # Consumer, built one of the two supported ways.  Both must move
             # real bytes GPU->GPU; the composed path is otherwise only covered
@@ -355,7 +378,11 @@ class TestNcclE2E(unittest.TestCase):
             self.client.delete(key)
 
     def _run_roundtrip(
-        self, composed: bool, strided: bool = False, action_dim: int = 2
+        self,
+        composed: bool,
+        strided: bool = False,
+        action_dim: int = 2,
+        direct: bool = False,
     ):
         import torch.multiprocessing as mp
 
@@ -368,7 +395,16 @@ class TestNcclE2E(unittest.TestCase):
         procs = [
             ctx.Process(
                 target=_worker,
-                args=(rank, 2, err_queue, composed, strided, run_id, action_dim),
+                args=(
+                    rank,
+                    2,
+                    err_queue,
+                    composed,
+                    strided,
+                    run_id,
+                    action_dim,
+                    direct,
+                ),
             )
             for rank in range(2)
         ]
@@ -399,6 +435,10 @@ class TestNcclE2E(unittest.TestCase):
         differently, the payload comes back wrong or not at all.
         """
         self._run_roundtrip(composed=True)
+
+    def test_two_rank_direct_storage_roundtrip(self):
+        """Public owned-storage publication moves the acquired allocation."""
+        self._run_roundtrip(composed=True, direct=True)
 
     def test_two_rank_roundtrip_narrow_action_dim(self):
         """A payload schema narrower than the consumer config must still resolve.

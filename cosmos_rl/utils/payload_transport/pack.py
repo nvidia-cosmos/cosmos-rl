@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pack a trajectory into the flat, schema-defined payload buffer.
+"""Pack a trajectory into a flat, layout-defined payload buffer.
 
-Both producers write the same on-wire format -- a single contiguous ``uint8``
-buffer whose field offsets come from :func:`~cosmos_rl.utils.trajectory.
-schema_layout` -- and the consumer reads it back by schema alone, slicing at
-``spec.nbytes`` and reinterpreting with ``spec.dtype``.  Keeping one
-implementation of that loop is what makes the two ends agree.
+Both producers write the same on-wire format: a single contiguous ``uint8``
+buffer whose field offsets come from the validated
+:class:`~cosmos_rl.utils.payload_transport.layout.TensorLayout`. The consumer
+resolves that layout by identity and binds typed views at the same offsets.
+Keeping one normalization and copy implementation is what makes the two ends
+agree.
 
 Lives here rather than in :mod:`cosmos_rl.utils.trajectory` because it needs
 torch, and that module is deliberately numpy-only so the transport-agnostic
@@ -28,6 +29,7 @@ scheduler can import it without pulling in a GPU stack.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, Iterator, Sequence, Set, Tuple
 
 import numpy as np
@@ -45,6 +47,7 @@ from cosmos_rl.utils.trajectory import (
 
 __all__ = [
     "NP_TO_TORCH",
+    "PackStats",
     "normalize_trajectory",
     "pack_trajectory_into",
     "torch_dtype_for",
@@ -66,6 +69,18 @@ NP_TO_TORCH = {
 #: Fields already warned about, so a narrowing cast logs once per process
 #: rather than once per trajectory.
 _WARNED_NARROWING: Set[Tuple[str, str, str]] = set()
+_COPY_POLICIES = frozenset({"batched", "strict_batched"})
+_MAX_COPY_BATCH_FIELDS = 256
+
+
+@dataclass(frozen=True)
+class PackStats:
+    """Observable adapter work for one payload pack."""
+
+    fields: int
+    bytes: int
+    batched_calls: int
+    fallback_fields: int
 
 
 def torch_dtype_for(np_dtype: Any) -> torch.dtype:
@@ -211,7 +226,9 @@ def pack_trajectory_into(
     offsets: Dict[str, int],
     ep_len: int,
     device: Any = None,
-) -> None:
+    *,
+    copy_policy: str = "batched",
+) -> PackStats:
     """Write ``trajectory`` into the preallocated ``flat`` uint8 buffer.
 
     ``flat`` must be sized to the schema's entry size. Absent optional fields
@@ -223,14 +240,49 @@ def pack_trajectory_into(
     even when the trajectory dict omits the key, and leaving that slot zero
     makes the consumer truncate the episode to nothing.
     """
-    # Stream normalization into private storage, retaining at most one field's
-    # cast/padding temporary rather than another whole payload on the GPU.
+    if copy_policy not in _COPY_POLICIES:
+        raise ValueError(
+            f"unsupported payload copy policy {copy_policy!r}; "
+            f"expected one of {sorted(_COPY_POLICIES)!r}"
+        )
+
+    fields = total_bytes = batched_calls = fallback_fields = 0
+    destinations = []
+    sources = []
+
+    def flush() -> None:
+        nonlocal batched_calls, fallback_fields
+        if not sources:
+            return
+        try:
+            torch._foreach_copy_(destinations, sources)
+            batched_calls += 1
+        except (AttributeError, RuntimeError) as error:
+            if copy_policy == "strict_batched":
+                raise RuntimeError(
+                    "[pack] batched tensor copy is unavailable for this payload"
+                ) from error
+            for destination, source in zip(destinations, sources):
+                destination.copy_(source)
+            fallback_fields += len(sources)
+        destinations.clear()
+        sources.clear()
+
+    # Bounded groups avoid retaining a full second normalized payload while
+    # replacing thousands of Python-dispatched copies with a few foreach calls.
     for spec, (_, tensor) in zip(
         schema, _normalized_fields(trajectory, schema, ep_len, device)
     ):
         try:
             chunk = tensor.reshape(-1).view(torch.uint8)
-        except RuntimeError as e:  # pragma: no cover - defensive
-            raise RuntimeError(_layout_error(spec, tensor, e)) from e
+        except RuntimeError as error:  # pragma: no cover - defensive
+            raise RuntimeError(_layout_error(spec, tensor, error)) from error
         off = offsets[spec.name]
-        flat[off : off + chunk.numel()] = chunk
+        destinations.append(flat.narrow(0, off, chunk.numel()))
+        sources.append(chunk)
+        fields += 1
+        total_bytes += chunk.numel()
+        if len(sources) >= _MAX_COPY_BATCH_FIELDS:
+            flush()
+    flush()
+    return PackStats(fields, total_bytes, batched_calls, fallback_fields)

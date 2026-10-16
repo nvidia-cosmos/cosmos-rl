@@ -13,6 +13,7 @@ or validate production producer/global-context shutdown.
 
 import argparse
 import asyncio
+import json
 from datetime import timedelta
 import os
 from pathlib import Path
@@ -36,8 +37,14 @@ def free_port():
 def worker(args):
     import cosmos_rl
     import ucxx
+    from cosmos_rl.utils.payload_transport.layout import (
+        TensorLayout,
+        WIRE_VERSION,
+        identity_key,
+    )
     from cosmos_rl.utils.payload_transport.prefetch_mixin import PrefetchDataPackerMixin
     from cosmos_rl.utils.payload_transport.ucxx.strategy import compose_ucxx_transport
+    from cosmos_rl.utils.trajectory import TensorSpec
 
     expected_root = os.environ.get("EXPECTED_PACKAGE_ROOT")
     if expected_root:
@@ -49,6 +56,7 @@ def worker(args):
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
     assert torch.cuda.is_available() and dist.get_world_size() == 2
+    layout = TensorLayout.compile([TensorSpec((4096,), np.float32, "x")])
 
     async def serve():
         ucxx.init()
@@ -56,11 +64,26 @@ def worker(args):
         errors = []
 
         async def connection(endpoint):
+            completed = False
             try:
                 while True:
-                    slot = np.empty(1, np.int64)
+                    slot = np.empty(3, np.uint64)
                     await endpoint.recv(slot)
+                    if int(slot[0]) == np.iinfo(np.uint64).max:
+                        assert int(slot[1]) == WIRE_VERSION
+                        assert int(slot[2]) == identity_key("canary-server")
+                        descriptor = json.dumps(
+                            layout.descriptor(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        await endpoint.send(np.array([3], np.uint8))
+                        await endpoint.send(np.array([len(descriptor)], np.int32))
+                        await endpoint.send(np.frombuffer(descriptor, np.uint8))
+                        return
                     step = int(slot[0])
+                    assert int(slot[1]) == 1
+                    assert int(slot[2]) == identity_key("canary-server")
                     assert 1 <= step <= 3
                     if step == 2 and args.case == "stale":
                         await endpoint.send(np.array([1], np.uint8))
@@ -73,12 +96,14 @@ def worker(args):
                     await endpoint.send(payload.view(np.uint8))
                     print(f"UCXX_SENT step={step}", flush=True)
                     if step == 3:
+                        completed = True
                         break
             except BaseException as error:
                 errors.append(error)
             finally:
                 await endpoint.close()
-                done.set()
+                if completed:
+                    done.set()
 
         listener = ucxx.create_listener(connection, port=0)
         address = [(os.environ["MASTER_ADDR"], listener.port)]
@@ -109,16 +134,16 @@ def worker(args):
         compose_ucxx_transport(
             packer, device=device, read_timeout=5, prefetch_timeout=30
         )
-        prior = []
         for step in range(1, 4):
             metadata = {
                 "_ucxx": True,
+                "_wire_version": WIRE_VERSION,
                 "_worker_ip": host,
                 "_ucxx_port": port,
                 "_slot": step,
-                "_buffer_handle": {
-                    "schema": [{"name": "x", "shape": [4096], "dtype": "float32"}]
-                },
+                "_slot_generation": 1,
+                "_sender_incarnation": "canary-server",
+                "_layout_id": layout.layout_id,
             }
             if args.prefetch:
                 packer.start_prefetch([metadata])
@@ -138,15 +163,6 @@ def worker(args):
                     result["x"],
                     torch.arange(4096, device=device, dtype=torch.float32) + step,
                 )
-                prior.append((step, result["x"]))
-                # Previous decoded tensors remain independent when pinned
-                # storage is recycled for subsequent reads.
-                for old_step, old_value in prior:
-                    torch.testing.assert_close(
-                        old_value,
-                        torch.arange(4096, device=device, dtype=torch.float32)
-                        + old_step,
-                    )
                 print(f"UCXX_PAYLOAD_PASS step={step} exact=True", flush=True)
             packer.release_prefetch()
         packer.close_transport(timeout=10)

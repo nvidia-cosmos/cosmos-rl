@@ -22,8 +22,8 @@ backends bypass Redis on the data plane:
 
 * **NCCL** — point-to-point GPU sends; Redis still carries control
   metadata.  See :mod:`cosmos_rl.utils.payload_transport.nccl`.
-* **UCXX** — RDMA / shared-memory zero-copy transfer (added in a
-  follow-up MR).  See ``cosmos_rl.utils.payload_transport.ucxx``.
+* **UCXX** — RDMA / shared-memory transfer with reusable pinned-host and
+  device staging. See ``cosmos_rl.utils.payload_transport.ucxx``.
 
 Selecting a backend
 -------------------
@@ -69,6 +69,12 @@ the box.  ``ucxx`` registers itself when imported.
 from cosmos_rl.utils.payload_transport.prefetch_mixin import (
     PrefetchDataPackerMixin,
 )
+from cosmos_rl.utils.payload_transport.context import PayloadContext, PayloadRef
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
+from cosmos_rl.utils.payload_transport.storage import (
+    PayloadStorageRequirements,
+    WritablePayload,
+)
 from cosmos_rl.utils.payload_transport.registry import (
     DEFAULT_TRANSFER_MODE,
     LEGACY_NCCL_KEY,
@@ -97,8 +103,13 @@ __all__ = [
     "PAYLOAD_TRANSFER_KEY",
     "PayloadTransport",
     "PayloadTransportRegistry",
+    "PayloadContext",
+    "PayloadRef",
+    "PayloadStorageRequirements",
     "PrefetchDataPackerMixin",
     "RedisEndpoint",
+    "TensorLayout",
+    "WritablePayload",
     "get_payload_transfer_mode",
     "is_payload_transfer_mode_explicit",
     "validate_single_receiver_topology",

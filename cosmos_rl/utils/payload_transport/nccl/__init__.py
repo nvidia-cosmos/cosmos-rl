@@ -16,10 +16,9 @@
 """In-tree NCCL payload transport.
 
 Formerly a single ``nccl.py`` module; promoted to a package (mirroring
-``ucxx/``) once the transport grew a full producer/consumer stack.  This
-``__init__`` preserves the historical import surface — every symbol that
-``from cosmos_rl.utils.payload_transport.nccl import X`` resolved before
-the split still resolves here — and adds the new classes.
+``ucxx/``) once the transport grew a full producer/consumer stack. Producer
+applications use :class:`~cosmos_rl.utils.payload_transport.PayloadContext`
+instead of importing backend implementation classes.
 
 Submodules
 ----------
@@ -35,19 +34,20 @@ Submodules
 * :mod:`.buffer_registry` — producer-side GPU send-buffer registry with
   bounded-capacity backpressure and idempotent free-on-cleanup.
 * :mod:`.streams` — per-process transfer-stream pool + CUDA event helpers.
-* :mod:`.mixins` — :class:`NCCLRolloutMixin` (producer).
+* :mod:`.producer` — producer implementation owned by ``PayloadContext``.
 * :mod:`.data_packer_mixin` — :class:`NCCLDataPackerMixin` (consumer).
 
-The heavier submodules (rendezvous / comm_cache / streams / mixins /
-data_packer_mixin) pull in ``torch`` + ``pynccl``; they are imported
-here so the public surface is complete, but each guards its own optional
-dependencies at call time rather than import time.
+The heavier consumer and protocol submodules pull in ``torch`` + ``pynccl``;
+the package imports those needed by its public receive surface. The producer is
+loaded by ``PayloadContext`` and remains an implementation detail. Optional
+native dependencies are guarded at call time rather than import time.
 """
 
 from cosmos_rl.utils.payload_transport.nccl.protocol import (
     NCCL_COMPLETION_PREFIX,
     NCCL_REDIS_NAMESPACE,
     build_cleanup_channel,
+    build_layout_key,
     build_nccl_prefix,
     build_pair_uid_key,
     build_request_channel,
@@ -78,14 +78,12 @@ from cosmos_rl.utils.payload_transport.nccl.streams import (
 from cosmos_rl.utils.payload_transport.nccl.data_packer_mixin import (
     NCCLDataPackerMixin,
 )
-from cosmos_rl.utils.payload_transport.nccl.mixins import NCCLRolloutMixin
 
 __all__ = [
     "NCCL_COMPLETION_PREFIX",
     "NCCL_REDIS_NAMESPACE",
     "CommCache",
     "NCCLDataPackerMixin",
-    "NCCLRolloutMixin",
     "NcclPayloadTransport",
     "NcclRendezvous",
     "RendezvousResult",
@@ -94,6 +92,7 @@ __all__ = [
     "TransferStatus",
     "TransferStreamPool",
     "build_cleanup_channel",
+    "build_layout_key",
     "build_nccl_prefix",
     "build_pair_uid_key",
     "build_request_channel",

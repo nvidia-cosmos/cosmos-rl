@@ -28,12 +28,10 @@ UCXX intentionally diverges from NCCL on two integration points:
    when the writer overwrites an unconsumed READY slot, so the
    controller has nothing to publish.
 
-The ``attach_data_packer`` hook drives the per-packer setup that used
-to live in a manual trainer-side call, so the trainer no longer has to
-remember to invoke ``_setup_ucxx_data_packer`` after constructing its
-data packer.  The ``UCXXDataPackerMixin`` (MR5) provides the actual
-``_setup_ucxx_data_packer`` method; on MR3b the hook is a no-op for
-any packer that does not subclass that mixin.
+The ``attach_data_packer`` hook drives the per-packer setup that used to live in
+a manual trainer-side call, so the trainer no longer has to remember to invoke
+``_setup_ucxx_data_packer`` after constructing its data packer. Packers without
+that consumer capability remain unchanged.
 """
 
 from __future__ import annotations
@@ -49,20 +47,28 @@ from cosmos_rl.utils.payload_transport.registry import (
 
 
 class UCXXPayloadTransport(PayloadTransport):
-    """UCXX backend (zero-copy RDMA / shared-memory transfer)."""
+    """UCXX backend with bounded shared-memory and pinned-host staging."""
 
     name = "ucxx"
 
     def close_producer(self, producer: Any, *, timeout: float = 5.0) -> None:
-        from cosmos_rl.utils.payload_transport.lifecycle import get_close_operation
-
-        close = getattr(producer, "cleanup_ucxx", None)
-        if not callable(close):
+        context = getattr(producer, "payload_context", None) or getattr(
+            producer, "_payload_context", None
+        )
+        if context is not None:
+            context.close(timeout=timeout)
             return
-        operation = getattr(producer, "_ucxx_close_operation", None)
-        if operation is None:
-            operation = get_close_operation(producer, "_ucxx_close_operation", close)
-        operation.close(timeout)
+        cleanup = getattr(producer, "cleanup_ucxx", None)
+        if callable(cleanup):
+            from cosmos_rl.utils.payload_transport.lifecycle import (
+                get_close_operation,
+            )
+
+            operation = get_close_operation(producer, "_ucxx_close_operation", cleanup)
+            operation.close(timeout)
+            return
+        if hasattr(producer, "_ucxx_close_operation"):
+            producer.close(timeout=timeout)
 
     # Intentionally None: UCXX uses dict-shaped completion metadata and
     # SHM ring buffers auto-recycle slots, so it does NOT participate in
@@ -82,7 +88,7 @@ class UCXXPayloadTransport(PayloadTransport):
         """Wire UCXX-specific state into a UCXX-aware data packer.
 
         Looks for the ``_setup_ucxx_data_packer`` method on the packer
-        (provided by :class:`UCXXDataPackerMixin` in MR5).  When present,
+        (provided by :class:`UCXXDataPackerMixin`).  When present,
         invokes it with ``device`` plus tunables resolved from
         ``config.custom``:
 

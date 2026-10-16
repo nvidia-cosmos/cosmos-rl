@@ -138,6 +138,16 @@ def build_sender_request_channel(prefix: str, ref: dict) -> str:
     return build_request_channel(build_rollout_prefix(prefix, ref["sender_replica"]))
 
 
+def build_layout_key(
+    prefix: str,
+    sender_replica: str,
+    sender_incarnation: str,
+    layout_id: str,
+) -> str:
+    """Redis key for one immutable layout published by one producer process."""
+    return f"{prefix}:payload_layout:{sender_replica}:{sender_incarnation}:{layout_id}"
+
+
 def parse_transfer_rollout_idx(transfer_id: str) -> int:
     """Extract the rollout index encoded in the transfer ID prefix."""
     if ":" not in transfer_id:
@@ -191,6 +201,7 @@ __all__ = [
     "build_cleanup_channel",
     "build_nccl_prefix",
     "build_pair_uid_key",
+    "build_layout_key",
     "build_request_channel",
     "build_response_key",
     "build_rollout_prefix",

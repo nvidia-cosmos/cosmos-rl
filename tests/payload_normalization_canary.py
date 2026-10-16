@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from cosmos_rl.utils.payload_transport.pack import pack_trajectory_into
+from cosmos_rl.utils.payload_transport.layout import TensorLayout
 from cosmos_rl.utils.payload_transport.nccl.strategy import _unpack
 from cosmos_rl.utils.tensor_packing import (
     pack_tensors_into_buffer,
@@ -19,7 +20,6 @@ from cosmos_rl.utils.tensor_packing import (
 from cosmos_rl.utils.trajectory import (
     TensorSpec,
     build_trajectory_schema,
-    schema_layout,
 )
 
 
@@ -34,10 +34,11 @@ def main():
             TensorSpec((), np.float64, "scalar"),
             TensorSpec((1,), np.int64, "mode"),
         ]
-        offsets, size = schema_layout(schema)
-        payload = torch.empty(size, dtype=torch.uint8, device=device)
+        layout = TensorLayout.compile(schema)
+        payload = torch.empty(layout.payload_nbytes, dtype=torch.uint8, device=device)
         for iteration in range(3):
             if rank == 0:
+                layout.zero_padding(payload)
                 pack_trajectory_into(
                     payload,
                     {
@@ -50,12 +51,12 @@ def main():
                         "mode": torch.arange(8, device=device).reshape(1, 8)[:, 3],
                     },
                     schema,
-                    offsets,
+                    layout.offsets(),
                     2,
                     device,
                 )
             dist.broadcast(payload, src=0)
-            restored = _unpack(payload, schema, device)
+            restored = _unpack(payload, layout, device)
             torch.testing.assert_close(
                 restored["observations"],
                 torch.full((2, 3), iteration + 1.0, device=device),

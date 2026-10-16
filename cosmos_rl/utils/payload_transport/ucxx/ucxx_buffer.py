@@ -44,7 +44,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.payload_transport.layout import (
+    TensorLayout,
+    WIRE_VERSION,
+    MAX_LAYOUT_DESCRIPTOR_BYTES,
+    deserialize_layout_descriptor,
+    identity_key,
+    serialize_layout_descriptor,
+)
 from cosmos_rl.utils.payload_transport.rotation import HealthSkipList
+from cosmos_rl.utils.payload_transport.receive_memory import ReusableViewMap
 from cosmos_rl.utils.payload_transport.ucxx.operation import UCXXOperation
 from cosmos_rl.utils.transport_failure import TransportUnusableError
 from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
@@ -227,6 +236,12 @@ class StaleSlotError(RuntimeError):
     pass
 
 
+class PayloadIdentityError(RuntimeError):
+    """A reference targets a different producer incarnation or wire format."""
+
+    pass
+
+
 # Errors for which retrying on a *different* server port can plausibly
 # help.  These are transport / connectivity failures: the underlying
 # server thread or its endpoint is unhealthy, but a sibling thread on
@@ -243,7 +258,6 @@ _PORT_ROTATABLE_ERRORS = frozenset(
         "UCXXCanceledError",
         "UCXXConnectionResetError",
         "UCXXCloseError",
-        "TimeoutError",
     }
 )
 
@@ -282,6 +296,8 @@ _PORT_QUARANTINE_SEC = 30.0
 # fallback at the cost of one transient quarantine, which the
 # current data shows is acceptable.
 _POOL_ENDPOINT_MAX_AGE_S = 100.0
+_LAYOUT_REQUEST_SLOT = np.iinfo(np.uint64).max
+_LAYOUT_RESPONSE_STATUS = 3
 
 
 @dataclass
@@ -293,12 +309,14 @@ class UCXXBufferConfig:
     max_entries: int = 100
     entry_size_bytes: int = 65536
     schema: List[Any] = None  # List of TensorSpec
+    layout: Optional[TensorLayout] = None
 
     # UCXX server config
     port: int = 13337
     n_server_threads: int = 4
     # One accepted status + payload send, including native completion.
     send_timeout: float = 30.0
+    sender_incarnation: str = ""
 
     def __post_init__(self):
         if not math.isfinite(self.send_timeout) or self.send_timeout <= 0:
@@ -313,6 +331,7 @@ class UCXXBufferConfig:
             max_entries=self.max_entries,
             entry_size_bytes=self.entry_size_bytes,
             schema=self.schema,
+            layout=self.layout,
         )
 
 
@@ -325,21 +344,21 @@ class UCXXBuffer:
 
     The UCXX server handles read requests:
     1. Trainer connects to worker's UCXX server
-    2. Trainer sends slot index
+    2. Trainer sends slot index and payload generation
     3. Worker reads from local buffer and sends data back
     4. UCX auto-selects transport (shm for same-node, RDMA for cross-node)
 
     Usage:
         # Worker side
         buffer = UCXXBuffer(config)
-        await buffer.start_server()
+        buffer.start_server()
 
         slot = buffer.write(rollout_data)
         metadata = buffer.get_metadata(slot)
         # Send metadata via Redis stream...
 
         # Cleanup
-        await buffer.stop_server()
+        buffer.stop_server()
         buffer.close()
     """
 
@@ -362,6 +381,7 @@ class UCXXBuffer:
                 f"base={self._base_port}, listeners={self._n_threads}"
             )
         self._local_ip = self._get_local_ip()
+        self._sender_incarnation_key = identity_key(config.sender_incarnation)
 
         # Create underlying SharedRingBuffer
         buffer_config = config.to_buffer_config()
@@ -395,7 +415,7 @@ class UCXXBuffer:
         Delegates to mixins._get_local_ip() which checks rdma* interfaces
         first to avoid binding to the management network on IB clusters.
         """
-        from .mixins import _get_local_ip
+        from .producer import _get_local_ip
 
         return _get_local_ip()
 
@@ -647,7 +667,7 @@ class UCXXBuffer:
 
         Single-chunk-per-slot protocol:
 
-        1. Receive: ``int64[1] = [slot]``.
+        1. Receive: ``uint64[3] = [slot, generation, sender-incarnation key]``.
         2. Send: status byte (``0`` = ok / ``1`` = stale slot /
            ``2`` = error).
         3. On status=0, send the entire raw SHM slot buffer.
@@ -678,7 +698,7 @@ class UCXXBuffer:
                     # submission and leave its waiter pending forever. Post
                     # only for an observed message; once posted, retain it and
                     # finish under a deadline even if shutdown is requested.
-                    slot_buf = np.empty(1, dtype=np.int64)
+                    slot_buf = np.empty(3, dtype=np.uint64)
                     header = UCXXOperation(
                         self.config.send_timeout,
                         "UCXX producer slot header",
@@ -691,6 +711,35 @@ class UCXXBuffer:
                         header.fail(f"slot header completion uncertain: {error}")
                     t_recv_done = time.perf_counter()
                     slot = int(slot_buf[0])
+                    generation = int(slot_buf[1])
+                    sender_key = int(slot_buf[2])
+
+                    if sender_key != self._sender_incarnation_key:
+                        await self._send_error_response(
+                            endpoint,
+                            RuntimeError("sender incarnation mismatch"),
+                        )
+                        continue
+
+                    if slot == _LAYOUT_REQUEST_SLOT:
+                        if generation != WIRE_VERSION:
+                            await self._send_error_response(
+                                endpoint,
+                                RuntimeError("payload wire version mismatch"),
+                            )
+                            continue
+                        descriptor = serialize_layout_descriptor(
+                            self._buffer.layout
+                        ).encode("utf-8")
+                        await self._send_control(
+                            endpoint,
+                            [
+                                np.array([_LAYOUT_RESPONSE_STATUS], dtype=np.uint8),
+                                np.array([len(descriptor)], dtype=np.int32),
+                                np.frombuffer(descriptor, dtype=np.uint8),
+                            ],
+                        )
+                        continue
 
                     if not self._buffer.schema:
                         err = RuntimeError(
@@ -703,7 +752,7 @@ class UCXXBuffer:
                         continue
 
                     try:
-                        raw_buf = self._buffer.read_raw(slot)
+                        raw_buf = self._buffer.read_raw(slot, generation=generation)
                     except SlotError as e:
                         await self._send_control(
                             endpoint, [np.array([1], dtype=np.uint8)]
@@ -736,7 +785,7 @@ class UCXXBuffer:
                         operation.fail(
                             f"producer send completion uncertain: {type(error).__name__}: {error}"
                         )
-                    self._buffer.mark_consumed(slot)
+                    self._buffer.mark_consumed(slot, generation=generation)
 
                     if sent_ok:
                         t_send_done = time.perf_counter()
@@ -900,6 +949,16 @@ class UCXXBuffer:
         """
         return self._buffer.write_raw(buf, overwrite_if_full)
 
+    def acquire_write_slot(self):
+        """Reserve transport-owned shared memory for direct production."""
+        return self._buffer.acquire_write_slot()
+
+    def publish_write_slot(self, slot: int, generation: int) -> None:
+        self._buffer.publish_write_slot(slot, generation)
+
+    def abandon_write_slot(self, slot: int, generation: int) -> None:
+        self._buffer.abandon_write_slot(slot, generation)
+
     def get_metadata(self, slot: int) -> Dict[str, Any]:
         """
         Get metadata for a slot (to be sent via Redis stream).
@@ -908,12 +967,18 @@ class UCXXBuffer:
             slot: Slot index.
 
         Returns:
-            Metadata dict with worker_ip, ports, slot for trainer to connect.
+            Metadata dict with addressing plus the generation, sender, wire, and
+            layout identities required for a trustworthy remote read.
         """
+        layout = self._buffer.layout
         return {
             "worker_ip": self._local_ip,
             "ports": list(self._ports) if self._ports else [self._base_port],
             "slot": slot,
+            "slot_generation": self._buffer.get_slot_generation(slot),
+            "sender_incarnation": self.config.sender_incarnation,
+            "wire_version": WIRE_VERSION,
+            "layout_id": layout.layout_id if layout is not None else None,
             "buffer_name": self._buffer.buffer_name,
         }
 
@@ -932,6 +997,10 @@ class UCXXBuffer:
     def mark_consumed(self, index: int) -> None:
         """Mark slot as consumed (for local reads)."""
         self._buffer.mark_consumed(index)
+
+    def get_slot_generation(self, index: int) -> int:
+        """Return the identity of the payload currently in a ring slot."""
+        return self._buffer.get_slot_generation(index)
 
     def is_ready(self, index: int) -> bool:
         """Check if slot is ready to read."""
@@ -1044,6 +1113,9 @@ class UCXXClient:
 
         self._pinned_pool: collections.deque = collections.deque()
         self._pinned_buf_size: int = 0
+        self._pinned_numpy_views: Dict[tuple, Dict[str, Any]] = {}
+        self._pinned_torch_views: Dict[tuple, tuple] = {}
+        self._pinned_lock = threading.Lock()
 
         _acquire_ucxx_context(self)
 
@@ -1077,11 +1149,14 @@ class UCXXClient:
 
     def _acquire_pinned(self, nbytes: int) -> torch.Tensor:
         """Get a pinned CPU buffer from the pool, or allocate a new one."""
-        if self._pinned_buf_size == nbytes and self._pinned_pool:
-            return self._pinned_pool.popleft()
-        if self._pinned_buf_size != nbytes:
-            self._pinned_pool.clear()
-            self._pinned_buf_size = nbytes
+        with self._pinned_lock:
+            if self._pinned_buf_size == nbytes and self._pinned_pool:
+                return self._pinned_pool.popleft()
+            if self._pinned_buf_size != nbytes:
+                self._pinned_pool.clear()
+                self._pinned_numpy_views.clear()
+                self._pinned_torch_views.clear()
+                self._pinned_buf_size = nbytes
         try:
             buf = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
         except RuntimeError:
@@ -1092,8 +1167,48 @@ class UCXXClient:
     def return_pinned(self, buf: torch.Tensor) -> None:
         """Return a pinned buffer to the pool for reuse."""
         self._check_open()
-        if len(self._pinned_pool) < self._PINNED_POOL_MAX:
+        with self._pinned_lock:
+            self._return_pinned_unlocked(buf)
+
+    def return_pinned_if_open(self, buf: torch.Tensor) -> bool:
+        """Recycle a final-reader buffer unless client teardown has begun."""
+        with self._pinned_lock:
+            if self._failure is not None or self._closing:
+                return False
+            self._return_pinned_unlocked(buf)
+            return True
+
+    def _return_pinned_unlocked(self, buf: torch.Tensor) -> None:
+        if (
+            buf.numel() == self._pinned_buf_size
+            and len(self._pinned_pool) < self._PINNED_POOL_MAX
+        ):
             self._pinned_pool.append(buf)
+            return
+        pointer = buf.untyped_storage().data_ptr()
+        self._pinned_numpy_views = {
+            key: value
+            for key, value in self._pinned_numpy_views.items()
+            if key[0] != pointer
+        }
+        self._pinned_torch_views = {
+            key: value
+            for key, value in self._pinned_torch_views.items()
+            if key[0] != pointer
+        }
+
+    def bind_pinned_views(self, buf, layout, *, reset_fields=()):
+        """Reuse typed torch views for one pooled pinned allocation."""
+        with self._pinned_lock:
+            key = (buf.untyped_storage().data_ptr(), layout.layout_id)
+            binding = self._pinned_torch_views.get(key)
+            if binding is None:
+                base_views = layout.views(buf)
+                active_views = ReusableViewMap(base_views)
+                binding = (base_views, active_views)
+                self._pinned_torch_views[key] = binding
+            _, active_views = binding
+            return active_views.reset(reset_fields)
 
     def _check_open(self):
         if self._failure is not None:
@@ -1111,6 +1226,8 @@ class UCXXClient:
         slot: int,
         recv_buf: np.ndarray,
         timeout: float,
+        generation: int = 0,
+        sender_incarnation: str = "",
     ) -> None:
         """Fetch the entire slot payload from one server thread on ``port``.
 
@@ -1122,19 +1239,36 @@ class UCXXClient:
         self._check_open()
         operation = UCXXOperation(
             timeout,
-            f"UCXX read {worker_ip}:{port} slot={slot}",
+            f"UCXX read {worker_ip}:{port} slot={slot} generation={generation}",
             owners=(self, recv_buf),
             on_failure=self._mark_failed,
         )
         self._operations.add(operation)
         try:
-            await self._read_slot_owned(worker_ip, port, slot, recv_buf, operation)
+            await self._read_slot_owned(
+                worker_ip,
+                port,
+                slot,
+                generation,
+                sender_incarnation,
+                recv_buf,
+                operation,
+            )
         finally:
             if operation.failure is None:
                 operation.complete()
                 self._operations.remove(operation)
 
-    async def _read_slot_owned(self, worker_ip, port, slot, recv_buf, operation):
+    async def _read_slot_owned(
+        self,
+        worker_ip,
+        port,
+        slot,
+        generation,
+        sender_incarnation,
+        recv_buf,
+        operation,
+    ):
         key = (worker_ip, port)
         pool = self._pool.get(key)
         endpoint = None
@@ -1167,7 +1301,10 @@ class UCXXClient:
 
         ok = False
         try:
-            slot_arr = np.array([slot], dtype=np.int64)
+            slot_arr = np.array(
+                [slot, generation, identity_key(sender_incarnation)],
+                dtype=np.uint64,
+            )
             await operation.wait(endpoint.send, slot_arr)
 
             status = np.empty(1, dtype=np.uint8)
@@ -1183,15 +1320,7 @@ class UCXXClient:
                 ok = True
                 raise StaleSlotError(f"Slot {slot} unavailable (stale reference)")
             elif status[0] == 2:
-                msg_len = np.empty(1, dtype=np.int32)
-                await operation.wait(endpoint.recv, msg_len)
-                if not 0 <= int(msg_len[0]) <= 65536:
-                    raise ValueError("UCXX remote error message exceeds protocol limit")
-                msg_buf = np.empty(int(msg_len[0]), dtype=np.uint8)
-                await operation.wait(endpoint.recv, msg_buf)
-                raise RuntimeError(
-                    f"Remote read failed: {msg_buf.tobytes().decode('utf-8')}"
-                )
+                await self._raise_remote_error(endpoint, operation)
             else:
                 raise RuntimeError(f"Unknown response status: {status[0]}")
         finally:
@@ -1212,14 +1341,147 @@ class UCXXClient:
             else:
                 await _close_endpoint_owned(endpoint, operation)
 
+    async def _raise_remote_error(self, endpoint, operation) -> None:
+        msg_len = np.empty(1, dtype=np.int32)
+        await operation.wait(endpoint.recv, msg_len)
+        if not 0 <= int(msg_len[0]) <= 65536:
+            raise ValueError("UCXX remote error message exceeds protocol limit")
+        msg_buf = np.empty(int(msg_len[0]), dtype=np.uint8)
+        await operation.wait(endpoint.recv, msg_buf)
+        message = msg_buf.tobytes().decode("utf-8")
+        if message in {
+            "sender incarnation mismatch",
+            "payload wire version mismatch",
+        }:
+            raise PayloadIdentityError(message)
+        raise RuntimeError(f"Remote read failed: {message}")
+
+    async def read_layout(
+        self,
+        worker_ip: str,
+        port: int,
+        *,
+        sender_incarnation: str,
+        timeout: float = 5.0,
+        ports: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Fetch an immutable layout descriptor with healthy-port rotation."""
+        self._check_open()
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("UCXX operation timeout must be finite and positive")
+
+        all_ports = ports if ports and len(ports) > 1 else [port]
+        available_ports = self._healthy_ports(worker_ip, all_ports)
+        with self._rr_lock:
+            rotation = self._rr_counter
+            self._rr_counter = (self._rr_counter + 1) % len(available_ports)
+
+        for attempt in range(2):
+            target_port = available_ports[(rotation + attempt) % len(available_ports)]
+            try:
+                return await self._read_layout_once(
+                    worker_ip,
+                    target_port,
+                    sender_incarnation=sender_incarnation,
+                    timeout=timeout,
+                )
+            except PayloadIdentityError:
+                raise
+            except ValueError as error:
+                raise PayloadIdentityError(
+                    f"tensor layout descriptor is not trustworthy: {error}"
+                ) from error
+            except BaseException as error:
+                if attempt == 0 and type(error).__name__ in _PORT_ROTATABLE_ERRORS:
+                    self._quarantine_port(worker_ip, target_port)
+                    logger.warning(
+                        "[UCXXClient] layout lookup failed via %s port=%s: "
+                        "%s: %s; rotating to next port",
+                        worker_ip,
+                        target_port,
+                        type(error).__name__,
+                        error,
+                    )
+                    continue
+                raise
+        raise RuntimeError("UCXX layout lookup exhausted its bounded attempts")
+
+    async def _read_layout_once(
+        self,
+        worker_ip: str,
+        port: int,
+        *,
+        sender_incarnation: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """Run one owned layout lookup against one server port."""
+        operation = UCXXOperation(
+            timeout,
+            f"UCXX layout lookup {worker_ip}:{port}",
+            owners=(self,),
+            on_failure=self._mark_failed,
+        )
+        self._operations.add(operation)
+        endpoint = None
+        try:
+            endpoint = await operation.wait(ucxx.create_endpoint, worker_ip, port)
+            operation.owners.append(endpoint)
+            request = np.array(
+                [
+                    _LAYOUT_REQUEST_SLOT,
+                    WIRE_VERSION,
+                    identity_key(sender_incarnation),
+                ],
+                dtype=np.uint64,
+            )
+            operation.owners.append(request)
+            await operation.wait(endpoint.send, request)
+            status = np.empty(1, dtype=np.uint8)
+            operation.owners.append(status)
+            await operation.wait(endpoint.recv, status)
+            if status[0] == _LAYOUT_RESPONSE_STATUS:
+                encoded_size = np.empty(1, dtype=np.int32)
+                operation.owners.append(encoded_size)
+                await operation.wait(endpoint.recv, encoded_size)
+                size = int(encoded_size[0])
+                if not 0 <= size <= MAX_LAYOUT_DESCRIPTOR_BYTES:
+                    raise ValueError("UCXX tensor layout descriptor is too large")
+                encoded = np.empty(size, dtype=np.uint8)
+                operation.owners.append(encoded)
+                await operation.wait(endpoint.recv, encoded)
+                descriptor = deserialize_layout_descriptor(encoded.tobytes())
+            elif status[0] == 2:
+                await self._raise_remote_error(endpoint, operation)
+            else:
+                raise RuntimeError(f"Unknown layout response status: {int(status[0])}")
+            await _close_endpoint_owned(endpoint, operation)
+            operation.complete()
+            return descriptor
+        except BaseException:
+            if operation.failure is None:
+                try:
+                    if endpoint is not None:
+                        await _close_endpoint_owned(endpoint, operation)
+                    operation.complete()
+                except BaseException as retirement_error:
+                    operation.fail(
+                        f"layout lookup retirement uncertain: {retirement_error}"
+                    )
+            raise
+        finally:
+            if operation.failure is None:
+                self._operations.remove(operation)
+
     async def read(
         self,
         worker_ip: str,
         port: int,
         slot: int,
-        schema: List[Any],
+        layout: TensorLayout,
         timeout: float = 5.0,
         ports: Optional[List[int]] = None,
+        generation: int = 0,
+        sender_incarnation: str = "",
     ) -> Dict[str, np.ndarray]:
         """Read slot data from a remote worker buffer.
 
@@ -1256,27 +1518,14 @@ class UCXXClient:
         self._check_open()
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("UCXX operation timeout must be finite and positive")
-        if not schema:
-            raise ValueError("Schema required for zero-pack protocol")
-        names = set()
-        for spec in schema:
-            if (
-                not spec.name
-                or spec.name == "_pinned_buf"
-                or spec.name in names
-                or spec.dtype.hasobject
-                or spec.dtype.itemsize <= 0
-                or any(type(dim) is not int or dim < 0 for dim in spec.shape)
-                or spec.nbytes != math.prod(spec.shape) * spec.dtype.itemsize
-            ):
-                raise ValueError("Invalid UCXX payload schema")
-            names.add(spec.name)
+        if not isinstance(layout, TensorLayout):
+            raise TypeError("UCXX reads require a validated tensor layout")
 
         # Health-aware rotation: skip ports that recently emitted a
         # transport-class failure (see :meth:`_healthy_ports`).
         all_ports = ports if ports and len(ports) > 1 else [port]
         available_ports = self._healthy_ports(worker_ip, all_ports)
-        total_bytes = sum(spec.nbytes for spec in schema)
+        total_bytes = layout.payload_nbytes
         pinned_buf = self._acquire_pinned(total_bytes)
         raw = pinned_buf.numpy()
 
@@ -1295,25 +1544,38 @@ class UCXXClient:
         # the whole job.
         last_exc: Optional[BaseException] = None
         target_port: Optional[int] = None
-        for attempt in range(2):
-            offset = (rotation + attempt) % len(available_ports)
-            target_port = available_ports[offset]
-            try:
-                await self._read_slot(worker_ip, target_port, slot, raw, timeout)
-                last_exc = None
-                break  # success
-            except BaseException as e:  # noqa: BLE001 -- re-raised below
-                last_exc = e
-                if attempt == 0 and type(e).__name__ in _PORT_ROTATABLE_ERRORS:
-                    self._quarantine_port(worker_ip, target_port)
-                    logger.warning(
-                        f"[UCXXClient] read failed via {worker_ip} "
-                        f"port={target_port} slot={slot}: "
-                        f"{type(e).__name__}: {e}; rotating to next "
-                        f"port and retrying"
+        try:
+            for attempt in range(2):
+                offset = (rotation + attempt) % len(available_ports)
+                target_port = available_ports[offset]
+                try:
+                    await self._read_slot(
+                        worker_ip,
+                        target_port,
+                        slot,
+                        raw,
+                        timeout,
+                        generation=generation,
+                        sender_incarnation=sender_incarnation,
                     )
-                    continue
-                raise
+                    last_exc = None
+                    break  # success
+                except BaseException as error:  # noqa: BLE001 -- re-raised below
+                    last_exc = error
+                    if attempt == 0 and type(error).__name__ in _PORT_ROTATABLE_ERRORS:
+                        self._quarantine_port(worker_ip, target_port)
+                        logger.warning(
+                            f"[UCXXClient] read failed via {worker_ip} "
+                            f"port={target_port} slot={slot}: "
+                            f"{type(error).__name__}: {error}; rotating to next "
+                            f"port and retrying"
+                        )
+                        continue
+                    raise
+        except BaseException:
+            if self._failure is None:
+                self.return_pinned(pinned_buf)
+            raise
         if last_exc is not None:  # second attempt also failed
             raise last_exc
 
@@ -1327,14 +1589,17 @@ class UCXXClient:
             f"(port={target_port}{bw_str})"
         )
 
-        result: Dict[str, Any] = {}
-        offset = 0
-        for spec in schema:
-            result[spec.name] = np.frombuffer(
-                raw[offset : offset + spec.nbytes], dtype=spec.dtype
-            ).reshape(spec.shape)
-            offset += spec.nbytes
+        view_key = (pinned_buf.untyped_storage().data_ptr(), layout.layout_id)
+        result = self._pinned_numpy_views.get(view_key)
+        if result is None:
+            result = {}
+            for field in layout.fields:
+                result[field.name] = np.frombuffer(
+                    raw[field.offset : field.offset + field.nbytes], dtype=field.dtype
+                ).reshape(field.shape)
+            self._pinned_numpy_views[view_key] = result
         result["_pinned_buf"] = pinned_buf
+        result["_layout"] = layout
         return result
 
     async def close(self) -> None:
@@ -1363,4 +1628,7 @@ class UCXXClient:
                     operation.fail(f"client close uncertain: {error}")
                 pool.popleft()
             del self._pool[key]
+        self._pinned_pool.clear()
+        self._pinned_numpy_views.clear()
+        self._pinned_torch_views.clear()
         _release_ucxx_context(self)
