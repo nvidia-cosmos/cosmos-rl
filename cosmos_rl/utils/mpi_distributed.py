@@ -110,7 +110,9 @@ def init_distributed_with_MPI():
             dist.init_process_group(
                 "cuda:nccl,cpu:gloo",
                 world_size=world_size,
-                rank=local_rank,
+                # The selected MPI communicator may be host-local; Torch's
+                # world group must use the same global rank as RANK above.
+                rank=global_rank,
                 init_method=init_method,
             )
         except dist.DistNetworkError:
@@ -123,5 +125,5 @@ def init_distributed_with_MPI():
         )
 
     logger.info(
-        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port} in rank {local_rank}."
+        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port} in global rank {global_rank} (local rank {local_rank})."
     )

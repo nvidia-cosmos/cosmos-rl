@@ -99,6 +99,18 @@ run python -m pytest -q tests/test_distributed_kv_store.py
 run python -m pytest -q tests/test_collective_operation.py
 run python -m pytest -q tests/test_collective_error_reporting.py
 run python -m pytest -q tests/test_training_collective_contract.py
+run python -m pytest -q tests/test_weight_adoption.py
+run python -m pytest -q tests/test_mpi_rank.py
+run python -m pytest -q tests/test_empty_rollout_batch.py
+run torchrun --standalone --nproc-per-node=2 tests/empty_rollout_batch_canary.py
+run python -m pytest -q tests/test_rollout_phase_boundaries.py
+run python -m pytest -q tests/test_r2r_command_selection.py
+run python -m pytest -q tests/test_multi_turn_termination.py
+run python -m pytest -q tests/test_multi_turn_distillation_guard.py
+run python -m pytest -q tests/test_async_rollout_phases.py
+run python -m pytest -q tests/test_p2r_temporary_queue.py tests/test_p2r_copyback_lifetime.py
+run python -m pytest -q tests/test_async_generation_lifetime.py
+run python -m pytest -q tests/test_async_weight_pause.py
 run python -m pytest -q tests/test_sft_ack_progress.py
 run python -m pytest -q tests/test_simulator_shutdown.py tests/test_vla_shutdown.py
 run python -m pytest -q tests/test_state_tensor_roundtrip.py
@@ -230,6 +242,8 @@ run python tests/test_transport_strategy.py
 run python tests/test_prefetch_mixin.py
 run python tests/test_trajectory.py
 run python tests/test_rollout_prefetch_loop_integration.py
+run python -m pytest -q tests/test_generation_prefetch_cancellation.py
+run python -m pytest -q tests/test_generation_preparation_identity.py
 run python tests/test_ucxx_e2e.py
 run python tests/test_custom_class.py
 run python tests/test_math_verify.py

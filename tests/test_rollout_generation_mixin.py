@@ -314,9 +314,9 @@ class TestOverlap(unittest.TestCase):
             # By now, bg should have done both prepares (50ms + 50ms = 100ms,
             # well within B1's gather (50ms) + generate (200ms) = 250ms).
             with backend._setup_futures_lock:
-                self.assertIn(("idx", 1), backend._setup_futures)
+                self.assertIn(backend._setup_key(b2[0]), backend._setup_futures)
                 self.assertTrue(
-                    backend._setup_futures[("idx", 1)].done(),
+                    backend._setup_futures[backend._setup_key(b2[0])].done(),
                     msg="B2[0] prepare should be done by the time B1 finishes",
                 )
 
