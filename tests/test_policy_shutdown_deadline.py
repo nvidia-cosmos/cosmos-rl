@@ -14,12 +14,14 @@ test failure.
 """
 
 import ast
+import asyncio
 import datetime
 import importlib.util
 import multiprocessing
 import os
 import queue
 import tempfile
+import threading
 import time
 import traceback
 import types
@@ -43,6 +45,11 @@ def _run_rank(
         assert spec is not None and spec.origin, "cosmos_rl is not importable"
         root = Path(spec.origin).resolve().parent
     worker_path = root / "policy/worker/rl_worker.py"
+    owner_spec = importlib.util.spec_from_file_location(
+        "shutdown_worker_threads", root / "utils/worker_threads.py"
+    )
+    owner = importlib.util.module_from_spec(owner_spec)
+    owner_spec.loader.exec_module(owner)
     worker_tree = ast.parse(worker_path.read_text(), filename=str(worker_path))
     methods = [
         method
@@ -97,9 +104,9 @@ def _run_rank(
 
     namespace = {
         "GRPOTrainer": object,
-        "threading": types.SimpleNamespace(
-            Thread=lambda **kwargs: types.SimpleNamespace(start=lambda: None)
-        ),
+        "threading": threading,
+        "asyncio": asyncio,
+        "start_worker_thread": owner.start_worker_thread,
         "time": types.SimpleNamespace(time=clock, sleep=sleep),
         "COSMOS_FINAL_WEIGHT_SYNC_WAIT_S": 30,
         "torch": torch,
@@ -123,8 +130,15 @@ def _run_rank(
         execute_command=execute,
         train_stream=None,
         replica_name="shutdown-test",
-        handle_shutdown=lambda: None,
+        shutdown_signal=threading.Event(),
     )
+
+    async def idle_io():
+        return
+
+    worker.fetch_command = idle_io
+    worker.fetch_rollouts = idle_io
+    worker.handle_shutdown = lambda: owner.stop_worker_threads(worker)
     worker.broadcast_command = types.MethodType(namespace["broadcast_command"], worker)
     if rank == 0:
         worker.fetch_command_buffer.put_nowait("end")
@@ -138,6 +152,9 @@ def _run_rank(
             timeout=datetime.timedelta(seconds=3),
         )
         namespace["main_loop"](worker)
+        assert not worker.fetch_command_thread.is_alive()
+        if rank == 0:
+            assert not worker.fetch_rollouts_thread.is_alive()
     except Exception:
         error = traceback.format_exc()
     finally:

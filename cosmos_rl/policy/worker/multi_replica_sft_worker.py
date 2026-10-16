@@ -17,7 +17,6 @@
 import asyncio
 import copy
 from queue import Queue
-import threading
 from cosmos_rl.policy.worker.stop import training_boundary, final_checkpoint
 import time
 from typing import List, Tuple
@@ -40,6 +39,7 @@ from cosmos_rl.policy.worker import RLPolicyWorker, SFTPolicyWorker
 import cosmos_rl.utils.distributed as dist_util
 import torch.distributed as dist
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+from cosmos_rl.utils.worker_threads import start_worker_thread
 
 
 class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
@@ -385,12 +385,9 @@ class MultiReplicaSFTPolicyWorker(RLPolicyWorker):
         # Start the thread with daemon=True, so it will exit when the main program exits.
         # we need all ranks have fetch_command_thread, so that buildmesh command can be broadcasted to all ranks
         # TODO(zjx): we will only let rank 0 fetch and broadcast command
-        self.fetch_command_thread = threading.Thread(
-            target=fetch_command_helper,
-            args=(self,),
-            daemon=True,
-            name="fetch_command_thread",
-        ).start()
+        self.fetch_command_thread = start_worker_thread(
+            self, "fetch_command_thread", fetch_command_helper, (self,)
+        )
 
         self.profiler.start()
         pp_last_stage = False

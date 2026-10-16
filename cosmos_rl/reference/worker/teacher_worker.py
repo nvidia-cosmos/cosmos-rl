@@ -52,6 +52,7 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.dispatcher.protocol import Role
+from cosmos_rl.utils.worker_threads import start_worker_thread, stop_worker_threads
 
 
 class TeacherWorker(PolicyWorkerBase):
@@ -116,6 +117,7 @@ class TeacherWorker(PolicyWorkerBase):
             traceback.print_exc()
             raise e
         finally:
+            stop_worker_threads(self)
             self.destroy_worker()
 
     def update_config(self, config: CosmosConfig):
@@ -160,6 +162,7 @@ class TeacherWorker(PolicyWorkerBase):
 
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
+            stop_worker_threads(self)
             if self.fetch_rollouts_thread is not None:
                 self.fetch_rollouts_thread.join()
                 self.fetch_rollouts_thread = None
@@ -174,20 +177,15 @@ class TeacherWorker(PolicyWorkerBase):
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         running = True
-        while running:
+        while running and not self.shutdown_signal.is_set():
             teacher_requests = []
             logger.debug("[Reference] Fetching rollouts from redis")
-            try:
-                teacher_requests = self.redis_controller.subscribe_teacher_request(
-                    self.replica_name, count=self.engine.batch_size
-                )
-                logger.debug(
-                    f"[Reference] Fetched {len(teacher_requests)} rollouts from redis"
-                )
-            except Exception as e:
-                logger.debug(
-                    f"[Reference] Failed to get rollouts: {e}, wait for next round"
-                )
+            teacher_requests = self.redis_controller.subscribe_teacher_request(
+                self.replica_name, count=self.engine.batch_size
+            )
+            logger.debug(
+                f"[Reference] Fetched {len(teacher_requests)} rollouts from redis"
+            )
             for rollout in teacher_requests:
                 assert len(rollout["teacher_result_uuid"]) == len(
                     rollout["completion_token_ids"]
@@ -314,12 +312,9 @@ class TeacherWorker(PolicyWorkerBase):
             return
 
         if self.global_rank == 0:
-            self.fetch_rollouts_thread = threading.Thread(
-                target=fetch_rollouts_helper,
-                args=(self,),
-                daemon=True,
-                name="fetch_rollouts_thread",
-            ).start()
+            self.fetch_rollouts_thread = start_worker_thread(
+                self, "fetch_rollouts_thread", fetch_rollouts_helper, (self,)
+            )
 
         while True:
             if self.end_event.is_set():
