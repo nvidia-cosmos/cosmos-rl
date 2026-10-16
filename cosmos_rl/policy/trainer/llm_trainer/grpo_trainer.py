@@ -21,6 +21,7 @@ import inspect
 import numpy as np
 import enum
 from functools import cached_property
+from collections import defaultdict
 from typing import Optional, Dict, Any, Callable, List, Tuple, Set
 
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -43,6 +44,7 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
+from cosmos_rl.utils.pipelining.pipelining_utils import resize_pipeline_schedule
 from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_inputs,
     pack_sequences_for_logprobs,
@@ -102,7 +104,9 @@ def _apply_off_policy_mask(
     seq_mean_logprob_diff = sum_diff / denom
 
     # Sequence-level advantage
-    advantage_by_sequence = current_advantages[cu_seqlens[:-1]]
+    advantage_by_sequence = current_advantages.new_zeros(shifted_length.shape)
+    nonempty = shifted_length > 0
+    advantage_by_sequence[nonempty] = current_advantages[cu_seqlens[:-1][nonempty]]
 
     # Apply the mask
     seq_mask = (
@@ -151,11 +155,16 @@ def compute_loss(
             )
         )
     if rollout_per_token_logps is not None:
-        rollout_per_token_logps = torch.tensor(
-            np.concatenate(rollout_per_token_logps, axis=0),
-            device=current_token_logps.device,
-            dtype=current_token_logps.dtype,
-        ).detach()
+        if isinstance(rollout_per_token_logps, torch.Tensor):
+            rollout_per_token_logps = rollout_per_token_logps.to(
+                device=current_token_logps.device, dtype=current_token_logps.dtype
+            ).detach()
+        else:
+            rollout_per_token_logps = torch.tensor(
+                np.concatenate(rollout_per_token_logps, axis=0),
+                device=current_token_logps.device,
+                dtype=current_token_logps.dtype,
+            ).detach()
         assert rollout_per_token_logps.shape == current_token_logps.shape, (
             "rollout_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
                 rollout_per_token_logps.shape, current_token_logps.shape
@@ -295,7 +304,8 @@ def compute_loss(
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
-    bsz, _ = logprob_masks.shape
+    # Packing may produce a single physical row containing multiple sequences.
+    bsz = cu_seqlens.numel() - 1
     per_token_loss_seq_sum = torch.zeros(
         bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
     )  # [bsz,]
@@ -309,6 +319,12 @@ def compute_loss(
         kl_loss_seq_sum[i] = kl_loss[cu_seqlens[i] : cu_seqlens[i + 1]].sum()
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
 
+    # Pipeline chunks contribute to one existing minibatch objective. Optional
+    # whole-minibatch counts prevent a mean-of-microbatch-means (and preserve
+    # the non-pipeline path when no counts are supplied).
+    normalization = kwargs.get("normalization_counts")
+    sequence_count = bsz if normalization is None else normalization["sequences"]
+
     if config.train.train_policy.loss_type == "seq-mean-token-mean":
         # seq-mean-token-sum
         # If Dr.GRPO is used, we need to normalize the loss by the max tokens for unbiased loss
@@ -318,18 +334,20 @@ def compute_loss(
         ):
             norm_factor = config.train.train_policy.unbiased_loss_max_tokens
         else:
-            norm_factor = shifted_length
+            norm_factor = shifted_length.clamp_min(1)
 
-        per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
-        kl_loss = (kl_loss_seq_sum / norm_factor).mean()
+        per_token_loss = (per_token_loss_seq_sum / norm_factor).sum() / sequence_count
+        kl_loss = (kl_loss_seq_sum / norm_factor).sum() / sequence_count
     elif config.train.train_policy.loss_type == "seq-mean-token-sum":
         # seq-mean-token-sum
-        per_token_loss = per_token_loss_seq_sum.mean()
-        kl_loss = kl_loss_seq_sum.mean()
+        per_token_loss = per_token_loss_seq_sum.sum() / sequence_count
+        kl_loss = kl_loss_seq_sum.sum() / sequence_count
     elif config.train.train_policy.loss_type == "token-mean":
-        length_sum = shifted_length.sum()
-        num_dp_workers = 1
-        if config.train.train_policy.balance_dp_token:
+        length_sum = (
+            shifted_length.sum() if normalization is None else normalization["tokens"]
+        )
+        num_dp_workers = 1 if normalization is None else normalization["dp_workers"]
+        if config.train.train_policy.balance_dp_token and normalization is None:
             # Balance the number of tokens across data parallel ranks and replicas
             if dp_group is not None:
                 # Take DP tokens into account
@@ -354,6 +372,19 @@ def compute_loss(
         per_token_loss,
         kl_loss,
     )
+
+
+def _pp_logprob_rows(logprob_masks, values):
+    """Keep ragged rollout logprobs aligned with PP's row-wise input splitting."""
+    assert len(values) == logprob_masks.shape[0]
+    result = torch.zeros_like(logprob_masks, dtype=torch.float32)
+    for row, row_values in enumerate(values):
+        row_values = torch.as_tensor(row_values, device=result.device)
+        assert row_values.numel() == logprob_masks[row].sum().item(), (
+            "Rollout logprobs must match the selected tokens in each PP row"
+        )
+        result[row, logprob_masks[row]] = row_values
+    return result
 
 
 # TODO: (lms) May be it's better to register this func as a hook to the last stage model.
@@ -406,6 +437,10 @@ def _swizzle_pp_grpo_forward(
                 kwargs.pop(key)
 
     raw_logits = ori_forward(*args, **kwargs)
+    if not torch.is_grad_enabled() and not (is_computing_ref or is_computing_old_ahead):
+        # Native stage shape inference feeds synthetic activations under
+        # no_grad. It must not become the old policy or update loss metrics.
+        return raw_logits.new_zeros(1)
 
     # recover the input ids and position ids
     if "input_ids_before_cp" in kwargs:
@@ -436,29 +471,22 @@ def _swizzle_pp_grpo_forward(
         pos_token_mask = None
 
     if is_computing_ref:
-        if trainer.ref_per_token_logps[mini_batch_id] is not None:
-            assert isinstance(trainer.ref_per_token_logps[mini_batch_id], list)
-            trainer.ref_per_token_logps[mini_batch_id].append(
-                current_per_token_logprobs.detach()
-            )
+        cache = trainer.ref_per_token_logps
+    elif is_computing_old_ahead:
+        cache = trainer.old_per_token_logps
+    if is_computing_ref or is_computing_old_ahead:
+        # Stage metadata inference may execute a chunk more than once. Store by
+        # its identity rather than appending a duplicate that shifts later rows.
+        if cache[mini_batch_id] is None:
+            cache[mini_batch_id] = []
+        chunks = cache[mini_batch_id]
+        assert isinstance(chunks, list) and micro_batch_id <= len(chunks)
+        value = current_per_token_logprobs.detach()
+        if micro_batch_id == len(chunks):
+            chunks.append(value)
         else:
-            trainer.ref_per_token_logps[mini_batch_id] = [
-                current_per_token_logprobs.detach()
-            ]
-        # Skip the rest logic since we are computing ref
-        return None
-    if is_computing_old_ahead:
-        if trainer.old_per_token_logps[mini_batch_id] is not None:
-            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
-            trainer.old_per_token_logps[mini_batch_id].append(
-                current_per_token_logprobs.detach()
-            )
-        else:
-            trainer.old_per_token_logps[mini_batch_id] = [
-                current_per_token_logprobs.detach()
-            ]
-        # Skip the rest logic since we are computing old ahead
-        return None
+            chunks[micro_batch_id] = value
+        return current_per_token_logprobs.new_zeros(1)
 
     if (
         trainer.old_per_token_logps[mini_batch_id] is not None
@@ -479,14 +507,9 @@ def _swizzle_pp_grpo_forward(
             assert "rollout_logprobs_as_old" in user_input, (
                 "rollout_logprobs_as_old is not found in user_input"
             )
-            concatenated_rollout_logprobs = torch.cat(
-                [
-                    t.to(current_per_token_logprobs.device)
-                    for t in user_input["rollout_logprobs_as_old"]
-                ],
-                dim=0,
-            )
-            old_per_token_logprobs = concatenated_rollout_logprobs.detach()
+            old_per_token_logprobs = user_input["rollout_logprobs_as_old"][
+                logprob_masks
+            ].detach()
         else:
             old_per_token_logprobs = current_per_token_logprobs.detach()
         # Following should only happen in the first iteration
@@ -511,7 +534,8 @@ def _swizzle_pp_grpo_forward(
         )
 
     compute_loss_fn = trainer.loss_fn if hasattr(trainer, "loss_fn") else compute_loss
-    loss, _, _ = compute_loss_fn(
+    normalization = getattr(trainer, "_pp_loss_normalization", None)
+    loss, per_token_loss, kl_loss = compute_loss_fn(
         current_per_token_logprobs,
         old_per_token_logprobs,
         ref_per_token_logprobs,
@@ -523,14 +547,39 @@ def _swizzle_pp_grpo_forward(
         if trainer.parallel_dims.dp_enabled
         else None,
         ddp_comm=inter_policy_nccl,
-        rollout_per_token_logps=user_input.get("rollout_logprobs", None),
+        rollout_per_token_logps=(
+            user_input["rollout_logprobs"][logprob_masks]
+            if "rollout_logprobs" in user_input
+            else None
+        ),
+        normalization_counts=normalization,
     )
     if config.train.train_policy.entropy_coeff > 0.0:
         loss += (
-            -config.train.train_policy.entropy_coeff * (metrics["effective_entropy"])
+            -config.train.train_policy.entropy_coeff
+            * metrics["effective_entropy"]
+            * (
+                1.0
+                if normalization is None
+                else current_per_token_logprobs.numel()
+                / trainer._pp_local_tokens.clamp_min(1)
+            )
         )
-    for key in metrics:
-        trainer.metrics[key] += metrics[key]
+    if normalization is None:
+        for key in metrics:
+            trainer.metrics[key] += metrics[key].detach()
+    else:
+        # Replace, do not double count a chunk if stage setup repeats a forward.
+        trainer._pp_chunk_metrics[micro_batch_id] = {
+            "loss": per_token_loss.detach(),
+            "kl": kl_loss.detach(),
+            "entropy": metrics["entropy"].detach()
+            * logprob_masks.shape[0]
+            / normalization["sequences"],
+            "effective_entropy": metrics["effective_entropy"].detach()
+            * current_per_token_logprobs.numel()
+            / trainer._pp_local_tokens.clamp_min(1),
+        }
 
     # Add Positive NLL if enabled and mask available
     pos_coef = config.train.train_policy.positive_nll_coef
@@ -541,7 +590,12 @@ def _swizzle_pp_grpo_forward(
         and pos_token_mask.any()
     ):
         flat_mask = pos_token_mask[logprob_masks]
-        l_nll = -current_per_token_logprobs[flat_mask].mean()
+        l_nll = (
+            -current_per_token_logprobs[flat_mask].mean()
+            if normalization is None
+            else -current_per_token_logprobs[flat_mask].sum()
+            / trainer._pp_positive_tokens.clamp_min(1)
+        )
         loss = loss + pos_coef * l_nll
 
     return loss.unsqueeze(0) * loss_scaling
@@ -1057,9 +1111,12 @@ class GRPOTrainer(LLMTrainer):
         do_save_checkpoint: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
-        pp_last_stage = (
-            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+        last_stage_model = (
+            self.pp_scheduler._cosmos_last_stage_model
+            if self.parallel_dims.pp_enabled
+            else None
         )
+        pp_last_stage = last_stage_model is not None
         # Do it once
         if (
             pp_last_stage
@@ -1067,8 +1124,10 @@ class GRPOTrainer(LLMTrainer):
             and not hasattr(self, "swizzled_forward")
         ):
             # Swizzle the forward function to return the current per-token logprobs.
-            orig_forward = self.model.forward
-            self.model.forward = types.MethodType(
+            # The root may remain a meta model; pipeline schedules execute
+            # its materialized model parts, including virtual last stages.
+            orig_forward = last_stage_model.forward
+            last_stage_model.forward = types.MethodType(
                 partial(
                     _swizzle_pp_grpo_forward,
                     self,
@@ -1076,7 +1135,7 @@ class GRPOTrainer(LLMTrainer):
                     self.config,
                     inter_policy_nccl,
                 ),
-                self.model,
+                last_stage_model,
             )
             self.swizzled_forward = True
 
@@ -1148,27 +1207,12 @@ class GRPOTrainer(LLMTrainer):
             else batch_size
         )
 
-        mini_batch_size = (
-            min(self.mini_batch, per_optimize_batch_size)
-            if self.mini_batch > 0
-            else per_optimize_batch_size
-        )
-        num_mini_batch = batch_size // mini_batch_size
-
-        # Initialize placeholder for old per-token logprobs
-        self.old_per_token_logps = [None for _ in range(num_mini_batch)]
-        self.ref_per_token_logps = [None for _ in range(num_mini_batch)]
+        # Dynamic partitions and uneven optimize chunks need more slots than
+        # floor(batch / mini_batch). Allocate only the actual cached minibatches.
+        self.old_per_token_logps = defaultdict(lambda: None)
+        self.ref_per_token_logps = defaultdict(lambda: None)
 
         acc_n_tokens = 0
-        # Validate the PP parallelism configuration
-        if self.parallel_dims.pp_enabled:
-            n_microbatches = (
-                mini_batch_size // self.config.policy.parallelism.pp_micro_batch_size
-            )
-            assert n_microbatches % self.parallel_dims.pp == 0, (
-                f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
-            )
-
         need_compute_ref, kl_beta = self._swap_model_state_dict()
         need_compute_old_ahead = (
             batch_size > per_optimize_batch_size
@@ -1179,6 +1223,7 @@ class GRPOTrainer(LLMTrainer):
         grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         grad_norm_count = 0
+        teacher_metrics = {}
 
         trainer_phases = []
         if need_compute_ref:
@@ -1212,10 +1257,19 @@ class GRPOTrainer(LLMTrainer):
                     local_mini_step = 0
                     local_optimize_step = 0
                     with torch.cuda.stream(self.train_stream):
-                        for i in range(0, batch_size, per_optimize_batch_size):
-                            end = min(i + per_optimize_batch_size, batch_size)
+                        for optimize_start in range(
+                            0, batch_size, per_optimize_batch_size
+                        ):
+                            # Even a fully skipped teacher chunk must take the
+                            # same reduction boundary as its peers.
+                            all_reduced = False
+                            end = min(
+                                optimize_start + per_optimize_batch_size, batch_size
+                            )
                             # Convert advantages from [batch_size] -> [batch_size, max_len] via expanding
-                            processed_samples_for_optimize = processed_samples[i:end]
+                            processed_samples_for_optimize = processed_samples[
+                                optimize_start:end
+                            ]
                             if len(cached_minibatch_arrangements) > local_optimize_step:
                                 (
                                     mini_batches,
@@ -1280,6 +1334,14 @@ class GRPOTrainer(LLMTrainer):
                                             self.mini_batch,
                                         )
                                     ]
+                                # Both partitioners return chunk-local indices.
+                                # All sample metadata below is full-batch indexed;
+                                # convert once before caching for reference/old
+                                # logprob passes and subsequent mu iterations.
+                                mini_batch_index = [
+                                    [optimize_start + index for index in indices]
+                                    for indices in mini_batch_index
+                                ]
                                 cached_minibatch_arrangements.append(
                                     (mini_batches, mini_batch_index)
                                 )
@@ -1412,6 +1474,7 @@ class GRPOTrainer(LLMTrainer):
                                         input_ids,
                                         pad_token_id=self.tokenizer.pad_token_id,
                                         seq_len_multiple=self.seq_len_multiple,
+                                        logprob_masks=user_mini_batch["logprob_masks"],
                                     )
                                     user_mini_batch.update(packed_args)
                                     packed_args = pack_sequences_for_masks(
@@ -1491,6 +1554,22 @@ class GRPOTrainer(LLMTrainer):
                                             )[torch.tensor(mask, dtype=torch.bool)]
                                         )
                                 if self.parallel_dims.pp_enabled:
+                                    mini_batch_size = len(minibatched_processed_samples)
+                                    forward_only = (
+                                        is_computing_ref or is_computing_old_ahead
+                                    )
+                                    schedule_name = (
+                                        "pp_scheduler_val"
+                                        if forward_only
+                                        else "pp_scheduler"
+                                    )
+                                    schedule, pp_microbatch = resize_pipeline_schedule(
+                                        getattr(self, schedule_name),
+                                        mini_batch_size,
+                                        self.config.policy.parallelism.pp_micro_batch_size,
+                                    )
+                                    setattr(self, schedule_name, schedule)
+                                    n_microbatches = mini_batch_size // pp_microbatch
                                     if pp_last_stage:
                                         if (
                                             self.old_per_token_logps[local_mini_step]
@@ -1500,8 +1579,8 @@ class GRPOTrainer(LLMTrainer):
                                                 "Only first `mu_iteration` should append `old_per_token_logps`"
                                             )
                                         else:
-                                            assert i_mu > 0, (
-                                                "Only `mu_iteration > 0` should reuse `old_per_token_logps`"
+                                            assert i_mu > 0 or need_compute_old_ahead, (
+                                                "Only inner iteration or an ahead pass should reuse old logprobs"
                                             )
                                             assert (
                                                 len(
@@ -1519,23 +1598,13 @@ class GRPOTrainer(LLMTrainer):
                                     micro_batch_ids_list = []
                                     for i in range(mini_batch_size):
                                         micro_batch_ids_list.append(
-                                            [
-                                                i
-                                                // self.config.policy.parallelism.pp_micro_batch_size
-                                            ]
+                                            [i // pp_microbatch]
                                         )
                                     micro_batch_ids_cpu = torch.Tensor(
                                         micro_batch_ids_list
                                     ).int()
                                     loss_scaling_cpu = torch.tensor(
-                                        [
-                                            [
-                                                1.0
-                                                * loss_scaling_factor
-                                                / self.config.policy.parallelism.pp_micro_batch_size
-                                            ]
-                                        ]
-                                        * mini_batch_size,
+                                        [[loss_scaling_factor]] * mini_batch_size,
                                         dtype=torch.float32,
                                     )
                                     is_computing_ref_cpu = torch.tensor(
@@ -1558,8 +1627,25 @@ class GRPOTrainer(LLMTrainer):
 
                                     pp_first_stage = self.parallel_dims.pp_coord[0] == 0
                                     # Pipeline Parallel forward / backward inside step() call
-                                    losses = [] if pp_last_stage else None
+                                    losses = (
+                                        []
+                                        if pp_last_stage and not forward_only
+                                        else None
+                                    )
                                     if pp_last_stage:
+                                        if (
+                                            not is_computing_ref
+                                            and not is_computing_old_ahead
+                                        ):
+                                            self._prepare_pp_loss(
+                                                user_mini_batch["logprob_masks"],
+                                                None
+                                                if self._positive_flags_t is None
+                                                else self._positive_flags_t[
+                                                    mini_batch_indices
+                                                ],
+                                                inter_policy_nccl,
+                                            )
                                         # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
                                         user_mini_batch["mini_batch_ids"] = (
                                             mini_batch_ids_cpu
@@ -1583,9 +1669,25 @@ class GRPOTrainer(LLMTrainer):
                                         if self.config.train.train_policy.use_rollout_logprobs_for_loss:
                                             user_mini_batch[
                                                 "rollout_logprobs_as_old"
-                                            ] = rollout_effective_logprobs
+                                            ] = _pp_logprob_rows(
+                                                user_mini_batch["logprob_masks"],
+                                                rollout_effective_logprobs,
+                                            )
+                                        if "rollout_logprobs" in user_mini_batch:
+                                            user_mini_batch["rollout_logprobs"] = (
+                                                _pp_logprob_rows(
+                                                    user_mini_batch["logprob_masks"],
+                                                    user_mini_batch["rollout_logprobs"],
+                                                )
+                                            )
                                     if pp_first_stage or pp_last_stage:
                                         # First/Last stage: pass all inputs
+                                        if not pp_last_stage:
+                                            # Only the loss-owning stage needs this
+                                            # ragged, non-model input.
+                                            user_mini_batch.pop(
+                                                "rollout_logprobs", None
+                                            )
                                         kwargs = {}
                                         if self.parallel_dims.cp_enabled:
                                             # This is for recover these two tensors after ulysses
@@ -1596,27 +1698,28 @@ class GRPOTrainer(LLMTrainer):
                                                 position_ids_before_cp
                                             )
 
-                                        self.pp_scheduler.step(
+                                        schedule.step(
                                             **user_mini_batch,
                                             advantages=minibatched_advantages,
                                             losses=losses,
-                                            target=torch.empty(
+                                            target=None
+                                            if forward_only
+                                            else torch.empty(
                                                 [mini_batch_size, 1], device=self.device
                                             ),
                                             **kwargs,
                                         )
                                     else:
                                         # Middle stages: forward data from previous stage
-                                        self.pp_scheduler.step(
-                                            position_ids=position_ids
-                                        )
+                                        schedule.step(position_ids=position_ids)
 
                                     if is_computing_ref or is_computing_old_ahead:
                                         # Continue to next mini-batch since loss is not needed for reference model
+                                        local_mini_step += 1
                                         continue
                                     else:
                                         loss = (
-                                            torch.mean(torch.stack(losses)).to(
+                                            torch.sum(torch.stack(losses)).to(
                                                 self.device
                                             )
                                             if pp_last_stage
@@ -1624,6 +1727,21 @@ class GRPOTrainer(LLMTrainer):
                                                 [-1.0], device=self.device
                                             )
                                         )
+                                        if pp_last_stage:
+                                            assert (
+                                                len(self._pp_chunk_metrics)
+                                                == n_microbatches
+                                            )
+                                            for (
+                                                chunk_metrics
+                                            ) in self._pp_chunk_metrics.values():
+                                                loss_sum += chunk_metrics["loss"]
+                                                kl_loss_sum += chunk_metrics["kl"]
+                                                for key in self.metrics:
+                                                    self.metrics[key] += chunk_metrics[
+                                                        key
+                                                    ]
+                                            loss_count += 1
                                 else:
                                     with self.act_offloading_ctx_manager:
                                         model_output = self.forward_model(
@@ -1848,21 +1966,19 @@ class GRPOTrainer(LLMTrainer):
                                             pos_flag_batch = self._positive_flags_t[
                                                 mini_batch_indices
                                             ]
-                                            pos_mask = pos_flag_batch.unsqueeze(
-                                                1
-                                            ).expand_as(logprob_masks)
-                                            pos_token_mask = pos_mask & logprob_masks
-                                            if pos_token_mask.any():
-                                                flat_mask = pos_token_mask[
-                                                    logprob_masks
-                                                ]
+                                            flat_mask = (
+                                                pos_flag_batch.bool().repeat_interleave(
+                                                    cu_seqlens[1:] - cu_seqlens[:-1]
+                                                )
+                                            )
+                                            if flat_mask.any():
                                                 l_nll = -current_per_token_logprobs[
                                                     flat_mask
                                                 ].mean()
                                                 loss = loss + pos_coef_global * l_nll
 
                                         for key in metrics:
-                                            self.metrics[key] += metrics[key]
+                                            self.metrics[key] += metrics[key].detach()
                                         loss = loss * loss_scaling_factor
                                         per_token_loss = (
                                             per_token_loss * loss_scaling_factor
@@ -1940,7 +2056,10 @@ class GRPOTrainer(LLMTrainer):
                 report_data["train/iteration_time"] = iter_time
                 report_data["train/loss_avg"] = global_avg_loss
                 report_data["train/loss_max"] = global_max_loss
-                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
+                learning_rates = self.lr_schedulers.get_last_lr()
+                report_data["train/learning_rate"] = (
+                    learning_rates[0] if learning_rates else 0.0
+                )
                 if self.config.train.train_policy.kl_beta != 0.0:
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
@@ -1953,7 +2072,7 @@ class GRPOTrainer(LLMTrainer):
                     for k, v in self.metrics.items():
                         report_data[f"train/{k}"] = (
                             v.item() if isinstance(v, torch.Tensor) else v
-                        ) / loss_count
+                        ) / max(loss_count, 1)
                 if self.config.distillation.enable:
                     for k, v in teacher_metrics.items():
                         report_data[f"train/{k}"] = v.item()
@@ -2064,6 +2183,47 @@ class GRPOTrainer(LLMTrainer):
         else:
             return False, 0.0
 
+    def _local_policy_state_dict(self):
+        if not self.parallel_dims.pp_enabled:
+            return self.model.state_dict()
+        state = {}
+        for part, prefix in zip(self.model_parts, self.model_module_path, strict=True):
+            for key, value in part.state_dict().items():
+                name = f"{prefix}.{key}" if prefix else key
+                if name in state:
+                    raise ValueError(f"Duplicate pipeline reference state: {name}")
+                state[name] = value
+        return state
+
+    def _prepare_pp_loss(self, logprob_masks, positive_flags, inter_policy_nccl):
+        """Pin the existing minibatch denominators before splitting PP chunks."""
+        local_tokens = logprob_masks.sum(dtype=torch.float32)
+        tokens = local_tokens.clone()
+        dp_workers = 1
+        policy = self.config.train.train_policy
+        if policy.loss_type == "token-mean" and policy.balance_dp_token:
+            if self.parallel_dims.dp_enabled:
+                group = self.parallel_dims.mesh["dp"].get_group()
+                dp_workers *= torch.distributed.get_world_size(group=group)
+                torch.distributed.all_reduce(tokens, group=group)
+            if inter_policy_nccl is not None:
+                dp_workers *= inter_policy_nccl.world_size()
+                inter_policy_nccl.allreduce(
+                    tokens, tokens, op=torch.distributed.ReduceOp.SUM
+                )
+        self._pp_loss_normalization = {
+            "sequences": logprob_masks.shape[0],
+            "tokens": tokens,
+            "dp_workers": dp_workers,
+        }
+        self._pp_chunk_metrics = {}
+        self._pp_local_tokens = local_tokens
+        self._pp_positive_tokens = (
+            (logprob_masks & positive_flags.bool().view(-1, 1)).sum(dtype=torch.float32)
+            if positive_flags is not None
+            else local_tokens.new_zeros(())
+        )
+
     def compute_logprobs(
         self,
         minibatch: Dict[str, Any],
@@ -2094,7 +2254,9 @@ class GRPOTrainer(LLMTrainer):
             logits.to(dtype=str2torch_dtype(self.config.train.logprob_dtype)),
             is_full_logits=is_full_logits,
             label_packing_mask=minibatch.get("label_packing_mask", None),
+            logprob_cu_seqlens=minibatch.get("logprob_cu_seqlens"),
             input_packing_mask=minibatch.get("input_packing_mask", None),
+            entropy_requires_grad=self.config.train.train_policy.entropy_coeff > 0.0,
             **kwargs,
         )
 

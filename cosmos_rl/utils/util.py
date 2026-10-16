@@ -330,6 +330,10 @@ def selective_log_softmax(logits, index):
         `torch.Tensor`:
             Gathered log probabilities with the same shape as `index`.
     """
+    if index.numel() == 0:
+        # Preserve the empty shape and its gradient connection without stacking
+        # an empty list (or launching a fused kernel with zero effective tokens).
+        return logits.sum(dim=-1)
     if _SELECTIVE_LOG_SOFTMAX_OPTIM:
         # NOTE: aazzolini optimized.
         selected_logits = (
@@ -903,15 +907,26 @@ def entropy_from_logits(logits: torch.Tensor):
     return entropy
 
 
-def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 2048):
+def entropy_from_logits_with_chunking(
+    logits: torch.Tensor, chunk_size: int = 2048, *, checkpoint_chunks: bool = False
+):
     """Memory-efficient entropy calculation with chunking."""
     entropy = torch.zeros(logits.shape[0], device=logits.device)
     for i in range(0, logits.shape[0], chunk_size):
-        logits_chunk = logits[i : i + chunk_size].float()
-        pd_chunk = torch.nn.functional.softmax(logits_chunk, dim=-1)
-        entropy_chunk = torch.logsumexp(logits_chunk, dim=-1) - torch.sum(
-            pd_chunk * logits_chunk, dim=-1
-        )
+        logits_chunk = logits[i : i + chunk_size]
+        if checkpoint_chunks and torch.is_grad_enabled() and logits.requires_grad:
+            from torch.utils.checkpoint import checkpoint
+
+            # Recompute one FP32 chunk during backward, retaining input views
+            # instead of a second full token-by-vocabulary probability matrix.
+            entropy_chunk = checkpoint(
+                lambda chunk: entropy_from_logits(chunk.float()),
+                logits_chunk,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            entropy_chunk = entropy_from_logits(logits_chunk.float())
         entropy[i : i + chunk_size] = entropy_chunk
     return entropy
 
@@ -923,6 +938,8 @@ def compute_logprobs(
     is_full_logits: bool = False,
     label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
     input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+    entropy_requires_grad: bool = False,
+    logprob_cu_seqlens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """
     Compute the per-token log probabilities and advantages
@@ -934,6 +951,10 @@ def compute_logprobs(
         is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
         label_packing_mask: the packing mask for the labels, if using packed sequences
         input_packing_mask: the packing mask for the inputs, if using packed sequences
+        entropy_requires_grad: opt in to a differentiable effective-token entropy;
+            the all-token logging metric remains detached
+        logprob_cu_seqlens: original sequences' masked-token boundaries when the
+            physical input rows have been packed
 
     Returns:
         logps: the per-token log probabilities
@@ -976,11 +997,20 @@ def compute_logprobs(
         entropy = entropy_from_logits_with_chunking(
             logits.view(-1, logits.size(-1))
         ).detach()
-        metrics_dict["entropy"] = entropy.mean()
+        metrics_dict["entropy"] = entropy.sum() / max(entropy.numel(), 1)
+        effective_entropy = (
+            entropy[logprob_masks.view(-1)] if is_full_logits else entropy
+        )
+        metrics_dict["effective_entropy"] = effective_entropy.sum() / max(
+            effective_entropy.numel(), 1
+        )
+    if entropy_requires_grad and torch.is_grad_enabled():
         metrics_dict["effective_entropy"] = (
-            entropy[logprob_masks.view(-1)].mean()
-            if is_full_logits
-            else metrics_dict["entropy"]
+            entropy_from_logits_with_chunking(
+                effective_logits, checkpoint_chunks=True
+            ).mean()
+            if effective_logits.shape[0]
+            else effective_logits.sum() * 0.0
         )
 
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
@@ -988,6 +1018,17 @@ def compute_logprobs(
         bsz + 1, dtype=torch.int32, device=logits.device
     )  # [bsz + 1,]
     cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
+    if logprob_cu_seqlens is not None:
+        if (
+            logprob_cu_seqlens.ndim != 1
+            or logprob_cu_seqlens.numel() < 2
+            or logprob_cu_seqlens.dtype not in (torch.int32, torch.int64)
+            or logprob_cu_seqlens[0] != 0
+            or logprob_cu_seqlens[-1] != effective_input_ids.numel()
+            or (logprob_cu_seqlens[1:] < logprob_cu_seqlens[:-1]).any()
+        ):
+            raise ValueError("Invalid packed logprob sequence boundaries")
+        cu_seqlens = logprob_cu_seqlens.to(device=logits.device, dtype=torch.int32)
     logps = selective_log_softmax(
         effective_logits, effective_input_ids
     )  # [n_logprob_tokens,]

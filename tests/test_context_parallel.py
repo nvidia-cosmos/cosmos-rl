@@ -142,7 +142,14 @@ def compare_tensor(actual: torch.Tensor, expected: torch.Tensor, is_forward: boo
         double_actual, double_expected, dim=0, eps=1e-5
     )
 
-    return res_0 or cosine_similarity > 0.999
+    accepted = res_0 or bool(cosine_similarity > 0.999)
+    if not accepted:
+        direction = "forward" if is_forward else "backward"
+        raise AssertionError(
+            f"Context-parallel {direction} comparison failed: "
+            f"cosine_similarity={cosine_similarity.item()}"
+        )
+    return accepted
 
 
 def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
