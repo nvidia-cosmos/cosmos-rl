@@ -174,7 +174,7 @@ def test_expected_participants_requires_strict_mode() -> None:
         )
 
 
-def test_ha_nccl_raises_after_exhausting_collective_retries(
+def test_ha_nccl_latches_first_uncertain_native_failure_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A collective cannot silently return with unreduced state."""
@@ -198,7 +198,7 @@ def test_ha_nccl_raises_after_exhausting_collective_retries(
     communicator.is_single_peer = threading.Event()
     communicator.is_comm_ready = threading.Event()
     communicator.is_comm_ready.set()
-    communicator.build_mesh_lock = threading.Lock()
+    communicator.build_mesh_lock = threading.RLock()
     communicator.api_client = SimpleNamespace(
         post_nccl_comm_error=lambda _name, error: error_reports.append(error)
     )
@@ -210,19 +210,25 @@ def test_ha_nccl_raises_after_exhausting_collective_retries(
         lambda **_kwargs: nullcontext(),
     )
 
-    with pytest.raises(RuntimeError, match="failed after 3 attempts") as error:
+    with pytest.raises(
+        dist_utils.CollectiveOperationError, match="not replayed"
+    ) as error:
         communicator.allreduce(
             torch.tensor([1.0]),
             torch.tensor([1.0]),
             dist.ReduceOp.SUM,
         )
 
-    assert attempts == 3
-    assert len(error_reports) == 3
+    assert attempts == 1
+    assert len(error_reports) == 1
     assert isinstance(error.value.__cause__, OSError)
+    assert not communicator.is_ready()
+    with pytest.raises(dist_utils.CollectiveOperationError):
+        communicator.allreduce(torch.ones(1), torch.ones(1), dist.ReduceOp.SUM)
+    assert attempts == 1
 
 
-def test_ha_nccl_returns_after_a_transient_collective_failure(
+def test_ha_nccl_retries_readiness_before_issuing_any_collective(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempts = 0
@@ -234,8 +240,6 @@ def test_ha_nccl_returns_after_a_transient_collective_failure(
     ) -> None:
         nonlocal attempts
         attempts += 1
-        if attempts < 3:
-            raise OSError("transient NCCL failure")
         recvbuff.copy_(sendbuff * 2.0)
 
     error_reports: list[Exception] = []
@@ -251,11 +255,19 @@ def test_ha_nccl_returns_after_a_transient_collective_failure(
     communicator.is_single_peer = threading.Event()
     communicator.is_comm_ready = threading.Event()
     communicator.is_comm_ready.set()
-    communicator.build_mesh_lock = threading.Lock()
+    communicator.build_mesh_lock = threading.RLock()
     communicator.api_client = SimpleNamespace(
         post_nccl_comm_error=lambda _name, error: error_reports.append(error)
     )
-    communicator.wait_comm_ready = lambda timeout=0: None
+    readiness = 0
+
+    def become_ready(timeout=0):
+        nonlocal readiness
+        readiness += 1
+        if readiness < 3:
+            raise TimeoutError("mesh not ready yet")
+
+    communicator.wait_comm_ready = become_ready
     monkeypatch.setattr(dist_utils, "nccl_allreduce", eventually_reduce)
     monkeypatch.setattr(
         dist_utils,
@@ -267,6 +279,7 @@ def test_ha_nccl_returns_after_a_transient_collective_failure(
 
     communicator.allreduce(send, receive, dist.ReduceOp.SUM)
 
-    assert attempts == 3
+    assert attempts == 1
+    assert readiness == 3
     assert len(error_reports) == 2
     torch.testing.assert_close(receive, torch.tensor([4.0]))
