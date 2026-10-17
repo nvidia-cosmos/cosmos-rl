@@ -110,3 +110,75 @@ def test_client_sends_pinned_attempt_and_does_not_retry_stale_result(monkeypatch
     assert post.call_args.kwargs["json"]["controller_execution_id"] == "old-execution"
     assert request.controller_execution_id == "spoofed"  # no caller mutation
     sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("colocated", [False, True])
+@pytest.mark.parametrize("role", ["POLICY", "ROLLOUT"])
+@pytest.mark.parametrize("execution_id", [None, "resumed-attempt"])
+def test_worker_init_comm_propagates_execution_fence(
+    monkeypatch, colocated, role, execution_id
+):
+    from cosmos_rl.comm import base
+    from cosmos_rl.colocated.api_client import ColocatedAPIClient
+
+    monkeypatch.setenv("COSMOS_CONTROLLER_HOST", "localhost:12345")
+    monkeypatch.setattr(base.dist_utils, "broadcast_object_cpu", lambda value: value)
+    worker = SimpleNamespace(
+        role=role,
+        global_rank=0,
+        config=SimpleNamespace(
+            controller_execution_id=execution_id,
+            train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
+        ),
+        init_redis=Mock(),
+        register_to_controller=Mock(),
+    )
+    if colocated:
+        worker.colocated = True
+    base.CommMixin.init_comm(worker)
+    assert isinstance(worker.api_client, ColocatedAPIClient) is colocated
+    assert worker.api_client.controller_execution_id == execution_id
+    worker.init_redis.assert_called_once()
+    worker.register_to_controller.assert_called_once()
+
+
+def test_colocated_worker_fetch_uses_resumed_controller_fence(monkeypatch):
+    import json
+    from cosmos_rl.comm import base
+    from cosmos_rl.dispatcher import run_web_panel as panel
+    from test_training_fetch_receipts import setup
+
+    controller, _, _ = setup(monkeypatch)
+    controller.config.controller_execution_id = "resumed-attempt"
+    controller.config.mode = "colocated"
+    monkeypatch.setenv("COSMOS_CONTROLLER_HOST", "localhost:12345")
+    monkeypatch.setattr(base.dist_utils, "broadcast_object_cpu", lambda value: value)
+    worker = SimpleNamespace(
+        colocated=True,
+        role="ROLLOUT",
+        global_rank=0,
+        config=controller.config,
+        init_redis=Mock(),
+        register_to_controller=Mock(),
+    )
+    base.CommMixin.init_comm(worker)
+    client = worker.api_client
+    client._registered_replica_name, client._registered_global_rank = "source", 0
+    client._report_session_id = "session"
+    outcomes = []
+
+    def get(url, *, params, timeout):
+        result = asyncio.run(panel.get_batched_prompt(**params))
+        response = requests.Response()
+        if hasattr(result, "status_code"):
+            response.status_code, response._content = result.status_code, result.body
+        else:
+            response.status_code, response._content = 200, json.dumps(result).encode()
+        outcomes.append((params["controller_execution_id"], response.status_code))
+        return response
+
+    monkeypatch.setattr(requests, "get", get)
+    payloads, ended = client.get_next_prompt(1)
+    assert not ended and payloads[0]["prompt_idx"] == 7
+    assert outcomes == [("resumed-attempt", 200)]
+    controller.data_fetcher.get_batched_prompt.assert_called_once()
