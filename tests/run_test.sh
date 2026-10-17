@@ -142,6 +142,13 @@ run python -m pytest -q tests/test_prefetch_completion_deadline.py
 run python -m pytest -q tests/test_training_payload_lifetime.py
 run python -m pytest -q tests/test_model_export_lifecycle.py
 run python -m pytest -q tests/test_dispatch_collection_count.py
+run python -m pytest -q tests/test_trainer_payload_prefetch.py
+run python -m pytest -q tests/test_training_receive_lifecycle.py
+run python -m pytest -q tests/test_prefetch_initialization_order.py
+run python -m pytest -q tests/test_trainer_prefetch_lifecycle.py
+run python -m pytest -q tests/test_trainer_prefetch_notifications.py
+run python -m pytest -q tests/test_trainer_prefetch_publication.py
+run torchrun --standalone --nproc-per-node=4 tests/trainer_prefetch_cohort_canary.py --cpu
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
 run python -m pytest -q tests/test_receive_memory.py tests/test_receive_memory_cuda.py
 run python -m pytest -q tests/test_receive_rejection_outcomes.py

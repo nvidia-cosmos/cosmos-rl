@@ -55,6 +55,7 @@ from cosmos_rl.dispatcher.command import (
     PolicyToRolloutUnicastCommand,
     PolicyToPolicyUnicastCommand,
     DataFetchCommand,
+    PayloadPrefetchCommand,
     TrainingCompleteCommand,
     WeightResumeCommand,
 )
@@ -169,6 +170,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             global_rank=self.global_rank,
             api_client=self.api_client,
         )
+        self._setup_payload_prefetch()
         self.kv_store = dist_util.DistKVStore(
             group=dist.distributed_c10d._get_default_group(),
             master_rank=0,
@@ -313,6 +315,11 @@ class RLPolicyWorker(PolicyWorkerBase):
         if not hasattr(self, "_handle_shutdown_called"):
             self._handle_shutdown_called = True
 
+            pipeline = getattr(self, "payload_prefetch", None)
+            if pipeline is not None:
+                # Close notification admission before waiting for checkpoint writers.
+                pipeline.stop_notifications()
+
             from cosmos_rl.utils.model_export import finish_checkpoint_writes
 
             # Keep heartbeat liveness while the actual trainer-owned writer
@@ -322,6 +329,18 @@ class RLPolicyWorker(PolicyWorkerBase):
                 finish_checkpoint_writes(getattr(self, "trainer", None))
             except Exception as error:
                 checkpoint_error = error
+            if pipeline is not None:
+                # Stop admission and its owned reader before retiring a packer.
+                # A live notification producer must never race transport close.
+                self.shutdown_signal.set()
+                reader = self.fetch_command_thread
+                if reader is not None:
+                    reader.join(timeout=constant.COSMOS_CONTROL_HTTP_TIMEOUT + 15)
+                    if reader.is_alive():
+                        from cosmos_rl.utils.transport_failure import fail_transport
+
+                        fail_transport("Payload notification reader did not stop")
+                    self.fetch_command_thread = None
 
             # Stop command/data producers before retiring their resources.
             self.shutdown_signal.set()
@@ -673,6 +692,12 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):
+        from cosmos_rl.policy.trainer.prefetch import payload_cohort_scope
+
+        with payload_cohort_scope(self):
+            return self._execute_data_fetch(command)
+
+    def _execute_data_fetch(self, command: DataFetchCommand):
         if command.do_profile:
             self.profiler.start_dynamic(
                 active_steps=command.active_steps,
@@ -699,17 +724,133 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         from cosmos_rl.policy.trainer.batching import run_training_step
 
-        report_data = run_training_step(
-            self.trainer,
-            before_step=lambda: self.trainer.update_lr_schedulers(command.total_steps),
-            rollouts=self.dispatch_rollouts(),
-            current_step=command.global_step,
-            total_steps=command.total_steps,
-            remain_samples_num=command.remain_samples_num,
-            do_save_checkpoint=do_save_checkpoint,
-            inter_policy_nccl=self.inter_policy_nccl,
-            is_master_replica=self.is_master_replica,
+        pipeline = getattr(self, "payload_prefetch", None)
+        if pipeline is None:
+            if getattr(command, "prefetched_batch_id", None) or getattr(
+                command, "prefetch_next_batch_id", None
+            ):
+                raise RuntimeError(
+                    "Controller issued lookahead to an unsupported worker"
+                )
+            rollouts, receive_wait = self.dispatch_rollouts(), 0.0
+        else:
+            from cosmos_rl.policy.trainer.prefetch import (
+                cohort_payload_call,
+                cohort_payload_max,
+            )
+
+            try:
+                do_save_checkpoint = bool(
+                    cohort_payload_max(self, int(do_save_checkpoint))
+                )
+                if command.payload_notification is not None:
+                    cohort_payload_call(
+                        self,
+                        lambda: self._admit_payload_command(command),
+                    )
+                cohort_payload_call(self, lambda: pipeline.validate(command))
+                rollouts, receive_wait = cohort_payload_call(
+                    self, lambda: pipeline.take(command, self.dispatch_rollouts)
+                )
+                if command.payload_notification is not None:
+                    rollouts = cohort_payload_call(
+                        self, lambda: self._prepare_payload_rollouts(rollouts)
+                    )
+                cohort_payload_call(
+                    self,
+                    lambda: pipeline.submit_next(
+                        command, self.dispatch_rollouts, defer_fetch=do_save_checkpoint
+                    ),
+                )
+            except BaseException:
+                pipeline.failed = True
+                raise
+        scope = (
+            pipeline.packer.payload_batch_scope(rollouts) if pipeline else nullcontext()
         )
+        from cosmos_rl.policy.trainer.prefetch import observe_optimizer_steps
+
+        observed = (
+            observe_optimizer_steps(self.trainer) if pipeline else nullcontext({})
+        )
+        try:
+            with scope, observed as optimizer_report:
+                report_data = run_training_step(
+                    self.trainer,
+                    before_step=lambda: self.trainer.update_lr_schedulers(
+                        command.total_steps
+                    ),
+                    rollouts=rollouts,
+                    current_step=command.global_step,
+                    total_steps=command.total_steps,
+                    remain_samples_num=command.remain_samples_num,
+                    do_save_checkpoint=do_save_checkpoint,
+                    inter_policy_nccl=self.inter_policy_nccl,
+                    is_master_replica=self.is_master_replica,
+                )
+        except BaseException:
+            if pipeline:
+                pipeline.failed = True
+            raise
+        if pipeline:
+            # The current batch may back tensors on several consumer streams.
+            # Finish those readers before the next command replaces its cache.
+            from cosmos_rl.utils.transport_failure import fail_transport
+
+            streams = [self.train_stream]
+            if torch.cuda.is_available():
+                streams.append(torch.cuda.current_stream())
+            streams.extend(
+                getattr(self.trainer, "training_payload_streams", lambda: ())()
+            )
+            # This is normal training completion, not process teardown. A
+            # legitimate long GPU step must retain the training collective
+            # budget rather than inherit the short shutdown drain deadline.
+            reader_deadline = time.monotonic() + min(
+                constant.COSMOS_GLOO_TIMEOUT,
+                getattr(
+                    self.inter_policy_nccl,
+                    "default_timeout_ms",
+                    constant.COSMOS_GLOO_TIMEOUT * 1000,
+                )
+                / 1000,
+            )
+            for stream in dict.fromkeys(streams):
+                if stream is not None and not bounded_drain_or_abort(
+                    stream,
+                    max(0, reader_deadline - time.monotonic()),
+                    "trainer payload final reader",
+                ):
+                    fail_transport("Trainer payload reader completion is uncertain")
+            pipeline.packer.finish_payload_batch(
+                streams=tuple(s for s in streams if s is not None)
+            )
+            cohort_payload_call(self, lambda: pipeline.complete(command.global_step))
+            pending = pipeline.pending
+            report_data.update(
+                {
+                    "prefetch/trained_step": command.global_step,
+                    "prefetch/outstanding_batches": int(pending is not None),
+                    "prefetch/exposed_receive_wait_s": receive_wait,
+                    "prefetch/fetch_latency_s": pipeline.fetch_latency_s,
+                    "prefetch/lookahead_hits": pipeline.lookahead_hits,
+                    "prefetch/lookahead_misses": pipeline.lookahead_misses,
+                    "prefetch/delivered_step": command.global_step
+                    + int(pending is not None),
+                }
+            )
+            report_data.update(optimizer_report)
+            if command.replica_should_stop():
+                cohort_payload_call(self, pipeline.drain)
+            logger.info(
+                "[TrainerPrefetch] trained_step=%s batch_id=%s next_batch_id=%s outstanding=%s receive_wait_s=%.6f fetch_latency_s=%.6f",
+                command.global_step,
+                command.prefetched_batch_id,
+                pending.identity if pending is not None else None,
+                int(pending is not None),
+                receive_wait,
+                pipeline.fetch_latency_s,
+            )
 
         # For profiling
         self.profiler.step()
@@ -729,6 +870,12 @@ class RLPolicyWorker(PolicyWorkerBase):
 
     @CommMixin.register_policy_command_handler(TrainingCompleteCommand)
     def execute_training_complete(self, command: TrainingCompleteCommand):
+        from cosmos_rl.policy.trainer.prefetch import payload_cohort_scope
+
+        with payload_cohort_scope(self):
+            return self._execute_training_complete(command)
+
+    def _execute_training_complete(self, command: TrainingCompleteCommand):
         if command.do_profile:
             self.profiler.start_dynamic(
                 active_steps=command.active_steps,
@@ -741,6 +888,11 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = 0
+        pipeline = getattr(self, "payload_prefetch", None)
+        if pipeline is not None:
+            from cosmos_rl.policy.trainer.prefetch import cohort_payload_call
+
+            cohort_payload_call(self, pipeline.drain)
         report_data = {}
         logger.info(
             f"[Policy] Training complete at global step {command.global_step}, skip training."
@@ -808,7 +960,92 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
         return command.replica_should_stop()
 
+    def _admit_payload_command(self, command):
+        notice = PayloadPrefetchCommand.from_dict(command.payload_notification)
+        if (
+            notice.batch_id,
+            notice.global_step,
+            notice.replica_name,
+            len(notice.rollouts),
+        ) != (
+            command.prefetched_batch_id,
+            command.global_step,
+            command.replica_name,
+            command.items_count,
+        ):
+            raise ValueError(
+                "Training command does not match payload reservation metadata"
+            )
+        self.receive_payload_notification(notice, start_fetch=False)
+
+    def receive_payload_notification(self, command, *, start_fetch=True):
+        """No training collectives, optimizer work, or current-cache mutation."""
+        pipeline = getattr(self, "payload_prefetch", None)
+        if pipeline is None:
+            raise RuntimeError("Payload notification sent to unsupported worker")
+        if command.replica_name != self.replica_name:
+            raise ValueError("Payload notification belongs to another replica")
+        members = dict(command.cohort).get(self.replica_name, ())
+        sessions = dict(members)
+        if len(dict(command.cohort)) != len(command.cohort) or len(sessions) != len(
+            members
+        ):
+            raise ValueError("Duplicate payload notification cohort participant")
+        if sessions.get(self.global_rank) != self.api_client._report_session_id:
+            raise ValueError(
+                "Payload notification belongs to another process incarnation"
+            )
+        if (
+            set(sessions) != set(range(self.world_size))
+            or len(command.rollouts) % self.dp_world_size
+        ):
+            raise ValueError("Payload notification has an incompatible DP assignment")
+        rollouts = tuple(
+            Rollout.model_validate(raw)
+            for index, raw in enumerate(command.rollouts)
+            if index % self.dp_world_size
+            == self.parallel_dims.get_rank_in_dim("dp", self.global_rank)
+        )
+        if not rollouts or any(rollout.prompt_idx < 0 for rollout in rollouts):
+            raise ValueError("Invalid payload notification metadata")
+        pipeline.notify(command, rollouts, start_fetch=start_fetch)
+
+    def _handle_background_command(self, cmd):
+        if isinstance(cmd, PayloadPrefetchCommand):
+            try:
+                self.receive_payload_notification(cmd)
+            except Exception:
+                pipeline = getattr(self, "payload_prefetch", None)
+                if pipeline is not None:
+                    pipeline.fail_notification()
+                logger.exception(
+                    "[Policy] Payload notification failed; no successful ACK"
+                )
+                raise
+        elif isinstance(cmd, BuildMeshCommand):
+            self.is_master_replica = cmd.replica_name_to_rank[self.replica_name] == 0
+            self.inter_policy_nccl.push_cmd(cmd)
+        else:
+            raise ValueError("Unexpected background control command")
+
     async def fetch_command(self):
+        try:
+            await self._fetch_command()
+        except Exception:
+            pipeline = getattr(self, "payload_prefetch", None)
+            if pipeline is not None and not self.shutdown_signal.is_set():
+                pipeline.fail_notification()
+                logger.exception("[Policy] Background control delivery failed")
+            raise
+
+    def _broadcast_background_command(self, command):
+        if getattr(self, "payload_prefetch", None) is not None:
+            return self.kv_store.broadcast_command_bounded(
+                command, src=0, timeout_s=self.data_packer._prefetch_timeout_s
+            )
+        return self.kv_store.broadcast_command(command, src=0)
+
+    async def _fetch_command(self):
         # assert self.global_rank == 0, "Only rank 0 can fetch command"
         while not self.shutdown_signal.is_set():
             # TODO(zjx): will remove separate BuildMeshCommand, and here only fetch other commands
@@ -818,28 +1055,20 @@ class RLPolicyWorker(PolicyWorkerBase):
                 commands = self.redis_controller.subscribe_command(self.replica_name)
                 for x in commands:
                     command = Command.depack(x)
-                    if isinstance(command, BuildMeshCommand):
+                    if isinstance(command, (BuildMeshCommand, PayloadPrefetchCommand)):
                         """ directly push the buildmesh command to the nccl comm, will not block main thread """
                         # broadcast the buildmesh command to all ranks
-                        cmd = self.kv_store.broadcast_command(command, src=0)
-                        self.is_master_replica = (
-                            cmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(cmd)
+                        cmd = self._broadcast_background_command(command)
+                        if cmd is not None:
+                            self._handle_background_command(cmd)
                         continue
                     self.fetch_command_buffer.put_nowait(command)
 
             else:
                 try:
-                    bmcmd = self.kv_store.broadcast_command(None, src=0)
+                    bmcmd = self._broadcast_background_command(None)
                     if bmcmd:
-                        assert isinstance(bmcmd, BuildMeshCommand), (
-                            "Only buildmesh command is supported"
-                        )
-                        self.is_master_replica = (
-                            bmcmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(bmcmd)
+                        self._handle_background_command(bmcmd)
                 except Exception as e:
                     raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
 
@@ -910,6 +1139,9 @@ class RLPolicyWorker(PolicyWorkerBase):
         return prefetch_dp_id
 
     def dispatch_rollouts(self) -> List[Rollout]:
+        if getattr(self, "payload_prefetch", None) is not None:
+            return self._dispatch_prefetch_rollouts()
+
         def preprocess_rollouts(rollouts: List[Rollout]) -> List[Rollout]:
             """
             Processing rollouts that retrieved from the controller,
@@ -1003,6 +1235,80 @@ class RLPolicyWorker(PolicyWorkerBase):
             )
         return preprocess_rollouts(rollouts[0])
 
+    def _dispatch_prefetch_rollouts(self):
+        """Bounded pure-DP metadata delivery, before native payload receives.
+
+        The leader broadcasts ingestion errors before scatter so peers cannot
+        wait in a different collective after a malformed or missing item.
+        """
+        error, scattered = None, None
+        if self.global_rank == 0:
+            try:
+                count = self.replica_batch_for_this_step
+                if count <= 0 or count % self.dp_world_size:
+                    raise ValueError(
+                        "Payload-prefetch collection must divide the DP mesh"
+                    )
+                timeout = min(
+                    self.data_packer._prefetch_timeout_s,
+                    constant.COSMOS_GLOO_TIMEOUT / 2,
+                )
+                deadline = time.monotonic() + timeout
+                raw = []
+                for _ in range(count):
+                    item = self.data_queue.get(
+                        timeout=max(0, deadline - time.monotonic())
+                    )
+                    if not isinstance(item, Rollout) or item.prompt_idx < 0:
+                        raise ValueError("Invalid prefetched rollout metadata")
+                    raw.append(item)
+                scattered = [
+                    [
+                        item
+                        for index, item in enumerate(raw)
+                        if index % self.dp_world_size
+                        == self.parallel_dims.get_rank_in_dim("dp", rank)
+                    ]
+                    for rank in range(self.world_size)
+                ]
+            except Exception as caught:
+                error = f"{type(caught).__name__}: {caught}"
+        if self.world_size > 1:
+            error = dist_util.broadcast_object_cpu(error, src=0)
+        if error is not None:
+            raise RuntimeError(f"Payload metadata delivery failed: {error}")
+        if self.world_size > 1:
+            result = [None]
+            dist.scatter_object_list(result, scattered, src=0)
+            rollouts = result[0]
+        else:
+            rollouts = scattered[0]
+        return self._prepare_payload_rollouts(rollouts)
+
+    def _prepare_payload_rollouts(self, rollouts):
+        # Dataset reconstruction belongs to the training thread. Notifications
+        # need only payload references and must not mutate shared dataset state.
+        if self.config.train.local_dataset:
+            for rollout in rollouts:
+                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+                    if (
+                        rollout.prompt_idx
+                        % len(self.inter_policy_nccl.replica_name_to_rank)
+                        != self.inter_policy_nccl.replica_name_to_rank[
+                            self.replica_name
+                        ]
+                    ):
+                        raise ValueError(
+                            "Prefetched rollout belongs to another replica"
+                        )
+                rollout.prompt = self.data_fetcher.get_payload_by_index(
+                    rollout.prompt_idx
+                )
+                rollout.conversation = self.data_fetcher.get_payload_by_index(
+                    rollout.prompt_idx, attr="conversation"
+                )
+        return rollouts
+
     def teacher_interact_loop(self):
         """Background task to interact with teacher model for distillation"""
         while not self.shutdown_signal.is_set():
@@ -1077,6 +1383,9 @@ class RLPolicyWorker(PolicyWorkerBase):
 
         abort = False
         while True:
+            pipeline = getattr(self, "payload_prefetch", None)
+            if pipeline is not None:
+                pipeline.check()
             abort_at_this_round = abort
             if abort_at_this_round and self.config.validation.enable:
                 # Validation-enabled runs: the controller issues a final P->R
@@ -1156,6 +1465,37 @@ class RLPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             hook_fns=self.hook_fns,
         )
+
+    def _setup_payload_prefetch(self):
+        """Initialize lookahead after trainer and communication budgets exist."""
+        from cosmos_rl.policy.trainer.prefetch import (
+            TrainerPayloadPrefetch,
+            prefetch_fallback_reason,
+        )
+
+        reason = prefetch_fallback_reason(self.config)
+        self.payload_prefetch = None
+        if reason is None:
+            if not getattr(self.data_packer, "_prefetch_enabled", False):
+                raise ValueError(
+                    "Trainer payload prefetch requires an attached prefetch-capable packer"
+                )
+            self.payload_prefetch = TrainerPayloadPrefetch(
+                self.data_packer, device=self.device
+            )
+            # Metadata delivery plus payload fetch must finish before healthy
+            # peers' readiness votes expire. Leave half the collective budget
+            # for those votes and their native scheduling overhead.
+            budget = min(
+                self.data_packer._prefetch_timeout_s,
+                constant.COSMOS_GLOO_TIMEOUT / 4,
+                self.inter_policy_nccl.default_timeout_ms / 4000,
+            )
+            self.data_packer._setup_prefetch(prefetch_timeout=budget)
+        elif getattr(self.config.train, "prefetch_payloads", False):
+            logger.info(
+                "[Policy] Trainer payload prefetch synchronous fallback: %s", reason
+            )
 
     def destroy_worker(self):
         # Idempotent: handle_shutdown() now runs the teardown before the

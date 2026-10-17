@@ -437,6 +437,9 @@ def _take_local_batch(trainer, rollouts):
                 if not packer._prefetch_outstanding:
                     packer.start_prefetch(rollouts)
                 packer.wait_prefetch()
+            if getattr(packer, "_managed_payload_rollouts", None) is None:
+                with packer.payload_batch_scope(rollouts):
+                    return _prepare_local_batch(trainer, rollouts)
         return _prepare_local_batch(trainer, rollouts)
     owned, future, packer = pending
     packer._raise_if_prefetch_failed()
@@ -478,11 +481,14 @@ def run_training_step(trainer, *, before_step=None, **kwargs):
     # Keep preparation/future/minibatch aliases in a separate frame. They must
     # be gone before returning capacity, not merely done with CPU preparation.
     result = _run_training_step(trainer, before_step=before_step, **kwargs)
-    if bounded:
-        from cosmos_rl.utils.payload_transport.receive_memory import ReceivedBatch
+    from cosmos_rl.utils.payload_transport.receive_memory import ReceivedBatch
 
+    if bounded or isinstance(getattr(packer, "_prefetch_cache", None), ReceivedBatch):
         if isinstance(packer._prefetch_cache, ReceivedBatch):
             packer._prefetch_cache.check_returned_metrics(result)
+        # The worker owns the bounded reader fence and final release.
+        if getattr(packer, "_managed_payload_rollouts", None) is not None:
+            return result
         stream_hook = getattr(trainer, "training_payload_streams", None)
         streams = stream_hook() if stream_hook is not None else ()
         train_stream = getattr(trainer, "train_stream", None)

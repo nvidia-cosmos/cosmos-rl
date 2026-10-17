@@ -1090,6 +1090,56 @@ class DistKVStore:
                     raise RuntimeError("Stop signal received")
         raise RuntimeError("Failed to wait for kv store blocking wait")
 
+    def broadcast_command_bounded(self, command, src=0, *, timeout_s):
+        """Control-thread delivery with bounded I/O and no training collective.
+
+        Idle receivers may wait indefinitely, but check shutdown each poll.
+        Once a command exists, missing recipients/errors are terminal; never
+        replay a partially delivered notification under a new sequence number.
+        Only opt-in payload-prefetch workers use this path.
+        """
+        if self.world_size == 1:
+            return command
+        if not 0 < timeout_s < float("inf"):
+            raise ValueError("Control delivery needs a positive timeout")
+        store = self.local_store
+        store.set_timeout(
+            timedelta(seconds=min(timeout_s, constant.COSMOS_CONTROL_HTTP_TIMEOUT))
+        )
+        key = f"#BROADCAST-{self.counter}"
+        dones = [f"{key}-done-{i}" for i in range(self.world_size)]
+
+        def stopped():
+            return self.shutdown_event is not None and self.shutdown_event.is_set()
+
+        if src == self.rank:
+            store.set(key, command.pack())
+        else:
+            while not store.check([key]):
+                if stopped():
+                    return None
+                time.sleep(0.05)
+        if stopped():
+            return None
+        deadline = time.monotonic() + timeout_s
+        result = Command.depack(store.get(key))
+        store.set(dones[self.rank], "1")
+        while not store.check(dones):
+            if stopped():
+                return None
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Background control recipient did not acknowledge delivery"
+                )
+            time.sleep(0.05)
+        if src == self.rank:
+            previous = f"#BROADCAST-{self.counter - 1}"
+            store.delete_key(previous)
+            for rank in range(self.world_size):
+                store.delete_key(f"{previous}-done-{rank}")
+        self.counter += 1
+        return result
+
     def broadcast_command(self, command: Command, src: int = 0) -> Command:
         """
         Broadcast a command to all ranks.

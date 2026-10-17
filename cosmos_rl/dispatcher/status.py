@@ -17,6 +17,7 @@ import time
 import math
 import threading
 import msgpack
+import uuid
 from functools import wraps
 from collections import OrderedDict
 from queue import Empty, Queue
@@ -350,6 +351,10 @@ class PolicyStatusManager:
         # policy ACK set, keeping samples_on_the_fly accounting symmetric.
         self.dispatched_rollouts_by_step: Dict[int, int] = {}
         self.training_dispatches: OrderedDict[int, TrainingDispatch] = OrderedDict()
+        self._payload_lookahead = None
+        self._payload_training_rollouts = ()
+        self._payload_notifications = {}
+        self._payload_dispatch_members = None
         self.sft_ack_groups: OrderedDict[tuple[bool, int], TrainingDispatch] = (
             OrderedDict()
         )
@@ -508,6 +513,7 @@ class PolicyStatusManager:
         return (
             self.terminal_error is None
             and not self.dispatched_rollouts_by_step
+            and self._payload_lookahead is None
             and (
                 self.terminal_complete
                 or (self.current_step >= total_steps and total_steps > 0)
@@ -578,7 +584,10 @@ class PolicyStatusManager:
             return
         # current_step is incremented on dispatch. Only use it once the
         # command's complete ACK set has removed its dispatch record.
-        self.trigger_training_complete()
+        if self._payload_lookahead is not None:
+            self.try_trigger_data_fetch_and_training()
+        else:
+            self.trigger_training_complete()
 
     def maintain_life_status(self):
         """
@@ -798,6 +807,8 @@ class PolicyStatusManager:
 
     def trigger_training_complete(self) -> None:
         """Stop policy replicas at synthetic coordinates without advancing K."""
+        if self._payload_lookahead is not None:
+            raise RuntimeError("Cannot complete before admitted lookahead is trained")
         if self.data_fetcher.activated_val_iter is not None:
             return
 
@@ -1508,9 +1519,10 @@ class PolicyStatusManager:
         """
         Get the total pending rollouts.
         """
+        reserved = len(self._payload_lookahead[2]) if self._payload_lookahead else 0
         if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-            return sum(q.qsize() for q in self.rollout_buffer_per_rank)
-        return self.rollout_buffer.qsize()
+            return reserved + sum(q.qsize() for q in self.rollout_buffer_per_rank)
+        return reserved + self.rollout_buffer.qsize()
 
     def next_rollout_training_step(self) -> int:
         """Return the training step targeted by the next arriving rollout.
@@ -2054,9 +2066,14 @@ class PolicyStatusManager:
         it unconditionally is safe.
         """
         redis_client = self._resolve_cleanup_redis_client()
+        # A discarded duplicate must not evict a producer buffer still needed
+        # by the current command or an admitted, not-yet-fetched next batch.
+        protected = list(self._payload_training_rollouts)
+        if self._payload_lookahead is not None:
+            protected.extend(self._payload_lookahead[2])
         published = PayloadTransportRegistry.handle_discarded(
             rollouts,
-            filtered,
+            [*filtered, *protected],
             config=self.config,
             redis_client=redis_client,
         )
@@ -2307,6 +2324,7 @@ class PolicyStatusManager:
             _sotf_before = self.samples_on_the_fly
             # Settle exactly the rollout count recorded for this real command.
             _dispatch_record = self.dispatched_rollouts_by_step.pop(step)
+            self._payload_training_rollouts = ()
             if _dispatch_record != dispatch.rollout_count:
                 raise RuntimeError("Training dispatch accounting changed after sealing")
             _train_decrement = dispatch.rollout_count
@@ -2618,6 +2636,8 @@ class PolicyStatusManager:
         """
         Check if the rollouts are enough.
         """
+        if self._payload_lookahead is not None:
+            return True
         if self.config.mode == "colocated":
             # Colocated mode always has enough rollouts since they are locally prepared.
             return True
@@ -2714,12 +2734,28 @@ class PolicyStatusManager:
     def try_trigger_data_fetch_and_training(self):
         if self.terminal_error is not None:
             raise self.terminal_error
-        if self.stop_reason is not None:
+        if self.stop_reason is not None and self._payload_lookahead is None:
             self._try_complete_requested_stop()
             return
         if self.dispatched_rollouts_by_step:
             # Live READY/REDUCED flags are not the sealed recipient set of
             # already-issued work, including in ordinary RUNNING mode.
+            from cosmos_rl.policy.trainer.prefetch import prefetch_fallback_reason
+
+            if prefetch_fallback_reason(self.config) is None:
+                replicas = self.get_all_atoms_arrived_replicas()
+                if self._payload_dispatch_members != self._payload_prefetch_members(
+                    replicas
+                ):
+                    raise RuntimeError(
+                        "Policy membership changed during payload admission"
+                    )
+                publications = []
+                self._reserve_payload_lookahead(replicas, publications)
+                if publications:
+                    self.redis_handler.publish_plan(
+                        PublicationPlan.create(publications)
+                    )
             return
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.data_fetcher.activated_val_iter is not None:
@@ -2742,7 +2778,13 @@ class PolicyStatusManager:
         )
 
         if all_ready_or_reduced:
-            self._revalidate_rollouts_before_dispatch()
+            if self._payload_lookahead is not None and (
+                self._payload_lookahead[1]
+                != self._payload_prefetch_members(arrived_replicas)
+            ):
+                raise RuntimeError("Policy membership changed with admitted lookahead")
+            if self._payload_lookahead is None:
+                self._revalidate_rollouts_before_dispatch()
             if not self.rollouts_enough_for_one_step():
                 return
             rollouts_of_this_step: List[Rollout] = []
@@ -2765,7 +2807,17 @@ class PolicyStatusManager:
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
             # Interleave-style data dispatch
-            if not self.config.mode == "colocated":
+            if self._payload_lookahead is not None:
+                identity, _, rollouts_of_this_step = self._payload_lookahead
+                self._payload_lookahead = None
+                notifications, self._payload_notifications = (
+                    self._payload_notifications,
+                    {},
+                )
+            else:
+                identity = None
+                notifications = {}
+            if identity is None and self.config.mode != "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
                 if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
                     # Helper function to sort a queue by item.prompt_idx
@@ -2813,6 +2865,11 @@ class PolicyStatusManager:
             # Decide whether to save checkpoint
             do_save = self.check_checkpoint_saving(required_rollouts)
 
+            from cosmos_rl.policy.trainer.prefetch import prefetch_fallback_reason
+
+            if prefetch_fallback_reason(self.config) is None:
+                self._payload_training_rollouts = tuple(rollouts_of_this_step)
+
             for replica in arrived_replicas:
                 fetch = command.DataFetchCommand.for_replica(
                     replica=replica,
@@ -2824,6 +2881,8 @@ class PolicyStatusManager:
                     # do_save from `check_checkpoint_saving` indicates whether the replica should save checkpoint after this training step
                     do_save=do_save,
                 )
+                fetch.prefetched_batch_id = identity
+                fetch.payload_notification = notifications.get(replica.name)
                 publications.append(
                     (replica.name + "_command", "command", fetch.pack())
                 )
@@ -2832,6 +2891,14 @@ class PolicyStatusManager:
             self._seal_training_dispatch(
                 arrived_replicas, training_horizon, required_rollouts
             )
+            self._payload_dispatch_members = self._payload_prefetch_members(
+                arrived_replicas
+            )
+            # Publish the real command before its independent notification.
+            # The background reader can then stage/fetch the future batch even
+            # while the main command is executing. Late rollout arrival uses
+            # this same reservation path without issuing another DataFetch.
+            self._reserve_payload_lookahead(arrived_replicas, publications)
             # One immutable operation contains all payloads and commands. Redis
             # retries the same identity after a lost reply; ambiguous partial
             # publication poisons the handler instead of issuing another step.
@@ -2955,6 +3022,85 @@ class PolicyStatusManager:
             "colocated dataset exhausted before a complete training batch"
         )
         self._try_complete_requested_stop()
+
+    @staticmethod
+    def _payload_prefetch_members(replicas):
+        return tuple(
+            sorted(
+                (
+                    replica.name,
+                    tuple(
+                        sorted(
+                            (atom.global_rank, atom.report_session_id)
+                            for atom in getattr(replica, "atoms", {}).values()
+                        )
+                    ),
+                )
+                for replica in replicas
+            )
+        )
+
+    def _reserve_payload_lookahead(self, replicas, publications):
+        from cosmos_rl.policy.trainer.prefetch import prefetch_fallback_reason
+
+        if prefetch_fallback_reason(self.config) is not None:
+            return None
+        step, horizon = self.current_step, self.training_horizon()
+        if (
+            self.stop_reason is not None
+            or self._payload_lookahead is not None
+            or step >= horizon
+            or self.data_fetcher.activated_val_iter is not None
+        ):
+            return None
+        # The next update's pre-update version is K, not K-1. Preserve lag.
+        self._revalidate_rollouts_before_dispatch()
+        if not self.rollouts_enough_for_one_step():
+            return None
+        count = self.config.train.train_batch_per_replica
+        rows = []
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            for index, replica in enumerate(
+                sorted(replicas, key=lambda r: r.start_time)
+            ):
+                queue = self.rollout_buffer_per_rank[index]
+                items = sorted(
+                    (queue.get_nowait() for _ in range(queue.qsize())),
+                    key=lambda r: r.prompt_idx,
+                )
+                for item in items[count:]:
+                    queue.put_nowait(item)
+                rows.extend((replica, rollout) for rollout in items[:count])
+        else:
+            for _ in range(count):
+                for replica in replicas:
+                    rows.append((replica, self.rollout_buffer.get_nowait()))
+        identity = uuid.uuid4().hex
+        self._payload_lookahead = (
+            identity,
+            self._payload_prefetch_members(replicas),
+            [rollout for _, rollout in rows],
+        )
+        # Complete per-replica metadata lets each pure-DP worker select its own
+        # shard without a training collective in the notification thread.
+        self._payload_notifications = {}
+        for replica in replicas:
+            notification = command.PayloadPrefetchCommand(
+                replica.name,
+                identity,
+                step + 1,
+                self._payload_lookahead[1],
+                [
+                    rollout.model_dump()
+                    for recipient, rollout in rows
+                    if recipient is replica
+                ],
+            )
+            self._payload_notifications[replica.name] = notification._serialize()
+            publications.append(
+                (replica.name + "_command", "command", notification.pack())
+            )
+        return identity
 
     def _seal_training_dispatch(self, replicas, total_steps, rollout_count):
         if self.current_step in self.training_dispatches:
