@@ -4487,7 +4487,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="4"><p>16</p></td>
 </tr>
-<tr class="row-even"><td rowspan="275"><ul class="simple">
+<tr class="row-even"><td rowspan="279"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -4497,6 +4497,20 @@
 <td colspan="5"><p><em>object</em></p></td>
 </tr>
 <tr class="row-even"><td colspan="6"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>prefetch_payloads</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Prefetch Payloads</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Worker-owned one-batch payload lookahead. Preserves training ACKs; unsupported modes and synchronization barriers remain synchronous.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="74"><ul class="simple">
 <li><p>train_policy</p></li>
