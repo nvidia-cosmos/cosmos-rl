@@ -122,10 +122,12 @@ run python -m pytest -q tests/test_scheduler_continuity.py
 run python -m pytest -q tests/test_reference_reset_continuity.py
 run python -m pytest -q tests/test_colocated_first_checkpoint.py
 run python -m pytest -q tests/test_vla_optional_simulator.py
+run python -m pytest -q tests/test_cpu_model_import.py
 run python -m pytest -q tests/test_checkpoint_discovery.py
 run python -m pytest -q tests/test_checkpoint_commit_contract.py
 run python -m pytest -q tests/test_checkpoint_immutable_step.py
 run python -m pytest -q tests/test_resume_selection_contract.py
+run python -m pytest -q tests/test_resume_execution_fence.py
 run python -m pytest -q tests/test_checkpoint_snapshot.py
 run python -m pytest -q tests/test_sft_membership.py
 run python -m pytest -q tests/test_dispatch_staleness.py

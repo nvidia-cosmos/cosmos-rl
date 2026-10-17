@@ -49,6 +49,8 @@ def importlib_metadata_version_context():
 
 with importlib_metadata_version_context():
     try:
+        if not torch.cuda.is_available():
+            raise ImportError("Transformer Engine requires CUDA")
         # When FA3 installed, TE will fail for importing flash_attn_3, you could check:
         # https://github.com/NVIDIA/TransformerEngine/pull/1913
         # So we manually let TE think FA3 is not installed. Remove this context manager after the PR is released.

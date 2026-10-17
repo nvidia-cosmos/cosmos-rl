@@ -101,7 +101,9 @@ class CommMixin:
         )
 
         self.api_client = (
-            ColocatedAPIClient(self.role)
+            ColocatedAPIClient(
+                self.role, controller_execution_id=self.config.controller_execution_id
+            )
             if hasattr(self, "colocated")
             else APIClient(
                 self.role,
