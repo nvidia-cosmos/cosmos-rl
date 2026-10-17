@@ -1093,6 +1093,10 @@ class UCXXClient:
 
         self._pool: Dict[tuple, collections.deque] = {}
         self._pool_size = 2
+        # Admit only as many simultaneous reads per listener as we can retain
+        # connections for. Otherwise every batch opens and retires its excess
+        # endpoints, paying connection setup again on the next batch.
+        self._endpoint_slots: Dict[tuple, asyncio.Semaphore] = {}
         self._failure = None
         self._closing = False
         self._operations = set()
@@ -1233,7 +1237,7 @@ class UCXXClient:
 
         Single-chunk protocol -- one connection, one ``send([slot])``,
         one ``recv(status)``, one ``recv(payload)``. One deadline covers
-        connection, protocol, native completion and endpoint retirement. A
+        pool admission, connection, protocol, native completion and retirement. A
         timed-out/cancelled native task stays owned and is never retried.
         """
         self._check_open()
@@ -1244,7 +1248,18 @@ class UCXXClient:
             on_failure=self._mark_failed,
         )
         self._operations.add(operation)
+        key = (worker_ip, port)
+        slots = self._endpoint_slots.get(key)
+        if slots is None:
+            slots = asyncio.Semaphore(self._pool_size)
+            self._endpoint_slots[key] = slots
+        acquired = False
         try:
+            # The accepted operation already owns its destination and deadline
+            # while queued. Cancellation must not abandon the retained waiter.
+            await operation.wait(slots.acquire)
+            acquired = True
+            self._check_open()
             await self._read_slot_owned(
                 worker_ip,
                 port,
@@ -1258,6 +1273,8 @@ class UCXXClient:
             if operation.failure is None:
                 operation.complete()
                 self._operations.remove(operation)
+                if acquired:
+                    slots.release()
 
     async def _read_slot_owned(
         self,
@@ -1628,6 +1645,7 @@ class UCXXClient:
                     operation.fail(f"client close uncertain: {error}")
                 pool.popleft()
             del self._pool[key]
+        self._endpoint_slots.clear()
         self._pinned_pool.clear()
         self._pinned_numpy_views.clear()
         self._pinned_torch_views.clear()

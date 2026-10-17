@@ -195,6 +195,33 @@ the consumer releases the batch after every CPU reader and every GPU stream has
 finished. `release_prefetch(streams=...)` records and waits for final-reader
 events before a slot can re-enter the pool.
 
+### UCXX connection admission
+
+UCXX keeps two reusable connections per producer listener. Reads share a
+per-listener admission limit of the same size: a large batch queues excess
+requests instead of opening connections that would immediately exceed the
+idle pool and be closed. Independent listeners retain independent concurrency.
+This optimizes connection reuse, not the wire format or host staging route.
+
+```text
+queued read (destination owned, deadline running)
+  -> listener permit
+  -> reuse/connect endpoint -> request/status/payload
+  -> return healthy endpoint to pool -> complete operation -> release permit
+```
+
+The existing operation deadline includes admission wait. Cancellation or an
+uncertain completion retains the operation, its destination and waiter and
+makes the client terminal; it is never permission to recycle storage or retry
+an accepted transfer. A queued read also prevents client teardown. Clean stale
+slot rejection and safely completed transport errors retain their existing
+handling. Idle endpoint expiry and healthy-port rotation are unchanged.
+
+This bounds active payload connections **per listener**, not total host memory
+or the number of producer listeners. The existing batch may still own queued
+receive destinations. GPU placement remains one bulk H2D copy followed by
+aligned views; direct GPU UCXX receive and CPU sidecars are not implemented.
+
 ### Custom trainer adoption
 
 Every training invocation must consume the rollout identities admitted for that
