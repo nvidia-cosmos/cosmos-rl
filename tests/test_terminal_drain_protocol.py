@@ -7,7 +7,8 @@ from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cosmos_rl.dispatcher.command import TrainingCompleteCommand
+from cosmos_rl.dispatcher.command import DataFetchCommand, TrainingCompleteCommand
+from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 from cosmos_rl.dispatcher.replica import Atom, Replica
 from cosmos_rl.dispatcher.status import (
@@ -71,37 +72,44 @@ class TestRankedRolloutEnd(unittest.TestCase):
             [replica],
         )
 
-    def test_http_forwards_rankless_command_participant_capability(self):
+    def test_http_forwards_registered_command_participant_capability(self):
         from cosmos_rl.dispatcher import run_web_panel
+        from rollout_receipt_fixture import install_report_source
 
         rollout_end = MagicMock(return_value=False)
         fake_controller = SimpleNamespace(
             config=SimpleNamespace(controller_execution_id=None),
             rollout_status_manager=SimpleNamespace(rollout_end=rollout_end),
+            policy_status_manager=SimpleNamespace(terminal_error=None),
         )
         request = SimpleNamespace(
             is_end=True,
             src_replica_name="trtllm",
             src_global_rank=None,
             stays_command_participant=True,
+            payloads=[],
         )
+        request = install_report_source(fake_controller, request)
         with patch.object(run_web_panel, "controller", fake_controller):
             response = asyncio.run(run_web_panel.put_rollout_group(request))
 
         self.assertEqual(response, {"message": "Rollout end signal received"})
         rollout_end.assert_called_once_with(
             "trtllm",
-            src_global_rank=None,
+            src_global_rank=0,
             stays_command_participant=True,
         )
 
 
 def _registered_rollout(name: str, *, ended: bool = False):
+    from cosmos_rl.dispatcher.reservations import ProducerReservations
+
     return SimpleNamespace(
         name=name,
         start_time=0,
         all_atoms_arrived=True,
         in_mesh=True,
+        producer_reservations=ProducerReservations(),
         status=SimpleNamespace(ended=ended),
     )
 
@@ -413,6 +421,7 @@ class TestTerminalHttpAdmission(unittest.TestCase):
         cleaned = []
         policy_status = SimpleNamespace(
             rollout_admission_closed=lambda: True,
+            _settle_samples_on_the_fly=MagicMock(),
             cleanup_terminal_rollouts=lambda rollouts, metrics, is_dapo: cleaned.append(
                 (rollouts, metrics, is_dapo)
             ),
@@ -435,11 +444,14 @@ class TestTerminalHttpAdmission(unittest.TestCase):
         request = SimpleNamespace(
             is_end=False,
             src_replica_name="rollout-0",
-            payloads=[object()],
+            payloads=[RLPayload(completions=["controlled-extracted-result"])],
             metrics={"filtered_positive": 2},
             completion_identities=None,
             completion_failures=[],
         )
+        from rollout_receipt_fixture import install_report_source
+
+        request = install_report_source(fake_controller, request)
         with (
             patch.object(run_web_panel, "controller", fake_controller),
             patch.object(run_web_panel, "extract_rollouts", return_value=[[extracted]]),
@@ -449,7 +461,13 @@ class TestTerminalHttpAdmission(unittest.TestCase):
         self.assertEqual(response, {"message": "Terminal rollout cleaned"})
         self.assertEqual(
             cleaned,
-            [([extracted], {"filtered_positive": 2}, True)],
+            [([extracted], {"filtered_positive": 2}, False)],
+        )
+        policy_status._settle_samples_on_the_fly.assert_called_once_with(
+            2,
+            "rollout_failure",
+            weight_version=0,
+            report_id="reservation:fixture-session:0:0",
         )
         fake_controller.put_rollouts.assert_not_awaited()
 
@@ -568,13 +586,13 @@ class TestTerminalMatrix(unittest.TestCase):
         manager.remain_samples_num = 20
         manager.samples_on_the_fly = accepted_count
         manager.rollout_buffer = Queue()
-        for _ in range(accepted_count):
-            manager.rollout_buffer.put(object())
+        for index in range(accepted_count):
+            manager.rollout_buffer.put(Rollout(prompt_idx=index))
         manager.policy_replicas = {replica.name: replica}
         manager.status = {replica.name: PolicyStatus.READY}
         manager.get_all_atoms_arrived_replicas = lambda: [replica]
         manager.data_fetcher = SimpleNamespace(activated_val_iter=None)
-        manager.redis_handler = object()
+        manager.redis_handler = MagicMock()
         manager.samples_per_epoch = 20
         manager.config = SimpleNamespace(
             mode="disaggregated",
@@ -606,16 +624,18 @@ class TestTerminalMatrix(unittest.TestCase):
                 manager, _replica = self._manager(accepted_count)
                 real_commands = []
                 completion_commands = []
+                build_command = DataFetchCommand.for_replica
 
                 def datafetch_trigger(**kwargs):
                     real_commands.append(kwargs)
+                    return build_command(**kwargs)
 
                 def completion_trigger(**kwargs):
                     completion_commands.append(kwargs)
 
                 with (
                     patch(
-                        "cosmos_rl.dispatcher.command.DataFetchCommand.trigger",
+                        "cosmos_rl.dispatcher.command.DataFetchCommand.for_replica",
                         datafetch_trigger,
                     ),
                     patch.object(
@@ -624,12 +644,14 @@ class TestTerminalMatrix(unittest.TestCase):
                 ):
                     manager.finish_draining_phase(rollout_status)
                     while len(real_commands) < expected_steps:
+                        manager.dispatched_rollouts_by_step.pop(manager.current_step)
                         manager.status["policy-0"] = PolicyStatus.READY
                         manager.finish_draining_phase(rollout_status)
 
                     if expected_steps == 2:
                         manager.record_real_datafetch_acked(2, 2)
                     elif expected_steps == 1:
+                        manager.dispatched_rollouts_by_step.pop(manager.current_step)
                         manager.status["policy-0"] = PolicyStatus.READY
                         manager.finish_draining_phase(rollout_status)
 
@@ -655,10 +677,15 @@ class TestTerminalMatrix(unittest.TestCase):
                 manager.enter_draining_phase()
                 manager.total_steps = late_total_steps
                 real_commands = []
+                build_command = DataFetchCommand.for_replica
+
+                def build(**kwargs):
+                    real_commands.append(kwargs)
+                    return build_command(**kwargs)
 
                 with patch(
-                    "cosmos_rl.dispatcher.command.DataFetchCommand.trigger",
-                    side_effect=lambda **kwargs: real_commands.append(kwargs),
+                    "cosmos_rl.dispatcher.command.DataFetchCommand.for_replica",
+                    side_effect=build,
                 ):
                     manager.finish_draining_phase(rollout_status)
 

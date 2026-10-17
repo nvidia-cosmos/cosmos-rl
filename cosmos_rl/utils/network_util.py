@@ -20,6 +20,7 @@ import fcntl
 import struct
 import array
 import os
+from requests.exceptions import HTTPError
 from typing import Any, Callable, List, Optional, Union
 
 from cosmos_rl.utils.constant import COSMOS_HTTP_RETRY_CONFIG
@@ -111,6 +112,16 @@ def make_request_with_retry(
             except Exception as e:
                 if exception_parser is not None and exception_parser(e):
                     return None
+                if (
+                    isinstance(e, HTTPError)
+                    and e.response is not None
+                    and 400 <= e.response.status_code < 500
+                    and e.response.status_code not in (408, 425, 429)
+                ):
+                    # Invalid/auth/conflicting requests do not become valid
+                    # after an hour of retries. Preserve explicit retryable
+                    # timeout/early-data/rate-limit statuses.
+                    raise
                 last_exception = e
                 url_index += 1
                 if url_index >= (1 if urls is None else len(urls)):

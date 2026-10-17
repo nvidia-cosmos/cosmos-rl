@@ -8,6 +8,7 @@ import threading
 from cosmos_rl.dispatcher.data.admission import CompletionFailure, CompletionIdentity
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.dispatcher.protocol import RolloutRequest
+from cosmos_rl.reward.reservations import attach_training_rejections, training_identity
 
 
 class CompletionReporter:
@@ -24,27 +25,39 @@ class CompletionReporter:
             for payload in payloads:
                 if payload.completion_sequences is not None:
                     raise ValueError("Prompt already has completion reservations")
+                if payload.training_work_id is not None and (
+                    payload.training_completion_slots is None
+                    or len(payload.training_completion_slots) != count
+                ):
+                    raise ValueError(
+                        "Producer and controller reservation counts disagree"
+                    )
                 payload.weight_version = weight_version
                 payload.completion_sequences = [
                     next(self._sequences) for _ in range(count)
                 ]
 
     def generation_failure(self, payloads, reason):
-        return RolloutRequest(
-            src_replica_name=self.replica_name,
-            src_global_rank=self.global_rank,
-            payloads=[],
-            completion_identities=[],
-            completion_failures=[
-                CompletionFailure(
-                    identity=CompletionIdentity(
-                        sequence=sequence, weight_version=payload.weight_version
-                    ),
-                    reason=reason,
-                )
-                for payload in payloads
-                for sequence in payload.completion_sequences
-            ],
+        return attach_training_rejections(
+            RolloutRequest(
+                src_replica_name=self.replica_name,
+                src_global_rank=self.global_rank,
+                payloads=[],
+                completion_identities=[],
+                completion_failures=[
+                    CompletionFailure(
+                        identity=CompletionIdentity(
+                            sequence=sequence,
+                            weight_version=payload.weight_version,
+                            reservation=training_identity(payload, index),
+                        ),
+                        reason=reason,
+                    )
+                    for payload in payloads
+                    for index, sequence in enumerate(payload.completion_sequences)
+                ],
+            ),
+            payloads,
         )
 
     def report(self, payloads, packer):
@@ -58,9 +71,11 @@ class CompletionReporter:
                 raise ValueError("Reward processing lost completion reservations")
             identities.extend(
                 CompletionIdentity(
-                    sequence=sequence, weight_version=payload.weight_version
+                    sequence=sequence,
+                    weight_version=payload.weight_version,
+                    reservation=training_identity(payload, index),
                 )
-                for sequence in payload.completion_sequences
+                for index, sequence in enumerate(payload.completion_sequences)
             )
             for rejection in payload.completion_rejections:
                 # Use the same application serializer for rejected references.
@@ -83,6 +98,7 @@ class CompletionReporter:
                         identity=CompletionIdentity(
                             sequence=rejection["sequence"],
                             weight_version=rejection["weight_version"],
+                            reservation=rejection.get("reservation"),
                         ),
                         reason=rejection["reason"],
                         payload=rejected,
@@ -90,10 +106,13 @@ class CompletionReporter:
                 )
             if payload.completions:
                 accepted.append(payload)
-        return RolloutRequest(
-            src_replica_name=self.replica_name,
-            src_global_rank=self.global_rank,
-            payloads=accepted,
-            completion_identities=identities,
-            completion_failures=failures,
+        return attach_training_rejections(
+            RolloutRequest(
+                src_replica_name=self.replica_name,
+                src_global_rank=self.global_rank,
+                payloads=accepted,
+                completion_identities=identities,
+                completion_failures=failures,
+            ),
+            payloads,
         )

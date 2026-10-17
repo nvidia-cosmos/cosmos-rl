@@ -113,7 +113,7 @@ class CompletionAdmissionState:
             )
         return window, all_ids, decisions, closed, late_payloads
 
-    def settle(self, controller, request, plan):
+    def settle(self, controller, request, plan, *, requested_versions=None):
         """Use existing cleanup, settlement and versioned refill mechanisms.
 
         An infrastructure exception after mutations poisons this instance;
@@ -145,7 +145,16 @@ class CompletionAdmissionState:
                         source_replica=request.src_replica_name,
                         report_id=report_id,
                         count=1,
-                        weight_version=identity.weight_version,
+                        weight_version=(
+                            identity.weight_version
+                            if requested_versions is None
+                            else requested_versions[
+                                (
+                                    identity.reservation.work_id,
+                                    identity.reservation.slot,
+                                )
+                            ]
+                        ),
                     )
                 # Bounded metric cardinality: application diagnostics remain
                 # on the disposition; aggregate terminal admission separately.

@@ -90,10 +90,13 @@ def test_resume_broadcast_honors_initial_validation_gate():
             src_replica_name="rollout",
             weight_step=8,
             total_steps=16,
+            validation_protocol_version=1,
+            validation_round_id="resume-validation" if before_train else None,
             replica_should_stop=lambda: False,
         )
         ColocatedRolloutControlWorker.broadcast_to_all_rollout_replica(worker, command)
         assert worker.do_validation.call_count == int(before_train)
         command.weight_step = 10
+        command.validation_round_id = "periodic-validation"
         ColocatedRolloutControlWorker.broadcast_to_all_rollout_replica(worker, command)
         assert worker.do_validation.call_count == int(before_train) + 1

@@ -146,8 +146,7 @@ class ColocatedRLControlWorker(WorkerBase):
         # Process the initial PolicyToRolloutUnicast command
         self.policy.consume_command(PolicyToRolloutUnicastCommand)
 
-        is_end = False
-        while not is_end:
+        while True:
             if not self.controller.prepare_iteration():
                 break
             self.controller.advance_iteration()
@@ -159,43 +158,26 @@ class ColocatedRLControlWorker(WorkerBase):
             ), (
                 f"train_batch_per_replica {self.config.train.train_batch_per_replica} must be divisible by n_generation {self.config.rollout.n_generation} and data parallel size {self.rollout.parallel_dims.mesh['dp'].size()}."
             )
-            n_prompts_per_train = (
-                self.config.train.train_batch_per_replica
-                // self.config.rollout.n_generation
-                // self.rollout.parallel_dims.mesh["dp"].size()
-            )
-            while n_prompts_per_train > 0:
-                logger.debug(
-                    f"[Rollout] Starting minor step generation with remain {n_prompts_per_train} prompts to generate"
-                )
-                is_end, processed_samples = self.rollout.rollout_for_one_minor_step()
-                n_prompts_per_train -= processed_samples
-                if is_end:
-                    break
-            self.rollout.report_rollouts(block=True)
-            # Handle generate rollouts if not enough like DAPO case.
-            while (
-                self.controller.pending_policy_samples_all_replicas()
-                < self.config.train.train_batch_per_replica
-            ):
+            pending_samples = self.controller.pending_policy_samples_all_replicas()
+            # All ranks refill together. Local rejection counts must not decide
+            # which ranks enter prompt-fetch or generation collectives next.
+            while pending_samples < self.config.train.train_batch_per_replica:
                 if self.controller.pending_policy_samples() > 0:
                     logger.debug(
                         f"[Rollout] Not enough rollouts generated for training in DAPO. Current pending samples: {self.controller.pending_policy_samples()}, required: {self.config.train.train_batch_per_replica}. Keep generating rollouts..."
                     )
                 is_end, _ = self.rollout.rollout_for_one_minor_step()
                 self.rollout.report_rollouts(block=True)
+                self.controller.synchronize_rollouts()
+                pending_samples = self.controller.pending_policy_samples_all_replicas()
                 if is_end:
                     break
-            pending_samples = self.controller.pending_policy_samples_all_replicas()
+            if not self.controller.agree_prepared_batch(
+                pending_samples >= self.config.train.train_batch_per_replica
+            ):
+                break
             self.controller.rollout_completed_for_data_fetch_n_training(pending_samples)
-            if pending_samples >= self.config.train.train_batch_per_replica:
-                self.policy.consume_command(DataFetchCommand)
-            else:
-                logger.warning(
-                    f"[Rollout] No enough prompts to generate rollouts {pending_samples} < {self.config.train.train_batch_per_replica}."
-                )
-                self.policy.consume_command(DataFetchCommand, no_exec=True)
-                self.controller.training_end_ack()
+            self.policy.consume_command(DataFetchCommand)
 
             need_sync_weight = (
                 self.controller.rollout_consume_one_step_commands_util_r2r()
@@ -211,7 +193,7 @@ class ColocatedRLControlWorker(WorkerBase):
                 self.rollout.consume_command(RolloutToRolloutBroadcastCommand)
 
             if self.rollout.shutdown_signal.is_set():
-                is_end = True
+                break
 
     def execute(self):
         """

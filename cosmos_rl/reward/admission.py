@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 import uuid
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.reward.reservations import training_identity
 
 if TYPE_CHECKING:
     from cosmos_rl.rollout.schema import RolloutResult
@@ -38,6 +39,7 @@ _COMPLETION_ALIGNED_FIELDS = (
     "report_metrics",
     "teacher_result_uuids",
     "completion_sequences",
+    "training_completion_slots",
 )
 
 _ROLLOUT_RESULT_COMPLETION_ALIGNED_FIELDS = (
@@ -349,6 +351,16 @@ def select_payload_completions(
 
     selected = payload.model_copy(deep=False)
     selected_indices = [] if admission.group_excluded else admission.eligible_indices
+    selected.training_rejected_slots = list(payload.training_rejected_slots)
+    if payload.training_completion_slots is not None:
+        if len(payload.training_completion_slots) != admission.original_size:
+            raise ValueError("Training reservation slots must be completion-aligned")
+        kept = set(selected_indices)
+        selected.training_rejected_slots.extend(
+            slot
+            for index, slot in enumerate(payload.training_completion_slots)
+            if index not in kept
+        )
     selected.completion_rejections = list(payload.completion_rejections)
     if payload.completion_sequences is not None:
         if len(payload.completion_sequences) != admission.original_size:
@@ -359,6 +371,7 @@ def select_payload_completions(
                 selected.completion_rejections.append(
                     {
                         "sequence": sequence,
+                        "reservation": training_identity(payload, index),
                         "weight_version": payload.weight_version,
                         "reason": (
                             "insufficient_group"

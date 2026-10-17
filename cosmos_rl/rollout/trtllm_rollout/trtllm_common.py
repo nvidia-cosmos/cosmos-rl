@@ -33,10 +33,14 @@ class ShutdownInstruction(InternalInstruction):
 
 class ValidationInstruction(InternalInstruction):
     def __init__(
-        self, validation_step: Optional[int] = None, total_steps: Optional[int] = None
+        self,
+        validation_step: Optional[int] = None,
+        total_steps: Optional[int] = None,
+        validation_round_id: Optional[str] = None,
     ):
         self.validation_step = validation_step
         self.total_steps = total_steps
+        self.validation_round_id = validation_round_id
 
 
 class RolloutWrapperInstruction(InternalInstruction):

@@ -252,6 +252,55 @@ scp cosmos_rl_ci.sqsh               <login-node>:/lustre/.../cosmos_rl_ci.sqsh
 
 ### 3. Submit the CI job (on the login node)
 
+To reproduce GitHub's installed-package layout with a reused dependency image,
+build a wheel from the exact candidate and pass `--package-wheel` together with
+the matching checkout in `--repo-root-path`. This mode mounts only `tests/`,
+installs the wheel into the ephemeral container's interpreter, and runs the
+complete `tests/run_test.sh`. It does not overlay checkout source or replace
+the suite with selected tests. Subprocesses use the installed candidate even
+when they replace `PYTHONPATH`.
+
+```bash
+bash tools/slurm/cosmos_rl_ci_job.sh \
+    --container /shared/cosmos_rl_ci.sqsh \
+    --repo-root-path /shared/pinned-candidate \
+    --package-wheel /shared/wheels/cosmos_rl-0.4.6-py3-none-any.whl \
+    --test-deps-dir /shared/pytest-wheelhouse \
+    --output-root-path /shared/ci-results \
+    --slurm-account ACCOUNT --slurm-partition PARTITION
+```
+
+`--test-deps-dir` is optional; when provided it must contain pytest 8, GitHub's
+`ucxx-cu12>=0.40.0` extra, and their dependencies for offline installation.
+Otherwise the runner installs those requirements from the configured package
+index. Setup verifies native UCXX imports and at least eight visible CUDA GPUs
+before executing the suite. Without
+`--package-wheel`, the existing source-overlay/baked-test modes remain available.
+Per-suite logs and the environment manifest are retained under the run directory.
+A passing suite against a reused dependency image does not validate the GitHub
+Docker build; check dependency/image differences and required native-test skips.
+
+With a pre-populated `--hf-cache`, installed-wheel runs can add
+`--cached-model-paths`. This exposes cached main-revision model snapshots under
+their usual `org/repo` paths inside the disposable test workspace. It avoids
+repeated remote metadata requests for those models without modifying tests or
+production code. The selected revision is logged, and existing workspace data
+is never overwritten. Warm the required assets first: config-only snapshots,
+empty checkpoints and missing indexed shards fail cache setup before the suite
+starts. This is a presence check, not weight-content validation. This is not a
+guarantee of network-free execution; uncached models
+and datasets can still require the Hub, and remote-download behavior is not
+exercised for locally aliased models. Use serialized cache preparation rather than
+launching many cold model downloads against the same external rate limit.
+
+To avoid copying large completed models for each run, also pass
+`--readonly-model-cache /path/to/completed/cache/hub`. That directory is mounted
+read-only and supplies the model aliases; `--hf-cache` remains a separate writable
+runtime cache for datasets/downloads. The paths must not overlap. Use a completed,
+stable cache: the read-only mount prevents this test container from changing it,
+not another process on the host. Revision and complete-checkpoint checks still
+apply, and the full suite is unchanged.
+
 Run the launcher directly. With no `SLURM_JOB_ID` in the environment it parses
 its args and `sbatch`es itself; Slurm then re-invokes the same file on the
 compute node, where it runs `bash tests/run_test.sh` inside the container on a
@@ -287,6 +336,10 @@ Use `--dry-run` to print the exact `sbatch` command without submitting.
 | `--scratch-path`       |       | node-local `$SLURM_TMPDIR`/`$TMPDIR` | Writable scratch backing the container `/tmp` + caches; avoids `$HOME`/Lustre per-user quota (EDQUOT) on HF downloads |
 | `--hf-cache`           |       | fresh dir under scratch | Pre-populated HuggingFace cache to reuse (mounted at `/root/.cache/huggingface`) |
 | `--repo-root-path`     |       | None                    | Repo to mount and test, overriding baked-in  |
+| `--package-wheel`      |       | None                    | Install the pinned wheel in the disposable interpreter, mounting only matching tests |
+| `--test-deps-dir`      |       | None                    | Offline pytest/UCXX dependency wheelhouse |
+| `--cached-model-paths` |       | False                   | Local aliases for cached model revisions; requires wheel mode and an explicit HF cache |
+| `--readonly-model-cache` |     | None                    | Completed Hub model-cache directory mounted read-only for aliases; requires `--cached-model-paths` and a distinct runtime HF cache |
 | `--job-name`           |       | `cosmos_ci`             | Base name for the SLURM job                  |
 | `--ngpu-per-node`      |       | 8                       | GPUs to request                              |
 | `--test-timeout`       |       | `2h`                    | `timeout` applied to `run_test.sh`           |

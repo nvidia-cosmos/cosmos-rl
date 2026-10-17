@@ -144,6 +144,7 @@ def test_zero_horizon_stop_still_requests_step_zero_checkpoint(manager):
 def test_real_ack_path_finishes_issued_update_before_stop(manager):
     manager.current_step = 1
     manager.dispatched_rollouts_by_step = {1: 4}
+    manager._seal_training_dispatch(list(manager.policy_replicas.values()), 100, 4)
     manager.samples_on_the_fly = 4
     manager.status = {name: PolicyStatus.RUNNING for name in manager.policy_replicas}
     for replica in manager.policy_replicas.values():

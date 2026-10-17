@@ -94,6 +94,7 @@ def test_final_sync_broadcast_defers_validation_and_shutdown_until_generation_re
 ):
     worker = object.__new__(DisaggregatedRolloutControlWorker)
     worker.replica_name = "rollout-0"
+    worker.api_client = SimpleNamespace(training_fetch_failed=False)
     worker.state = State()
     if already_seeded:
         worker.state.set_weight_synced()
@@ -131,6 +132,8 @@ def test_final_sync_broadcast_defers_validation_and_shutdown_until_generation_re
         weight_step=1,
         total_steps=1,
         replica_should_stop=lambda: True,
+        validation_protocol_version=1,
+        validation_round_id="final-validation" if validation_enabled else None,
     )
     worker.broadcast_to_all_rollout_replica(command)
     worker.do_validation.assert_not_called()

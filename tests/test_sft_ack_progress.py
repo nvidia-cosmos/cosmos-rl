@@ -9,12 +9,15 @@ from cosmos_rl.dispatcher.status import PolicyStatus, PolicyStatusManager
 
 
 def manager():
-    instance = object.__new__(PolicyStatusManager)
+    instance = PolicyStatusManager()
     instance.current_step = 2
     instance.total_steps = 10
     instance.config = SimpleNamespace(
         validation=SimpleNamespace(enable=True, freq=1),
-        train=SimpleNamespace(train_batch_per_replica=4),
+        train=SimpleNamespace(
+            train_batch_per_replica=4,
+            train_policy=SimpleNamespace(type="sft"),
+        ),
     )
     instance.data_fetcher = SimpleNamespace(validation_activate_dataloader=Mock())
     statuses = {"a": PolicyStatus.RUNNING, "b": PolicyStatus.RUNNING}
@@ -26,7 +29,11 @@ def manager():
         v in values for v in statuses.values()
     )
     instance.all_reduced = lambda: instance.all_with_status([PolicyStatus.REDUCED])
-    instance.get_all_atoms_arrived_replicas = lambda: ["a", "b"]
+    instance.policy_replicas = {n: SimpleNamespace(name=n) for n in ("a", "b")}
+    instance.sft_cohort = dict(instance.policy_replicas)
+    instance.get_all_atoms_arrived_replicas = lambda: list(
+        instance.policy_replicas.values()
+    )
     instance.remain_samples_num = 100
     instance.sft_report_summary = Mock()
     return instance

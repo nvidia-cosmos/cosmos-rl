@@ -150,6 +150,9 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
                     controller, request, rollouts
                 )
             )
+        from rollout_receipt_fixture import install_report_source
+
+        request = install_report_source(controller, request)
         monkeypatch.setattr(run_web_panel, "controller", controller)
         response = asyncio.run(run_web_panel.put_rollout_group(request))
         assert response == {
@@ -164,6 +167,7 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
         controller.config = config
         controller.current_step = 0
         controller.train_report_data = {}
+        controller._unreported_rollouts = []
         controller.policy = SimpleNamespace(data_queue=Queue())
         mesh = SimpleNamespace(get_group=lambda: None, get_local_rank=lambda: 0)
         controller.rollout = SimpleNamespace(
@@ -174,6 +178,7 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
             "cosmos_rl.colocated.controller.dist_util.all_gather_object_cpu", gather
         )
         controller.put_rollouts(request)
+        controller.synchronize_rollouts()
         received = list(controller.policy.data_queue.queue)
         assert gather.call_count == int(mode == "colocated_centralized")
         metrics = controller.train_report_data[0]
@@ -218,4 +223,4 @@ def test_colocated_minor_step_handles_empty_generation():
 
     assert worker.rollout_for_one_minor_step() == (False, 0)
     assert worker._prompt_queue.empty()
-    worker._report_discarded_samples.assert_called_once_with(3)
+    worker._report_discarded_samples.assert_called_once_with(3, training_rejections=[])

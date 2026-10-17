@@ -22,6 +22,7 @@ def worker_fixture(rank=0, supported=True, prefetch=False):
     worker = object.__new__(Worker)
     worker.global_rank = rank
     worker.replica_name = "empty-test"
+    worker.validation_round_id = "empty-validation-round"
     worker.rank_in_rollout_repicas = 0
     worker._prompt_fetch_lock = threading.Lock()
     worker._prompt_queue = Queue(maxsize=2)
@@ -61,7 +62,7 @@ def test_common_guard_precedes_scatter_and_retains_empty_slot(rank, supported):
     with (
         patch(
             "cosmos_rl.rollout.worker.rollout_control.dist_utils.broadcast_object_cpu",
-            return_value=([payload], True),
+            return_value=(([payload], True), None),
         ),
         patch(
             "torch.distributed.scatter_object_list", side_effect=scatter
@@ -96,7 +97,7 @@ def test_globally_empty_response_does_not_create_a_slot(rank, is_end):
     with (
         patch(
             "cosmos_rl.rollout.worker.rollout_control.dist_utils.broadcast_object_cpu",
-            return_value=(None, is_end),
+            return_value=((None, is_end), None),
         ),
         patch("torch.distributed.scatter_object_list", side_effect=scatter),
     ):
@@ -117,7 +118,7 @@ def test_nonempty_slices_share_maximum_global_version(rank):
     with (
         patch(
             "cosmos_rl.rollout.worker.rollout_control.dist_utils.broadcast_object_cpu",
-            return_value=(payloads, False),
+            return_value=((payloads, False), None),
         ),
         patch("torch.distributed.scatter_object_list", side_effect=scatter),
     ):
@@ -209,4 +210,39 @@ def test_empty_validation_rank_still_reports_terminal_without_reward_work():
     worker.do_validation()
     request = worker.api_client.post_validation_report.call_args.args[0]
     assert request.is_end and request.payloads == [] and request.validation_step == 4
+    assert request.validation_round_id == worker.validation_round_id
+    assert request.report_sequence == 0
+    assert not worker.validation_flag.is_set()
+    assert worker._completed_validation_round_id == worker.validation_round_id
     worker.reward_dispatcher.enqueue_rewards_cal.assert_not_called()
+    worker.validation_flag.set()
+    worker.do_validation()
+    worker.api_client.post_validation_report.assert_called_once()
+    assert not worker.validation_flag.is_set()
+
+
+def test_colocated_agreement_uses_maximum_global_prompt_version():
+    worker = worker_fixture()
+    worker.batch_size = 2
+    worker.current_weight_version = 2
+    worker.request_new_prompts = Mock(return_value=False)
+    worker.one_step_generation = Mock(return_value=(None, ["result"]))
+    worker._prompt_queue.put(
+        [SimpleNamespace(weight_version=version) for version in (2, 7)]
+    )
+    with patch(
+        "cosmos_rl.rollout.worker.colocated.rollout_control.dist_util.all_gather_object_cpu",
+        side_effect=lambda state: [state],
+    ) as agreement:
+        assert ColocatedRolloutControlWorker.rollout_for_one_minor_step(worker) == (
+            False,
+            0,
+        )
+        agreement.assert_called_with((False, False))
+        worker.one_step_generation.assert_not_called()
+        worker.current_weight_version = 7
+        assert ColocatedRolloutControlWorker.rollout_for_one_minor_step(worker) == (
+            False,
+            1,
+        )
+        agreement.assert_called_with((True, False))

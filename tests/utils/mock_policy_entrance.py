@@ -173,6 +173,7 @@ def main(*args, **kwargs):
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", type=str)
     args = parser.parse_args()
+    verify_refill = None
 
     if args.test == "decoupled_loss":
         # Apply the mock for decoupled loss testing
@@ -182,6 +183,10 @@ def main(*args, **kwargs):
         mock_for_custom_rollout()
     elif args.test == "colocated":
         mock_for_colocated()
+    elif args.test == "colocated_final_step_refill":
+        from colocated_final_step_refill import install
+
+        verify_refill = install()
 
     try:
         if cosmos_config.mode == "colocated":
@@ -192,6 +197,8 @@ def main(*args, **kwargs):
                 **kwargs,
             )
             policy_worker.main_loop()
+            if verify_refill is not None:
+                verify_refill()
         elif policy_type == "grpo":
             logger.info("Starting GRPO training...")
             worker = RLPolicyWorker(

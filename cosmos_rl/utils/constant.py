@@ -37,7 +37,7 @@ COSMOS_HEARTBEAT_SEND_INTERVAL = int(
     os.environ.get("COSMOS_HEARTBEAT_SEND_INTERVAL", "60")
 )
 
-# Bound for control-plane HTTP calls (unregister/heartbeat). Without a timeout,
+# Bound for control-plane HTTP calls (unregister/heartbeat/validation receipts). Without a timeout,
 # requests.post blocks forever on a hung/saturated controller socket during
 # teardown -- which strands the clean unregister.
 COSMOS_CONTROL_HTTP_TIMEOUT = float(os.environ.get("COSMOS_CONTROL_HTTP_TIMEOUT", "30"))
