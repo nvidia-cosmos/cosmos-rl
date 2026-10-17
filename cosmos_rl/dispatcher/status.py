@@ -670,6 +670,30 @@ class PolicyStatusManager:
             self.draining_total_steps,
         )
 
+    def _try_complete_validated_terminal_step(self) -> bool:
+        """Close a fully ACKed final validation even without sampler exhaustion."""
+        if not self.config.validation.enable:
+            return False
+        final_dispatch = self.training_dispatches.get(self.current_step)
+        round_ = self.validation_round
+        if (
+            self.current_step != self.training_horizon()
+            or self.data_fetcher.activated_val_iter is not None
+            or self._payload_lookahead is not None
+            or self.dispatched_rollouts_by_step
+            or round_ is None
+            or round_.step != self.current_step
+            or not round_.complete
+            or final_dispatch is None
+            or final_dispatch.total_steps != self.training_horizon()
+            or not final_dispatch.settled
+        ):
+            return False
+        self.enter_draining_phase()
+        self.terminal_complete = True
+        self.cleanup_buffered_rollouts()
+        return True
+
     def finish_draining_phase(
         self,
         rollout_status_manager: "RolloutStatusManager",
@@ -677,6 +701,8 @@ class PolicyStatusManager:
         """Dispatch complete tail batches, then complete without inventing work."""
         if self.stop_reason is not None:
             self._try_complete_requested_stop()
+            return
+        if self._try_complete_validated_terminal_step():
             return
         if not rollout_status_manager.all_rollouts_ended():
             return
@@ -723,15 +749,10 @@ class PolicyStatusManager:
                 return
 
         self.cleanup_buffered_rollouts()
-        final_dispatch = self.training_dispatches.get(frozen_total)
-        validation_terminal_acked = (
-            self.config.validation.enable
-            and self.current_step == frozen_total
-            and final_dispatch is not None
-            and final_dispatch.total_steps == frozen_total
-            and final_dispatch.settled
-        )
-        if self.real_terminal_command_acked() or validation_terminal_acked:
+        if (
+            self.real_terminal_command_acked()
+            or self._try_complete_validated_terminal_step()
+        ):
             self.terminal_complete = True
             return
         self.trigger_training_complete()
@@ -1152,7 +1173,10 @@ class PolicyStatusManager:
                         dst_replica=any_valid_rollout_replica,
                         src_replica_size=self.policy_atoms_in_replica,
                         dst_replica_size=rollout_status_manager.rollout_atoms_in_replica,
-                        weight_step=None,
+                        # Resume progress is known before registration. Async
+                        # adoption needs the version on P2R itself, including
+                        # singleton rollouts without a native R2R broadcast.
+                        weight_step=self.current_step,
                         total_steps=None,
                         redis_handler=self.redis_handler,
                     )
@@ -2737,6 +2761,8 @@ class PolicyStatusManager:
         if self.stop_reason is not None and self._payload_lookahead is None:
             self._try_complete_requested_stop()
             return
+        if self._try_complete_validated_terminal_step():
+            return
         if self.dispatched_rollouts_by_step:
             # Live READY/REDUCED flags are not the sealed recipient set of
             # already-issued work, including in ordinary RUNNING mode.
@@ -2977,9 +3003,30 @@ class PolicyStatusManager:
                 "Preparation is not from a registered dispatch participant"
             )
         decision = dispatch.prepare(replica_name, step, total_steps, ready)
-        if decision != "stop" or dispatch.cancelled:
+        if decision == "wait" or dispatch.settled or dispatch.reports:
             return decision
-        self._cancel_colocated_preparation(dispatch)
+        # Colocated prompts are fetched after dispatch. Bind their reservation
+        # only once every replica has prepared, before training or cancellation.
+        count = (
+            self.config.train.train_batch_per_replica * len(dispatch.participants)
+            if decision == "train"
+            else (
+                dispatch.colocated_fetched_rollouts
+                if dispatch.colocated_fetched_rollouts is not None
+                else dispatch.rollout_count
+            )
+        )
+        if (
+            self.current_step != step
+            or set(self.dispatched_rollouts_by_step) != {step}
+            or self.dispatched_rollouts_by_step[step] != dispatch.rollout_count
+            or self.samples_on_the_fly < count
+        ):
+            raise RuntimeError("Cannot bind an uncertain colocated reservation")
+        dispatch.rollout_count = count
+        self.dispatched_rollouts_by_step[step] = count
+        if decision == "stop":
+            self._cancel_colocated_preparation(dispatch)
         return decision
 
     @_terminal_dispatch_failure

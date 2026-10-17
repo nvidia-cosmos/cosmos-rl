@@ -4,6 +4,13 @@ Colocated workers prepare their batches after the dispatcher issues DataFetch.
 Dispatch is not permission to optimize: every original policy replica must
 report a complete local batch before any replica starts the update.
 
+The initial dispatch can reserve zero samples before local prompt fetches occur.
+Track actual fetched prompts per dispatch and bind the reservation when every
+participant has prepared. Successful training ACKs settle the bound count once;
+an unstarted exhausted batch settles only its fetched prompts, without consuming
+reservations belonging to other work. Progress rollback still restores the full
+unstarted batch debit, not merely the fetched count.
+
 Within a replica, ranks refill together using the minimum available capacity.
 Prompt/generation decisions also agree before entering backend collectives.
 Centralized reward reports are gathered at the explicit reporting boundary,

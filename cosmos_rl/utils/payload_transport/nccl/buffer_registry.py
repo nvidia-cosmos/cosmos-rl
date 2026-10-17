@@ -51,6 +51,10 @@ from cosmos_rl.utils.logging import logger
 
 __all__ = ["SendBufferEntry", "SendBufferRegistry"]
 
+# CUDA event completion does not signal a Python condition. Only publishers
+# already blocked on capacity need to poll for that transition.
+_COMPLETION_POLL_INTERVAL_S = 0.05
+
 
 def _event_fired(ev: Any) -> bool:
     """True if a send-complete event has fired.
@@ -224,8 +228,10 @@ class SendBufferRegistry:
                 continue
             remaining = deadline - time.monotonic()
             if self._block_timeout > 0 and remaining > 0:
-                # Wait for a concurrent free() to signal capacity.
-                self._not_full.wait(timeout=remaining)
+                # free()/send bookkeeping notify immediately. An event can
+                # also fire later without another registry call, so recheck
+                # completion without extending the original eviction deadline.
+                self._not_full.wait(timeout=min(remaining, _COMPLETION_POLL_INTERVAL_S))
                 continue
             # Timed out (or blocking disabled): evict oldest buffer so the
             # producer never deadlocks on an idle consumer.
@@ -293,6 +299,7 @@ class SendBufferRegistry:
             entry.done_events.append(done_event)
             if entry.inflight > 0:
                 entry.inflight -= 1
+            self._not_full.notify_all()
 
     def abandon_inflight(self, entry: SendBufferEntry) -> None:
         """Release a send's :meth:`acquire` lease WITHOUT recording an event.
@@ -304,6 +311,7 @@ class SendBufferRegistry:
         with self._lock:
             if entry.inflight > 0:
                 entry.inflight -= 1
+                self._not_full.notify_all()
 
     def free(self, transfer_id: str) -> bool:
         """Release the buffer for ``transfer_id``.  Idempotent.

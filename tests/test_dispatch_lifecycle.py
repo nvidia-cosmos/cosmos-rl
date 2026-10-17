@@ -9,6 +9,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from cosmos_rl.dispatcher import run_web_panel
+from cosmos_rl.dispatcher.command import (
+    BuildMeshCommand,
+    Command,
+    PolicyToRolloutUnicastCommand,
+    RolloutToRolloutBroadcastCommand,
+    WeightResumeCommand,
+)
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 from cosmos_rl.dispatcher.replica import Atom, Replica
 from cosmos_rl.dispatcher.status import (
@@ -29,6 +36,63 @@ def atom(name="replica", *, host="localhost"):
         group_size=[1] * len(MESH_NAMES),
         replica_name=name,
     )
+
+
+@pytest.mark.parametrize("step", [0, 10])
+@pytest.mark.parametrize("rollout_first", [False, True])
+@pytest.mark.parametrize("rollout_count", [1, 2])
+def test_initial_weight_transfer_preserves_version_in_either_registration_order(
+    step, rollout_first, rollout_count
+):
+    policy, rollouts = PolicyStatusManager(), RolloutStatusManager()
+    config = SimpleNamespace(
+        train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
+        policy=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=1)),
+        rollout=SimpleNamespace(
+            parallelism=SimpleNamespace(n_init_replicas=rollout_count)
+        ),
+    )
+    redis = Mock()
+    policy.current_step, policy.total_steps = step, 20
+    policy.redis_handler = rollouts.redis_handler = redis
+    rollouts.policy_status_manager = policy
+    # Keep real registration and command serialization; omit mesh/training work.
+    policy.post_register_hook = Mock()
+    policy.prepare_validation_round = Mock(return_value=None)
+    rollouts.trigger_rebuild_mesh = lambda replicas: BuildMeshCommand.trigger(
+        replicas, redis_handler=redis
+    )
+
+    def register_policy():
+        policy.register(atom("policy"), config, rollouts)
+
+    def register_rollouts():
+        for index in range(rollout_count):
+            rollouts.register(atom(f"rollout-{index}"), config, policy)
+
+    if rollout_first:
+        register_rollouts()
+        register_policy()
+    else:
+        register_policy()
+        register_rollouts()
+
+    published = [
+        (Command.depack(call.args[0]), call.args[1])
+        for call in redis.publish_command.call_args_list
+    ]
+    transfers = [
+        cmd for cmd, _ in published if isinstance(cmd, PolicyToRolloutUnicastCommand)
+    ]
+    assert len(transfers) == 2  # Identical command sent to policy and receiver.
+    assert all(cmd.weight_step == step for cmd in transfers)
+    assert all(not cmd.trainable_only for cmd in transfers)
+    broadcasts = [
+        cmd for cmd, _ in published if isinstance(cmd, RolloutToRolloutBroadcastCommand)
+    ]
+    assert broadcasts and all(cmd.weight_step == step for cmd in broadcasts)
+    policy_commands = [type(cmd) for cmd, target in published if target == "policy"]
+    assert policy_commands[:2] == [WeightResumeCommand, PolicyToRolloutUnicastCommand]
 
 
 @pytest.mark.parametrize("role", [Role.POLICY, Role.ROLLOUT])

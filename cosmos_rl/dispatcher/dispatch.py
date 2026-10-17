@@ -25,6 +25,7 @@ class TrainingDispatch:
     preparation_required: bool = False
     preparation_reports: dict[str, bool] = field(default_factory=dict)
     cancelled: bool = False
+    colocated_fetched_rollouts: int | None = None
 
     def prepare(self, replica: str, step: int, total_steps: int, ready: bool):
         """Seal permission to execute only after every colocated replica prepares.

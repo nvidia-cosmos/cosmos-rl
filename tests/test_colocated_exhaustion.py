@@ -250,3 +250,104 @@ def test_http_preparation_is_serialized_and_conflicts_are_permanent():
             )
         )
         assert response.status_code == 409
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_prepared_colocated_fetch_is_settled_by_real_training_ack(initial):
+    status, first, second = dispatched()
+    if initial:
+        status.training_dispatches[1].rollout_count = 0
+        status.dispatched_rollouts_by_step[1] = 0
+    # The actual prompt fetch charges this after the DataFetch was issued.
+    status.samples_on_the_fly = 4
+    status.try_trigger_data_fetch_and_training = Mock()
+    assert prepare(status, first, True) == "wait"
+    assert prepare(status, second, True) == "train"
+    assert prepare(status, first, True) == "train"
+    status.train_ack(first.name, 1, 10, False, {}, Mock())
+    assert status.samples_on_the_fly == 4
+    status.train_ack(second.name, 1, 10, False, {}, Mock())
+    assert status.samples_on_the_fly == 0
+    assert not status.dispatched_rollouts_by_step
+    assert status.training_dispatches[1].settled
+    # A lost preparation/ACK reply cannot charge or settle the reservation twice.
+    assert prepare(status, first, True) == "train"
+    status.train_ack(first.name, 1, 10, False, {}, Mock())
+    assert status.samples_on_the_fly == 0
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("fetched", [0, 2])
+def test_unstarted_colocated_stop_settles_only_actual_fetched_prompts(initial, fetched):
+    status, first, second = dispatched()
+    if initial:
+        status.training_dispatches[1].rollout_count = 0
+        status.dispatched_rollouts_by_step[1] = 0
+    status.samples_on_the_fly = fetched
+    status.training_dispatches[1].colocated_fetched_rollouts = fetched
+    remaining = status.remain_samples_num
+    with patch.object(TrainingCompleteCommand, "trigger") as publish:
+        assert prepare(status, first, fetched > 0) == "wait"
+        assert prepare(status, second, False) == "stop"
+        assert status.samples_on_the_fly == 0
+        assert status.remain_samples_num == remaining + 4
+        assert status.training_dispatches[1].rollout_count == fetched
+        assert status.training_dispatches[1].cancelled
+        assert not status.dispatched_rollouts_by_step
+        assert prepare(status, second, False, step=1) == "stop"
+        assert status.samples_on_the_fly == 0
+        assert publish.call_count == 2
+
+
+def test_prepared_colocated_step_requires_backed_reservations():
+    status, first, second = dispatched()
+    status.training_dispatches[1].rollout_count = 0
+    status.dispatched_rollouts_by_step[1] = 0
+    status.samples_on_the_fly = 2
+    assert prepare(status, first, True) == "wait"
+    with pytest.raises(RuntimeError, match="uncertain colocated reservation"):
+        prepare(status, second, True)
+    assert status.samples_on_the_fly == 2
+    assert status.dispatched_rollouts_by_step[1] == 0
+
+
+def test_actual_colocated_prompt_fetch_is_bound_then_settled(monkeypatch):
+    from test_training_fetch_receipts import setup as fetch_setup
+
+    controller, _, _ = fetch_setup(monkeypatch)
+    status, first, second = dispatched()
+    status.config = controller.config
+    status.config.mode = "colocated"
+    status.config.train.train_policy.on_policy = False
+    status.config.train.train_policy.allowed_outdated_steps = 2
+    status.config.train.train_batch_per_replica = 2
+    status.samples_on_the_fly = 0
+    status.training_dispatches[1].rollout_count = 0
+    status.dispatched_rollouts_by_step[1] = 0
+    status.try_trigger_data_fetch_and_training = Mock()
+    controller.policy_status_manager = status
+    for _ in range(2):
+        payloads, _ = asyncio.run(controller._get_batched_prompt_impl(1, None, 0))
+        assert len(payloads) == 1
+    assert status.samples_on_the_fly == 4
+    assert status.training_dispatches[1].colocated_fetched_rollouts == 4
+    # Validation must neither charge training quota nor alter its dispatch.
+    asyncio.run(controller._get_batched_prompt_impl(1, 1, 0))
+    assert status.samples_on_the_fly == 4
+    assert status.training_dispatches[1].colocated_fetched_rollouts == 4
+    assert prepare(status, first, True) == "wait"
+    assert prepare(status, second, True) == "train"
+    status.train_ack(first.name, 1, 10, False, {}, Mock())
+    status.train_ack(second.name, 1, 10, False, {}, Mock())
+    assert status.samples_on_the_fly == 0
+
+
+def test_colocated_stop_preserves_reservations_outside_its_fetch():
+    status, first, second = dispatched()
+    status.samples_on_the_fly = 6
+    status.training_dispatches[1].colocated_fetched_rollouts = 2
+    with patch.object(TrainingCompleteCommand, "trigger"):
+        assert prepare(status, first, True) == "wait"
+        assert prepare(status, second, False) == "stop"
+    assert status.samples_on_the_fly == 4
+    assert status.training_dispatches[1].rollout_count == 2

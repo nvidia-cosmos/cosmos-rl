@@ -39,6 +39,7 @@ CASES = {
     "periodic": (4, 1),
     "initial": (3, 10),
     "nominal": (6, 10),
+    "step-bounded": (7, 1),
 }
 
 
@@ -128,7 +129,13 @@ def main():
             if args.case == "initial":
                 manager.config.validation.val_before_train = True
                 manager.prepare_validation_round(0, 3, [replica])
-            manager.on_rollout_is_end(rollouts)
+            if args.case == "step-bounded":
+                # The sampler still has data when max_num_steps is reached.
+                # Final validation must close using real dispatch receipts.
+                rollouts.all_rollouts_ended = lambda: False
+                manager.try_trigger_data_fetch_and_training()
+            else:
+                manager.on_rollout_is_end(rollouts)
             rounds = []
         else:
             policy, acknowledgements = worker(device, reader)
@@ -243,13 +250,20 @@ def main():
                     "periodic": [1, 2],
                     "initial": [0, 1],
                     "nominal": [3],
+                    "step-bounded": [1, 2, 3],
                 }[args.case]
             )
             assert (
                 manager.completion_step is None
-                if args.case == "nominal"
+                if args.case in {"nominal", "step-bounded"}
                 else manager.completion_step == expected_steps + 1
             )
+            if args.case == "step-bounded":
+                assert not rollouts.all_rollouts_ended()
+                assert manager.training_dispatches[3].settled
+                assert not manager.dispatched_rollouts_by_step
+                assert manager._payload_lookahead is None
+                assert manager.last_real_datafetch_acked_step is None
         else:
             assert (
                 policy.trainer.updates

@@ -145,6 +145,15 @@ depend on Redis making progress. See the
   pending native readers retain their storage. Uncertain work cannot be freed
   merely to meet an entry-count or memory target.
 
+When the producer registry is full, send bookkeeping changes wake blocked
+publishers so they can recheck for safely reclaimable entries. A blocked
+publisher also rechecks completion at 50 ms intervals because a CUDA event can
+fire without another Python registry call. This adds no background thread and
+does not poll when registration has capacity. Rechecks retain the original
+capacity-wait deadline; they never treat elapsed time as proof that native
+readers finished. All recorded send events must be complete and all sender
+leases balanced before completion-based reclamation.
+
 ## Communicator scaling
 
 Comm count is `O(rollout_ranks × trainer_ranks)`; each 2-rank comm costs

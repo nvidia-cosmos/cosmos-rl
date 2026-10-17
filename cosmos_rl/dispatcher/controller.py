@@ -818,9 +818,16 @@ maxmemory-policy noeviction
                 else:
                     payloads_list[i].weight_version = 0
         if not is_validation:
-            self.policy_status_manager.samples_on_the_fly += (
-                current_fetch_count * self.config.rollout.n_generation
-            )
+            count = current_fetch_count * self.config.rollout.n_generation
+            if self.config.mode == "colocated":
+                dispatch = self.policy_status_manager.training_dispatches.get(
+                    self.policy_status_manager.current_step
+                )
+                if dispatch is not None and not dispatch.settled:
+                    dispatch.colocated_fetched_rollouts = (
+                        dispatch.colocated_fetched_rollouts or 0
+                    ) + count
+            self.policy_status_manager.samples_on_the_fly += count
 
         # Unified end-of-job signal: step-bounded runs (``max_num_steps`` <
         # ``steps_by_dataset``) never exhaust the dataset, so ``is_end`` from

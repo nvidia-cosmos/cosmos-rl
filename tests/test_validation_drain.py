@@ -303,3 +303,72 @@ def test_monitor_stop_requires_validation_completion_ack_and_policy_exit(
 
     asyncio.run(scenario())
     assert stop.call_count == int(phase == "complete" and policy_exited)
+
+
+def _running_validation_setup(monkeypatch, policies_count, tail):
+    from copy import copy
+    from cosmos_rl.dispatcher.status import PolicyStatus
+
+    policies, rollouts, rollout, p2r, r2r, complete = setup(
+        monkeypatch, 4 * policies_count + tail, freq=1
+    )
+    if policies_count == 2:
+        first = next(iter(policies.policy_replicas.values()))
+        second = copy(first)
+        second.name = "policy-1"
+        first.in_mesh = second.in_mesh = True
+        policies.policy_replicas[second.name] = second
+        policies.status[second.name] = PolicyStatus.READY
+        policies.get_all_atoms_arrived_replicas = lambda: list(
+            policies.policy_replicas.values()
+        )
+    rollouts.all_rollouts_ended = lambda: False
+    return policies, rollouts, rollout, p2r, r2r, complete
+
+
+@pytest.mark.parametrize("policies_count", [1, 2])
+@pytest.mark.parametrize("tail", [0, 1])
+def test_step_bounded_final_validation_closes_without_sampler_end(
+    monkeypatch, policies_count, tail
+):
+    policies, rollouts, _, _, _, complete = _running_validation_setup(
+        monkeypatch, policies_count, tail
+    )
+    policies.try_trigger_data_fetch_and_training()
+    for step in (1, 2):
+        assert policies.current_step == step
+        for replica in policies.get_all_atoms_arrived_replicas():
+            policies.train_ack(replica.name, step, 2, False, {}, rollouts)
+        assert not policies.terminal_complete
+        finish_round(policies, rollouts)
+    assert not rollouts.all_rollouts_ended()
+    assert policies.current_step == policies.training_horizon() == 2
+    assert policies.training_dispatches[2].settled
+    assert policies.terminal_complete and policies.validation_drained
+    assert policies.samples_on_the_fly == policies.total_pending_rollouts() == 0
+    assert policies._payload_lookahead is None
+    assert policies.last_real_datafetch_acked_step is None
+    complete.assert_not_called()
+
+
+def test_step_bounded_validation_cannot_close_with_a_missing_policy_ack(monkeypatch):
+    policies, rollouts, rollout, _, _, complete = _running_validation_setup(
+        monkeypatch, 2, 1
+    )
+    policies.try_trigger_data_fetch_and_training()
+    peers = policies.get_all_atoms_arrived_replicas()
+    for replica in peers:
+        policies.train_ack(replica.name, 1, 2, False, {}, rollouts)
+    finish_round(policies, rollouts)
+    assert policies.current_step == 2
+    policies.train_ack(peers[0].name, 2, 2, False, {}, rollouts)
+    # Exercise an authenticated final validation receipt with the other sealed
+    # participant's ACK still absent. Live status cannot substitute for it.
+    policies.prepare_validation_round(2, 2, [rollout])
+    finish_round(policies, rollouts)
+    assert policies.validation_round.complete
+    assert not policies.training_dispatches[2].settled
+    assert not policies.terminal_complete and not policies.validation_drained
+    assert policies.dispatched_rollouts_by_step == {2: 4}
+    assert policies.samples_on_the_fly == 5
+    complete.assert_not_called()
