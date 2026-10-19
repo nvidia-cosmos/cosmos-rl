@@ -62,7 +62,7 @@ def test_rank_local_imbalance_rechecks_real_use_not_global_queue_estimate(allowe
     admitted = status.filter_outdated_rollouts(
         [Rollout(prompt_idx=0, weight_version=0) for _ in range(4)]
     )
-    assert len(admitted) == 4
+    assert len(admitted) == (2 if allowed == 0 else 4)
     for rollout in admitted:
         status.rollout_buffer_per_rank[0].put(rollout)
     for _ in range(2):

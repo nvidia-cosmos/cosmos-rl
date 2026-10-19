@@ -120,6 +120,7 @@ class Controller:
         self.temp_kv_store = {}
 
         self.life_cycle_lock = asyncio.Lock()
+        self._rank_input_exhausted = False
         self.shut_down_event = threading.Event()
 
     def setup(
@@ -373,11 +374,70 @@ maxmemory-policy noeviction
 
     _SOFT_THROTTLE_HEARTBEAT_S = 5.0
 
+    def close_exhausted_rank_input(self) -> bool:
+        """Close prompts only when even all remaining slots cannot form a batch.
+
+        Runs on the controller event loop under its lifecycle lock. Existing
+        generation/reports still drain through ordinary end-of-data completion,
+        including final validation and checkpointing; no update is fabricated.
+        """
+        policy = self.config.train.train_policy
+        if (
+            not getattr(policy, "data_dispatch_as_rank_in_mesh", False)
+            or policy.type == "sft"
+            or self.config.mode == "colocated"
+            or getattr(self.data_fetcher, "train_iterator_exhausted", False) is not True
+        ):
+            return False
+        if getattr(self, "_rank_input_exhausted", False):
+            return True
+        status = self.policy_status_manager
+        queues = status.rollout_buffer_per_rank
+        size = len(queues)
+        if (
+            not size
+            or size != self.data_fetcher.policy_global_mesh_size
+            or len(status.get_all_atoms_arrived_replicas()) != size
+            or not status.policy_init_done
+            or status.rollout_admission_closed()
+        ):
+            # A lost/changed cohort is not evidence of successful exhaustion.
+            return False
+        possible = [queue.qsize() for queue in queues]
+        if status._payload_lookahead is not None:
+            for rollout in status._payload_lookahead[2]:
+                possible[rollout.prompt_idx % size] += 1
+        for replica in self.rollout_status_manager.rollout_replicas.values():
+            for (
+                _,
+                rank,
+            ), count in replica.producer_reservations.outstanding_rank_counts().items():
+                if not 0 <= rank < size:
+                    return False
+                possible[rank] += count
+        for index, _ in self.data_fetcher.fetched_data_buffer:
+            possible[index % size] += self.config.rollout.n_generation
+        if all(
+            count >= self.config.train.train_batch_per_replica for count in possible
+        ):
+            return False
+        self._rank_input_exhausted = True
+        logger.info(
+            "[Controller] Rank-affine dataset exhausted: remaining completion "
+            "capacity %s cannot fill batch %d on every policy; closing prompt "
+            "input and draining issued work without another partial update.",
+            possible,
+            self.config.train.train_batch_per_replica,
+        )
+        return True
+
     def register_discarded_samples_for_refill(
         self,
         weight_version: int,
         discarded_samples: int,
         report_id: Optional[str] = None,
+        *,
+        policy_rank: Optional[int] = None,
     ) -> int:
         """Reopen same-weight prompt capacity after terminal sample loss.
 
@@ -398,7 +458,9 @@ maxmemory-policy noeviction
         )
         if (
             discarded_samples <= 0
-            or not strict
+            or not (
+                strict or getattr(train_policy, "data_dispatch_as_rank_in_mesh", False)
+            )
             or train_policy.variant == "dapo"
             or self.config.mode == "colocated"
         ):
@@ -412,6 +474,12 @@ maxmemory-policy noeviction
             )
             return 0
 
+        rank_dispatch = getattr(train_policy, "data_dispatch_as_rank_in_mesh", False)
+        if rank_dispatch and (
+            type(policy_rank) is not int
+            or not 0 <= policy_rank < self.data_fetcher.policy_global_mesh_size
+        ):
+            raise ValueError("Rank-dispatch refill requires the reserved policy rank")
         if report_id is not None:
             applied = getattr(self, "_applied_refill_report_ids", None)
             if applied is None:
@@ -421,6 +489,11 @@ maxmemory-policy noeviction
             applied[report_id] = None
             if len(applied) > _REFILL_REPORT_DEDUP_WINDOW:
                 applied.popitem(last=False)
+
+        if rank_dispatch:
+            return self.data_fetcher.reopen_rank_prompt_capacity(
+                weight_version, policy_rank, discarded_samples
+            )
 
         credits = getattr(self, "weight_version_to_replacement_prompt_num", None)
         if credits is None:
@@ -581,6 +654,8 @@ maxmemory-policy noeviction
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        if not is_validation and getattr(self, "_rank_input_exhausted", False) is True:
+            return [], True
         if not is_validation and self.policy_status_manager.stop_reason is not None:
             if (
                 self.policy_status_manager.completion_step is not None
@@ -627,6 +702,9 @@ maxmemory-policy noeviction
             )
             return [], True
 
+        rank_dispatch = getattr(
+            self.config.train.train_policy, "data_dispatch_as_rank_in_mesh", False
+        )
         # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
         rollouts_per_global_batch = self.config.train.train_batch_per_replica * len(
             self.policy_status_manager
@@ -640,6 +718,34 @@ maxmemory-policy noeviction
         weight_version_for_current_batch = self.policy_status_manager.current_step + (
             self.policy_status_manager.total_pending_rollouts()
             // rollouts_per_global_batch
+        )
+        rank_quota = (
+            rank_dispatch
+            and not is_validation
+            and self.config.train.train_policy.type != "sft"
+            and self.config.train.train_policy.variant != "dapo"
+            and self.config.mode != "colocated"
+        )
+        if rank_quota:
+            weight_version_for_current_batch = (
+                self.policy_status_manager.current_step
+                + self.policy_status_manager.pending_rank_training_batches()
+            )
+            # Whole replacement groups can overfill a destination by at most
+            # n_generation-1 completions. Do not let that bounded surplus block
+            # a missing peer, or interpret it as another complete global batch.
+            group = self.config.rollout.n_generation
+            global_batch_size = math.ceil(
+                self.config.train.train_batch_per_replica / group
+            ) * len(self.policy_status_manager)
+            rollouts_per_global_batch = global_batch_size * group
+            self.data_fetcher.prune_rank_prompt_capacity(
+                self.policy_status_manager.current_step
+            )
+        rank_surplus = (
+            (self.config.rollout.n_generation - 1) * len(self.policy_status_manager)
+            if rank_quota
+            else 0
         )
 
         is_sft = self.config.train.train_policy.type == "sft"
@@ -660,7 +766,7 @@ maxmemory-policy noeviction
             )
             soft_throttle_threshold = (
                 allowed_outdated_steps + 1
-            ) * rollouts_per_global_batch
+            ) * rollouts_per_global_batch + rank_surplus
             soft_throttle_engaged = (
                 current_pending_rollouts >= soft_throttle_threshold
                 and self.config.train.train_policy.variant != "dapo"
@@ -731,7 +837,7 @@ maxmemory-policy noeviction
             # max_inflight_steps accordingly if using DAPO.
             max_inflight = self.config.train.train_policy.max_inflight_steps
             if max_inflight is not None:
-                hard_threshold = max_inflight * rollouts_per_global_batch
+                hard_threshold = max_inflight * rollouts_per_global_batch + rank_surplus
                 if current_pending_rollouts >= hard_threshold:
                     return [], is_validation
 
@@ -750,7 +856,21 @@ maxmemory-policy noeviction
                 else None,
             )
             current_fetch_count = len(payloads_list)
-            if self.config.train.train_policy.variant != "dapo":
+            if self.config.train.train_policy.variant != "dapo" and getattr(
+                self.config.train.train_policy, "data_dispatch_as_rank_in_mesh", False
+            ):
+                # The fetcher sealed destination-specific capacity for this
+                # version. Global refill must not move it to another queue or
+                # relabel it when another rank has consumed the global quota.
+                for payload in payloads_list:
+                    payload.weight_version = weight_version_for_current_batch
+                self.weight_version_to_prompt_num[weight_version_for_current_batch] = (
+                    self.weight_version_to_prompt_num.get(
+                        weight_version_for_current_batch, 0
+                    )
+                    + current_fetch_count
+                )
+            elif self.config.train.train_policy.variant != "dapo":
                 self._assign_prompt_weight_versions(
                     payloads_list,
                     starting_weight_version=weight_version_for_current_batch,
@@ -790,12 +910,16 @@ maxmemory-policy noeviction
                     )
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
+            # Colocated preparation owns its refill budget. A fixed prompt
+            # quota cannot distinguish a usable group from a local rejection.
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
                 validation_step,
                 rank_in_mesh,
                 weight_version=weight_version_for_current_batch
-                if not is_sft and self.config.train.train_policy.variant != "dapo"
+                if not is_sft
+                and self.config.train.train_policy.variant != "dapo"
+                and self.config.mode != "colocated"
                 else None,
             )
             current_fetch_count = len(payloads_list)
@@ -899,14 +1023,24 @@ maxmemory-policy noeviction
             await self._put_application_rollouts_locked(request, rollouts)
 
     async def _put_application_rollouts_locked(
-        self, request, rollouts: List[Rollout], *, plan=None, requested_versions=None
+        self,
+        request,
+        rollouts: List[Rollout],
+        *,
+        plan=None,
+        requested_versions=None,
+        requested_policy_ranks=None,
     ):
         admission = self.completion_admission
         if plan is None:
             plan = admission.prepare(self, request, rollouts)
         try:
             accepted = admission.settle(
-                self, request, plan, requested_versions=requested_versions
+                self,
+                request,
+                plan,
+                requested_versions=requested_versions,
+                requested_policy_ranks=requested_policy_ranks,
             )
             accepted = self.policy_status_manager.filter_outdated_rollouts(accepted)
             await self.put_rollouts(accepted)

@@ -289,6 +289,13 @@ async def lifespan(app: FastAPI):
                 controller.rollout_status_manager.maintain_life_status(
                     controller.policy_status_manager
                 )
+                # Reports/ACKs can make exhaustion provable after the last
+                # fetch. Reuse this serialized tick rather than add a task.
+                exhaustion_probe = getattr(
+                    controller, "close_exhausted_rank_input", None
+                )
+                if exhaustion_probe is not None:
+                    exhaustion_probe()
             # A replica reaped via heartbeat timeout is just as "gone" as one
             # that unregistered cleanly -- finalize the controller here too so a
             # dead/ungracefully-exiting replica can never strand it.
@@ -876,7 +883,18 @@ async def get_batched_prompt(
                             count = controller.config.rollout.n_generation
                             payload.training_work_id = (
                                 replica.producer_reservations.issue(
-                                    payload.weight_version, count
+                                    payload.weight_version,
+                                    count,
+                                    policy_rank=(
+                                        payload.prompt_idx
+                                        % len(controller.policy_status_manager)
+                                    )
+                                    if getattr(
+                                        controller.config.train.train_policy,
+                                        "data_dispatch_as_rank_in_mesh",
+                                        False,
+                                    )
+                                    else None,
                                 )
                             )
                             payload.training_completion_slots = list(range(count))
@@ -985,6 +1003,15 @@ async def put_rollout_group(rollout: RolloutRequest):
                     rollout,
                     application_plan=application_plan,
                     is_dapo=controller.config.train.train_policy.variant == "dapo",
+                    policy_size=len(
+                        controller.policy_status_manager.rollout_buffer_per_rank
+                    )
+                    if getattr(
+                        controller.config.train.train_policy,
+                        "data_dispatch_as_rank_in_mesh",
+                        False,
+                    )
+                    else None,
                 )
         except (ValueError, AssertionError, TypeError) as error:
             result = JSONResponse(status_code=409, content={"error": str(error)})
@@ -1069,6 +1096,9 @@ async def _apply_rollout_group(
                 requested_versions=training_plan.requested_versions
                 if training_plan is not None
                 else None,
+                requested_policy_ranks=training_plan.requested_policy_ranks
+                if training_plan is not None
+                else None,
             )
             return {"message": "Identified rollout report processed"}
         if rollout.completion_identities is not None or rollout.completion_failures:
@@ -1089,12 +1119,27 @@ async def _apply_rollout_group(
             # These coordinates, unlike generation versions or metric IDs,
             # refer to the exact original capacity. DAPO metric settlement below
             # is disabled because every rejected slot is already settled here.
-            for version, count in training_plan.rejected_version_counts:
+            rank_dispatch = getattr(
+                controller.config.train.train_policy,
+                "data_dispatch_as_rank_in_mesh",
+                False,
+            )
+            rejected = (
+                training_plan.rejected_rank_counts
+                if rank_dispatch
+                else (
+                    (version, None, count)
+                    for version, count in training_plan.rejected_version_counts
+                )
+            )
+            for version, rank, count in rejected:
                 policy_status._settle_samples_on_the_fly(
                     count,
                     "rollout_failure",
                     weight_version=version,
-                    report_id=f"reservation:{rollout.report_session_id}:{rollout.report_sequence}:{version}",
+                    report_id=f"reservation:{rollout.report_session_id}:{rollout.report_sequence}:{version}"
+                    + (f":{rank}" if rank is not None else ""),
+                    **({"policy_rank": rank} if rank is not None else {}),
                 )
             if rollout.metrics.get("discarded_samples", 0):
                 policy_status.filter_records["rollout_failed"] = (

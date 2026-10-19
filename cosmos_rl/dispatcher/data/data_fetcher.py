@@ -130,6 +130,7 @@ class ControllerDataFetcher(DataFetcherBase):
                 "Controller resume adapters require controller-owned sampling"
             )
         self.epoch = 1
+        self.train_iterator_exhausted = False
         self.remain_samples_num = -1
         self.sampler = sampler
         self.batch_sampler = batch_sampler
@@ -514,6 +515,29 @@ class ControllerDataFetcher(DataFetcherBase):
 
         validate_resume_metadata(self.ckpt_extra_info, ckpt_extra_info)
 
+    def prune_rank_prompt_capacity(self, before_version):
+        """Completed versions cannot consume another prompt slot."""
+        for version in list(self.data_fetched_for_each_policy_at_step):
+            if version < before_version:
+                del self.data_fetched_for_each_policy_at_step[version]
+        losses = getattr(self, "_rank_discarded_samples", {})
+        for key in list(losses):
+            if key[0] < before_version:
+                del losses[key]
+
+    def reopen_rank_prompt_capacity(
+        self, weight_version, policy_rank, discarded_samples
+    ):
+        """Round losses per destination queue, never across policy replicas."""
+        losses = getattr(self, "_rank_discarded_samples", None)
+        if losses is None:
+            losses = self._rank_discarded_samples = {}
+        key = (weight_version, policy_rank)
+        before = losses.get(key, 0)
+        losses[key] = before + discarded_samples
+        group = self.config.rollout.n_generation
+        return math.ceil(losses[key] / group) - math.ceil(before / group)
+
     def get_batched_prompt(
         self,
         n: int,
@@ -538,12 +562,28 @@ class ControllerDataFetcher(DataFetcherBase):
         weight_version = None if is_validation else weight_version
 
         rank_dispatch = self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+
+        def quota_for(rank):
+            losses = getattr(self, "_rank_discarded_samples", {})
+            return prompt_batch_per_replica + math.ceil(
+                losses.get((weight_version, rank), 0) / self.config.rollout.n_generation
+            )
+
         if rank_dispatch:
             if (
                 rank_in_mesh is None
                 or not 0 <= rank_in_mesh < self.rollout_global_mesh_size
             ):
                 raise ValueError("rank_in_mesh must identify an active rollout rank")
+            if (
+                not is_validation
+                and getattr(self, "train_iterator_exhausted", False)
+                and not any(
+                    index % self.rollout_global_mesh_size == rank_in_mesh
+                    for index, _ in self.fetched_data_buffer
+                )
+            ):
+                return [], True
             if weight_version is not None:
                 # An index assigned to rollout rank r can reach only policy
                 # ranks congruent to r modulo gcd(rollout_size, policy_size).
@@ -553,7 +593,7 @@ class ControllerDataFetcher(DataFetcherBase):
                 )
                 counts = self.data_fetched_for_each_policy_at_step[weight_version]
                 capacity = sum(
-                    max(0, prompt_batch_per_replica - counts.get(rank, 0))
+                    max(0, quota_for(rank) - counts.get(rank, 0))
                     for rank in range(
                         rank_in_mesh % stride, self.policy_global_mesh_size, stride
                     )
@@ -610,7 +650,7 @@ class ControllerDataFetcher(DataFetcherBase):
                         or self.data_fetched_for_each_policy_at_step[
                             weight_version
                         ].get(data[0] % self.policy_global_mesh_size, 0)
-                        < prompt_batch_per_replica
+                        < quota_for(data[0] % self.policy_global_mesh_size)
                     ):
                         payloads_list.append(data[1])
                         if weight_version is not None:
@@ -637,6 +677,14 @@ class ControllerDataFetcher(DataFetcherBase):
             if rank_dispatch
             else math.ceil(n / batch_size)
         )
+        if (
+            rank_dispatch
+            and not is_validation
+            and getattr(self, "train_iterator_exhausted", False)
+        ):
+            # Only buffered rows remain. Do not advance epochs on every poll.
+            pulls_left = 0
+            is_end = True
         while n - len(payloads_list) > 0 and pulls_left > 0:
             for _ in range(math.ceil(n / batch_size)):
                 if pulls_left <= 0:
@@ -666,6 +714,7 @@ class ControllerDataFetcher(DataFetcherBase):
                                     "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
                                 )
                             is_end = True
+                            self.train_iterator_exhausted = True
                             break
                     else:
                         is_end = True
@@ -692,7 +741,7 @@ class ControllerDataFetcher(DataFetcherBase):
                                 or self.data_fetched_for_each_policy_at_step[
                                     weight_version
                                 ].get(idx % self.policy_global_mesh_size, 0)
-                                < prompt_batch_per_replica
+                                < quota_for(idx % self.policy_global_mesh_size)
                             )
                             and len(payloads_list) < n
                         ):
@@ -718,8 +767,11 @@ class ControllerDataFetcher(DataFetcherBase):
                 break
         # For data_dispatch_as_rank_in_mesh, we only allow is_end to be True when there is no more data suitable for current rank_in_mesh.
         is_end = is_end and (
-            len(fetched_data_buffer) == 0
-            or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
+            not rank_dispatch
+            or not any(
+                index % self.rollout_global_mesh_size == rank_in_mesh
+                for index, _ in fetched_data_buffer
+            )
         )
         if is_validation:
             self.fetched_data_buffer_for_validation = fetched_data_buffer

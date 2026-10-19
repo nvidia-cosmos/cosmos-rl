@@ -339,9 +339,7 @@ class PolicyStatusManager:
         self.samples_on_the_fly = 0
         self._applied_discard_report_ids: Dict[str, OrderedDict[str, None]] = {}
         # Set by the controller; see ``set_discard_refill_hook``.
-        self._discard_refill_hook: Optional[
-            Callable[[int, int, Optional[str]], int]
-        ] = None
+        self._discard_refill_hook: Optional[Callable[..., int]] = None
         self._applied_completion_admission_report_ids: Dict[
             str, OrderedDict[str, None]
         ] = {}
@@ -1541,6 +1539,14 @@ class PolicyStatusManager:
             self.current_step + self.total_pending_rollouts() // required_rollouts + 1
         )
 
+    def pending_rank_training_batches(self) -> int:
+        """Only a balanced set of queues advances rank-affine prompt versions."""
+        reserved = len(self._payload_lookahead[2]) if self._payload_lookahead else 0
+        batch = self.config.train.train_batch_per_replica
+        return reserved // (batch * max(len(self.rollout_buffer_per_rank), 1)) + min(
+            (q.qsize() // batch for q in self.rollout_buffer_per_rank), default=0
+        )
+
     @staticmethod
     def _parse_non_negative_count(metrics: Dict[str, Any], key: str) -> int:
         value = metrics.get(key, 0)
@@ -1571,6 +1577,7 @@ class PolicyStatusManager:
         source: str,
         weight_version: Optional[int] = None,
         report_id: Optional[str] = None,
+        policy_rank: Optional[int] = None,
     ) -> None:
         """Release ``count`` reserved samples, optionally reopening a prompt slot.
 
@@ -1600,6 +1607,7 @@ class PolicyStatusManager:
                 count=count,
                 source=source,
                 report_id=report_id,
+                policy_rank=policy_rank,
             )
         elif source not in _INTERNAL_SETTLEMENT_SOURCES:
             self._warn_settlement_without_weight_version(source, count)
@@ -1628,6 +1636,7 @@ class PolicyStatusManager:
         count: int,
         source: str,
         report_id: Optional[str],
+        policy_rank: Optional[int] = None,
     ) -> None:
         hook = getattr(self, "_discard_refill_hook", None)
         if hook is None:
@@ -1641,11 +1650,12 @@ class PolicyStatusManager:
                 weight_version,
             )
             return
-        hook(weight_version, count, report_id)
+        if policy_rank is None:
+            hook(weight_version, count, report_id)
+        else:
+            hook(weight_version, count, report_id, policy_rank=policy_rank)
 
-    def set_discard_refill_hook(
-        self, hook: Optional[Callable[[int, int, Optional[str]], int]]
-    ) -> None:
+    def set_discard_refill_hook(self, hook: Optional[Callable[..., int]]) -> None:
         """Register the controller callback that reopens prompt capacity.
 
         Settling a terminal discard frees samples but not the prompt-version
@@ -1662,6 +1672,7 @@ class PolicyStatusManager:
         report_id: Any,
         count: int,
         weight_version: Optional[int] = None,
+        policy_rank: Optional[int] = None,
     ) -> int:
         """Settle one idempotent report of terminally discarded samples.
 
@@ -1700,6 +1711,7 @@ class PolicyStatusManager:
             "rollout_failure",
             weight_version=weight_version,
             report_id=report_id if isinstance(report_id, str) else None,
+            policy_rank=policy_rank,
         )
         if weight_version is None:
             logger.warning(
@@ -1958,6 +1970,16 @@ class PolicyStatusManager:
         filtered_rollouts = []
         accepted_staleness: List[int] = []
         discarded_staleness: List[int] = []
+        rank_pending = None
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            reserved_per_rank = (
+                self.config.train.train_batch_per_replica
+                if self._payload_lookahead
+                else 0
+            )
+            rank_pending = [
+                q.qsize() + reserved_per_rank for q in self.rollout_buffer_per_rank
+            ]
         for idx, rollout in enumerate(rollouts):
             assert rollout.weight_version <= self.current_step, (
                 f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
@@ -1976,10 +1998,18 @@ class PolicyStatusManager:
                 self.config.train.train_batch_per_replica
                 * max(len(self.get_all_atoms_arrived_replicas()), 1)
             )
+            if rank_pending is not None:
+                target = rollout.prompt_idx % len(rank_pending)
+                estimated_step = (
+                    self.current_step
+                    + rank_pending[target] // self.config.train.train_batch_per_replica
+                )
             staleness = estimated_step - rollout.weight_version
             if staleness <= allowed_outdated_steps:
                 filtered_rollouts.append(rollout)
                 accepted_staleness.append(staleness)
+                if rank_pending is not None:
+                    rank_pending[target] += 1
             else:
                 discarded_staleness.append(staleness)
                 logger.debug(
@@ -3273,7 +3303,19 @@ class RolloutStatusManager:
         """Retire only unreported slots, never buffered/dispatched payloads."""
         ledger = replica.producer_reservations
         try:
-            for version, count in ledger.retire().items():
+            rank_counts = ledger.outstanding_rank_counts()
+            counts = ledger.retire()
+            if rank_counts:
+                for (version, rank), count in rank_counts.items():
+                    policy_status_manager.settle_discarded_samples(
+                        source_replica=replica.name,
+                        report_id=f"producer-retired:{ledger.incarnation}:{version}:{rank}",
+                        count=count,
+                        weight_version=version,
+                        policy_rank=rank,
+                    )
+                    counts[version] -= count
+            for version, count in counts.items():
                 policy_status_manager.settle_discarded_samples(
                     source_replica=replica.name,
                     report_id=f"producer-retired:{ledger.incarnation}:{version}",
