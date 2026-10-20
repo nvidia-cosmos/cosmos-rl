@@ -38,10 +38,8 @@ def _training_payload_from_rollouts(
     admission = rollout_group.completion_admission
     assert admission is not None
     selected = select_payload_completions(source_payload, admission)
-    if not admission.explicit:
-        # Preserve the historical local-reward payload shape when no producer
-        # opts into admission. The old reconstruction did not forward extra_info.
-        selected.extra_info = None
+    # extra_info travels with the payload whether or not the producer opted into
+    # admission; custom controllers and trainers read per-rollout metadata from it.
     selected.reference_answer = None
     selected.valid = valid
     selected.completions = [rollout.completion for rollout in rollouts]
