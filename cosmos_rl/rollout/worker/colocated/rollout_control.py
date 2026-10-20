@@ -149,7 +149,11 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             num_valid_results (int): Number of valid results generated in this step.
         """
 
-        no_more_prompts = self.request_new_prompts(self.batch_size, self._prompt_queue)
+        no_more_prompts = self.request_new_prompts(
+            self.batch_size,
+            self._prompt_queue,
+            rank_in_mesh=getattr(self, "rank_in_rollout_repicas", None),
+        )
         # A final ragged scatter can leave a DP rank with no prompts. Never
         # invoke the backend on only part of its collective cohort (or enqueue
         # an empty list as a real generation batch).

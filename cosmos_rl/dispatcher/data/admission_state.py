@@ -113,7 +113,15 @@ class CompletionAdmissionState:
             )
         return window, all_ids, decisions, closed, late_payloads
 
-    def settle(self, controller, request, plan, *, requested_versions=None):
+    def settle(
+        self,
+        controller,
+        request,
+        plan,
+        *,
+        requested_versions=None,
+        requested_policy_ranks=None,
+    ):
         """Use existing cleanup, settlement and versioned refill mechanisms.
 
         An infrastructure exception after mutations poisons this instance;
@@ -154,6 +162,16 @@ class CompletionAdmissionState:
                                     identity.reservation.slot,
                                 )
                             ]
+                        ),
+                        policy_rank=(
+                            requested_policy_ranks.get(
+                                (
+                                    identity.reservation.work_id,
+                                    identity.reservation.slot,
+                                )
+                            )
+                            if requested_policy_ranks is not None
+                            else None
                         ),
                     )
                 # Bounded metric cardinality: application diagnostics remain

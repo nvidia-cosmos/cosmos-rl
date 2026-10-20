@@ -156,6 +156,7 @@ run python -m pytest -q tests/test_receive_memory.py tests/test_receive_memory_c
 run python -m pytest -q tests/test_receive_rejection_outcomes.py
 if python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() >= 2 else 1)'; then
     run torchrun --standalone --nproc-per-node=2 tests/receive_outcome_canary.py
+    run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend nccl
 else
     echo "SKIP: receive outcome canary requires two CUDA devices"
     SKIPPED+=("tests/receive_outcome_canary.py [requires two CUDA devices]")
@@ -272,6 +273,8 @@ run python -m pytest -q tests/test_objective_weighting.py tests/test_vla_objecti
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_rollout_mesh_retirement.py tests/test_weight_sync_rebuild_safety.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
 run python -m pytest -q tests/test_dispatch_fetch_bounds.py
+run python -m pytest -q tests/test_rank_dispatch_refill.py
+run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend gloo
 run python -m pytest -q tests/test_dispatch_failure_reporting.py
 run python -m pytest -q tests/test_dispatch_publication.py
 run python -m pytest -q tests/test_dispatch_accounting.py

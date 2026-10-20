@@ -27,6 +27,8 @@ class ReportReservations:
     ownership: ReservationPlan
     rejected_version_counts: tuple[tuple[int, int], ...]
     requested_versions: dict[tuple[str, int], int]
+    requested_policy_ranks: dict[tuple[str, int], int | None]
+    rejected_rank_counts: tuple[tuple[int, int, int], ...]
 
 
 class ProducerReservations:
@@ -36,22 +38,31 @@ class ProducerReservations:
         self._revision = 0
         self._owner = object()
         self._work: dict[str, tuple[int, set[int]]] = {}
+        self._policy_ranks: dict[str, int] = {}
         self.retired = False
 
     @property
     def outstanding(self) -> int:
         return sum(len(slots) for _, slots in self._work.values())
 
-    def issue(self, requested_weight_version: int, count: int) -> str:
+    def issue(
+        self, requested_weight_version: int, count: int, *, policy_rank=None
+    ) -> str:
         if self.retired:
             raise ValueError("Cannot reserve work for a retired producer")
         if type(count) is not int or count < 1:
             raise ValueError("Reservation count must be a positive integer")
         if type(requested_weight_version) is not int or requested_weight_version < 0:
             raise ValueError("Reservation requires its original requested version")
+        if policy_rank is not None and (
+            type(policy_rank) is not int or policy_rank < 0
+        ):
+            raise ValueError("Reservation policy rank must be a nonnegative integer")
         work_id = f"{self.incarnation}:{self._next_work}"
         self._next_work += 1
         self._work[work_id] = (requested_weight_version, set(range(count)))
+        if policy_rank is not None:
+            self._policy_ranks[work_id] = policy_rank
         self._revision += 1
         return work_id
 
@@ -94,9 +105,12 @@ class ProducerReservations:
             pending.difference_update(slots)
             if not pending:
                 del self._work[work_id]
+                self._policy_ranks.pop(work_id, None)
         self._revision += 1
 
-    def prepare_report(self, request, *, application_plan=None, is_dapo=False):
+    def prepare_report(
+        self, request, *, application_plan=None, is_dapo=False, policy_size=None
+    ):
         """Bind report outcomes to owned work before legacy/application mutation.
 
         Application replay windows decide which identities are new; their
@@ -105,6 +119,13 @@ class ProducerReservations:
         """
         delivered = []
         for payload in request.payloads:
+            if (
+                policy_size is not None
+                and payload.training_work_id in self._work
+                and self._policy_ranks.get(payload.training_work_id)
+                != payload.prompt_idx % policy_size
+            ):
+                raise ValueError("Training payload changed its reserved policy rank")
             if (
                 payload.training_work_id is None
                 or payload.training_completion_slots is None
@@ -165,9 +186,35 @@ class ProducerReservations:
         rejected_counts = Counter(
             versions[(item.work_id, item.slot)] for item in rejected
         )
-        return ReportReservations(
-            plan, tuple(sorted(rejected_counts.items())), versions
+        ranks = {
+            (item.work_id, item.slot): self._policy_ranks.get(item.work_id)
+            for item in claims
+        }
+        if policy_size is not None and any(rank is None for rank in ranks.values()):
+            raise ValueError("Rank-dispatch reservation lacks its original policy rank")
+        rejected_ranks = Counter(
+            (versions[(item.work_id, item.slot)], ranks[(item.work_id, item.slot)])
+            for item in rejected
+            if ranks[(item.work_id, item.slot)] is not None
         )
+        return ReportReservations(
+            plan,
+            tuple(sorted(rejected_counts.items())),
+            versions,
+            ranks,
+            tuple(
+                (version, rank, count)
+                for (version, rank), count in sorted(rejected_ranks.items())
+            ),
+        )
+
+    def outstanding_rank_counts(self):
+        """Original queue affinity for producer-owned slots, before retirement."""
+        counts = Counter()
+        for work, (version, slots) in self._work.items():
+            if work in self._policy_ranks:
+                counts[(version, self._policy_ranks[work])] += len(slots)
+        return counts
 
     def retire(self) -> dict[int, int]:
         """Return unreported counts under their original requested versions once."""
@@ -177,6 +224,7 @@ class ProducerReservations:
         for version, slots in self._work.values():
             counts[version] += len(slots)
         self._work.clear()
+        self._policy_ranks.clear()
         self.retired = True
         self._revision += 1
         return dict(counts)

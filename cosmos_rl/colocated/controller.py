@@ -368,6 +368,14 @@ class ColocatedController(Controller):
                 if isinstance(cmd, TrainingCompleteCommand):
                     self.finish_requested_stop(cmd)
                     return False
+                if isinstance(cmd, BuildMeshCommand):
+                    # Colocated weights are shared locally, so no rollout
+                    # communicator is built. Prompt sharding still needs the
+                    # controller-assigned rollout topology before generation.
+                    self.rollout.rank_in_rollout_repicas = cmd.replica_name_to_rank[
+                        self.rollout.replica_name
+                    ]
+                    self.rollout.replica_name_to_rank = cmd.replica_name_to_rank
                 if isinstance(cmd, RolloutToRolloutBroadcastCommand):
                     break
             # Further trigger P2R & R2R commands locally
