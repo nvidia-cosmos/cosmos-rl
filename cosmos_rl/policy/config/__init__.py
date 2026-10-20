@@ -397,6 +397,20 @@ class GrpoConfig(BaseModel):
         description="Whether to dispatch data according to rank in global mesh. If True, each rank will get its specific data shard based on its rank in the global mesh.",
     )
 
+    dispatch_balance_key: Optional[str] = Field(
+        default=None,
+        description=(
+            "Balance the rollouts of each training step across data ranks by a per-rollout weight. "
+            "When set, the controller reads a non-negative number from "
+            "`rollout.extra_info[dispatch_balance_key]` and assigns the rollouts of each "
+            "training step to the data ranks so that the per-rank weight sums are as even as "
+            "possible; every rank still receives exactly the same number of rollouts. "
+            "Unset keeps FIFO round-robin dispatch. A rollout without the key or with a "
+            "non-numeric value counts as weight 0 and is logged once. "
+            "Cannot be combined with `data_dispatch_as_rank_in_mesh`."
+        ),
+    )
+
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",
@@ -722,6 +736,11 @@ class GrpoConfig(BaseModel):
                 "Uncentralized training is only suitable for GRPO, but the current variant is {}. Please make sure this is intended.".format(
                     self.variant
                 )
+            )
+        if self.dispatch_balance_key is not None and self.data_dispatch_as_rank_in_mesh:
+            raise ValueError(
+                "dispatch_balance_key balances the shared rollout queue and cannot be "
+                "combined with data_dispatch_as_rank_in_mesh"
             )
         return self
 

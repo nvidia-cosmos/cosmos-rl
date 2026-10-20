@@ -355,6 +355,7 @@ class PolicyStatusManager:
         self._payload_training_rollouts = ()
         self._payload_notifications = {}
         self._payload_dispatch_members = None
+        self._dispatch_balance_warned = False
         self.sft_ack_groups: OrderedDict[tuple[bool, int], TrainingDispatch] = (
             OrderedDict()
         )
@@ -2877,48 +2878,15 @@ class PolicyStatusManager:
                 notifications = {}
             if identity is None and self.config.mode != "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
-                if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-                    # Helper function to sort a queue by item.prompt_idx
-                    def sort_queue_by_prompt_idx(q):
-                        # Step 1: Extract all items
-                        items: List[Rollout] = []
-                        while not q.empty():
-                            items.append(q.get())
-
-                        # Step 2: Sort by prompt_idx
-                        items.sort(key=lambda item: item.prompt_idx)
-
-                        # Step 3: Put sorted items back
-                        for item in items:
-                            q.put(item)
-
-                    sorted_valid_replicas = sorted(
-                        arrived_replicas, key=lambda x: x.start_time
+                for replica, rollout in self._take_dispatch_rows(arrived_replicas):
+                    publications.append(
+                        (
+                            replica.name + "_rollout",
+                            "rollout",
+                            msgpack.packb(rollout.model_dump()),
+                        )
                     )
-                    for index, replica in enumerate(sorted_valid_replicas):
-                        sort_queue_by_prompt_idx(self.rollout_buffer_per_rank[index])
-                        for _ in range(items_count):
-                            rollout = self.rollout_buffer_per_rank[index].get()
-                            publications.append(
-                                (
-                                    replica.name + "_rollout",
-                                    "rollout",
-                                    msgpack.packb(rollout.model_dump()),
-                                )
-                            )
-                            rollouts_of_this_step.append(rollout)
-                else:
-                    for _ in range(items_count):
-                        for replica in arrived_replicas:
-                            rollout = self.rollout_buffer.get()
-                            publications.append(
-                                (
-                                    replica.name + "_rollout",
-                                    "rollout",
-                                    msgpack.packb(rollout.model_dump()),
-                                )
-                            )
-                            rollouts_of_this_step.append(rollout)
+                    rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             do_save = self.check_checkpoint_saving(required_rollouts)
@@ -3195,6 +3163,91 @@ class PolicyStatusManager:
             )
         )
 
+    def _take_dispatch_rows(self, replicas):
+        """Pop one training step of rollouts as ``(replica, rollout)`` rows.
+
+        Rows interleave replicas, so the ``k``-th row of a replica is its
+        ``k``-th published rollout and the policy worker hands it to data rank
+        ``k % dp_size``. The real dispatch and the payload lookahead both use
+        this one selection, so counts and accounting do not depend on the path.
+        """
+        count = self.config.train.train_batch_per_replica
+        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
+            rows = []
+            for index, replica in enumerate(
+                sorted(replicas, key=lambda r: r.start_time)
+            ):
+                queue = self.rollout_buffer_per_rank[index]
+                items = sorted(
+                    (queue.get_nowait() for _ in range(queue.qsize())),
+                    key=lambda r: r.prompt_idx,
+                )
+                for item in items[count:]:
+                    queue.put_nowait(item)
+                rows.extend((replica, rollout) for rollout in items[:count])
+            return rows
+        replicas = list(replicas)
+        taken = [self.rollout_buffer.get_nowait() for _ in range(count * len(replicas))]
+        key = getattr(self.config.train.train_policy, "dispatch_balance_key", None)
+        if key is None:
+            streams = [taken[index :: len(replicas)] for index in range(len(replicas))]
+        else:
+            streams = self._balance_dispatch_streams(replicas, taken, count, key)
+        return [
+            (replica, streams[index][position])
+            for position in range(count)
+            for index, replica in enumerate(replicas)
+        ]
+
+    def _balance_dispatch_streams(self, replicas, rollouts, count, key):
+        """Order ``rollouts`` into per-replica streams with even per-rank weight.
+
+        Every ``(replica, data rank)`` slot receives exactly ``count // dp_size``
+        rollouts. Heavier rollouts are placed first, each on the slot with the
+        smallest weight sum that still has room; equal weights keep arrival order.
+        """
+        slots = []  # (replica index, data rank, dp size)
+        for index, replica in enumerate(replicas):
+            dp_size = replica.data_rank_count()
+            if count % dp_size:
+                raise ValueError(
+                    f"train_batch_per_replica ({count}) must be divisible by the "
+                    f"data-parallel size ({dp_size}) of replica {replica.name}"
+                )
+            slots.extend((index, rank, dp_size) for rank in range(dp_size))
+        assigned = {slot: [] for slot in slots}
+        load = dict.fromkeys(slots, 0.0)
+        weights = [self._dispatch_weight(rollout, key) for rollout in rollouts]
+        for i in sorted(range(len(rollouts)), key=lambda i: (-weights[i], i)):
+            slot = min(
+                (slot for slot in slots if len(assigned[slot]) < count // slot[2]),
+                key=load.__getitem__,
+            )
+            load[slot] += weights[i]
+            assigned[slot].append(rollouts[i])
+        streams = [[None] * count for _ in replicas]
+        for (index, rank, dp_size), rollouts_of_slot in assigned.items():
+            for turn, rollout in enumerate(rollouts_of_slot):
+                streams[index][rank + turn * dp_size] = rollout
+        return streams
+
+    def _dispatch_weight(self, rollout, key):
+        value = (rollout.extra_info or {}).get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            return float(value)
+        if not self._dispatch_balance_warned:
+            self._dispatch_balance_warned = True
+            logger.warning(
+                f"[Controller] Rollout with prompt_idx={rollout.prompt_idx} has no "
+                f"non-negative numeric extra_info[{key!r}]; such rollouts count as "
+                "weight 0 for dispatch balancing (logged once)"
+            )
+        return 0.0
+
     def _reserve_payload_lookahead(self, replicas, publications):
         from cosmos_rl.policy.trainer.prefetch import prefetch_fallback_reason
 
@@ -3212,24 +3265,7 @@ class PolicyStatusManager:
         self._revalidate_rollouts_before_dispatch()
         if not self.rollouts_enough_for_one_step():
             return None
-        count = self.config.train.train_batch_per_replica
-        rows = []
-        if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
-            for index, replica in enumerate(
-                sorted(replicas, key=lambda r: r.start_time)
-            ):
-                queue = self.rollout_buffer_per_rank[index]
-                items = sorted(
-                    (queue.get_nowait() for _ in range(queue.qsize())),
-                    key=lambda r: r.prompt_idx,
-                )
-                for item in items[count:]:
-                    queue.put_nowait(item)
-                rows.extend((replica, rollout) for rollout in items[:count])
-        else:
-            for _ in range(count):
-                for replica in replicas:
-                    rows.append((replica, self.rollout_buffer.get_nowait()))
+        rows = self._take_dispatch_rows(replicas)
         identity = uuid.uuid4().hex
         self._payload_lookahead = (
             identity,
