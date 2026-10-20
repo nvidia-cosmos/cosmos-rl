@@ -18,6 +18,7 @@ import socket
 import threading
 import time
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
@@ -189,8 +190,11 @@ def main():
     status.total_steps = 1
     status.training_dispatches[1].total_steps = 1
     status.config.train.train_batch_per_replica = 16
-    status.training_dispatches[1].rollout_count = 32
-    status.dispatched_rollouts_by_step[1] = 32
+    # Initial colocated dispatch precedes prompt fetch and has no reservation.
+    # The preparation agreement must bind the subsequently fetched prompts.
+    status.training_dispatches[1].rollout_count = 0
+    status.dispatched_rollouts_by_step[1] = 0
+    status.training_dispatches[1].colocated_fetched_rollouts = 32
     status.samples_on_the_fly = 32
     run_web_panel.controller = NS(
         life_cycle_lock=asyncio.Lock(), policy_status_manager=status
@@ -249,6 +253,17 @@ def main():
             assert status.current_step == (0 if stopped else 1)
             assert bool(status.stop_reason) == stopped
             assert bool(status.dispatched_rollouts_by_step) != stopped
+            if not stopped:
+                # Every worker's real gradient update and resulting weight were
+                # checked above before reporting successful training receipts.
+                status.try_trigger_data_fetch_and_training = Mock()
+                rollouts = Mock()
+                status.train_ack("policy-0", 1, 1, False, {}, rollouts)
+                assert status.samples_on_the_fly == 32
+                status.train_ack("policy-1", 1, 1, False, {}, rollouts)
+            assert status.training_dispatches[1].settled
+            assert not status.dispatched_rollouts_by_step
+            assert status.samples_on_the_fly == 0
             print(
                 json.dumps(
                     {

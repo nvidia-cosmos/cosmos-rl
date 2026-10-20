@@ -140,6 +140,20 @@ current and next reservation IDs. A completed command may contain multiple
 optimizer calls, or none under an existing agreed skip policy. Do not equate
 admissions or command count with useful optimizer work.
 
+NCCL and UCXX periodic and final transport totals account for each successful
+background fetch, including managed prepared batches. Payload counts and bytes
+describe the native receive results, not the number of distinct cache keys or
+optimizer updates. Fetch latency excludes subsequent CPU batch preparation.
+The legacy completion hook remains available, but cache promotion does not
+count the same transfer again. Failed fetches are not counted as completed
+batches; successful receives still count if later preparation fails.
+
+On checkpoint resume, the initial policy-to-rollout transfer carries the
+controller's restored weight version, regardless of registration order. The
+rollout must adopt that version along with the weights before serving resumed
+prompts; a singleton asynchronous rollout cannot rely on a later native R2R
+broadcast to correct an unversioned bootstrap transfer.
+
 `tests/trainer_prefetch_payload_canary.py` runs matched OFF/ON/barrier controls
 through the stock controller, background readers and worker with real NCCL or
 UCXX payloads and SGD. The next batch is released only after current training

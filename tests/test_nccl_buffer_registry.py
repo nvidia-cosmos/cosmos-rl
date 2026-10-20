@@ -22,6 +22,7 @@ and eviction are all exercised without a GPU.
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from cosmos_rl.utils.payload_transport.nccl.buffer_registry import SendBufferRegistry
 
@@ -152,6 +153,11 @@ class _DoneEvent:
         return self._drained
 
 
+class _AsyncDoneEvent(threading.Event):
+    def query(self):
+        return self.is_set()
+
+
 class TestReapCompleted(unittest.TestCase):
     """Delivered buffers (done_event fired) are retired under capacity
     pressure BEFORE blocking/evicting -- so a healthy run never hits the
@@ -200,6 +206,123 @@ class TestReapCompleted(unittest.TestCase):
         self.assertEqual(freed, ["t0"])
         self.assertIn("t1", reg)
         self.assertIn("t2", reg)
+
+
+class TestCompletionWhileBlocked(unittest.TestCase):
+    """Completion must release backpressure without waiting for eviction."""
+
+    def _start_publisher(self, reg):
+        waiting = threading.Event()
+        finished = threading.Event()
+        original_wait = reg._not_full.wait
+
+        def observed_wait(timeout=None):
+            waiting.set()
+            return original_wait(timeout)
+
+        reg._not_full.wait = observed_wait
+
+        def publish():
+            reg.register("next", object())
+            finished.set()
+
+        thread = threading.Thread(target=publish, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2.0)
+        # Unblock the test thread even on the unfixed implementation.
+        self.addCleanup(reg.free, "current")
+        self.assertTrue(waiting.wait(1.0), "publisher never reached capacity wait")
+        return finished
+
+    def _registry(self):
+        freed = []
+
+        def on_free(entry):
+            # Callbacks must remain outside the registry lock.
+            freed.append((entry.transfer_id, reg.stats()["live"]))
+
+        reg = SendBufferRegistry(capacity=1, block_timeout=5.0, on_free=on_free)
+        reg.register("current", object())
+        entry = reg.acquire("current")
+        return reg, entry, freed
+
+    def _assert_reaped(self, reg, finished, freed):
+        self.assertTrue(finished.wait(1.0), "completed send did not wake publisher")
+        self.assertEqual(freed, [("current", 1)])
+        self.assertEqual(reg.stats()["evicted"], 0)
+        self.assertIn("next", reg)
+
+    def test_recording_already_fired_event_wakes_publisher(self):
+        reg, entry, freed = self._registry()
+        finished = self._start_publisher(reg)
+        reg.add_done_event(entry, _DoneEvent(True))
+        self._assert_reaped(reg, finished, freed)
+
+    def test_event_firing_after_recording_needs_no_further_registry_call(self):
+        reg, entry, freed = self._registry()
+        event = _AsyncDoneEvent()
+        reg.add_done_event(entry, event)
+        finished = self._start_publisher(reg)
+        self.assertFalse(finished.wait(0.1))
+        self.assertEqual(freed, [])
+        event.set()  # CUDA event completion does not notify a Python condition.
+        self._assert_reaped(reg, finished, freed)
+
+    def test_all_receiver_events_and_leases_must_finish(self):
+        reg, entry, freed = self._registry()
+        self.assertIs(reg.acquire("current"), entry)
+        reg.add_done_event(entry, _DoneEvent(True))
+        finished = self._start_publisher(reg)
+        self.assertFalse(finished.wait(0.1), "one receiver still holds a lease")
+        second_done = _AsyncDoneEvent()
+        reg.add_done_event(entry, second_done)
+        self.assertFalse(finished.wait(0.1), "second receiver event is pending")
+        self.assertEqual(freed, [])
+        second_done.set()
+        self._assert_reaped(reg, finished, freed)
+
+    def test_abandoned_last_lease_unblocks_previously_completed_send(self):
+        reg, entry, freed = self._registry()
+        reg.acquire("current")
+        reg.add_done_event(entry, _DoneEvent(True))
+        finished = self._start_publisher(reg)
+        reg.abandon_inflight(entry)
+        self._assert_reaped(reg, finished, freed)
+
+    def test_real_cuda_event_unblocks_publisher(self):
+        import torch
+
+        if not torch.cuda.is_available():
+            self.skipTest("requires a real CUDA event")
+        torch.cuda.set_device(0)
+        reg, entry, freed = self._registry()
+        finished = self._start_publisher(reg)
+        stream = torch.cuda.Stream()
+        event = torch.cuda.Event()
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(100_000_000)
+            event.record()
+        reg.add_done_event(entry, event)
+        self._assert_reaped(reg, finished, freed)
+        self.assertTrue(event.query())
+
+    def test_spurious_wakeups_do_not_extend_eviction_deadline(self):
+        reg = SendBufferRegistry(capacity=1, block_timeout=0.12)
+        reg.register("unsent", object())
+        now = [0.0]
+
+        def spurious_wait(timeout):
+            now[0] += min(timeout, 0.01)
+
+        reg._not_full.wait = spurious_wait
+        with patch(
+            "cosmos_rl.utils.payload_transport.nccl.buffer_registry.time.monotonic",
+            side_effect=lambda: now[0],
+        ):
+            reg.register("next", object())
+        self.assertAlmostEqual(now[0], 0.12)
+        self.assertEqual(reg.stats()["evicted"], 1)
+        self.assertNotIn("unsent", reg)
 
 
 class TestSendDrained(unittest.TestCase):

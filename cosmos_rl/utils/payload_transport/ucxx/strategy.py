@@ -259,6 +259,7 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         Called by the base mixin's worker loop.  Returns
         ``{cache_key: gpu_data}``.
         """
+        fetch_start = get_trace_time()
         validated_tasks = [
             (idx, _validate_ucxx_reference(metadata)) for idx, metadata in tasks
         ]
@@ -285,15 +286,13 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
             raw_results.update(cache_results)
             cache_results = raw_results
 
-        # Stash for _on_prefetch_complete (called from the trainer
-        # thread once wait_prefetch drains the result queue).  We
-        # intentionally don't accumulate counters here -- the base
-        # mixin guarantees _on_prefetch_complete sees exactly the
-        # results from this batch.
+        # Retain last-fetch diagnostics, but account from local figures now.
+        # Managed preparation does not run the legacy cache-promotion hook.
         self._last_bytes = total_bytes
         self._last_transfer_ms = transfer_ms
         self._last_copy_ms = copy_ms
         self._last_count = ucxx_count
+        self._record_fetch(ucxx_count, total_bytes, get_trace_time() - fetch_start)
 
         # Decoupled trace event (actual I/O timestamps from the bg thread,
         # not the trainer's wait_prefetch).
@@ -335,13 +334,14 @@ class UCXXTransportStrategy(PayloadTransportStrategy):
         fetch_ms: float,
         step: int,
     ) -> None:
-        """Accumulate UCXX-specific stats; emit periodic INFO summaries."""
-        # Batch's own figures, set by fetch_batch -- not n_results, which the
-        # base passes as len(self._prefetch_cache) and would over-count.
-        self._total_ucxx += self._last_count
-        self._total_bytes += self._last_bytes
+        """Keep the legacy hook; fetch completion already accounted for I/O."""
+
+    def _record_fetch(self, count: int, nbytes: int, fetch_ms: float) -> None:
+        self._total_ucxx += count
+        self._total_bytes += nbytes
         self._total_latency_ms += fetch_ms
-        self._steps = step
+        self._steps += 1
+        step = self._steps
         if step == 1 or step % _LOG_INTERVAL == 0:
             avg_ms = self._total_latency_ms / step
             logger.info(

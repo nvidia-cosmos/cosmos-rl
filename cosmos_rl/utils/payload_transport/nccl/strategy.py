@@ -353,6 +353,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
     def fetch_batch(self, tasks: List[Any]) -> Dict[str, Any]:
         """Resolve a batch of NCCL references via rendezvous + standalone per-pair recvs."""
+        fetch_start = get_trace_time()
         refs: List[Tuple[Any, dict]] = []
         rejected = set()
         keys_by_idx = {}
@@ -373,6 +374,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 ) from error
 
         results, total_bytes, transfer_ms = self._fetch_all(refs)
+        received_count = len(results)
         if self._receive_budget is not None and not isinstance(results, ReceivedBatch):
             # An all-rejected batch has no tensor reservation, but still owns
             # explicit outcomes until its consumer releases the batch.
@@ -394,13 +396,14 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             cache_results = results
 
         self._last_bytes = total_bytes
-        self._last_count = len(results)
+        self._last_count = received_count
+        self._record_fetch(received_count, total_bytes, get_trace_time() - fetch_start)
         if results:
             logger.debug(
                 "[Trace] thread=nccl_prefetch op=nccl_fetch transfer_ms=%.1f "
                 "count=%d bytes=%d",
                 transfer_ms,
-                len(results),
+                received_count,
                 total_bytes,
             )
         return cache_results
@@ -469,13 +472,16 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
     def on_prefetch_complete(
         self, batch_id: int, n_results: int, fetch_ms: float, step: int
     ) -> None:
-        # These are the batch's own figures, set by fetch_batch. Do NOT fall
-        # back to n_results: the base passes len(self._prefetch_cache), i.e.
-        # the whole double-buffered cache, which over-counts every step.
-        self._total_nccl += self._last_count
-        self._total_bytes += self._last_bytes
+        """Keep the legacy hook; fetch completion already accounted for I/O."""
+
+    def _record_fetch(self, count: int, nbytes: int, fetch_ms: float) -> None:
+        # The worker owns accounting, using this fetch's local figures. Cache
+        # promotion may happen later, after another fetch, or not at all.
+        self._total_nccl += count
+        self._total_bytes += nbytes
         self._total_latency_ms += fetch_ms
-        self._steps = step
+        self._steps += 1
+        step = self._steps
         if step == 1 or step % _LOG_INTERVAL == 0:
             avg_ms = self._total_latency_ms / step
             logger.info(

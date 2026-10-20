@@ -27,6 +27,14 @@ payloads already carry group-derived advantages. Controller extraction rejects
 an unconsumed mask instead of silently training it or filtering too late.
 Late staleness and terminal-job cleanup remain separate lifecycle decisions.
 
+For step-bounded runs with validation, sampler exhaustion is not a prerequisite
+for terminal cleanup. The controller closes admission and releases buffered tail
+payloads after the final dispatch's sealed ACK set and final validation round
+are complete, with no outstanding dispatch, active validation iterator or
+payload lookahead. A missing training ACK cannot be replaced by live READY
+status or a completed validation receipt. No extra synthetic training step is
+issued to finish this path.
+
 Colocated workers inherit the same producer and reward implementation. Their
 controller queues only selected completions, aggregates numeric telemetry, and
 does not sum routing IDs or originating weight versions. Both centralized and

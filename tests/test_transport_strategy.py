@@ -353,14 +353,7 @@ def _cfg():
 
 
 class TestStrategyTelemetryCountsTheBatch(unittest.TestCase):
-    """The real strategies must accumulate the BATCH's figures.
-
-    `on_prefetch_complete` receives `n_results`, which the base passes as
-    `len(self._prefetch_cache)` -- the whole double-buffered cache, not this
-    batch. Accumulating that over-counts every step, and reading a byte total
-    that was never set silently reports 0.0 MB forever. Both are invisible
-    unless something asserts on the counters, so this does.
-    """
+    """Count actual fetches, not later cache promotions or preparation work."""
 
     def _nccl(self):
         from cosmos_rl.utils.payload_transport.nccl.strategy import (
@@ -374,36 +367,166 @@ class TestStrategyTelemetryCountsTheBatch(unittest.TestCase):
             UCXXTransportStrategy,
         )
 
-        return UCXXTransportStrategy()
+        strategy = UCXXTransportStrategy()
+        self.addCleanup(strategy.shutdown)
+        return strategy
+
+    def _batch(self, strategy, sizes):
+        """Real reference validation/mapping, with only native I/O mocked."""
+        import torch
+        from cosmos_rl.utils.payload_transport.layout import WIRE_VERSION
+
+        data = {
+            index: {"tensor": torch.zeros(size, dtype=torch.uint8)}
+            for index, size in enumerate(sizes)
+        }
+        rollouts = []
+        for index in range(len(sizes)):
+            reference = {
+                "_wire_version": WIRE_VERSION,
+                "_layout_id": "a" * 32,
+                "_sender_incarnation": "test-incarnation",
+            }
+            if type(strategy).__name__ == "NCCLTransportStrategy":
+                reference.update(
+                    _nccl=True,
+                    _transfer_id=f"0:telemetry-{index}",
+                    _rollout_idx=0,
+                    _sender_rank=0,
+                    _sender_replica="producer",
+                )
+            else:
+                reference.update(
+                    _ucxx=True,
+                    _worker_ip="localhost",
+                    _ucxx_port=1234,
+                    _slot=index,
+                    _slot_generation=1,
+                )
+            rollouts.append(reference)
+        if type(strategy).__name__ == "NCCLTransportStrategy":
+            strategy._resolve_layout = unittest.mock.Mock(return_value=object())
+            strategy._fetch_all = unittest.mock.Mock(
+                return_value=(data, sum(sizes), 5.0)
+            )
+        else:
+            strategy._fetch_all = unittest.mock.AsyncMock(return_value=(data, 5.0, 2.0))
+        return rollouts
+
+    def _fetch(self, strategy, sizes, duration=12.0):
+        rollouts = self._batch(strategy, sizes)
+        with unittest.mock.patch(
+            type(strategy).__module__ + ".get_trace_time",
+            side_effect=[100.0, 100.0 + duration],
+        ):
+            strategy.fetch_batch(strategy.filter_prefetch_tasks(rollouts))
+
+    def _totals(self, strategy):
+        count = getattr(strategy, "_total_nccl", getattr(strategy, "_total_ucxx", 0))
+        return count, strategy._total_bytes, strategy._total_latency_ms, strategy._steps
 
     def test_nccl_totals_track_the_batch_not_the_cache(self):
         s = self._nccl()
-        s._last_count, s._last_bytes = 3, 4096
+        self._fetch(s, [2048, 1024, 1024])
         # n_results is deliberately larger: it is the cache size, not the batch.
         s.on_prefetch_complete(batch_id=1, n_results=50, fetch_ms=12.0, step=1)
-        self.assertEqual(s._total_nccl, 3)
-        self.assertEqual(s._total_bytes, 4096)
+        self.assertEqual(self._totals(s), (3, 4096, 12.0, 1))
 
-        s._last_count, s._last_bytes = 2, 1024
+        self._fetch(s, [512, 512], duration=8.0)
         s.on_prefetch_complete(batch_id=2, n_results=50, fetch_ms=8.0, step=2)
-        self.assertEqual(s._total_nccl, 5)
-        self.assertEqual(s._total_bytes, 5120)
+        self.assertEqual(self._totals(s), (5, 5120, 20.0, 2))
 
     def test_ucxx_totals_track_the_batch_not_the_cache(self):
         s = self._ucxx()
-        s._last_count, s._last_bytes = 3, 4096
+        self._fetch(s, [2048, 1024, 1024])
         s.on_prefetch_complete(batch_id=1, n_results=50, fetch_ms=12.0, step=1)
-        self.assertEqual(s._total_ucxx, 3)
-        self.assertEqual(s._total_bytes, 4096)
+        self.assertEqual(self._totals(s), (3, 4096, 12.0, 1))
 
     def test_bytes_are_not_silently_zero(self):
         """The failure mode was a byte total that never left 0."""
         for s in (self._nccl(), self._ucxx()):
-            s._last_count, s._last_bytes = 1, 8192
+            self._fetch(s, [8192])
             s.on_prefetch_complete(batch_id=1, n_results=1, fetch_ms=1.0, step=1)
             self.assertGreater(
                 s._total_bytes, 0, f"{type(s).__name__} reported 0 bytes"
             )
+
+    def test_delayed_or_repeated_legacy_hooks_cannot_count_another_fetch(self):
+        for s in (self._nccl(), self._ucxx()):
+            self._fetch(s, [1024], duration=3.0)
+            self._fetch(s, [2048, 2048], duration=7.0)
+            # The latest diagnostics are not the earlier batch's statistics.
+            s._last_count, s._last_bytes = 999, 999999
+            for _ in range(2):
+                s.on_prefetch_complete(1, 50, 500.0, 1)
+            self.assertEqual(self._totals(s), (3, 5120, 10.0, 2))
+
+    def test_failed_fetch_is_not_a_completed_batch(self):
+        for s in (self._nccl(), self._ucxx()):
+            rollouts = self._batch(s, [1024])
+            s._fetch_all.side_effect = RuntimeError("receive failed")
+            with self.assertRaisesRegex(RuntimeError, "receive failed"):
+                s.fetch_batch(s.filter_prefetch_tasks(rollouts))
+            self.assertEqual(self._totals(s), (0, 0, 0.0, 0))
+
+    def test_empty_result_does_not_invent_native_payloads(self):
+        for s in (self._nccl(), self._ucxx()):
+            self._fetch(s, [], duration=4.0)
+            s.on_prefetch_complete(1, 50, 100.0, 1)
+            self.assertEqual(self._totals(s), (0, 0, 4.0, 1))
+
+    def test_received_count_is_not_reduced_by_cache_key_coalescing(self):
+        from cosmos_rl.utils.payload_transport.receive_memory import ReceivedBatch
+
+        for s in (self._nccl(), self._ucxx()):
+            rollouts = self._batch(s, [1024, 1024])
+            rollouts[1] = dict(rollouts[0])
+            values, *timing = s._fetch_all.return_value
+            received = ReceivedBatch(values)
+            self.addCleanup(received.release)
+            s._fetch_all.return_value = (received, *timing)
+            result = s.fetch_batch(s.filter_prefetch_tasks(rollouts))
+            self.assertEqual(len(result), 1)
+            self.assertEqual(self._totals(s)[:2], (2, 2048))
+
+    def test_both_scheduler_paths_record_once(self):
+        for factory in (self._nccl, self._ucxx):
+            for managed in (False, True):
+                with self.subTest(backend=factory.__name__, managed=managed):
+                    s = factory()
+                    rollouts = self._batch(s, [1024, 2048])
+                    s.on_prefetch_complete = unittest.mock.Mock(
+                        wraps=s.on_prefetch_complete
+                    )
+                    packer = _Packer()
+                    packer.set_transport_strategy(s)
+                    packer._setup_prefetch(prefetch_timeout=10.0)
+                    self.addCleanup(packer.shutdown_prefetch, join_timeout=5.0)
+                    if managed:
+                        future = packer.prefetch_payload_batch(rollouts)
+                        future.result(timeout=5.0)
+                        packer.consume_payload_batch(future)
+                        packer.finish_payload_batch()
+                        s.on_prefetch_complete.assert_not_called()
+                    else:
+                        packer.start_prefetch(rollouts)
+                        packer.wait_prefetch()
+                        s.on_prefetch_complete.assert_called_once()
+                    self.assertEqual(self._totals(s)[:2], (2, 3072))
+                    self.assertEqual(s._steps, 1)
+                    # Stop this worker before the next subtest's loop/resources.
+                    packer.shutdown_prefetch(join_timeout=5.0)
+
+    def test_managed_fetch_has_a_shutdown_summary_without_legacy_hook(self):
+        for s in (self._nccl(), self._ucxx()):
+            self._fetch(s, [8192])
+            with unittest.mock.patch(type(s).__module__ + ".logger.info") as info:
+                s.shutdown()
+            summaries = [
+                call for call in info.call_args_list if "Final:" in call.args[0]
+            ]
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0].args[1:4], (1, 1, 0))
 
 
 if __name__ == "__main__":
