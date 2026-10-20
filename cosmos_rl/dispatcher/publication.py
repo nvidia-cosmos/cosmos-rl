@@ -16,6 +16,17 @@ import threading
 from cosmos_rl.utils.redis_publication import PublicationPlan
 
 
+def outbox_capacity(policy_replicas, rollout_replicas):
+    """Pending publications the controller outbox must hold for a cohort.
+
+    Registration, weight-sync and dispatch commands fan out to every replica
+    in a burst while one writer thread drains them, so the outbox has to hold
+    several publications per replica. The floor keeps small runs at the
+    previous fixed capacity.
+    """
+    return max(128, 8 * (policy_replicas + rollout_replicas))
+
+
 class ControllerPublisher:
     def __init__(self, transport, *, on_failure, max_pending=128):
         if max_pending <= 0:
