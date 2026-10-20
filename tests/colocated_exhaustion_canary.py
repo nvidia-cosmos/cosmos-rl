@@ -84,7 +84,10 @@ def worker(
     mesh = NS(
         size=lambda: 2, get_group=lambda: dist.group.WORLD, get_local_rank=lambda: rank
     )
-    controller.rollout = NS(parallel_dims=NS(mesh={"dp": mesh}, cp_coord=(0, 1)))
+    controller.rollout = NS(
+        parallel_dims=NS(mesh={"dp": mesh}, cp_coord=(0, 1)),
+        api_client=NS(post_queued_rollout_discard=lambda count: True),
+    )
     controller.init_data_fetch_command = NS(global_step=1, total_steps=1)
     state = NS(calls=0, updates=0, stopped=False, shutdown=False)
     weight = torch.nn.Parameter(torch.tensor([1.0], device=device))
@@ -107,6 +110,10 @@ def worker(
     def consume(command, **kwargs):
         if command is DataFetchCommand:
             assert not kwargs.get("no_exec", False), "fake training ACK path"
+            if not centralized or rank == 0:
+                count = 16 if centralized else 8
+                for _ in range(count):
+                    data_queue.get_nowait()
             optimizer.zero_grad()
             weight.square().sum().backward()
             dist.all_reduce(weight.grad)

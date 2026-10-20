@@ -992,6 +992,24 @@ async def put_rollout_group(rollout: RolloutRequest):
             extracted = (
                 [] if rollout.is_end else extract_rollouts(rollout.payloads, False)
             )
+            if not rollout.is_end and controller.config.mode == "colocated":
+                if (
+                    rollout.payloads
+                    or rollout.completion_identities is not None
+                    or rollout.completion_failures
+                    or rollout.training_rejections
+                    or set(rollout.metrics)
+                    not in ({"discarded_samples"}, {"discarded_queued_samples"})
+                ):
+                    raise ValueError("Colocated HTTP reports are accounting-only")
+                if "discarded_queued_samples" in rollout.metrics:
+                    controller.policy_status_manager.validate_colocated_queue_discard(
+                        rollout.metrics["discarded_queued_samples"]
+                    )
+                else:
+                    controller.policy_status_manager.validate_colocated_discard(
+                        rollout.metrics["discarded_samples"]
+                    )
             if not rollout.is_end and controller.config.mode != "colocated":
                 if controller.completion_admission is not None:
                     application_plan = controller.completion_admission.prepare(
@@ -1088,6 +1106,18 @@ async def _apply_rollout_group(
             for extracted in rollouts_group
         ]
         policy_status = controller.policy_status_manager
+        if controller.config.mode == "colocated":
+            # Source/session/sequence and both reservation bounds were checked
+            # before mutation. The receipt commits settlement and its ACK once.
+            if "discarded_queued_samples" in rollout.metrics:
+                policy_status.settle_colocated_queue_discard(
+                    rollout.metrics["discarded_queued_samples"]
+                )
+            else:
+                policy_status.settle_colocated_discard(
+                    rollout.metrics["discarded_samples"]
+                )
+            return {"message": "Colocated discard settled"}
         if getattr(controller, "completion_admission", None) is not None:
             await controller._put_application_rollouts_locked(
                 rollout,

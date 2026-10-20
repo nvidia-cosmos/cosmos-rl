@@ -17,7 +17,10 @@ def controller(on_policy, step, versions):
             train=SimpleNamespace(train_policy=SimpleNamespace(on_policy=on_policy))
         ),
         current_step=step,
-        rollout=SimpleNamespace(current_weight_version=step),
+        rollout=SimpleNamespace(
+            current_weight_version=step,
+            api_client=SimpleNamespace(post_queued_rollout_discard=Mock()),
+        ),
         policy=SimpleNamespace(data_queue=queue),
         train_report_data={},
     )
@@ -29,6 +32,7 @@ def test_strict_queue_discards_old_samples_and_preserves_current_fifo():
     assert obj.current_step == 9
     assert [obj.policy.data_queue.get_nowait().index for _ in range(2)] == [1, 3]
     assert obj.policy.data_queue.empty()
+    obj.rollout.api_client.post_queued_rollout_discard.assert_called_once_with(2)
 
 
 def test_async_queue_preserves_surplus_and_empty_ranks_advance():
@@ -65,8 +69,8 @@ def test_resume_initializes_local_version_before_sync():
         policy_consume_one_step_commands_util_data_fetch=Mock(return_value=cmd),
     )
     observed = []
-    obj.rollout_consume_one_step_commands_util_r2r = lambda: observed.append(
-        (obj.current_step, obj.total_steps)
+    obj.rollout_consume_one_step_commands_util_r2r = (
+        lambda **kwargs: observed.append((obj.current_step, obj.total_steps)) or True
     )
     ColocatedController.init_commands(obj)
     assert observed == [(8, 16)]

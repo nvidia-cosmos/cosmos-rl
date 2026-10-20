@@ -87,6 +87,7 @@ class ColocatedController(Controller):
         return self.policy.api_client.request_stop(reason)
 
     def finish_requested_stop(self, command: TrainingCompleteCommand):
+        self.finalize_queued_rollouts()
         self.command_dispatcher.publish_command(
             command.pack(), self.policy.replica_name
         )
@@ -428,6 +429,8 @@ class ColocatedController(Controller):
             for sample in retained:
                 self.policy.data_queue.put_nowait(sample)
             if discarded:
+                if not self.rollout.api_client.post_queued_rollout_discard(discarded):
+                    raise RuntimeError("Queued discard report was not acknowledged")
                 logger.info(
                     "[Controller] Discarded %d leftover on-policy rollouts before update %d",
                     discarded,
@@ -435,6 +438,50 @@ class ColocatedController(Controller):
                 )
         self.train_report_data[self.current_step] = {}
         self.current_step += 1
+
+    def finalize_queued_rollouts(self):
+        """Settle unused local input before rank zero unregisters its source.
+
+        This is one clean-exit fence, not another per-update collective.
+        Every rank reports its own purge before rank zero may unregister the
+        source; rank zero's queue can be empty while a peer still owns input.
+        """
+        previous_error = getattr(self, "_queued_rollouts_finalize_error", None)
+        if previous_error is not None:
+            raise RuntimeError(previous_error)
+        if getattr(self, "_queued_rollouts_finalized", False):
+            return
+        error = None
+        local_exception = None
+        try:
+            discarded = sum(len(batch) for batch in self._unreported_rollouts)
+            self._unreported_rollouts.clear()
+            while True:
+                try:
+                    self.policy.data_queue.get_nowait()
+                    discarded += 1
+                except Empty:
+                    break
+            if discarded:
+                if not self.rollout.api_client.post_queued_rollout_discard(discarded):
+                    raise RuntimeError("Queued discard report was not acknowledged")
+        except Exception as exc:
+            local_exception = exc
+            error = f"{type(exc).__name__}: {exc}"
+        try:
+            errors = dist_util.all_gather_object_cpu(error)
+        except BaseException:
+            self._queued_rollouts_finalize_error = "Queue cleanup agreement failed"
+            raise
+        failure = next((item for item in errors if item is not None), None)
+        if failure is not None:
+            self._queued_rollouts_finalize_error = (
+                f"Colocated queue cleanup failed: {failure}"
+            )
+            raise RuntimeError(
+                self._queued_rollouts_finalize_error
+            ) from local_exception
+        self._queued_rollouts_finalized = True
 
     def rollout_completed_for_data_fetch_n_training(self, required_rollouts: int):
         """

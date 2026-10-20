@@ -25,7 +25,10 @@ def controller(on_policy, step, versions):
         config=NS(train=NS(train_policy=NS(on_policy=on_policy))),
         current_step=step,
         policy=NS(data_queue=queue),
-        rollout=NS(current_weight_version=step),
+        rollout=NS(
+            current_weight_version=step,
+            api_client=NS(post_queued_rollout_discard=Mock()),
+        ),
         train_report_data={},
     )
 

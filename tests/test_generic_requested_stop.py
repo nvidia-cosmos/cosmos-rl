@@ -232,6 +232,7 @@ def test_colocated_terminal_command_prevents_another_generation_iteration():
     from cosmos_rl.dispatcher.command import TrainingCompleteCommand
 
     controller = object.__new__(ColocatedController)
+    controller.finalize_queued_rollouts = Mock()
     command = TrainingCompleteCommand(
         replica_name="p0",
         global_step=3,
@@ -248,6 +249,7 @@ def test_colocated_terminal_command_prevents_another_generation_iteration():
     controller.policy.consume_command.return_value = True
     controller.rollout = Mock()
     assert not controller.prepare_iteration()
+    controller.finalize_queued_rollouts.assert_called_once_with()
     assert not controller.prepare_iteration()
     controller.policy.consume_command.assert_called_once_with(TrainingCompleteCommand)
     assert controller.requested_stop_complete
@@ -401,7 +403,7 @@ def test_real_multi_sft_loop_stops_before_next_prompt(monkeypatch, stop_step, ma
         }
 
     w.api_client.training_boundary.side_effect = boundary
-    monkeypatch.setattr(module.threading, "Thread", Mock())
+    monkeypatch.setattr(module, "start_worker_thread", Mock())
     monkeypatch.setattr(torch.cuda, "Event", Mock(return_value=Mock()))
     monkeypatch.setattr(module.util, "is_master_rank", lambda *_: True)
     monkeypatch.setattr(

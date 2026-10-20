@@ -47,7 +47,10 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
     def _report_discarded_samples(
         self, count: int, weight_version=None, *, training_rejections=None
     ) -> None:
-        """Skip remote capacity accounting because colocated scheduling observes its local queue."""
+        """Report terminal drops even though accepted payloads remain local."""
+        super()._report_discarded_samples(
+            count, weight_version, training_rejections=training_rejections
+        )
 
     def set_command_dispatcher(self, dispatcher: CommandDispatcher):
         """

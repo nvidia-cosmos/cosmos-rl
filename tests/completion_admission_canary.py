@@ -10,6 +10,10 @@ with ordinary local queue accounting. No identity/accounting implementation is
 injected by this fixture: it exercises the standard producer implementation.
 Set ADMISSION_CANARY_SETTLEMENT_FAULT=1 to inject an exception after the first
 real discard settlement; the controller must exit nonzero, not hang or retry.
+ADMISSION_CANARY_HEALTHY=1 disables producer faults for a matching control.
+Colocated clean checkout must retire every sample charge after its final update.
+ADMISSION_CANARY_FAULT_RANK selects one torchrun rank for asymmetric faults;
+ADMISSION_CANARY_FAULT_VERSION delays them until the selected weight version.
 """
 
 import os
@@ -50,7 +54,16 @@ def inject_producer_faults(cls):
     original = cls.rollout_generation
 
     def generate(self, **kwargs):
-        if kwargs.get("is_validation"):
+        fault_rank = os.environ.get("ADMISSION_CANARY_FAULT_RANK")
+        fault_version = os.environ.get("ADMISSION_CANARY_FAULT_VERSION")
+        if (
+            kwargs.get("is_validation")
+            or os.environ.get("ADMISSION_CANARY_HEALTHY") == "1"
+            or fault_rank is not None
+            and int(os.environ.get("RANK", "0")) != int(fault_rank)
+            or fault_version is not None
+            and kwargs.get("current_weight_version") != int(fault_version)
+        ):
             return original(self, **kwargs)
         if self.config.mode == "disaggregated":
             assert all(
@@ -84,10 +97,17 @@ original_post = APIClient.post_rollout_completion
 
 def replay_report(client, report):
     assert original_post(client, report), "first report failed"
-    if not report.is_end and report.completion_identities is not None:
+    if not report.is_end and (
+        report.completion_identities is not None
+        or os.environ.get("ADMISSION_CANARY_MODE") == "colocated"
+        and (
+            report.metrics.get("discarded_samples", 0)
+            or report.metrics.get("discarded_queued_samples", 0)
+        )
+    ):
         assert original_post(client, report), "duplicate report failed"
         print(
-            f"[ADMISSION-CANARY] replayed accepted={len(report.completion_identities)} rejected={len(report.completion_failures)}",
+            f"[ADMISSION-CANARY] replayed accepted={len(report.completion_identities or [])} rejected={len(report.completion_failures)} discarded={report.metrics.get('discarded_samples', 0)} queued={report.metrics.get('discarded_queued_samples', 0)}",
             flush=True,
         )
     return True
@@ -115,6 +135,22 @@ if role == "controller":
             status._canary_fault_installed = True
         response = await call_next(request)
         status = run_web_panel.controller.policy_status_manager
+        if (
+            status.config.mode == "colocated"
+            and status.training_finished()
+            and not status.policy_replicas
+            and not getattr(status, "_canary_terminal_checked", False)
+        ):
+            assert status.samples_on_the_fly == 0, (
+                f"Terminal colocated charge leaked: {status.samples_on_the_fly}"
+            )
+            assert not status.dispatched_rollouts_by_step
+            assert status.rollout_buffer.empty()
+            status._canary_terminal_checked = True
+            print(
+                f"[ADMISSION-CANARY] COLOCATED_TERMINAL_PASS step={status.current_step} in_flight=0 buffered=0 healthy={os.environ.get('ADMISSION_CANARY_HEALTHY', '0')}",
+                flush=True,
+            )
         rejected = status.filter_records.get("application_rejected", 0)
         if rejected:
             print(

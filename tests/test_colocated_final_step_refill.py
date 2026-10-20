@@ -75,6 +75,7 @@ def run_final_batch(controller, contributions, prompts_per_call=1):
         rollout_completed_for_data_fetch_n_training=Mock(),
         training_end_ack=Mock(),
         rollout_consume_one_step_commands_util_r2r=finish,
+        finalize_queued_rollouts=Mock(),
     )
     worker = NS(
         config=controller.config,
@@ -89,6 +90,7 @@ def run_final_batch(controller, contributions, prompts_per_call=1):
         ),
     )
     ColocatedRLControlWorker.main_loop(worker)
+    local.finalize_queued_rollouts.assert_called_once_with()
     return state
 
 

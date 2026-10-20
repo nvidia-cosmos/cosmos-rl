@@ -294,6 +294,7 @@ run python -m pytest -q tests/test_rollout_report_receipts.py
 run python -m pytest -q tests/test_training_fetch_receipts.py
 run python -m pytest -q tests/test_colocated_final_step_refill.py
 run python -m pytest -q tests/test_colocated_exhaustion.py
+run python -m pytest -q tests/test_colocated_discard_settlement.py tests/test_colocated_on_policy_queue.py tests/test_colocated_resume_version.py
 run python -m pytest -q tests/test_colocated_policy_version.py
 run torchrun --standalone --nproc-per-node=2 tests/colocated_policy_version_canary.py --cpu
 run python -m pytest -q tests/test_colocated_batch_capacity.py
