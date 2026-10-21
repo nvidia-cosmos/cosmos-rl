@@ -82,7 +82,7 @@ def test_http_rollout_end_reports_failed_delivery():
 
 
 def test_colocated_rollout_end_reports_synchronous_acknowledgement():
-    client = object.__new__(ColocatedAPIClient)
+    client = ColocatedAPIClient("ROLLOUT", remote_ips=["localhost"], remote_port=8000)
     client.controller = MagicMock()
     request = RolloutRequest(
         src_replica_name="rollout-0",

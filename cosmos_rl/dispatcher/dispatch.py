@@ -25,7 +25,11 @@ class TrainingDispatch:
     preparation_required: bool = False
     preparation_reports: dict[str, bool] = field(default_factory=dict)
     cancelled: bool = False
+    # Outstanding prompt-side charge: terminal drops retire it before an
+    # unstarted dispatch can be cancelled; accepted queue surplus stays charged.
     colocated_fetched_rollouts: int | None = None
+    # Accepted local queue entries still charged when this dispatch begins.
+    colocated_carried_rollouts: int = 0
 
     def prepare(self, replica: str, step: int, total_steps: int, ready: bool):
         """Seal permission to execute only after every colocated replica prepares.

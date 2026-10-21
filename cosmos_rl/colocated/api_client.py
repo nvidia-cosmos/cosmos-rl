@@ -18,6 +18,7 @@ API client for the dispatcher.
 """
 
 from cosmos_rl.dispatcher.api.client import APIClient
+import threading
 from typing import Dict, Any, List, Tuple, Optional
 
 from cosmos_rl.dispatcher.protocol import (
@@ -31,6 +32,10 @@ class ColocatedAPIClient(APIClient):
     In colocated mode, the policy and rollout controllers are in the same process.
     This client directly interacts with the controller instance.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._local_report_lock = threading.Lock()
 
     def set_controller(self, controller):
         """
@@ -66,8 +71,72 @@ class ColocatedAPIClient(APIClient):
         Args:
             response: The rollout completion response.
         """
-        self.controller.put_rollouts(response)
+        # Keep receipt allocation and local delivery in the same order, even
+        # when callers report or explicitly replay from different threads.
+        with self._local_report_lock:
+            return self._post_local_rollout_completion(response)
+
+    def _post_local_rollout_completion(self, response: RolloutRequest) -> bool:
+        if self._report_failed:
+            raise RuntimeError("Rollout reporting failed; source cannot continue")
+        queued = "discarded_queued_samples" in response.metrics
+        if queued and (response.payloads or "discarded_samples" in response.metrics):
+            raise ValueError("Queued discard reports cannot contain fresh outcomes")
+        discard_key = "discarded_queued_samples" if queued else "discarded_samples"
+        discarded = response.metrics.get(discard_key, 0)
+        if type(discarded) is not int or discarded < 0:
+            raise ValueError("Colocated discard count must be a nonnegative integer")
+        if queued and not discarded:
+            raise ValueError("Queued discard report must retire a positive count")
+        if discarded:
+            if response.is_end:
+                raise ValueError("End report cannot contain training outcomes")
+            # Only accounting crosses HTTP. Accepted tensors, rewards and
+            # advantages keep their existing local queue/collective path.
+            replay = (
+                response.report_session_id is not None
+                and response.report_sequence is not None
+                and response.report_sequence < self._report_sequence
+            )
+            accounting = RolloutRequest(
+                src_replica_name=response.src_replica_name,
+                src_global_rank=response.src_global_rank,
+                report_session_id=response.report_session_id,
+                report_sequence=response.report_sequence,
+                payloads=[],
+                metrics={discard_key: discarded},
+            )
+            if not super().post_rollout_completion(accounting):
+                raise RuntimeError("Colocated discard report delivery failed")
+            # Preserve the HTTP receipt identity if a caller retries this same
+            # report; do not allocate another mutation sequence for the drop.
+            response.report_session_id = accounting.report_session_id
+            response.report_sequence = accounting.report_sequence
+            if replay or queued:
+                return True
+        try:
+            self.controller.put_rollouts(response)
+        except BaseException:
+            # A local callback may already have queued part of the batch. Do
+            # not let a caller retry uncertain delivery as fresh healthy work.
+            self._report_failed = True
+            raise
         return True
+
+    def post_queued_rollout_discard(self, count: int) -> bool:
+        """Report a real local queue purge without delivering another payload."""
+        if type(count) is not int or count < 0:
+            raise ValueError("Queued discard count must be a nonnegative integer")
+        if not count:
+            return True
+        return self.post_rollout_completion(
+            RolloutRequest(
+                src_replica_name=self._registered_replica_name,
+                src_global_rank=self._registered_global_rank,
+                payloads=[],
+                metrics={"discarded_queued_samples": count},
+            )
+        )
 
     def post_policy_train_ack(
         self,

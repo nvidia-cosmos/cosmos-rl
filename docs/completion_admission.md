@@ -41,6 +41,42 @@ does not sum routing IDs or originating weight versions. Both centralized and
 uncentralized colocated ingestion follow this contract; existing queue-based
 collection continues until enough accepted samples are available.
 
+### Colocated terminal-sample accounting
+
+Fetching a prompt charges its requested generations even in colocated mode.
+Accepted payloads stay on the existing local queue path. Quality exclusions and
+structurally failed/empty generations instead send an accounting-only report
+through the registered producer's ordered HTTP receipt stream. No accepted
+tensors, rewards or advantages cross that reporting path; healthy reports add
+no HTTP request or training collective.
+
+The controller validates the source incarnation, rank, sequence and current
+preparing dispatch before retiring the count. It decrements both the global
+in-flight charge and that dispatch's outstanding fetched balance. This makes
+lost-ACK retries idempotent and prevents an exhaustion cancellation from
+retiring the same dropped samples again. Training ACKs still settle only the
+actual training batch; any accepted queue surplus remains charged. A fresh
+discard cannot retire a batch whose preparation agreement is already sealed.
+
+Each new dispatch records the charged local input carried from earlier updates.
+Existing strict on-policy purges report `discarded_queued_samples` against that
+carried balance, without changing which samples are trained or their ordering.
+Dataset exhaustion cancels both remaining carried input and current fetched
+input; acknowledged drops cannot be counted again. Once preparation is sealed,
+a queue-only discard can retire only surplus outside the optimizer reservation.
+
+On clean exit, each rank retires its own unused local queues before one final
+CPU completion fence permits source unregistration. Empty ranks participate too:
+rank zero must not unregister while a peer's queued-input receipt is pending.
+Failure to confirm any purge prevents clean completion. This adds no per-update
+training collective and leaves accepted completion reporting on its local path.
+
+For example, six fetched samples with two exclusions leave four charged for
+training, then zero after the training ACK. Six healthy samples with a batch of
+four leave two queued samples charged until reused, purged or retired at clean
+exit. Delivery failure stops the source rather than admitting healthy work after
+uncertain accounting.
+
 ## Optional identified reporting
 
 Set `[rollout].completion_admission = true` to enable the standard worker's

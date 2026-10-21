@@ -33,9 +33,13 @@ def run_case(rank, device, start, on_policy, centralized):
     controller._unreported_rollouts = []
     controller.policy = NS(global_rank=rank, world_size=world, data_queue=Queue())
     mesh = NS(get_group=lambda: dist.group.WORLD, get_local_rank=lambda: rank)
+    discarded = []
     controller.rollout = NS(
         parallel_dims=NS(mesh={"dp": mesh}, cp_coord=(0, 1)),
         current_weight_version=start,
+        api_client=NS(
+            post_queued_rollout_discard=lambda count: discarded.append(count) or True
+        ),
     )
     command = object.__new__(DataFetchCommand)
     command.global_step, command.total_steps = start + 1, start + 2
@@ -93,9 +97,16 @@ def run_case(rank, device, start, on_policy, centralized):
             controller.rollout.current_weight_version = controller.current_step
     assert generated == (2 if on_policy else 1)
     assert controller.total_steps == start + 2
+    controller.finalize_queued_rollouts()
+    assert controller.policy.data_queue.empty()
+    if centralized:
+        expected_discarded = ([6, 6] if on_policy else [2]) if rank == 0 else []
+    else:
+        expected_discarded = [2 + 2 * rank] * 2 if on_policy else ([2] if rank else [])
+    assert discarded == expected_discarded, (rank, discarded, expected_discarded)
     print(
         f"COLOCATED_POLICY_VERSION_PASS rank={rank} start={start} "
-        f"on_policy={on_policy} centralized={centralized} updates=2 generated={generated}",
+        f"on_policy={on_policy} centralized={centralized} updates=2 generated={generated} discarded={discarded}",
         flush=True,
     )
 

@@ -62,6 +62,8 @@ _INTERNAL_SETTLEMENT_SOURCES = frozenset(
         "dapo_filter",
         "terminal_result_cleanup",
         "terminal_buffer_cleanup",
+        "colocated_discard",
+        "colocated_queue_discard",
     }
 )
 
@@ -3009,6 +3011,85 @@ class PolicyStatusManager:
                 )
                 self.train_report_data[self.current_step] = report_data
 
+    def validate_colocated_discard(self, count: int) -> TrainingDispatch:
+        """Only the preparing dispatch can retire known terminal outcomes.
+
+        The caller holds the controller lifecycle lock and fences the reporting
+        source with its ordered HTTP receipt before changing either balance.
+        """
+        dispatch = self.training_dispatches.get(self.current_step)
+        if (
+            self.config.mode != "colocated"
+            or type(count) is not int
+            or count <= 0
+            or dispatch is None
+            or not dispatch.preparation_required
+            or dispatch.settled
+            or dispatch.preparation_decision != "wait"
+            or self.dispatched_rollouts_by_step.get(self.current_step)
+            != dispatch.rollout_count
+            or dispatch.colocated_fetched_rollouts is None
+            or count > dispatch.colocated_fetched_rollouts
+            or count > self.samples_on_the_fly
+        ):
+            raise ValueError("Colocated discard exceeds preparing reservations")
+        return dispatch
+
+    def settle_colocated_discard(self, count: int) -> None:
+        dispatch = self.validate_colocated_discard(count)
+        self._settle_samples_on_the_fly(count, "colocated_discard")
+        # Cancellation settles the remaining fetched balance, not the original
+        # count whose terminal outcomes may already have been acknowledged.
+        dispatch.colocated_fetched_rollouts -= count
+        self.filter_records["rollout_failed"] = (
+            self.filter_records.get("rollout_failed", 0) + count
+        )
+
+    def validate_colocated_queue_discard(self, count: int) -> TrainingDispatch | None:
+        """Retire queued input, never an already-sealed optimizer reservation."""
+        if (
+            self.config.mode != "colocated"
+            or type(count) is not int
+            or count <= 0
+            or count > self.samples_on_the_fly
+        ):
+            raise ValueError("Colocated queue discard exceeds outstanding reservations")
+        dispatch = self.training_dispatches.get(self.current_step)
+        if self.dispatched_rollouts_by_step:
+            if (
+                dispatch is None
+                or dispatch.settled
+                or not dispatch.preparation_required
+                or set(self.dispatched_rollouts_by_step) != {self.current_step}
+                or self.dispatched_rollouts_by_step[self.current_step]
+                != dispatch.rollout_count
+            ):
+                raise ValueError("Cannot discard an uncertain colocated queue")
+            if dispatch.preparation_decision == "wait":
+                if count > dispatch.colocated_carried_rollouts:
+                    raise ValueError("Colocated queue discard exceeds carried input")
+                return dispatch
+            if (
+                dispatch.preparation_decision != "train"
+                or count > self.samples_on_the_fly - dispatch.rollout_count
+            ):
+                raise ValueError("Colocated queue discard overlaps a prepared batch")
+        elif not (self.training_finished() or self.rollout_admission_closed()):
+            raise ValueError(
+                "Colocated queue discard has no preparing or terminal owner"
+            )
+        return None
+
+    def settle_colocated_queue_discard(self, count: int) -> None:
+        dispatch = self.validate_colocated_queue_discard(count)
+        self._settle_samples_on_the_fly(count, "colocated_queue_discard")
+        if dispatch is not None:
+            # Cancellation must not release a stale queue entry twice.
+            dispatch.colocated_carried_rollouts -= count
+        self.filter_records["rollout_failed"] = (
+            self.filter_records.get("rollout_failed", 0) + count
+        )
+
     @_serialize_policy_lifecycle
     def colocated_preparation(
         self, replica_name, step, total_steps, ready, report_session_id, src_global_rank
@@ -3040,11 +3121,8 @@ class PolicyStatusManager:
         count = (
             self.config.train.train_batch_per_replica * len(dispatch.participants)
             if decision == "train"
-            else (
-                dispatch.colocated_fetched_rollouts
-                if dispatch.colocated_fetched_rollouts is not None
-                else dispatch.rollout_count
-            )
+            else dispatch.colocated_carried_rollouts
+            + (dispatch.colocated_fetched_rollouts or 0)
         )
         if (
             self.current_step != step
@@ -3188,6 +3266,9 @@ class PolicyStatusManager:
             frozenset(replica.name for replica in replicas),
             rollout_count,
             preparation_required=self.config.mode == "colocated",
+            colocated_carried_rollouts=self.samples_on_the_fly
+            if self.config.mode == "colocated"
+            else 0,
         )
         while len(self.training_dispatches) > _REPORT_DEDUP_WINDOW:
             oldest = next(iter(self.training_dispatches))

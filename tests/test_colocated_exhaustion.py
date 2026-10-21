@@ -27,10 +27,17 @@ def dispatched(*, completed=0, validation=False):
     status.current_step = completed
     status.policy_init_done = True
     status.rollout_buffer = Queue()
+    # Unlike the disaggregated fixture, a new colocated dispatch has no
+    # remote payloads charged before its ranks fetch prompts.
+    status.samples_on_the_fly = 0
     status.data_fetcher.validation_activate_dataloader = Mock()
     for replica in (first, second):
         replica.atoms = {0: NS(global_rank=0, report_session_id=replica.name)}
     status.try_trigger_data_fetch_and_training()
+    # Model the ordinary full prompt fetch used by this preparation fixture.
+    fetched = status.dispatched_rollouts_by_step[completed + 1]
+    status.samples_on_the_fly = fetched
+    status.training_dispatches[completed + 1].colocated_fetched_rollouts = fetched
     # The generic fixture mocks DataFetcher; give cancellation a real marker.
     status.data_fetcher.activated_val_iter = object() if validation else None
     status.data_fetcher.activated_val_step = completed + 1 if validation else None
@@ -113,6 +120,7 @@ def test_initial_local_dispatch_restores_progress_without_remote_reservations():
     status.training_dispatches[1].rollout_count = 0
     status.dispatched_rollouts_by_step[1] = 0
     status.samples_on_the_fly = 0
+    status.training_dispatches[1].colocated_fetched_rollouts = 0
     with patch.object(TrainingCompleteCommand, "trigger"):
         assert prepare(status, first, False) == "wait"
         assert prepare(status, second, False) == "stop"
@@ -322,6 +330,7 @@ def test_actual_colocated_prompt_fetch_is_bound_then_settled(monkeypatch):
     status.config.train.train_policy.allowed_outdated_steps = 2
     status.config.train.train_batch_per_replica = 2
     status.samples_on_the_fly = 0
+    status.training_dispatches[1].colocated_fetched_rollouts = 0
     status.training_dispatches[1].rollout_count = 0
     status.dispatched_rollouts_by_step[1] = 0
     status.try_trigger_data_fetch_and_training = Mock()

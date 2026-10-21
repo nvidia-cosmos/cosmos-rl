@@ -195,6 +195,8 @@ class ColocatedRLControlWorker(WorkerBase):
             if self.rollout.shutdown_signal.is_set():
                 break
 
+        self.controller.finalize_queued_rollouts()
+
     def execute(self):
         """
         Execute the Colocated GRPO Control Worker's main loop.

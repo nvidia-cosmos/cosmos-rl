@@ -97,7 +97,7 @@ def test_non_reporting_rank_does_not_report_discard():
     worker.api_client.post_rollout_completion.assert_not_called()
 
 
-def test_colocated_worker_does_not_report_discarded_samples():
+def test_colocated_worker_reports_discarded_samples_through_its_local_client():
     worker = _rollout_worker(worker_type=ColocatedRolloutControlWorker)
 
     valid_payloads, valid_results = worker._filter_valid_rollout_results_and_report(
@@ -107,7 +107,9 @@ def test_colocated_worker_does_not_report_discarded_samples():
 
     assert valid_payloads == []
     assert valid_results == []
-    worker.api_client.post_rollout_completion.assert_not_called()
+    request = worker.api_client.post_rollout_completion.call_args.args[0]
+    assert request.payloads == []
+    assert request.metrics["discarded_samples"] == 2
 
 
 def test_discard_settlement_is_idempotent_per_replica_and_report():
