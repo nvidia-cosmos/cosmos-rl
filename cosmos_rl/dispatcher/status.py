@@ -1311,6 +1311,15 @@ class PolicyStatusManager:
                 "[Controller] No valid rollout replicas found, skip PolicyToRolloutUnicastCommand"
             )
             return
+        if len(valid_rollout_replicas) < config.rollout.parallelism.n_init_replicas:
+            # The rollout mesh is built when the last rollout registers. A
+            # transfer issued before that would run ahead of the mesh build
+            # on its target, so the rollout-side post_register_hook issues it
+            # once both cohorts are complete.
+            logger.info(
+                "[Controller] Rollout cohort incomplete, the first PolicyToRolloutUnicastCommand follows the last rollout registration"
+            )
+            return
         command.PolicyToRolloutUnicastCommand.trigger(
             src_replica=loaded_policy_replica,
             dst_replica=any_valid_rollout_replica,
@@ -3733,9 +3742,19 @@ class RolloutStatusManager:
                 any_loaded_policy_replica = replica
                 break
 
-        # First P->R Unicast if the policy is ready and all rollout replicas are not ready
+        # First P->R Unicast if the policy is ready and all rollout replicas are not ready.
+        # With several policy replicas, wait until the policy cohort is complete:
+        # PolicyStatusManager.post_register_hook issues the first transfer right
+        # after the policy-to-policy broadcast, so the loaded replica never blocks
+        # on rollout readiness while its peers wait in the broadcast collective.
+        policy_cohort_ready = getattr(
+            policy_status_manager, "policy_init_done", True
+        ) or len(policy_status_manager.policy_replicas) >= (
+            config.policy.parallelism.n_init_replicas
+        )
         if (
-            all(
+            policy_cohort_ready
+            and all(
                 [
                     not replica.weights_loaded_in_view_of_command
                     for replica in valid_replicas
