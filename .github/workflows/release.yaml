@@ -29,6 +29,48 @@ permissions:
   contents: read
 
 jobs:
+  gate:
+    # Pre-flight checks for tag releases. A PyPI version can never be reused,
+    # so refuse to publish anything that has not been through main and CI.
+    # Runs in parallel with `build`; `publish-pypi` needs both. It holds no
+    # secrets and the checkout is only used to read git history.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # list build-and-test runs for the tagged commit
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the tagged commit is on main
+        run: |
+          set -eu
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not reachable from main. Releases must be cut from main."
+            exit 1
+          fi
+
+      - name: Verify build-and-test passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # build-and-test runs on every push to main, but its concurrency
+          # group cancels in-flight runs when a newer commit lands, so an
+          # older commit can legitimately have only cancelled runs. Require at
+          # least one successful push run for this exact SHA.
+          ok=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-and-test.yaml/runs?head_sha=${GITHUB_SHA}&event=push&status=success" \
+            --jq '.total_count')
+          if [ "${ok}" -lt 1 ]; then
+            echo "::error::No successful build-and-test run found for ${GITHUB_SHA}. Re-run build-and-test on that commit (or tag a commit that has passed) before releasing."
+            exit 1
+          fi
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -86,7 +128,7 @@ jobs:
           if-no-files-found: error
 
   publish-pypi:
-    needs: build
+    needs: [build, gate]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # The environment is both the secret's scope and the approval gate:
