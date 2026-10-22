@@ -31,7 +31,8 @@ permissions:
 jobs:
   gate:
     # Pre-flight checks for tag releases. A PyPI version can never be reused,
-    # so refuse to publish anything that has not been through main and CI.
+    # so refuse to publish anything that is not on main, and surface the CI
+    # status of the tagged commit to the approver.
     # Runs in parallel with `build`; `publish-pypi` needs both. It holds no
     # secrets and the checkout is only used to read git history.
     if: github.ref_type == 'tag'
@@ -54,22 +55,30 @@ jobs:
             exit 1
           fi
 
-      - name: Verify build-and-test passed on the tagged commit
+      - name: Report build-and-test status for the tagged commit
+        # Informational only, deliberately not a hard gate. build-and-test
+        # mostly runs on pull requests, and its push runs on main are
+        # routinely cancelled by the concurrency group when newer commits
+        # land, so requiring a green push run would block every release. The
+        # status is surfaced so whoever approves the `pypi` environment can
+        # see it before clicking approve.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          # build-and-test runs on every push to main, but its concurrency
-          # group cancels in-flight runs when a newer commit lands, so an
-          # older commit can legitimately have only cancelled runs. Require at
-          # least one successful push run for this exact SHA.
-          ok=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-and-test.yaml/runs?head_sha=${GITHUB_SHA}&event=push&status=success" \
-            --jq '.total_count')
-          if [ "${ok}" -lt 1 ]; then
-            echo "::error::No successful build-and-test run found for ${GITHUB_SHA}. Re-run build-and-test on that commit (or tag a commit that has passed) before releasing."
-            exit 1
-          fi
+          runs=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-and-test.yaml/runs?head_sha=${GITHUB_SHA}&event=push" \
+            --jq '[.workflow_runs[] | (.conclusion // .status)] | join(", ")')
+          runs="${runs:-none}"
+          {
+            echo "### build-and-test for \`${GITHUB_SHA}\`"
+            echo
+            echo "Push runs on this commit: **${runs}**"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          case ",${runs}," in
+            *success*) ;;
+            *) echo "::warning::No successful build-and-test push run for ${GITHUB_SHA} (found: ${runs}). Confirm CI before approving the pypi deployment." ;;
+          esac
 
   build:
     runs-on: ubuntu-latest
