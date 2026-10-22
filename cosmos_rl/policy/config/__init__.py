@@ -411,6 +411,19 @@ class GrpoConfig(BaseModel):
         ),
     )
 
+    dispatch_on_trainer_ready: bool = Field(
+        default=False,
+        description=(
+            "Start a training step as soon as every policy replica is ready, with every "
+            "pending rollout, possibly none. For trainers that keep their own replay data, "
+            "so training never waits for rollouts. Each replica receives a multiple of its "
+            "data-parallel size, and per-rank counts differ by at most one round; "
+            "`train_batch_per_replica` then only sizes the dataset horizon and the "
+            "in-flight ceiling. Requires disaggregated mode and cannot be combined with "
+            "`on_policy`, `data_dispatch_as_rank_in_mesh` or `train.prefetch_payloads`."
+        ),
+    )
+
     enable_dataset_cache: bool = Field(
         default=False,
         description="Enable dataset cache process results, maybe accelerate the dataset loading",
@@ -741,6 +754,14 @@ class GrpoConfig(BaseModel):
             raise ValueError(
                 "dispatch_balance_key balances the shared rollout queue and cannot be "
                 "combined with data_dispatch_as_rank_in_mesh"
+            )
+        if self.dispatch_on_trainer_ready and (
+            self.on_policy or self.data_dispatch_as_rank_in_mesh
+        ):
+            raise ValueError(
+                "dispatch_on_trainer_ready dispatches whatever the shared rollout queue "
+                "holds and cannot be combined with on_policy or "
+                "data_dispatch_as_rank_in_mesh"
             )
         return self
 
@@ -2112,6 +2133,15 @@ class Config(BaseModel):
                         f"sync_weight_interval adjustment; raising to {min_allowed}."
                     )
                     tp.max_inflight_steps = min_allowed
+
+        if self.train.train_policy.type == "grpo" and (
+            self.train.train_policy.dispatch_on_trainer_ready
+            and (self.mode == "colocated" or self.train.prefetch_payloads)
+        ):
+            raise ValueError(
+                "train.train_policy.dispatch_on_trainer_ready dispatches rollouts as they "
+                "arrive and requires disaggregated mode without train.prefetch_payloads"
+            )
 
         # Handle for evaludation configuration.
         if isinstance(self.validation.dataset.split, str):

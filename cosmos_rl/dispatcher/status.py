@@ -2401,7 +2401,15 @@ class PolicyStatusManager:
             if (
                 getattr(self.config, "mode", None) != "colocated"
                 and not self.config.validation.enable
-                and _train_decrement > 0
+                and (
+                    _train_decrement > 0
+                    # Without rollouts, such a step still updates the policy.
+                    or getattr(
+                        self.config.train.train_policy,
+                        "dispatch_on_trainer_ready",
+                        False,
+                    )
+                )
             ):
                 self.record_real_datafetch_acked(step, total_steps)
             # All replicas have been reduced; decide whether to weight-sync.
@@ -2498,7 +2506,7 @@ class PolicyStatusManager:
                         ]
                     )
                     logger.info(
-                        f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} rollouts: {report_data_str}"
+                        f"[Controller] Train report data from total {dispatch.rollout_count} rollouts: {report_data_str}"
                     )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
@@ -2545,8 +2553,15 @@ class PolicyStatusManager:
                             step=train_step,
                         )
                     if "console" in self.config.logging.logger:
+                        step_report = self.train_report_data[train_step]
+                        # A step dispatched on trainer readiness can carry no rollouts.
+                        rollout_summary = (
+                            f"Reward Mean: {step_report['train/reward_mean']:.4f}, Reward Std: {step_report['train/reward_std']:.4f}, Reward Max: {step_report['train/reward_max']:.4f}, Reward Min: {step_report['train/reward_min']:.4f}, Completion Length Mean: {step_report['rollout/completion_length_mean']:.2f}, Completion Length Max: {step_report['rollout/completion_length_max']:.2f}, "
+                            if "train/reward_mean" in step_report
+                            else "No rollouts, "
+                        )
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Step: {train_step}/{total_steps}, {rollout_summary}Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                         if len(filter_records) > 0:
                             logger.info(
@@ -2698,6 +2713,9 @@ class PolicyStatusManager:
         if self.config.mode == "colocated":
             # Colocated mode always has enough rollouts since they are locally prepared.
             return True
+        if getattr(self.config.train.train_policy, "dispatch_on_trainer_ready", False):
+            # The trainer keeps its own replay data, so a step needs no rollouts.
+            return True
 
         if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
             if not self.rollout_buffer_per_rank:
@@ -2830,8 +2848,6 @@ class PolicyStatusManager:
 
         training_horizon = self.training_horizon()
 
-        items_count = self.config.train.train_batch_per_replica
-        required_rollouts = items_count * len(arrived_replicas)
         all_ready_or_reduced = (
             self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
         )
@@ -2846,6 +2862,8 @@ class PolicyStatusManager:
                 self._revalidate_rollouts_before_dispatch()
             if not self.rollouts_enough_for_one_step():
                 return
+            items_counts = self._dispatch_counts(arrived_replicas)
+            required_rollouts = sum(items_counts)
             rollouts_of_this_step: List[Rollout] = []
             publications = []
             # Decrease the consumed rollouts number.
@@ -2878,7 +2896,9 @@ class PolicyStatusManager:
                 notifications = {}
             if identity is None and self.config.mode != "colocated":
                 # Colocated mode no need real rollout dispatching since they are all local.
-                for replica, rollout in self._take_dispatch_rows(arrived_replicas):
+                for replica, rollout in self._take_dispatch_rows(
+                    arrived_replicas, items_counts
+                ):
                     publications.append(
                         (
                             replica.name + "_rollout",
@@ -2896,7 +2916,7 @@ class PolicyStatusManager:
             if prefetch_fallback_reason(self.config) is None:
                 self._payload_training_rollouts = tuple(rollouts_of_this_step)
 
-            for replica in arrived_replicas:
+            for replica, items_count in zip(arrived_replicas, items_counts):
                 fetch = command.DataFetchCommand.for_replica(
                     replica=replica,
                     items_count=items_count,
@@ -3163,19 +3183,44 @@ class PolicyStatusManager:
             )
         )
 
-    def _take_dispatch_rows(self, replicas):
+    def _dispatch_counts(self, replicas):
+        """Return the rollouts each of ``replicas`` receives this step.
+
+        Fixed dispatch gives every replica ``train_batch_per_replica``. With
+        ``dispatch_on_trainer_ready`` the step takes every pending rollout,
+        possibly none: rollouts go out in rounds of one per data rank of a
+        replica, each round to the replica with the fewest rollouts per data
+        rank so far. Rollouts too few for any replica's round stay queued for
+        the next step.
+        """
+        if not getattr(
+            self.config.train.train_policy, "dispatch_on_trainer_ready", False
+        ):
+            return [self.config.train.train_batch_per_replica] * len(replicas)
+        dp_sizes = [replica.data_rank_count() for replica in replicas]
+        counts = [0] * len(replicas)
+        pending = self.total_pending_rollouts()
+        while True:
+            fitting = [i for i, dp_size in enumerate(dp_sizes) if dp_size <= pending]
+            if not fitting:
+                return counts
+            index = min(fitting, key=lambda i: (counts[i] / dp_sizes[i], i))
+            counts[index] += dp_sizes[index]
+            pending -= dp_sizes[index]
+
+    def _take_dispatch_rows(self, replicas, counts):
         """Pop one training step of rollouts as ``(replica, rollout)`` rows.
 
+        ``counts`` holds each replica's rollout count, from ``_dispatch_counts``.
         Rows interleave replicas, so the ``k``-th row of a replica is its
         ``k``-th published rollout and the policy worker hands it to data rank
         ``k % dp_size``. The real dispatch and the payload lookahead both use
         this one selection, so counts and accounting do not depend on the path.
         """
-        count = self.config.train.train_batch_per_replica
         if self.config.train.train_policy.data_dispatch_as_rank_in_mesh:
             rows = []
-            for index, replica in enumerate(
-                sorted(replicas, key=lambda r: r.start_time)
+            for index, (replica, count) in enumerate(
+                sorted(zip(replicas, counts), key=lambda pair: pair[0].start_time)
             ):
                 queue = self.rollout_buffer_per_rank[index]
                 items = sorted(
@@ -3187,31 +3232,38 @@ class PolicyStatusManager:
                 rows.extend((replica, rollout) for rollout in items[:count])
             return rows
         replicas = list(replicas)
-        taken = [self.rollout_buffer.get_nowait() for _ in range(count * len(replicas))]
+        taken = [self.rollout_buffer.get_nowait() for _ in range(sum(counts))]
         key = getattr(self.config.train.train_policy, "dispatch_balance_key", None)
         if key is None:
-            streams = [taken[index :: len(replicas)] for index in range(len(replicas))]
+            streams = [[] for _ in replicas]
+            arrivals = iter(taken)
+            for position in range(max(counts, default=0)):
+                for index, count in enumerate(counts):
+                    if position < count:
+                        streams[index].append(next(arrivals))
         else:
-            streams = self._balance_dispatch_streams(replicas, taken, count, key)
+            streams = self._balance_dispatch_streams(replicas, taken, counts, key)
         return [
             (replica, streams[index][position])
-            for position in range(count)
+            for position in range(max(counts, default=0))
             for index, replica in enumerate(replicas)
+            if position < counts[index]
         ]
 
-    def _balance_dispatch_streams(self, replicas, rollouts, count, key):
+    def _balance_dispatch_streams(self, replicas, rollouts, counts, key):
         """Order ``rollouts`` into per-replica streams with even per-rank weight.
 
         Every ``(replica, data rank)`` slot receives exactly ``count // dp_size``
-        rollouts. Heavier rollouts are placed first, each on the slot with the
-        smallest weight sum that still has room; equal weights keep arrival order.
+        rollouts of its replica's ``count``. Heavier rollouts are placed first,
+        each on the slot with the smallest weight sum that still has room; equal
+        weights keep arrival order.
         """
         slots = []  # (replica index, data rank, dp size)
-        for index, replica in enumerate(replicas):
+        for index, (replica, count) in enumerate(zip(replicas, counts)):
             dp_size = replica.data_rank_count()
             if count % dp_size:
                 raise ValueError(
-                    f"train_batch_per_replica ({count}) must be divisible by the "
+                    f"The dispatch count ({count}) must be divisible by the "
                     f"data-parallel size ({dp_size}) of replica {replica.name}"
                 )
             slots.extend((index, rank, dp_size) for rank in range(dp_size))
@@ -3220,12 +3272,16 @@ class PolicyStatusManager:
         weights = [self._dispatch_weight(rollout, key) for rollout in rollouts]
         for i in sorted(range(len(rollouts)), key=lambda i: (-weights[i], i)):
             slot = min(
-                (slot for slot in slots if len(assigned[slot]) < count // slot[2]),
+                (
+                    slot
+                    for slot in slots
+                    if len(assigned[slot]) < counts[slot[0]] // slot[2]
+                ),
                 key=load.__getitem__,
             )
             load[slot] += weights[i]
             assigned[slot].append(rollouts[i])
-        streams = [[None] * count for _ in replicas]
+        streams = [[None] * count for count in counts]
         for (index, rank, dp_size), rollouts_of_slot in assigned.items():
             for turn, rollout in enumerate(rollouts_of_slot):
                 streams[index][rank + turn * dp_size] = rollout
@@ -3265,7 +3321,7 @@ class PolicyStatusManager:
         self._revalidate_rollouts_before_dispatch()
         if not self.rollouts_enough_for_one_step():
             return None
-        rows = self._take_dispatch_rows(replicas)
+        rows = self._take_dispatch_rows(replicas, self._dispatch_counts(replicas))
         identity = uuid.uuid4().hex
         self._payload_lookahead = (
             identity,

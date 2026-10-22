@@ -107,7 +107,7 @@ def test_balanced_rows_give_every_rank_equal_count_and_even_weight():
     replicas = [_replica("policy-0", 0, 2), _replica("policy-1", 1, 2)]
     manager = _manager(HEAVY_LIGHT, replicas, count=4)
 
-    rows = manager._take_dispatch_rows(replicas)
+    rows = manager._take_dispatch_rows(replicas, manager._dispatch_counts(replicas))
 
     assert manager.rollout_buffer.empty()
     assert sorted(rollout.prompt_idx for _, rollout in rows) == list(range(8))
@@ -121,7 +121,7 @@ def test_unset_key_keeps_fifo_round_robin():
     replicas = [_replica("policy-0", 0, 2), _replica("policy-1", 1, 2)]
     manager = _manager(HEAVY_LIGHT, replicas, count=4, key=None)
 
-    rows = manager._take_dispatch_rows(replicas)
+    rows = manager._take_dispatch_rows(replicas, manager._dispatch_counts(replicas))
 
     assert [rollout.prompt_idx for _, rollout in rows] == list(range(8))
     assert [[r.prompt_idx for r in s] for s in _streams(rows, replicas)] == [
@@ -134,7 +134,7 @@ def test_equal_weights_take_the_oldest_rollouts_in_arrival_order():
     replicas = [_replica("policy-0", 0, 2), _replica("policy-1", 1, 2)]
     manager = _manager([3] * 10, replicas, count=4)
 
-    rows = manager._take_dispatch_rows(replicas)
+    rows = manager._take_dispatch_rows(replicas, manager._dispatch_counts(replicas))
 
     assert sorted(rollout.prompt_idx for _, rollout in rows) == list(range(8))
     assert manager.rollout_buffer.qsize() == 2
@@ -150,7 +150,7 @@ def test_missing_or_invalid_weight_counts_as_zero_and_warns_once(monkeypatch):
     replicas = [_replica("policy-0", 0, 2)]
     manager = _manager([None, "many", 5, 5], replicas, count=4)
 
-    rows = manager._take_dispatch_rows(replicas)
+    rows = manager._take_dispatch_rows(replicas, manager._dispatch_counts(replicas))
 
     assert warning.call_count == 1
     assert "weight 0" in warning.call_args.args[0]
@@ -162,7 +162,7 @@ def test_count_must_divide_the_replica_data_parallel_size():
     replicas = [_replica("policy-0", 0, 2)]
     manager = _manager([1, 2, 3], replicas, count=3)
     with pytest.raises(ValueError, match="divisible"):
-        manager._take_dispatch_rows(replicas)
+        manager._take_dispatch_rows(replicas, manager._dispatch_counts(replicas))
 
 
 def test_real_dispatch_publishes_balanced_replica_streams():
@@ -192,8 +192,8 @@ def test_payload_lookahead_reserves_with_the_same_selection(monkeypatch):
     calls = []
     original = manager._take_dispatch_rows
 
-    def spy(target):
-        rows = original(target)
+    def spy(target, counts):
+        rows = original(target, counts)
         calls.append(rows)
         return rows
 
