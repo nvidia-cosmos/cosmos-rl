@@ -29,6 +29,57 @@ permissions:
   contents: read
 
 jobs:
+  gate:
+    # Pre-flight checks for tag releases. A PyPI version can never be reused,
+    # so refuse to publish anything that is not on main, and surface the CI
+    # status of the tagged commit to the approver.
+    # Runs in parallel with `build`; `publish-pypi` needs both. It holds no
+    # secrets and the checkout is only used to read git history.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # list build-and-test runs for the tagged commit
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the tagged commit is on main
+        run: |
+          set -eu
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not reachable from main. Releases must be cut from main."
+            exit 1
+          fi
+
+      - name: Report build-and-test status for the tagged commit
+        # Informational only, deliberately not a hard gate. build-and-test
+        # mostly runs on pull requests, and its push runs on main are
+        # routinely cancelled by the concurrency group when newer commits
+        # land, so requiring a green push run would block every release. The
+        # status is surfaced so whoever approves the `pypi` environment can
+        # see it before clicking approve.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          runs=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-and-test.yaml/runs?head_sha=${GITHUB_SHA}&event=push" \
+            --jq '[.workflow_runs[] | (.conclusion // .status)] | join(", ")')
+          runs="${runs:-none}"
+          {
+            echo "### build-and-test for \`${GITHUB_SHA}\`"
+            echo
+            echo "Push runs on this commit: **${runs}**"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          case ",${runs}," in
+            *success*) ;;
+            *) echo "::warning::No successful build-and-test push run for ${GITHUB_SHA} (found: ${runs}). Confirm CI before approving the pypi deployment." ;;
+          esac
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -86,7 +137,7 @@ jobs:
           if-no-files-found: error
 
   publish-pypi:
-    needs: build
+    needs: [build, gate]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # The environment is both the secret's scope and the approval gate:
