@@ -49,7 +49,7 @@ from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
-from cosmos_rl.dispatcher.publication import ControllerPublisher
+from cosmos_rl.dispatcher.publication import ControllerPublisher, outbox_capacity
 
 
 def _fatal_publication(error):
@@ -278,6 +278,10 @@ maxmemory-policy noeviction
         self.redis_controller = ControllerPublisher(
             RedisStreamHandler(ips=["0.0.0.0"], port=redis_free_port),
             on_failure=_fatal_publication,
+            max_pending=outbox_capacity(
+                config.policy.parallelism.n_init_replicas,
+                config.rollout.parallelism.n_init_replicas,
+            ),
         )
 
         # Terminal discards must free the samples AND reopen the prompt slot
