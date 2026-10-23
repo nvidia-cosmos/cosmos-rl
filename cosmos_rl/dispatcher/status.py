@@ -1155,51 +1155,21 @@ class PolicyStatusManager:
                     current_policy_replica, redis_handler=self.redis_handler
                 )
 
-                # Check whether there is any valid rollout replicas
-                any_valid_rollout_replica = None
-                sorted_rollout_replicas = sorted(
-                    rollout_status_manager.rollout_replicas.values(),
-                    key=lambda x: x.start_time,
-                )
-                valid_rollout_replicas = []
-                for r in sorted_rollout_replicas:
-                    if r.all_atoms_arrived:
-                        valid_rollout_replicas.append(r)
-                        if any_valid_rollout_replica is None:
-                            any_valid_rollout_replica = r
-                if any_valid_rollout_replica:
-                    command.PolicyToRolloutUnicastCommand.trigger(
-                        src_replica=current_policy_replica,
-                        dst_replica=any_valid_rollout_replica,
-                        src_replica_size=self.policy_atoms_in_replica,
-                        dst_replica_size=rollout_status_manager.rollout_atoms_in_replica,
-                        # Resume progress is known before registration. Async
-                        # adoption needs the version on P2R itself, including
-                        # singleton rollouts without a native R2R broadcast.
-                        weight_step=self.current_step,
-                        total_steps=None,
-                        redis_handler=self.redis_handler,
-                    )
-                    if (
-                        len(valid_rollout_replicas)
-                        >= config.rollout.parallelism.n_init_replicas
-                    ):
-                        command.RolloutToRolloutBroadcastCommand.trigger(
-                            src_replica=any_valid_rollout_replica,
-                            dst_replicas=valid_rollout_replicas,
-                            weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
-                            total_steps=None,
-                            redis_handler=self.redis_handler,
-                            validation_round_id=self.prepare_validation_round(
-                                self.current_step, None, valid_rollout_replicas
-                            ),
-                        )
-                    logger.info(
-                        f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} via Policy registration"
+                if config.policy.parallelism.n_init_replicas <= 1:
+                    # A single policy replica gets no policy-to-policy
+                    # broadcast, so it can serve waiting rollouts right away,
+                    # but only once their cohort and mesh build are complete.
+                    self.trigger_initial_p2r(
+                        current_policy_replica, config, rollout_status_manager
                     )
                 else:
+                    # The first P2R to an already waiting rollout is issued in
+                    # post_register_hook once the cohort is complete, after
+                    # the policy-to-policy broadcast. Issued here, the loaded
+                    # replica would block on rollout readiness while every
+                    # other policy replica waits in the broadcast collective.
                     logger.info(
-                        "[Controller] No valid rollout replicas found, skip PolicyToRolloutUnicastCommand"
+                        "[Controller] Deferring the first PolicyToRolloutUnicastCommand until the policy cohort completes"
                     )
             self.post_register_hook(
                 valid_replicas,
@@ -1272,6 +1242,69 @@ class PolicyStatusManager:
                     ].put(rollout)
             self.rollout_buffer_per_rank = new_rollout_buffer_per_rank
 
+    def trigger_initial_p2r(
+        self,
+        loaded_policy_replica: Replica,
+        config: Config,
+        rollout_status_manager: "RolloutStatusManager",
+    ):
+        """Send the first weights to a rollout that is already waiting.
+
+        Rollouts that register after this point receive their P2R from the
+        rollout-side post_register_hook instead.
+        """
+        any_valid_rollout_replica = None
+        sorted_rollout_replicas = sorted(
+            rollout_status_manager.rollout_replicas.values(),
+            key=lambda x: x.start_time,
+        )
+        valid_rollout_replicas = []
+        for r in sorted_rollout_replicas:
+            if r.all_atoms_arrived:
+                valid_rollout_replicas.append(r)
+                if any_valid_rollout_replica is None:
+                    any_valid_rollout_replica = r
+        if any_valid_rollout_replica is None:
+            logger.info(
+                "[Controller] No valid rollout replicas found, skip PolicyToRolloutUnicastCommand"
+            )
+            return
+        if len(valid_rollout_replicas) < config.rollout.parallelism.n_init_replicas:
+            # The rollout mesh is built when the last rollout registers. A
+            # transfer issued before that would run ahead of the mesh build
+            # on its target, so the rollout-side post_register_hook issues it
+            # once both cohorts are complete.
+            logger.info(
+                "[Controller] Rollout cohort incomplete, the first PolicyToRolloutUnicastCommand follows the last rollout registration"
+            )
+            return
+        command.PolicyToRolloutUnicastCommand.trigger(
+            src_replica=loaded_policy_replica,
+            dst_replica=any_valid_rollout_replica,
+            src_replica_size=self.policy_atoms_in_replica,
+            dst_replica_size=rollout_status_manager.rollout_atoms_in_replica,
+            # Resume progress is known before registration. Async
+            # adoption needs the version on P2R itself, including
+            # singleton rollouts without a native R2R broadcast.
+            weight_step=self.current_step,
+            total_steps=None,
+            redis_handler=self.redis_handler,
+        )
+        if len(valid_rollout_replicas) >= config.rollout.parallelism.n_init_replicas:
+            command.RolloutToRolloutBroadcastCommand.trigger(
+                src_replica=any_valid_rollout_replica,
+                dst_replicas=valid_rollout_replicas,
+                weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
+                total_steps=None,
+                redis_handler=self.redis_handler,
+                validation_round_id=self.prepare_validation_round(
+                    self.current_step, None, valid_rollout_replicas
+                ),
+            )
+        logger.info(
+            f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} after the policy cohort completed"
+        )
+
     def post_register_hook(
         self,
         valid_replicas: List[Replica],
@@ -1317,6 +1350,14 @@ class PolicyStatusManager:
                     total_steps=self.total_steps,
                     redis_handler=self.redis_handler,
                 )
+                # 3. Hand the loaded weights to a rollout that registered
+                # before the cohort was complete. Commands run in order on
+                # the loaded replica, so the broadcast above finishes before
+                # it blocks on rollout readiness here.
+                if config.mode != "colocated":
+                    self.trigger_initial_p2r(
+                        initialized_replica, config, rollout_status_manager
+                    )
             # Set all policy replicas to `ready`
             for replica in valid_replicas:
                 self.set_status(replica.name, PolicyStatus.READY)
@@ -3659,9 +3700,43 @@ class RolloutStatusManager:
                 any_loaded_policy_replica = replica
                 break
 
-        # First P->R Unicast if the policy is ready and all rollout replicas are not ready
+        # Queue the mesh build before any transfer: a worker executes its commands
+        # in order, and a P2R queued ahead of BuildMesh would hold the receiver in
+        # the transfer while the other workers wait in the mesh collective.
+        cohort_completed_now = (
+            not self.rollout_init_done
+            and len(valid_replicas) == config.rollout.parallelism.n_init_replicas
+        )
+        if cohort_completed_now:
+            self.rollout_init_done = True
+            self.trigger_rebuild_mesh(valid_replicas)
+        elif not self.rollout_init_done:
+            assert len(valid_replicas) < config.rollout.parallelism.n_init_replicas
+            logger.info(
+                f"Waiting for {config.rollout.parallelism.n_init_replicas - len(valid_replicas)} more replicas to arrive"
+            )
+        else:
+            # Dynamic mesh building, no matter what the length of valid_replicas is,
+            # we will always trigger mesh building if there are more than one rollout replicas
+            self.trigger_rebuild_mesh(valid_replicas)
+
+        # First P->R Unicast if the policy is ready and all rollout replicas are not ready.
+        # With several policy replicas, wait until the policy cohort is complete:
+        # PolicyStatusManager.post_register_hook issues the first transfer right
+        # after the policy-to-policy broadcast, so the loaded replica never blocks
+        # on rollout readiness while its peers wait in the broadcast collective.
+        # Before the rollout cohort is complete there is no BuildMesh yet, so a
+        # transfer to an early rollout would again run ahead of its mesh build;
+        # the last rollout registration (above) or trigger_initial_p2r issues it.
+        policy_cohort_ready = getattr(
+            policy_status_manager, "policy_init_done", True
+        ) or len(policy_status_manager.policy_replicas) >= (
+            config.policy.parallelism.n_init_replicas
+        )
         if (
-            all(
+            self.rollout_init_done
+            and policy_cohort_ready
+            and all(
                 [
                     not replica.weights_loaded_in_view_of_command
                     for replica in valid_replicas
@@ -3686,15 +3761,7 @@ class RolloutStatusManager:
                 "[Controller] No valid policy replicas found in Rollout registration or some rollout already get weight from policy, skip PolicyToRolloutUnicastCommand"
             )
 
-        was_already_initialized = self.rollout_init_done
-
-        if (
-            not was_already_initialized
-            and len(valid_replicas) == config.rollout.parallelism.n_init_replicas
-        ):
-            self.rollout_init_done = True
-            self.trigger_rebuild_mesh(valid_replicas)
-
+        if cohort_completed_now:
             # ONLY ONCE PER LIFE CYCLE
             # Trigger RolloutToRolloutBroadcastCommand only once after all initial rollout replicas are loaded
             any_loaded_rollout_replica = None
@@ -3719,12 +3786,3 @@ class RolloutStatusManager:
                         policy_status_manager.current_step, None, valid_replicas
                     ),
                 )
-        elif not self.rollout_init_done:
-            assert len(valid_replicas) < config.rollout.parallelism.n_init_replicas
-            logger.info(
-                f"Waiting for {config.rollout.parallelism.n_init_replicas - len(valid_replicas)} more replicas to arrive"
-            )
-        else:
-            # Dynamic mesh building, no matter what the length of valid_replicas is,
-            # we will always trigger mesh building if there are more than one rollout replicas
-            self.trigger_rebuild_mesh(valid_replicas)
