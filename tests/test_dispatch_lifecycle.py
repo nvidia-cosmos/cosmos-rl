@@ -231,6 +231,7 @@ def test_initial_validation_is_not_restarted_by_late_join():
     config = SimpleNamespace(
         validation=SimpleNamespace(enable=True, val_before_train=True),
         policy=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=1)),
+        train=SimpleNamespace(train_policy=SimpleNamespace()),
     )
     first = SimpleNamespace(
         name="a", start_time=0, weights_loaded_in_view_of_command=True

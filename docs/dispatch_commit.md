@@ -68,6 +68,36 @@ Discarded obsolete prompt slots stay spent, matching admission-time filtering.
 Configured lag remains authoritative: allowing one old step still permits it.
 No new divisibility restriction on generation count or default objective change.
 
+## Weight-balanced dispatch
+
+`train.train_policy.dispatch_balance_key` defaults to `null`, which keeps FIFO
+round-robin dispatch: the controller publishes the rollouts of one training step
+in arrival order, interleaved across the arrived policy replicas, and each policy
+worker hands the `i`-th rollout of its replica stream to data rank `i % dp_size`.
+Equal counts per rank are already required by the worker.
+
+When the key is set, the controller reads a non-negative number from
+`rollout.extra_info[dispatch_balance_key]` for every rollout of the step and
+assigns the rollouts of the step to the `(replica, data rank)` slots so that the
+per-rank weight sums are as even as possible: rollouts are placed heaviest
+first, each on the slot with the smallest sum that still has room; equal weights
+keep arrival order. Every rank still receives exactly
+`train_batch_per_replica / dp_size` rollouts, the step still consumes the oldest
+`train_batch_per_replica x replicas` rollouts, and only the published
+per-replica order is rearranged so that the existing worker-side sharding lands
+each rollout on its assigned rank. There is no protocol or worker change;
+counts, receipts and per-step accounting are unchanged, and the payload
+lookahead reservation uses the same selection.
+
+Use it when rollouts differ widely in training cost: variable-length episodes
+from a simulator (weight = number of trainable rows or frames) or LLM GRPO with
+long and short completions (weight = completion token count). Without it, one
+data rank can receive several heavy rollouts while another receives only light
+ones, and every rank then waits for the slowest one in each collective. A
+rollout without the key, or with a non-numeric or negative value, counts as
+weight 0; the first such rollout is logged once. The option balances the shared
+queue only and cannot be combined with `data_dispatch_as_rank_in_mesh`.
+
 ## Multi-replica SFT membership
 
 Autonomous SFT seals its original cohort before the first mesh publication.

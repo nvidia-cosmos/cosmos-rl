@@ -384,6 +384,33 @@ def test_local_reward_payload_remains_aligned_after_admission():
     ]
 
 
+def test_local_reward_forwards_extra_info_without_explicit_admission():
+    """A producer that never opts into admission still ships extra_info to the controller."""
+    calculator = LocalRewardCalculator()
+    calculator.rl_algo = _TestAlgo([1.0, 2.0, 3.0, 4.0])
+    calculator.config = SimpleNamespace(
+        train=SimpleNamespace(
+            non_text=True,
+            train_policy=SimpleNamespace(min_filter_prefix_tokens=None),
+        )
+    )
+
+    result, _, _ = calculator.compute_rewards([_payload()], False, 4)
+
+    assert result[0].extra_info == {"aligned": [10, 11, 12, 13], "group": "metadata"}
+    admitted_payloads, _ = consume_completion_admission_metrics(result)
+    trainer_rollouts = extract_rollouts(admitted_payloads, is_end=False)
+    assert [rollout.extra_info["aligned"] for rollout in trainer_rollouts[0]] == [
+        10,
+        11,
+        12,
+        13,
+    ]
+    assert all(
+        rollout.extra_info["group"] == "metadata" for rollout in trainer_rollouts[0]
+    )
+
+
 def test_fully_rejected_group_preserves_excluded_reward_telemetry():
     calculator = LocalRewardCalculator()
     calculator.rl_algo = _TestAlgo([1.0, 2.0, 3.0, 4.0])
