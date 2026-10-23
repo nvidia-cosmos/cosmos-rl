@@ -9,6 +9,7 @@ import pytest
 from test_dispatch_balance import KEY, _manager, _per_rank, _replica, _streams, _weight
 
 from cosmos_rl.dispatcher.command import Command
+from cosmos_rl.dispatcher.status import PolicyStatus
 from cosmos_rl.policy.config import GrpoConfig
 
 
@@ -61,6 +62,36 @@ def test_step_without_pending_rollouts_dispatches_zero_counts():
     assert _published(manager) == {"policy-0": (0, []), "policy-1": (0, [])}
     assert manager.dispatched_rollouts_by_step == {1: 0}
     assert manager.current_step == 1
+
+
+def _complete_cohort(manager, replicas):
+    """Run the registration hook for the replica that completes the policy cohort."""
+    manager.policy_init_done = False
+    manager.status = {replica.name: PolicyStatus.UNINITIALIZED for replica in replicas}
+    manager.trigger_rebuild_mesh = MagicMock()
+    manager.config.policy.parallelism.n_init_replicas = len(replicas)
+    manager.post_register_hook(replicas, replicas[-1], manager.config, MagicMock())
+
+
+def test_completed_cohort_starts_the_first_step_without_rollouts():
+    """The first step must not wait for the first finished episode."""
+    replicas = [_replica("policy-0", 0, 1)]
+    manager = _ready_manager([], replicas)
+
+    _complete_cohort(manager, replicas)
+
+    assert _published(manager) == {"policy-0": (0, [])}
+    assert manager.current_step == 1
+
+
+def test_completed_cohort_waits_for_rollouts_under_fixed_dispatch():
+    replicas = [_replica("policy-0", 0, 1)]
+    manager = _manager([], replicas, count=2, key=None)
+
+    _complete_cohort(manager, replicas)
+
+    manager.redis_handler.publish_plan.assert_not_called()
+    assert manager.current_step == 0
 
 
 def test_counts_are_whole_rounds_per_data_rank_and_leave_the_rest_queued():

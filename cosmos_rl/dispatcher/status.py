@@ -1075,6 +1075,13 @@ class PolicyStatusManager:
             self._fail_pending_policy_membership()
         if replica.in_mesh and len(valid_replicas) > 0:
             self.trigger_rebuild_mesh(valid_replicas)
+            if getattr(
+                self.config.train.train_policy, "dispatch_on_trainer_ready", False
+            ):
+                # The survivors may be ready and waiting on a rollout completion
+                # that a replay-pool trainer does not need; losing a peer is the
+                # other transition that leaves them with nothing to wake them.
+                self.try_trigger_data_fetch_and_training()
 
     @_serialize_policy_lifecycle
     def register(
@@ -1400,6 +1407,16 @@ class PolicyStatusManager:
                 redis_handler=self.redis_handler,
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
+
+        if self.policy_init_done and getattr(
+            config.train.train_policy, "dispatch_on_trainer_ready", False
+        ):
+            # The other dispatch points are a rollout completion and a training
+            # ACK, so without this the first step would wait for the first
+            # finished episode, which a trainer serving itself from a replay pool
+            # does not need. This is the transition that starts such a run and
+            # resumes it after a rescale.
+            self.try_trigger_data_fetch_and_training()
 
     @_serialize_policy_lifecycle
     def validation_report_validation_results(
