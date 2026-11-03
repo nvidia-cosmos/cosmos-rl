@@ -19,6 +19,7 @@ from test_zero_staleness_refill_deadlock import _config, _controller
 def controller(*, issued=12, pending=22, staleness=0, on_policy=False):
     config = _config(on_policy=on_policy, allowed_outdated_steps=staleness)
     config.rollout.n_generation = 2
+    config.train.train_policy.max_inflight_steps = staleness + 1
     config.train.train_policy.data_dispatch_as_rank_in_mesh = False
     item = _controller(
         config, current_step=4, samples_on_the_fly=pending, pending_rollouts=pending

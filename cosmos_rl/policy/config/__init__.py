@@ -620,7 +620,7 @@ class GrpoConfig(BaseModel):
 
     max_retry_for_on_policy: int = Field(
         default=-1,
-        description="Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.",
+        description="Maximum number of prompt batches attempted per weight version in disaggregated RL, including terminal-loss replacements, for both on-policy and asynchronous runs. If non-positive, will retry with no upper limit until enough samples are generated.",
     )
 
     reference_reset_interval: Optional[int] = Field(
