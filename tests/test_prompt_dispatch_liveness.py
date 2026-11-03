@@ -149,6 +149,56 @@ def test_completed_versions_are_not_reissued_after_the_controller_advances():
     assert 0 not in item.weight_version_to_replacement_prompt_num
 
 
+@pytest.mark.parametrize("step,staged,lag", [(1, 0, 1), (3, 2, 1), (4, 2, 4)])
+def test_batch_fits_weights_available_between_sync_intervals(step, staged, lag):
+    from cosmos_rl.rollout.prompt_batch import required_weight_version
+
+    item = controller(lag=lag)
+    item.config.train.sync_weight_interval = 2
+    status = item.policy_status_manager
+    status.current_step = step
+    status._weight_last_staged_step = staged
+    status._weight_max_adopted_version = staged
+    payloads = fetch(item, 8)
+    assert [p.weight_version for p in payloads] == list(range(step, staged + lag + 1))
+    assert required_weight_version(payloads) <= staged + lag
+    assert status.total_pending_rollouts() == 0
+    assert not status.dispatched_rollouts_by_step
+    # Losing every group must still permit a batch usable with these weights.
+    for payload in payloads:
+        discard(item, payload)
+    replacements = fetch(item, 8)
+    assert [p.weight_version for p in replacements] == [
+        p.weight_version for p in payloads
+    ]
+    assert required_weight_version(replacements) <= staged + lag
+
+
+def test_inflight_weight_transfer_can_unblock_a_batch_without_more_training():
+    item = controller(lag=1)
+    status = item.policy_status_manager
+    status.current_step = 3
+    status._weight_last_staged_step = 3
+    status._weight_max_adopted_version = 2
+    assert [p.weight_version for p in fetch(item, 8)] == [3, 4]
+
+
+def test_admitted_update_can_advance_a_spent_reachable_window():
+    item = controller(lag=1)
+    status = item.policy_status_manager
+    status.current_step = 3
+    status._weight_last_staged_step = status._weight_max_adopted_version = 2
+    status.rollout_buffer.put(object())
+    status.samples_on_the_fly = 1
+    assert fetch(item, 8) == []
+    assert item.data_fetcher.pulled == []
+    # That already-admitted batch can finish step 4 and stage its weights.
+    status.rollout_buffer.get_nowait()
+    status.current_step = status._weight_last_staged_step = 4
+    status.samples_on_the_fly = 0
+    assert [p.weight_version for p in fetch(item, 8)] == [4, 5]
+
+
 def test_retry_budget_also_checks_replacements_at_a_later_version():
     item = controller()
     item.config.train.train_policy.max_retry_for_on_policy = 1

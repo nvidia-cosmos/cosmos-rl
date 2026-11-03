@@ -586,14 +586,29 @@ maxmemory-policy noeviction
         """Bound the whole fetch before it advances the dataset.
 
         Queued/admitted batches determine the starting stamp, as in native
-        assignment. The controller step already includes dispatched updates;
-        workers can catch up to it without another generation. Do not issue
-        beyond its staleness window: otherwise blocked future work can occupy
-        every throttle slot and prevent terminal-loss replacements.
+        assignment. Use weights already reported or staged for transfer to
+        bound what workers can reach without another generation. The controller
+        can be ahead of those weights between sync intervals or while syncs
+        are coalesced. Blocked future work must not occupy every throttle slot
+        and prevent terminal-loss replacements.
         """
         status = self.policy_status_manager
         policy = self.config.train.train_policy
-        ceiling = status.current_step + policy.allowed_outdated_steps
+        available_versions = [
+            version
+            for version in (
+                getattr(status, "_weight_last_staged_step", None),
+                getattr(status, "_weight_max_adopted_version", None),
+            )
+            if type(version) is int and version >= 0
+        ]
+        # Before the initial sync, the restored controller step is the weight
+        # version the startup protocol will deliver. Staged transfers may still
+        # be in flight; waiting for them does not require another training step.
+        reachable_weight_version = min(
+            status.current_step, max(available_versions, default=status.current_step)
+        )
+        ceiling = reachable_weight_version + policy.allowed_outdated_steps
         self._prune_refill_state(before_weight_version=starting_weight_version)
         replacements = getattr(self, "weight_version_to_replacement_prompt_issued", {})
         credits = getattr(self, "weight_version_to_replacement_prompt_num", {})
@@ -639,6 +654,7 @@ maxmemory-policy noeviction
             logger.info(
                 "[Controller] Prompt window limited fetch %d -> %d: "
                 "current_step=%d latest_reported_weight_version=%s "
+                "staged_weight_version=%s reachable_weight_version=%d "
                 "starting_version=%d ceiling=%d "
                 "pending_admitted=%d dispatched_steps=%s outstanding=%d "
                 "normal_slots=%s refill_slots=%s",
@@ -646,6 +662,8 @@ maxmemory-policy noeviction
                 bounded,
                 status.current_step,
                 getattr(status, "_weight_max_adopted_version", None),
+                getattr(status, "_weight_last_staged_step", None),
+                reachable_weight_version,
                 starting_weight_version,
                 ceiling,
                 status.total_pending_rollouts(),

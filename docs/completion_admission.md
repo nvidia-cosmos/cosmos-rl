@@ -131,7 +131,12 @@ usable groups must leave replacement work that can run without a training update
 In shared-queue dispatch, each fetch is bounded before reading dataset rows or
 charging samples. Capacity is the unused normal quota plus replacement credits
 from the native admission-derived starting version through
-`current_step + allowed_outdated_steps`. With zero allowed staleness, a request
+`reachable_weight_version + allowed_outdated_steps`. Reachable weights include
+versions already reported by rollouts or staged for transfer, bounded by the
+controller step. This prevents a sync interval or coalesced sync from issuing
+work that needs a version unavailable until another training update. Before
+the initial sync, the startup protocol delivers the restored controller version.
+With zero allowed staleness, a request
 for four prompts with one replacement credit and no ordinary capacity returns
 that one replacement, leaving the next version's quota untouched. In-flight
 limits apply to the whole fetch, rounded up to a complete generation group so
