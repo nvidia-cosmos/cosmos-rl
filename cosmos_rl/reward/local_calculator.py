@@ -21,6 +21,7 @@ from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.reward.base import RolloutGroup
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.reward.admission import (
     aggregate_excluded_reward_metrics,
     select_payload_completions,
@@ -103,12 +104,28 @@ class LocalRewardCalculator:
             data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
         """
-        if hasattr(self, "rl_algo"):
+        if hasattr(self, "rl_algo") or getattr(self, "_setup_complete", False):
             logger.warning(
                 "[LocalRewardCalculator] LocalRewardCalculator is already setup, returning directly."
             )
             return
         self.config = config
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+        )
+        if self.rollout_only:
+            self.scorer = None
+            if not config.train.train_policy.bypass_reward:
+                self.scorer = Reward(
+                    config=config,
+                    tokenier=util.setup_tokenizer(config.policy.model_name_or_path),
+                    reward_function=config.train.train_policy.reward_function,
+                    explicit_reward_fn=reward_fns,
+                    explicit_filter_reward_fn=[],
+                    data_packer=data_packer,
+                )
+            self._setup_complete = True
+            return
         self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
 
         self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
@@ -235,9 +252,15 @@ class LocalRewardCalculator:
         return payload_list, True, step
 
     def compute_rewards(
+        self, payloads: List[RLPayload], is_validation: bool, step: int
+    ) -> Tuple[List[RLPayload], bool, int]:
+        if is_validation:
+            return self.compute_validation_rewards(payloads, step)
+        return self._compute_training_rewards(payloads, step)
+
+    def _compute_training_rewards(
         self,
         payloads: List[RLPayload],
-        is_validation: bool,
         step: int,
     ) -> Tuple[List[RLPayload], bool, int]:
         """
@@ -255,9 +278,18 @@ class LocalRewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        if is_validation:
-            return self.compute_validation_rewards(payloads, step)
-
+        if getattr(self, "rollout_only", False):
+            for payload in payloads:
+                if self.scorer is None:
+                    prepare_scored_payload(payload)
+                else:
+                    scores, _, metrics = self.scorer.compute_reward(
+                        payload.completions,
+                        payload.reference_answer,
+                        prompt=payload.prompt,
+                    )
+                    prepare_scored_payload(payload, scores, metrics)
+            return payloads, False, step
         assert all(payload.prompt_idx >= 0 for payload in payloads), (
             "[Reward] All payloads should have a valid prompt index"
         )

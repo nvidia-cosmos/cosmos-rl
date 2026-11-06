@@ -422,7 +422,7 @@ def _is_coordinated_controller_exit(
     return returncode in (-signal.SIGTERM, 128 + signal.SIGTERM)
 
 
-def _monitor_processes(processes, controller=None):
+def _monitor_processes(processes, controller=None, *, fail_on_worker_error=False):
     """Contain explicit fatal transport failures, preserving other exit policy.
 
     Kill descendants as well as shell wrappers, without changing the existing
@@ -446,6 +446,7 @@ def _monitor_processes(processes, controller=None):
                 logger.error("Process %s failed with return code %s", process.pid, rc)
                 if (
                     rc != FATAL_TRANSPORT_EXIT_CODE
+                    and not fail_on_worker_error
                     and controller is not None
                     and process is not controller
                 ):
@@ -596,6 +597,18 @@ def main():
         cosmos_config.get("train", {}).get("train_policy", {}).get("type", "grpo")
         == "sft"
     )
+
+    if cosmos_config.get("rollout", {}).get("rollout_only", False):
+        if n_policy != 0 or n_rollouts < 1 or is_colocated or is_sft:
+            parser.error(
+                "rollout_only requires zero policy replicas, at least one rollout replica and disaggregated GRPO"
+            )
+        cosmos_config.setdefault("policy", {}).setdefault("parallelism", {})[
+            "n_init_replicas"
+        ] = n_policy
+        cosmos_config.setdefault("rollout", {}).setdefault("parallelism", {})[
+            "n_init_replicas"
+        ] = n_rollouts
 
     # If the training type is SFT, set n_rollouts to 0
     if is_sft:
@@ -1012,7 +1025,11 @@ cosmos-rl --config config.toml"""
     DistributedSignalHandler.get_instance(["SIGUSR1"], policy_processes)
 
     _monitor_processes(
-        processes, processes[controller_id] if controller_id >= 0 else None
+        processes,
+        processes[controller_id] if controller_id >= 0 else None,
+        fail_on_worker_error=cosmos_config.get("rollout", {}).get(
+            "rollout_only", False
+        ),
     )
 
     if tmpfile_toml is not None and os.path.exists(tmpfile_toml):

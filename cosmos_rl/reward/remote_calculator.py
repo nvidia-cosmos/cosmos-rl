@@ -34,6 +34,7 @@ from cosmos_rl.reward.admission import (
     select_payload_completions,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.utils.network_util import make_request_with_retry
 
 try:
@@ -78,12 +79,21 @@ class RemoteRewardCalculator:
             return
         self.train_config = config.train.train_policy.remote_reward
         self.val_config = config.validation.remote_reward
-        self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
-            reward_fn=None,
-            unbiased=config.train.train_policy.unbiased_advantage,
-            config=config,
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
         )
-        self.minimum_trainable_completions = self.rl_algo.minimum_trainable_completions
+        self.rl_algo = (
+            None
+            if self.rollout_only
+            else REGISTERED_ALGOs[config.train.train_policy.algo](
+                reward_fn=None,
+                unbiased=config.train.train_policy.unbiased_advantage,
+                config=config,
+            )
+        )
+        self.minimum_trainable_completions = (
+            0 if self.rollout_only else self.rl_algo.minimum_trainable_completions
+        )
         # We use wan2pt1 VAE tokenizer to encode the images/videos into latents.
         try:
             self.tokenizer = Wan2pt1VAEInterface(
@@ -386,6 +396,12 @@ class RemoteRewardCalculator:
                 uuids.get()  # remove the uuid from the queue
                 payloads_for_uuid = self.uuid2payload[uuid]
                 completions_per_payload = self.uuid2completions_per_payload[uuid]
+                if getattr(self, "rollout_only", False) and (
+                    rewards.ndim != 1 or len(rewards) != sum(completions_per_payload)
+                ):
+                    raise ValueError(
+                        "Remote scores must match every generated completion"
+                    )
 
                 # Split the batched rewards back to individual payloads
                 offset = 0
@@ -406,11 +422,23 @@ class RemoteRewardCalculator:
                 del self.uuid2step[uuid]
                 del self.uuid2completions_per_payload[uuid]
             except Exception as e:
+                if getattr(self, "rollout_only", False):
+                    # Remote request retries already have their own budget.
+                    # An exhausted request or malformed score is a scoring
+                    # failure, not permission to discard/evaluate as zero.
+                    raise
                 logger.info(
                     f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
                 )
                 break
 
+        return self._finalize_results(
+            valid_payloads, valid_results, valid_stages, valid_steps
+        )
+
+    def _finalize_results(
+        self, valid_payloads, valid_results, valid_stages, valid_steps
+    ):
         # Convert the rewards results to RLPayloads
         assert all(payload.prompt_idx >= 0 for payload in valid_payloads), (
             "[Reward] All payloads should have a valid prompt index"
@@ -423,12 +451,17 @@ class RemoteRewardCalculator:
         assert all(step == valid_steps[0] for step in valid_steps), (
             "[Reward] All steps should be the same"
         )
+        if getattr(self, "rollout_only", False) and not valid_payloads:
+            return None, False, -1
         is_validation = valid_stages[0] == "validation"
         step = valid_steps[0]
 
         payload_list: List[RLPayload] = []
         for i, payload in enumerate(valid_payloads):
             rewards = valid_results[i]
+            if getattr(self, "rollout_only", False):
+                payload_list.append(prepare_scored_payload(payload, rewards.tolist()))
+                continue
             admission = resolve_completion_admission(
                 payload,
                 self.minimum_trainable_completions,

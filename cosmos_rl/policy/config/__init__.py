@@ -679,8 +679,8 @@ class GrpoConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
-        assert len(self.reward_function) > 0, (
-            "reward_function must be a dict of reward functions"
+        assert self.bypass_reward or len(self.reward_function) > 0, (
+            "reward_function must be a nonempty dict unless bypass_reward=True"
         )
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
@@ -1499,6 +1499,20 @@ class ValidationConfig(BaseModel):
 
 
 class RolloutConfig(BaseModel):
+    rollout_only: bool = Field(
+        default=False,
+        description="Run disaggregated generation and rewards without policy replicas or weight synchronization.",
+    )
+    max_prompts: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Optional total prompt limit for rollout-only execution; dataset epochs also bound execution.",
+    )
+    max_inflight_prompts: int = Field(
+        default=128,
+        gt=0,
+        description="Maximum outstanding prompts across all rollout-only workers, including reward processing.",
+    )
     completion_admission: bool = Field(
         default=False,
         description="Enable pre-generation completion identities and replay-protected reporting for disaggregated non-DAPO RL. Quality masks work in all modes independently.",
@@ -2019,6 +2033,44 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def check_params_value(self):
+        if self.rollout.rollout_only:
+            if (
+                self.mode != "disaggregated"
+                or self.policy.parallelism.n_init_replicas != 0
+            ):
+                raise ValueError(
+                    "rollout_only requires disaggregated mode and zero policy replicas"
+                )
+            if self.rollout.backend == "trtllm":
+                raise ValueError("rollout_only does not yet support the TRT-LLM worker")
+            if self.rollout.parallelism.n_init_replicas < 1:
+                raise ValueError("rollout_only requires at least one rollout replica")
+            if (
+                self.train.train_policy.type != "grpo"
+                or self.train.train_policy.variant == "dapo"
+            ):
+                raise ValueError(
+                    "rollout_only currently supports non-DAPO GRPO rollout configuration"
+                )
+            if (
+                self.rollout.n_generation < 1
+                or self.rollout.batch_size < 1
+                or self.train.epoch < 1
+            ):
+                raise ValueError(
+                    "rollout_only requires positive n_generation, batch_size and epoch"
+                )
+            if (
+                self.validation.enable
+                or self.distillation.enable
+                or self.train.resume
+                or self.rollout.completion_admission
+                or self.train.train_policy.data_dispatch_as_rank_in_mesh
+                or self.rollout.async_r2r_sync != "disabled"
+            ):
+                raise ValueError(
+                    "rollout_only does not support validation, distillation, resume, completion admission, rank dispatch or async weight sync"
+                )
         if self.rollout.completion_admission:
             if (
                 self.mode != "disaggregated"

@@ -104,6 +104,7 @@ run python -m pytest -q tests/test_weight_adoption.py
 run python -m pytest -q tests/test_mpi_rank.py
 run python -m pytest -q tests/test_empty_rollout_batch.py
 run torchrun --standalone --nproc-per-node=2 tests/empty_rollout_batch_canary.py
+run python -m pytest -q tests/test_rollout_only.py tests/test_rollout_only_results.py tests/test_application_callbacks.py
 run python -m pytest -q tests/test_rollout_phase_boundaries.py
 run python -m pytest -q tests/test_r2r_command_selection.py
 run python -m pytest -q tests/test_multi_turn_termination.py

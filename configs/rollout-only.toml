@@ -1,0 +1,42 @@
+# Run with: cosmos-rl --config configs/rollout-only.toml
+mode = "disaggregated"
+
+[train]
+output_dir = "./outputs/rollout-only"
+epoch = 1
+resume = false
+local_dataset = false
+
+[train.train_policy]
+type = "grpo"
+dataset.name = "openai/gsm8k"
+dataset.subset = "main"
+dataset.split = "test"
+prompt_column_name = "question"
+response_column_name = "answer"
+reward_function = "gsm8k"
+dataloader_shuffle = false
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-0.5B-Instruct"
+model_max_length = 2048
+
+[policy.parallelism]
+n_init_replicas = 0
+tp_size = 1
+
+[rollout]
+rollout_only = true
+max_prompts = 32
+max_inflight_prompts = 8
+backend = "vllm"
+batch_size = 1
+n_generation = 1
+max_response_length = 1024
+
+[rollout.parallelism]
+n_init_replicas = 1
+tp_size = 1
+
+[logging]
+logger = []

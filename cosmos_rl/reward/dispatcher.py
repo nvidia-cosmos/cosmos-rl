@@ -27,6 +27,7 @@ from cosmos_rl.reward.admission import (
     select_payload_completions,
 )
 from cosmos_rl.reward.remote_calculator import RemoteRewardCalculator
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
 
@@ -113,10 +114,19 @@ class RewardDispatcher:
             num_workers (int): The number of worker processes for parallel reward calculation.
         """
 
-        self.is_remote = config.train.train_policy.use_remote_reward
-        self.minimum_trainable_completions = REGISTERED_ALGOs[
-            config.train.train_policy.algo
-        ].minimum_trainable_completions
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+        )
+        self.is_remote = config.train.train_policy.use_remote_reward and not (
+            self.rollout_only and config.train.train_policy.bypass_reward
+        )
+        self.minimum_trainable_completions = (
+            0
+            if self.rollout_only
+            else REGISTERED_ALGOs[
+                config.train.train_policy.algo
+            ].minimum_trainable_completions
+        )
         if self.is_remote:
             self.remote_batch_size = config.train.train_policy.remote_reward.batch_size
 
@@ -149,7 +159,11 @@ class RewardDispatcher:
             data_packer,
             val_data_packer,
         )
-        if not self.is_remote and num_workers > 0:
+        if (
+            not self.is_remote
+            and num_workers > 0
+            and not (self.rollout_only and config.train.train_policy.bypass_reward)
+        ):
             # Use multiprocessing for local reward calculation
             # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor in non-text mode.
             # Unlike ProcessPoolExecutor, ThreadPoolExecutor can parse the tensors, videos, images directly
@@ -208,49 +222,9 @@ class RewardDispatcher:
             bypass_reward (bool): Whether to bypass the reward calculation and set rewards to zero.
         """
         if bypass_reward:
-            for i in range(0, len(payloads), self.payload_per_task):
-                # Directly return the payloads with zero rewards and advantages
-                for payload_idx in range(
-                    i, min(i + self.payload_per_task, len(payloads))
-                ):
-                    payload = payloads[payload_idx]
-                    payload.rewards = [0.0 for _ in payload.completions]
-                    payload.advantages = [0.0 for _ in payload.completions]
-                    payload.filter_rewards = [0.0 for _ in payload.completions]
-                    payload.report_metrics = [{} for _ in payload.completions]
-                    if payload.completed_conversations is None:
-                        payload.completed_conversations = [
-                            [] for _ in range(len(payload.completions))
-                        ]
-                    if payload.completion_logprobs is None:
-                        payload.completion_logprobs = [
-                            [] for _ in range(len(payload.completions))
-                        ]
-                    if payload.completion_token_ids is None:
-                        payload.completion_token_ids = [
-                            [] for _ in range(len(payload.completions))
-                        ]
-                    if payload.n_ignore_prefix_tokens is None:
-                        payload.n_ignore_prefix_tokens = [
-                            0 for _ in payload.completions
-                        ]
-                    admission = resolve_completion_admission(
-                        payload,
-                        self.minimum_trainable_completions,
-                        enabled=not is_validation,
-                    )
-                    payloads[payload_idx] = select_payload_completions(
-                        payload, admission
-                    )
-                    if admission.group_excluded:
-                        payloads[payload_idx].valid = False
-                self.task_queue.put(
-                    (
-                        payloads[i : i + self.payload_per_task],
-                        is_validation,
-                        step,
-                    )
-                )
+            results = self._bypass_rewards(payloads, is_validation, step)
+            for result in results:
+                self.task_queue.put(result)
         else:
             # For the remote reward, we batch payloads by total completions count.
             # remote_batch_size refers to the max number of completions per request,
@@ -281,6 +255,16 @@ class RewardDispatcher:
             # The result will be stored in the task queue.
             else:
                 for i in range(0, len(payloads), self.payload_per_task):
+                    if self.executor is None and getattr(self, "rollout_only", False):
+                        self.task_queue.put(
+                            RewardDispatcher.compute_rewards(
+                                payloads[i : i + self.payload_per_task],
+                                is_validation,
+                                step,
+                                False,
+                            )
+                        )
+                        continue
                     self.task_queue.put(
                         self.executor.submit(
                             RewardDispatcher.compute_rewards,
@@ -290,6 +274,51 @@ class RewardDispatcher:
                             self.is_remote,
                         )
                     )
+
+    def _bypass_rewards(self, payloads, is_validation, step):
+        if getattr(self, "rollout_only", False):
+            for payload in payloads:
+                prepare_scored_payload(payload)
+            return [(payloads, is_validation, step)]
+        results = []
+        for i in range(0, len(payloads), self.payload_per_task):
+            # Directly return the payloads with zero rewards and advantages
+            for payload_idx in range(i, min(i + self.payload_per_task, len(payloads))):
+                payload = payloads[payload_idx]
+                payload.rewards = [0.0 for _ in payload.completions]
+                payload.advantages = [0.0 for _ in payload.completions]
+                payload.filter_rewards = [0.0 for _ in payload.completions]
+                payload.report_metrics = [{} for _ in payload.completions]
+                if payload.completed_conversations is None:
+                    payload.completed_conversations = [
+                        [] for _ in range(len(payload.completions))
+                    ]
+                if payload.completion_logprobs is None:
+                    payload.completion_logprobs = [
+                        [] for _ in range(len(payload.completions))
+                    ]
+                if payload.completion_token_ids is None:
+                    payload.completion_token_ids = [
+                        [] for _ in range(len(payload.completions))
+                    ]
+                if payload.n_ignore_prefix_tokens is None:
+                    payload.n_ignore_prefix_tokens = [0 for _ in payload.completions]
+                admission = resolve_completion_admission(
+                    payload,
+                    self.minimum_trainable_completions,
+                    enabled=not is_validation,
+                )
+                payloads[payload_idx] = select_payload_completions(payload, admission)
+                if admission.group_excluded:
+                    payloads[payload_idx].valid = False
+            results.append(
+                (
+                    payloads[i : i + self.payload_per_task],
+                    is_validation,
+                    step,
+                )
+            )
+        return results
 
     def dequeue_rewards_cal(
         self,
