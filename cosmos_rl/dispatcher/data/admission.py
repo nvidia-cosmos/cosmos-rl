@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from cosmos_rl.dispatcher.data.schema import Rollout, TrainingCompletionIdentity
+from cosmos_rl.dispatcher.data.diagnostics import CompletionDiagnostics
 
 
 class CompletionIdentity(BaseModel):
@@ -47,6 +48,23 @@ class CompletionFailure(BaseModel):
     identity: CompletionIdentity
     reason: str = Field(min_length=1, max_length=64)
     payload: Rollout | None = None
+    diagnostics: CompletionDiagnostics | None = None
+
+
+@dataclass(frozen=True)
+class AdmissionCommitted:
+    """Native admission committed; accepted does not mean trained/consumed."""
+
+    source_replica: str
+    source_rank: int
+    identity: CompletionIdentity
+    disposition: CompletionDisposition
+    diagnostics: CompletionDiagnostics | None = None
+    stage: Literal["admission_committed"] = "admission_committed"
+
+
+# Compatibility for the initial draft API; use AdmissionCommitted in new code.
+CompletionSettlement = AdmissionCommitted
 
 
 @dataclass

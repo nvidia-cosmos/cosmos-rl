@@ -17,6 +17,7 @@ import torch
 import atexit
 import threading
 import time
+from dataclasses import replace
 from queue import Queue, Empty
 from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
@@ -29,6 +30,7 @@ from cosmos_rl.utils.constant import (
 
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.application_callbacks import CallbackContext
 
 # Note: this must be before import tensorrt_llm and calls of MPI.init
 # Otherwise, environment will not be inherited by MPI.
@@ -173,6 +175,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             val_dataset=kwargs.get("val_dataset"),
             val_data_packer=kwargs.get("val_data_packer"),
             val_reward_fns=kwargs.get("val_reward_fns"),
+            hook_fns=kwargs.get("hook_fns"),
         )
         atexit.register(self.handle_shutdown)
 
@@ -185,6 +188,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
+        hook_fns=None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -210,6 +214,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
             num_workers=COSMOS_REWARD_DISPATCHER_CONCURRENCY,
+            hook_fns=hook_fns,
+            callback_context=CallbackContext(
+                role="reward",
+                replica_name=getattr(self, "replica_name", None),
+                global_rank=self.global_rank,
+            ),
         )
 
     def report_rollouts(self, block=False):
@@ -316,6 +326,25 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def bind_report_source(self, source):
         self.api_client.adopt_rollout_reporting(source)
         self.replica_name = source["replica_name"]
+        # TRT receives its registered source after setup, before reward workers
+        # start. Bind factories to this source instead of the pre-IPC placeholder.
+        dispatcher = getattr(self, "reward_dispatcher", None)
+        if dispatcher is not None:
+            context = CallbackContext(
+                role="reward",
+                replica_name=self.replica_name,
+                global_rank=source.get(
+                    "global_rank", getattr(self, "global_rank", None)
+                ),
+            )
+            dispatcher.callback_context = context
+            for owner in (dispatcher, dispatcher.reward_calculator):
+                for name in ("reward_callbacks", "validation_reward_callbacks"):
+                    registry = getattr(owner, name, None)
+                    if registry is not None:
+                        registry.context = replace(
+                            context, is_validation=name.startswith("validation")
+                        )
         self._is_registered = True
 
     @torch.no_grad()
