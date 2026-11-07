@@ -84,3 +84,31 @@ def test_shipped_execution_examples_validate():
 
     for path in Path("configs/execution").glob("*.toml"):
         Config.model_validate(toml.load(path))
+
+
+@pytest.mark.parametrize(
+    "source,objectives,message",
+    [
+        ({"kind": "dataset"}, {"policy_gradient": 1}, "corpus source"),
+        (
+            {"kind": "corpus", "path": "/recorded", "reward_weighting": "nonnegative"},
+            None,
+            "explicit execution.objectives",
+        ),
+    ],
+)
+def test_recorded_objective_requirements_cannot_be_silently_ignored(
+    source, objectives, message
+):
+    with pytest.raises(ValueError, match=message):
+        Config.model_validate(
+            {
+                "execution": {
+                    "path": "train_from_data",
+                    "source": source,
+                    "objectives": objectives,
+                },
+                "train": {"train_policy": {"type": "sft"}},
+                "policy": {"parallelism": {"tp_size": 1}},
+            }
+        )

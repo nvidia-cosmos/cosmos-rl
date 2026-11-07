@@ -173,6 +173,20 @@ def resolve_execution(config) -> ExecutionPlan:
                     raise ValueError(
                         "Record scoring initially runs in the learner process; use dataloader_num_workers=0"
                     )
+            if (pg or kd) and (
+                execution.source is None or execution.source.kind != "corpus"
+            ):
+                raise ValueError(
+                    "Recorded policy and distillation objectives require a corpus source"
+                )
+            if (
+                execution.source is not None
+                and execution.source.reward_weighting != "none"
+                and objectives is None
+            ):
+                raise ValueError(
+                    "Reward weighting requires explicit execution.objectives"
+                )
             if (
                 execution.source is not None
                 and execution.source.kind == "corpus"

@@ -3,6 +3,7 @@
 """Objective-specific masks and one denominator per optimizer window."""
 
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.distributed as dist
@@ -74,11 +75,15 @@ def clipped_policy_loss(current_logprobs, behavior_logprobs, advantages, *, clip
         raise ValueError(
             "Policy objective requires aligned original behavior log probabilities and advantages"
         )
-    ratio = (current_logprobs - behavior_logprobs.detach()).exp()
-    return -torch.minimum(
-        ratio * advantages.detach(),
-        ratio.clamp(1 - clip, 1 + clip) * advantages.detach(),
+    log_ratio = current_logprobs - behavior_logprobs.detach()
+    # Clip the selected branch before exp: an unselected overflowing ratio
+    # otherwise produces NaN gradients through zero * infinity.
+    selected = torch.where(
+        advantages >= 0,
+        log_ratio.clamp_max(math.log1p(clip)),
+        log_ratio.clamp_min(math.log1p(-clip)),
     )
+    return -selected.exp() * advantages.detach()
 
 
 def supervised_token_loss(logits, labels):

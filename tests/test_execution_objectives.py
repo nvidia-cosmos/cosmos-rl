@@ -174,3 +174,13 @@ def test_cached_distillation_and_supervision_match_reference_gradient():
     )
     loss.backward()
     assert torch.allclose(logits.grad, reference.grad, atol=1e-7)
+
+
+def test_clipped_positive_advantage_cannot_overflow_an_unselected_ratio():
+    from cosmos_rl.execution.objectives import clipped_policy_loss
+
+    current = torch.tensor([-1.0], requires_grad=True)
+    loss = clipped_policy_loss(current, torch.tensor([-10001.0]), torch.tensor([1.0]))
+    loss.sum().backward()
+    assert loss.item() == pytest.approx(-1.2)
+    assert current.grad.item() == 0
