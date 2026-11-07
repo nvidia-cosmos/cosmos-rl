@@ -93,6 +93,7 @@ def base(root, model):
 def launch(root, name, config, *, corpus=False, training=True):
     config = copy.deepcopy(config)
     config["train"]["output_dir"] = str(root / name)
+    config["train"]["timestamp"] = name
     config["redis"] = str(find_available_port(19000))
     # Validate the exact file submitted to the launcher before starting roles.
     Config.model_validate(copy.deepcopy(config))
