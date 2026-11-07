@@ -478,12 +478,8 @@ class NodesManager:
         self.get_worker_ip = get_worker_ip
 
         # Checks
-        assert len(available_gpus) in [
-            1,
-            2,
-            4,
-            8,
-        ], "Number of GPUs per node must be 1, 2, 4, or 8"
+        if not available_gpus:
+            raise ValueError("At least one GPU must be available for replica placement")
 
         # Commands, command-associated GPU devices, control URLs, output files, and environment variables.
         self.commands: List[str] = []
@@ -592,6 +588,12 @@ class NodesManager:
     ):
         if n_replicas == 0:
             return
+        if min_n_gpus_replica > len(self.available_gpus) and min_n_gpus_replica % len(
+            self.available_gpus
+        ):
+            raise ValueError(
+                "A multi-node replica must use an integral number of node GPU allocations"
+            )
 
         if (self.nodes and (min_n_gpus_replica > len(self.available_gpus))) or (
             self.rl_mode in ["colocated_separated"] and role == "rollout"

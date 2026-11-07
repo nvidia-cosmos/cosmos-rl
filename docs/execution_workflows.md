@@ -20,6 +20,9 @@ New execution fields reject unknown keys. Absent unused role counts become
 zero; contradictory explicit counts, including launcher overrides, fail.
 The launcher validates the configuration before allocating GPUs. Legacy SFT,
 GRPO and OPD configurations need no execution section.
+Placement accepts any positive local GPU count, so learner, actor and teacher
+can occupy three distinct GPUs. A replica spanning nodes must divide exactly
+across their GPU allocations; unsupported partial-node splits fail at startup.
 
 ```bash
 # Direct local dataset; the example supplies four illustrative paragraphs.
@@ -66,6 +69,7 @@ For continuous actions and other application losses, select an existing
 registered trainer with `train.train_policy.trainer_type`. It opts in by
 declaring `recorded_objectives`, a set containing the objective names it
 implements. The worker checks enabled terms before source or model setup.
+Each registered class declares this support explicitly, including subclasses.
 The trainer implements the native SFT worker's step/checkpoint interface and
 owns model-specific mathematics, normalization units, masks and collective
 participation. It can reuse `execution.objectives.ObjectiveWindow` for shared

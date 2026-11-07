@@ -222,9 +222,14 @@ def test_registered_application_trainer_keeps_continuous_action_targets(
 def test_unadvertised_objectives_fail_before_source_or_model_setup(
     tmp_path, monkeypatch
 ):
-    class Unsupported:
+    from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
+
+    class Unsupported(SFTTrainer):
         def __init__(self, **kwargs):
             pytest.fail("constructed an unsupported model/trainer")
+
+        def step_training(self, *args, **kwargs):
+            pytest.fail("an overridden training loop inherited objective support")
 
     monkeypatch.setitem(
         TrainerRegistry._TRAINER_REGISTRY, "application_actions", Unsupported

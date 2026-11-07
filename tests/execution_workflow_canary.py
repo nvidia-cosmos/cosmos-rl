@@ -4,7 +4,7 @@
 
 Uses a tiny random Qwen2 checkpoint with a cached production tokenizer. This
 qualifies execution and optimizer plumbing; it measures no model quality.
-Run on >=4 GPUs: python tests/execution_workflow_canary.py
+Run on >=3 GPUs: python tests/execution_workflow_canary.py
 """
 
 import copy
@@ -144,7 +144,7 @@ def launch(root, name, config, *, corpus=False, training=True):
 
 
 def run(root):
-    assert torch.cuda.device_count() >= 4, "The execution canary requires four GPUs"
+    assert torch.cuda.device_count() >= 3, "The execution canary requires three GPUs"
     model = root / "actor"
     vocab = checkpoint(model)
     common = base(root / "unused", model)

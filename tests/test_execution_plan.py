@@ -156,3 +156,23 @@ def test_recorded_distillation_does_not_allocate_a_live_teacher():
     assert configuration.execution_plan.distillation == 1
     assert configuration.execution_plan.teachers == 0
     assert not configuration.distillation.enable
+
+
+def test_three_independent_roles_fit_a_three_gpu_node():
+    from types import SimpleNamespace
+    from cosmos_rl.launcher.utility import NodesManager
+
+    manager = NodesManager("replica.sh", ["2", "4", "7"])
+    manager.replica_placement(SimpleNamespace(), 1, 1, 1, 1, 1, 1, "replica.sh")
+    workers = manager.finalize()
+    assert len(workers) == 1
+    commands = workers[0].command_items
+    assert [item.gpu_devices for item in commands] == ["2", "4", "7"]
+    assert all(
+        f"--type {role}" in item.command
+        for role, item in zip(["policy", "rollout", "reference"], commands)
+    )
+    with pytest.raises(ValueError, match="integral number"):
+        NodesManager("replica.sh", ["0", "1", "2"]).replica_placement(
+            SimpleNamespace(), 1, 0, 0, 4, 1, 1, "replica.sh"
+        )

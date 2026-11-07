@@ -442,7 +442,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 if getattr(objectives, name) > 0
             }
             unsupported = active.difference(
-                getattr(trainer_cls, "recorded_objectives", ())
+                vars(trainer_cls).get("recorded_objectives", ())
             )
             if unsupported:
                 raise ValueError(
