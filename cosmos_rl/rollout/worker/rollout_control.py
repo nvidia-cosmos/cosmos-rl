@@ -282,8 +282,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             model_type = "diffusers"
         else:
+            revision = getattr(self.config.policy, "model_revision", None)
+            model_kwargs = {"revision": revision} if revision is not None else {}
             self.eos_token = util.setup_tokenizer(
-                self.config.policy.model_name_or_path
+                self.config.policy.model_name_or_path, **model_kwargs
             ).eos_token
 
             # Routes through ``register_local_model_config`` so non-HF
@@ -291,7 +293,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # Gymnasium MLP) resolve before falling back to
             # ``AutoConfig.from_pretrained``. Default HF flow is unchanged.
             hf_config = util.retry(load_model_config)(
-                self.config.policy.model_name_or_path, trust_remote_code=True
+                self.config.policy.model_name_or_path,
+                trust_remote_code=True,
+                **model_kwargs,
             )
 
             model_type = hf_config.model_type

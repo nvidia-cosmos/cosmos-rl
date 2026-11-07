@@ -74,6 +74,7 @@ def base(root, model):
         },
         "policy": {
             "model_name_or_path": str(model),
+            "model_revision": "canary-local-checkpoint",
             "model_max_length": 256,
             "enable_liger_fused_cross_entropy": False,
             "parallelism": {"tp_size": 1, "dp_shard_size": 1},
@@ -245,6 +246,8 @@ def run(root):
 
 
 if __name__ == "__main__":
+    if os.environ.get("TEST_LOG_DIR"):
+        Path(os.environ["TEST_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
     directory = Path(
         tempfile.mkdtemp(prefix="execution-canary-", dir=os.environ.get("TEST_LOG_DIR"))
     )

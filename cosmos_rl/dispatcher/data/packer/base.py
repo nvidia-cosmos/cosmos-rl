@@ -258,7 +258,11 @@ class DataPacker(BaseDataPacker, ABC):
 
     def setup(self, config: Config, *args, **kwargs):
         super().setup(config, *args, **kwargs)
-        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
+        revision = getattr(config.policy, "model_revision", None)
+        self.tokenizer = util.setup_tokenizer(
+            config.policy.model_name_or_path,
+            **({"revision": revision} if revision is not None else {}),
+        )
 
         if not self.config.rollout.multi_turn_config.enable:
             self.tool_agent = None

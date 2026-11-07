@@ -96,13 +96,16 @@ def test_actor_waits_for_initial_learner_registration_without_ending_input():
     assert payloads == [] and not ended
 
 
-def test_teacher_uses_student_tokenizer_without_mutating_shared_config(monkeypatch):
+@pytest.mark.parametrize("revision", [None, "pinned-student"])
+def test_teacher_uses_student_tokenizer_without_mutating_shared_config(
+    monkeypatch, revision
+):
     from cosmos_rl.reference.worker import teacher_worker
 
     shared = Config.model_validate(
         {
             "train": {"train_policy": {"type": "grpo"}},
-            "policy": {"model_name_or_path": "student"},
+            "policy": {"model_name_or_path": "student", "model_revision": revision},
             "distillation": {"enable": True, "model_name_or_path": "teacher"},
         }
     )
@@ -111,7 +114,13 @@ def test_teacher_uses_student_tokenizer_without_mutating_shared_config(monkeypat
         "__init__",
         lambda self, config, **kwargs: setattr(self, "config", config),
     )
-    monkeypatch.setattr(teacher_worker, "setup_tokenizer", lambda name: name)
+    loaded = []
+
+    def tokenizer(name, **kwargs):
+        loaded.append((name, kwargs))
+        return name
+
+    monkeypatch.setattr(teacher_worker, "setup_tokenizer", tokenizer)
     monkeypatch.setattr(
         teacher_worker.TeacherWorker, "build_runner", lambda *args, **kwargs: None
     )
@@ -120,3 +129,27 @@ def test_teacher_uses_student_tokenizer_without_mutating_shared_config(monkeypat
     assert worker.student_tokenizer == "student"
     assert worker.config.policy.model_name_or_path == "teacher"
     assert shared.policy.model_name_or_path == "student"
+    assert loaded == [
+        ("student", {"revision": revision} if revision is not None else {})
+    ]
+
+
+def test_hf_tokenizer_and_packer_use_the_configured_model_revision(monkeypatch):
+    from cosmos_rl.utils import util
+    from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+        DecoderOnlyLLMDataPacker,
+    )
+
+    loaded = []
+    monkeypatch.setattr(util, "_CUSTOM_TOKENIZER_LOADERS", [])
+
+    def load(name, **kwargs):
+        loaded.append((name, kwargs))
+        return NS(pad_token_id=0)
+
+    monkeypatch.setattr(util.AutoTokenizer, "from_pretrained", load)
+    packer = DecoderOnlyLLMDataPacker()
+    packer.setup(config())
+    assert loaded == [
+        ("student", {"trust_remote_code": True, "revision": "student-revision"})
+    ]

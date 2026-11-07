@@ -59,6 +59,7 @@ class TeacherWorker(PolicyWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         # parallel_dims is built from distillation parallelism config
         student_model = config.policy.model_name_or_path
+        student_revision = config.policy.model_revision
         config = self.update_config(config.model_copy(deep=True))
         assert isinstance(config, CosmosConfig), (
             "config must be a CosmosConfig object for this trainer"
@@ -70,7 +71,10 @@ class TeacherWorker(PolicyWorkerBase):
             config, parallel_dims=parallel_dims, **kwargs
         )
 
-        self.student_tokenizer = setup_tokenizer(student_model)
+        self.student_tokenizer = setup_tokenizer(
+            student_model,
+            **({"revision": student_revision} if student_revision is not None else {}),
+        )
 
         # Initialize the teacher
         dataset = kwargs.get("dataset", None)
