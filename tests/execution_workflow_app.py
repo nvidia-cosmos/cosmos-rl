@@ -38,6 +38,9 @@ if __name__ == "__main__":
         original_step = SFTTrainer.step_training
 
         def profiled_step(self, *args, **kwargs):
+            torch.cuda.synchronize()
+            resident_bytes = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
             started = time.perf_counter()
             result = original_step(self, *args, **kwargs)
             torch.cuda.synchronize()
@@ -51,6 +54,7 @@ if __name__ == "__main__":
                         "event": "recorded_text_update",
                         "seconds": time.perf_counter() - started,
                         "cuda_peak_bytes": torch.cuda.max_memory_allocated(),
+                        "resident_bytes": resident_bytes,
                         **metrics,
                     }
                 ),

@@ -27,24 +27,24 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.network_util import find_available_port
 
 
-def checkpoint(path):
+def checkpoint(path, **overrides):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
     tokenizer.save_pretrained(path)
     torch.manual_seed(7)
-    model = Qwen2ForCausalLM(
-        Qwen2Config(
-            vocab_size=len(tokenizer),
-            hidden_size=128,
-            intermediate_size=256,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            num_key_value_heads=2,
-            max_position_embeddings=512,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            tie_word_embeddings=True,
-        )
+    settings = dict(
+        vocab_size=len(tokenizer),
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=512,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        tie_word_embeddings=True,
     )
+    settings.update(overrides)
+    model = Qwen2ForCausalLM(Qwen2Config(**settings))
     model.to(torch.bfloat16).save_pretrained(path)
     return len(tokenizer)
 
