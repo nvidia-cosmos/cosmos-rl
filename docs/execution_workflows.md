@@ -187,6 +187,55 @@ standardization cannot be combined.
 
 ## Generation and restart
 
+### Application owned durable payloads
+
+Heavy observation/action applications can implement
+`execution.storage.DataSaver.save(value, max_bytes=...) -> DataReference` and
+the matching `DataReader.load(reference, max_bytes=...)`. Applications supply
+these objects through their registered backend or packer; there is no storage
+registry or new launcher. The reference contains a URI, format, conservative
+stored/decoded `size_bytes`, and at most 64 KiB of JSON metadata. Use metadata
+references for large inputs as well as outputs.
+
+`FileSystemDataStore` supplies the baseline on local/shared storage:
+
+```python
+from cosmos_rl.execution.storage import FileSystemDataStore, save_data
+
+store = FileSystemDataStore("/shared/corpus")
+# Run in the producer, while it owns the trajectory and its buffers.
+reference = save_data(store, trajectory, max_bytes=2 * 1024**3)
+# The packer attaches the reference as SampleRecord.targets. The required
+# result consumer commits its small manifest before report settlement.
+owned_trajectory = store.load(reference, max_bytes=2 * 1024**3)
+```
+
+The baseline checks aggregate tensor/array bytes before serialization, writes
+through temporary files, fsyncs, and publishes immutable content-addressed
+artifacts without replacement. It compacts tensor views that would otherwise
+serialize a larger backing storage. Checksums stream through bounded buffers;
+no full serialized byte buffer is built. A saver returns only when the payload
+is durable and all reads of borrowed buffers have finished. Internal writer
+concurrency must be bounded and joined before returning. `save_data` raises
+`DataSaveError` on a storage or contract failure; callers must propagate it.
+The standard generation mixin treats it as fatal rather than discarding an
+episode. Slow storage directly backpressures the producer.
+
+Corpus manifests preserve references without resolving them. Corpus byte
+admission counts declared payload bytes, not just small pointers; compressed
+formats must account conservatively for decoded memory too. Application packers
+resolve references through their reader, which validates integrity and returns
+owned training data. Controller restart reconciles identity and reference
+metadata without loading, hashing or serializing payloads. Tensor checksums are
+verified by readers; full integrity scrubbing belongs outside controller startup.
+
+The RL-Gym application example uses its modular simulator, rewards, MLP and
+optimizer with these interfaces. `scripts/qualify_execution_workflows.py` in
+the sibling RL-Gym checkout qualifies the public launcher, generation restart,
+supervised and return-weighted updates, checkpoint continuation and optional
+500 MB/1 GB payload cases. The toy return-weighted MSE objective is application
+supervision; it is not advertised as likelihood-based policy gradient.
+
 `execution.output` specifies `path`, a stable logical `run_id`, and optional
 `max_record_bytes`. It installs a required synchronous consumer. Applications
 can instead register their own required result consumer, following its ownership
@@ -198,7 +247,7 @@ first committed output wins; duplicate attempts cannot replace it with another
 sample or different provenance. All completion outcomes, including generation
 failures, scores and quality decisions, remain visible in the corpus.
 
-On restart, committed artifacts are validated and complete occurrences are
+On restart, committed manifest metadata is validated and complete occurrences are
 skipped. Partially committed prompts may generate again, filling missing slots
 while retaining earlier commits. Logical prompt limits include already-seen
 source occurrences. Changed input at an existing occurrence or changed run

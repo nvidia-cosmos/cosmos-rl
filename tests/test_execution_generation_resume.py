@@ -150,3 +150,26 @@ def test_restart_validates_committed_artifacts_before_skipping_input(tmp_path):
     artifact.write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="length"):
         generation(tmp_path, count=1)._get_rollout_only_prompts(1)
+
+
+def test_restart_reconciles_identity_without_tensor_io(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import torch
+    from cosmos_rl.execution import corpus
+
+    initial = generation(tmp_path, count=1)
+    work, _ = initial._get_rollout_only_prompts(1)
+    result = event(initial, work[0])
+    sink(initial)(
+        replace(
+            result, outcomes=(replace(result.outcomes[0], completion=torch.arange(32)),)
+        )
+    )
+    monkeypatch.setattr(
+        torch, "load", lambda *a, **k: pytest.fail("controller loaded tensor")
+    )
+    monkeypatch.setattr(
+        corpus, "_file_digest", lambda *a: pytest.fail("controller hashed tensor")
+    )
+    resumed, ended = generation(tmp_path, count=1)._get_rollout_only_prompts(1)
+    assert not resumed and ended

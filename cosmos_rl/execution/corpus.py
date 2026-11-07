@@ -9,7 +9,6 @@ wins even when a process dies before acknowledging its work.
 """
 
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -26,6 +25,14 @@ def _json(value):
 
 def _digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _file_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(2 * 1024**2):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _publish(path: Path, data: bytes):
@@ -56,7 +63,28 @@ class ArtifactCodec:
         self.max_bytes = max_bytes
         self.used_bytes = 0
 
+    def _tensor_path(self, value, *, verify=True):
+        path = (self.root / value["path"]).resolve()
+        if not path.is_relative_to(self.root / "artifacts"):
+            raise ValueError("Artifact escapes its corpus")
+        declared = value["bytes"]
+        if type(declared) is not int or declared < 0:
+            raise ValueError("Invalid artifact length")
+        self.used_bytes += declared
+        if self.used_bytes > self.max_bytes or path.stat().st_size != declared:
+            raise ValueError("Artifact exceeds byte budget or has an invalid length")
+        if verify and _file_digest(path) != value["sha256"]:
+            raise ValueError("Artifact checksum mismatch")
+        return path
+
     def encode(self, value):
+        from cosmos_rl.execution.storage import DataReference
+
+        if isinstance(value, DataReference):
+            self.used_bytes += value.size_bytes
+            if self.used_bytes > self.max_bytes:
+                raise ValueError("Corpus record exceeds its artifact byte budget")
+            return {"kind": "data_reference", "reference": value.to_dict()}
         if value is None or isinstance(value, (str, bool, int, float)):
             return value
         if isinstance(value, dict):
@@ -81,22 +109,47 @@ class ArtifactCodec:
             if self.used_bytes > self.max_bytes:
                 raise ValueError("Corpus record exceeds its artifact byte budget")
             tensor = value.detach().to("cpu").contiguous()
-            buffer = io.BytesIO()
-            torch.save(tensor, buffer)
-            data = buffer.getvalue()
-            self.used_bytes += len(data) - size
-            if self.used_bytes > self.max_bytes:
-                raise ValueError(
-                    "Corpus record exceeds its serialized artifact byte budget"
-                )
-            sha = _digest(data)
-            relative = f"artifacts/{sha}.pt"
-            _publish(self.root / relative, data)
+            # torch.save preserves backing storage. Compact contiguous slices
+            # too, otherwise a tiny view can serialize an entire trajectory.
+            if tensor.storage_offset() or tensor.untyped_storage().nbytes() > size:
+                tensor = tensor.clone()
+            directory = self.root / "artifacts"
+            directory.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=directory)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    torch.save(tensor, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                serialized = Path(temporary).stat().st_size
+                self.used_bytes += serialized - size
+                if self.used_bytes > self.max_bytes:
+                    raise ValueError(
+                        "Corpus record exceeds its serialized artifact byte budget"
+                    )
+                sha = _file_digest(Path(temporary))
+                relative = f"artifacts/{sha}.pt"
+                try:
+                    os.link(temporary, self.root / relative)
+                except FileExistsError:
+                    existing = self.root / relative
+                    if (
+                        existing.stat().st_size != serialized
+                        or _file_digest(existing) != sha
+                    ):
+                        raise ValueError("Existing artifact checksum mismatch")
+                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                os.unlink(temporary)
             return {
                 "kind": "tensor",
                 "path": relative,
                 "sha256": sha,
-                "bytes": len(data),
+                "bytes": serialized,
             }
         # NumPy is optional; normalize its scalars and arrays without repr().
         import numpy as np
@@ -116,34 +169,39 @@ class ArtifactCodec:
             f"Unsupported persistent value: {type(value).__name__}; supply a durable application representation"
         )
 
-    def decode(self, value):
+    def decode(self, value, *, materialize=True):
         if not isinstance(value, dict):
             return value
         kind = value["kind"]
+        if kind == "data_reference":
+            from cosmos_rl.execution.storage import DataReference
+
+            reference = DataReference(**value["reference"])
+            self.used_bytes += reference.size_bytes
+            if self.used_bytes > self.max_bytes:
+                raise ValueError("Referenced payload exceeds its byte budget")
+            return reference
         if kind == "mapping":
-            return {k: self.decode(v) for k, v in value["items"].items()}
+            return {
+                k: self.decode(v, materialize=materialize)
+                for k, v in value["items"].items()
+            }
         if kind in ("list", "tuple"):
-            items = [self.decode(v) for v in value["items"]]
+            items = [self.decode(v, materialize=materialize) for v in value["items"]]
             return tuple(items) if kind == "tuple" else items
         if kind == "ndarray":
-            return self.decode(value["tensor"]).numpy()
+            result = self.decode(value["tensor"], materialize=materialize)
+            return result.numpy() if materialize else result
         if kind != "tensor":
             raise ValueError(f"Unknown artifact encoding {kind}")
-        path = (self.root / value["path"]).resolve()
-        if not path.is_relative_to(self.root / "artifacts"):
-            raise ValueError("Artifact escapes its corpus")
-        declared = value["bytes"]
-        if type(declared) is not int or declared < 0:
-            raise ValueError("Invalid artifact length")
-        self.used_bytes += declared
-        if self.used_bytes > self.max_bytes or path.stat().st_size != declared:
-            raise ValueError("Artifact exceeds byte budget or has an invalid length")
-        data = path.read_bytes()
-        if _digest(data) != value["sha256"]:
-            raise ValueError("Artifact checksum mismatch")
+        path = self._tensor_path(value, verify=materialize)
+        if not materialize:
+            # Controller resume only needs identity and declared byte/availability
+            # metadata. Tensor checksums are verified by the eventual reader.
+            return None
         import torch
 
-        return torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+        return torch.load(path, map_location="cpu", weights_only=True)
 
 
 class CorpusWriter:
@@ -190,7 +248,7 @@ class CorpusWriter:
         pass
 
 
-def _read_record(root, path, max_bytes):
+def _read_record(root, path, max_bytes, *, materialize=True):
     if path.stat().st_size > max_bytes:
         raise ValueError("Manifest exceeds its byte budget")
     manifest = json.loads(path.read_bytes())
@@ -198,7 +256,9 @@ def _read_record(root, path, max_bytes):
     if manifest["schema_version"] != 1 or manifest["run_id"] != metadata["run_id"]:
         raise ValueError("Manifest schema or dataset identity mismatch")
     codec = ArtifactCodec(root, max_bytes - path.stat().st_size)
-    return SampleRecord.model_validate(codec.decode(manifest["record"]))
+    return SampleRecord.model_validate(
+        codec.decode(manifest["record"], materialize=materialize)
+    )
 
 
 class CorpusDataset:
@@ -240,6 +300,8 @@ class CorpusDataset:
             if isinstance(value, dict):
                 if value.get("kind") == "tensor":
                     return value["bytes"]
+                if value.get("kind") == "data_reference":
+                    return value["reference"]["size_bytes"]
                 return sum(size(v) for v in value.values())
             if isinstance(value, list):
                 return sum(size(v) for v in value)

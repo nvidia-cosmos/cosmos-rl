@@ -152,7 +152,9 @@ class GenerationLedger:
         from cosmos_rl.execution.corpus import _read_record
 
         for path in (self.writer.root / "records").glob("*.json"):
-            record = _read_record(self.writer.root, path, self.output.max_record_bytes)
+            record = _read_record(
+                self.writer.root, path, self.output.max_record_bytes, materialize=False
+            )
             identity = json.loads(record.sample_id)
             run_id, occurrence, slot = identity
             if run_id != self.output.run_id:
