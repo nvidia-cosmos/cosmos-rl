@@ -53,6 +53,7 @@ Main Features
    quickstart/single_node_example
    quickstart/configuration
    quickstart/dataflow
+   execution_workflows
    quickstart/customization
    quickstart/hf_models_support
    quickstart/load_balanced_batching

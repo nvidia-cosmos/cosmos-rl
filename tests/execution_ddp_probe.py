@@ -56,6 +56,30 @@ def main():
     expected_momentum = expected_optimizer.state_dict()["state"][0]["momentum_buffer"]
     assert torch.allclose(actual_momentum, expected_momentum, atol=1e-7)
 
+    # A whole rank has no contributing tokens but still runs every backward.
+    with torch.no_grad():
+        model.module.weight.copy_(initial)
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=0.1, momentum=0.9, weight_decay=0.03
+    )
+    optimizer.zero_grad()
+    empty = sample([0, 1], supervised=False, rl=False)
+    empty["label_ids"] = [-100, -100]
+    empty_rank_rows = all_rows if rank == 0 else [empty] * len(all_rows)
+    window = TokenObjectiveBatch(empty_rank_rows, config, device="cpu")
+    for index, row in enumerate(empty_rank_rows):
+        ids = torch.tensor(row["input_ids"])[None]
+        labels = torch.tensor(row["label_ids"])[None]
+        window.loss(model(ids), labels, start=index).backward()
+    optimizer.step()
+    assert torch.allclose(model.module.weight, reference.weight, atol=1e-7)
+    assert torch.allclose(
+        optimizer.state_dict()["state"][0]["momentum_buffer"],
+        expected_momentum,
+        atol=1e-7,
+    )
+    assert TokenObjectiveBatch([empty], config, device="cpu").window.empty
+
     bad = configuration(supervised=0.7 + rank, policy_gradient=0.3)
     try:
         TokenObjectiveBatch(rows, bad, device="cpu")
@@ -81,6 +105,22 @@ def main():
     else:
         raise AssertionError("A peer preparation error entered training")
 
+    teacher_row = sample([0, 1], rl=False)
+    teacher_row["_execution_record"].annotations.update(
+        teacher={"role": "teacher", "name": "recorded-teacher"},
+        teacher_logprobs=torch.zeros(1, 3)
+        if rank == 1
+        else torch.full((1, 3), -torch.log(torch.tensor(3.0))),
+    )
+    try:
+        TokenObjectiveBatch(
+            [teacher_row], configuration(distillation=1), device="cpu", vocab_size=3
+        )
+    except ValueError as error:
+        assert "Teacher targets" in str(error)
+    else:
+        raise AssertionError("Malformed teacher targets entered training")
+
     dist.barrier()
     if rank == 0:
         print(
@@ -90,6 +130,9 @@ def main():
                     "optimizer_equivalence": True,
                     "cohort_disagreement": True,
                     "peer_preparation_failure": True,
+                    "empty_rank": True,
+                    "all_empty": True,
+                    "malformed_teacher_agreement": True,
                 }
             ),
             flush=True,

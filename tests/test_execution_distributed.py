@@ -23,3 +23,5 @@ def test_real_distributed_objective_update_and_failure_agreement():
     assert result.returncode == 0, result.stdout + result.stderr
     assert '"gradient_equivalence": true' in result.stdout
     assert '"peer_preparation_failure": true' in result.stdout
+    assert '"empty_rank": true' in result.stdout
+    assert '"malformed_teacher_agreement": true' in result.stdout
