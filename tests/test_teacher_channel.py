@@ -3,9 +3,12 @@
 
 import subprocess
 import ast
+import asyncio
 from pathlib import Path
+from queue import Queue
 import threading
 import time
+from types import SimpleNamespace
 
 import msgpack
 import pytest
@@ -205,6 +208,57 @@ def test_end_marker_is_acknowledged_without_training_result(client):
     )
     assert transport.subscribe_teacher_request("teacher")[0]["is_end"]
     assert client.xlen(transport.teacher_request_stream) == 0
+    assert (
+        client.xpending(
+            transport.teacher_request_stream, transport.teacher_request_group
+        )["pending"]
+        == 0
+    )
+
+
+@pytest.mark.parametrize("order", [("policy", "rollout"), ("rollout", "policy")])
+@pytest.mark.parametrize("teachers", [1, 2])
+def test_controller_departure_stops_all_teachers_without_final_weight_sync(
+    client, order, teachers
+):
+    from cosmos_rl.dispatcher.controller import Controller
+    from cosmos_rl.reference.worker.teacher_worker import TeacherWorker
+
+    class Manager(dict):
+        def unregister(self, name, *args):
+            self.pop(name)
+
+    transport = handler(client)
+    controller = Controller.__new__(Controller)
+    controller.policy_status_manager = Manager(policy=object())
+    controller.rollout_status_manager = Manager(rollout=object())
+    controller.teacher_result_manager = {f"teacher-{i}" for i in range(teachers)}
+    controller.life_cycle_lock = asyncio.Lock()
+    controller.redis_controller = transport
+
+    async def complete():
+        await controller.unregister(order[0])
+        assert client.xlen(transport.teacher_request_stream) == 0
+        await controller.unregister(order[1])
+        assert client.xlen(transport.teacher_request_stream) == 1
+        for i in range(teachers):
+            worker = SimpleNamespace(
+                global_rank=0,
+                replica_name=f"teacher-{i}",
+                shutdown_signal=threading.Event(),
+                redis_controller=transport,
+                engine=SimpleNamespace(batch_size=2),
+                data_queue=Queue(),
+            )
+            await TeacherWorker.fetch_rollouts(worker)
+            assert worker.data_queue.get_nowait() == {"is_end": True}
+            assert worker.data_queue.empty()
+            await controller.unregister(worker.replica_name)
+        assert not controller.teacher_result_manager
+
+    asyncio.run(complete())
+    assert client.xlen(transport.teacher_request_stream) == 0
+    assert int(client.get(transport.teacher_request_stream + ":bytes")) == 0
     assert (
         client.xpending(
             transport.teacher_request_stream, transport.teacher_request_group

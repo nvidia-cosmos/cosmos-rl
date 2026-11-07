@@ -1391,6 +1391,7 @@ maxmemory-policy noeviction
     async def unregister(self, replica_name: str):
         logger.info(f"[Controller] Unregistering replica {replica_name}")
         async with self.life_cycle_lock:
+            teacher_departed = replica_name in self.teacher_result_manager
             if replica_name in self.policy_status_manager:
                 self.policy_status_manager.unregister(replica_name)
             elif replica_name in self.rollout_status_manager:
@@ -1399,10 +1400,17 @@ maxmemory-policy noeviction
                 )
             elif replica_name in self.teacher_result_manager:
                 self.teacher_result_manager.remove(replica_name)
-                if len(self.teacher_result_manager) > 0:
-                    await self.end_reference_replica()
             else:
                 raise Exception(f"[Controller] Replica {replica_name} not found")
+            if self.teacher_result_manager and (
+                teacher_departed
+                or (not self.policy_status_manager and not self.rollout_status_manager)
+            ):
+                # No producer can submit another teacher request after both
+                # learner and rollout departure. STOP does not require a final
+                # weight sync, so that sync cannot own teacher termination.
+                # Each departing teacher passes the marker to the next one.
+                await self.end_reference_replica()
 
     async def end_reference_replica(self):
         self.redis_controller.publish_teacher_request(

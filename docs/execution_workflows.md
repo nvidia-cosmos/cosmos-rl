@@ -235,6 +235,8 @@ bytes and individual result bytes. Legacy settings remain compatible. Existing
 teacher deadlines and cohort agreement decide an update together when targets
 are delayed, missing or malformed. Completed results retain their existing TTL
 and acknowledgment lifecycle.
+After the last learner and rollout depart, the controller terminates the
+teacher replicas independently of the final weight synchronization path.
 
 EMA/external teacher updates, streaming between independently scaled jobs,
 checkpointed mixtures of separate datasets and additional objective topologies
