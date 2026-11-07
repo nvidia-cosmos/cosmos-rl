@@ -120,6 +120,8 @@ def async_safe_ce(
 
 @TrainerRegistry.register(trainer_type="sft")
 class SFTTrainer(LLMTrainer):
+    recorded_objectives = frozenset({"supervised", "policy_gradient", "distillation"})
+
     def __init__(
         self,
         config: CosmosConfig,

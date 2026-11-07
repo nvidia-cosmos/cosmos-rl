@@ -300,9 +300,7 @@ def prepare_supervised_record(record, packer):
         )
     if not isinstance(prepared, dict):
         raise TypeError("prepare_record must return a trainer input mapping")
-    if record.annotations.get("empty_contribution"):
-        if "label_ids" not in prepared:
-            raise ValueError("Masked corpus padding requires explicit label_ids")
+    if record.annotations.get("empty_contribution") and "label_ids" in prepared:
         prepared["label_ids"] = [-100] * len(prepared["label_ids"])
     prepared["_execution_record"] = record
     return prepared

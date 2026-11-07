@@ -265,9 +265,9 @@ def resolve_execution(config) -> ExecutionPlan:
                 "Live GRPO and OPD use their existing trainer settings; explicit combined objectives currently belong to train_from_data"
             )
         if path == "train_from_data" and objectives is not None:
-            if policy.type != "sft" or policy.trainer_type != "sft":
+            if policy.type != "sft":
                 raise ValueError(
-                    "Recorded token objectives currently use the native sft trainer"
+                    "Recorded objectives use the direct-data SFT worker and a compatible registered trainer"
                 )
             if (
                 any(
@@ -277,13 +277,16 @@ def resolve_execution(config) -> ExecutionPlan:
                 or learners != 1
             ):
                 raise ValueError(
-                    "Recorded token objectives currently require one pure-DP learner replica"
+                    "Recorded objectives currently require one pure-DP learner replica"
                 )
             if config.train.sequence_packing or policy.enable_dp_load_balancing:
                 raise ValueError(
-                    "Recorded token objectives require unpacked fixed-schedule batches"
+                    "Recorded objectives require unpacked fixed-schedule batches"
                 )
-            if config.policy.enable_liger_fused_cross_entropy:
+            if (
+                policy.trainer_type == "sft"
+                and config.policy.enable_liger_fused_cross_entropy
+            ):
                 raise ValueError(
                     "Recorded token objectives require materialized logits; disable fused cross entropy"
                 )

@@ -12,7 +12,7 @@ turn a logged reward into a training objective.
 
 | Path | Roles | Objectives |
 | --- | --- | --- |
-| `train_from_data` | Learner; no rollout worker | Native SFT/PT, or explicit recorded token objectives |
+| `train_from_data` | Learner; no rollout worker | Native SFT/PT, or declared recorded objectives |
 | `train_from_generation` | Learner and rollout workers; optional teacher | Existing GRPO and OPD settings |
 | `generate` | Rollout workers; no learner or teacher | No optimizer; optional scoring and a required result sink |
 
@@ -59,8 +59,23 @@ contains the packer's usual fields: for the decoder packer these are
 `token_ids` and `label_ids`. Application packers may implement
 `prepare_record(record)` to return their trainer input mapping. For example,
 an observation/action adapter can put camera tensors from `record.inputs`
-alongside tokenized action targets from `record.targets`. The attached
+alongside action targets from `record.targets`. The attached
 `_execution_record` retains provenance and objective views.
+
+For continuous actions and other application losses, select an existing
+registered trainer with `train.train_policy.trainer_type`. It opts in by
+declaring `recorded_objectives`, a set containing the objective names it
+implements. The worker checks enabled terms before source or model setup.
+The trainer implements the native SFT worker's step/checkpoint interface and
+owns model-specific mathematics, normalization units, masks and collective
+participation. It can reuse `execution.objectives.ObjectiveWindow` for shared
+window counts and scaling. There is no requirement to manufacture token labels.
+
+A custom `prepare_record` must honor
+`record.annotations["empty_contribution"]`: preserve a valid model input while
+giving every objective zero contributing mass. That flag also remains in the
+attached record. The built-in token adapter masks `label_ids` automatically.
+Checkpoint compatibility includes the selected trainer and packer identities.
 
 Application packers may also implement `export_record(record)` for generation.
 It must return a `SampleRecord` with the same sample/group identities and
@@ -226,6 +241,13 @@ token targets, mixed gradients, zero-weight dependencies, all-empty windows,
 checkpoint source compatibility and optimizer/scheduler resume equivalence.
 Two real Gloo/DDP processes compare gradients and momentum with an independent
 reference and check preparation/configuration failure agreement.
+
+The application-trainer test feeds variable-length continuous observation/action
+trajectories through the actual corpus dataloader, without token labels. Its
+application-owned MSE and Gaussian policy losses match an independent gradient
+and optimizer reference. The same qualification helper also passed using the
+local RL-Gym checkout's actual `MLP` and `SimpleRLDataPacker`; this is an adapter
+and model check, not a full RL-Gym simulator run.
 
 Corpus tests cover atomic publication, concurrent attempts, interrupted writes,
 partial-prompt restart, changed sources, corrupt artifacts, byte admission and

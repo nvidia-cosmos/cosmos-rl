@@ -427,6 +427,27 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     ):
         source = getattr(getattr(self.config, "execution", None), "source", None)
+        trainer_cls = None
+        objectives = getattr(
+            getattr(self.config, "execution", None), "objectives", None
+        )
+        if objectives is not None:
+            trainer_type = self.config.train.train_policy.trainer_type
+            if self.config.policy.is_diffusers:
+                trainer_type = "diffusers_" + trainer_type
+            trainer_cls = TrainerRegistry.get_trainer_cls(trainer_type)
+            active = {
+                name
+                for name in ("supervised", "policy_gradient", "distillation")
+                if getattr(objectives, name) > 0
+            }
+            unsupported = active.difference(
+                getattr(trainer_cls, "recorded_objectives", ())
+            )
+            if unsupported:
+                raise ValueError(
+                    f"Trainer {trainer_type} does not support recorded objectives: {sorted(unsupported)}"
+                )
         if source is not None and source.kind == "corpus":
             if dataset is not None:
                 raise ValueError(
@@ -471,10 +492,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
             dataset.scorer = RecordScorer(
                 self.config, self.data_packer, self.record_reward_fns
             )
-        trainer_type = self.config.train.train_policy.trainer_type
-        if self.config.policy.is_diffusers:
-            trainer_type = "diffusers_" + trainer_type
-        self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
+        if trainer_cls is None:
+            trainer_type = self.config.train.train_policy.trainer_type
+            if self.config.policy.is_diffusers:
+                trainer_type = "diffusers_" + trainer_type
+            trainer_cls = TrainerRegistry.get_trainer_cls(trainer_type)
+        self.trainer = trainer_cls(
             config=self.config,
             parallel_dims=self.parallel_dims,
             train_stream=self.train_stream,
@@ -498,6 +521,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "model_revision": self.config.policy.model_revision,
                 "max_length": self.config.policy.model_max_length,
                 "packing": self.config.train.sequence_packing,
+                "trainer": trainer_type,
+                "packer": f"{type(self.data_packer).__module__}.{type(self.data_packer).__qualname__}",
             }
             state = {
                 "compatibility": source_compatibility(

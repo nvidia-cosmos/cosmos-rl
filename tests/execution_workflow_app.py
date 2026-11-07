@@ -11,14 +11,16 @@ from cosmos_rl.launcher.worker_entry import main
 
 class Inputs(Dataset):
     def __init__(self, config):
-        self.supervised = config.train.train_policy.type == "sft"
+        self.texts = tuple(
+            f"The example number {index} describes supervised prediction over recorded data."
+            for index in range(8)
+        )
 
     def __len__(self):
-        return 8
+        return len(self.texts)
 
     def __getitem__(self, index):
-        text = f"The example number {index} describes supervised prediction over recorded data."
-        return text if self.supervised else {"prompt": text, "reference": "prediction"}
+        return self.texts[index]
 
 
 def reward(completion, reference, **kwargs):

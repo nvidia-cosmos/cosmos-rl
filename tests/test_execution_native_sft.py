@@ -242,6 +242,8 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
     saved = None
 
     class NativeTrainer:
+        recorded_objectives = {"supervised"}
+
         def __init__(self, config, **kwargs):
             self.inner = trainer(ObservationModel(), 1)
             self.inner.config = config
