@@ -112,3 +112,29 @@ def test_recorded_objective_requirements_cannot_be_silently_ignored(
                 "policy": {"parallelism": {"tp_size": 1}},
             }
         )
+
+
+@pytest.mark.parametrize(
+    "path,policy",
+    [
+        ("train_from_data", "sft"),
+        ("generate", "grpo"),
+        ("train_from_generation", "grpo"),
+    ],
+)
+def test_resolved_execution_config_roundtrips_through_native_launcher_toml(
+    path, policy
+):
+    from pathlib import Path
+    import toml
+    from cosmos_rl.launcher.utility import dump_config_with_literal_patterns_to_tmpfile
+
+    configuration = recipe(policy, path=path)
+    filename = Path(
+        dump_config_with_literal_patterns_to_tmpfile(configuration.model_dump())
+    )
+    try:
+        restored = Config.model_validate(toml.load(filename))
+        assert restored.execution_plan == configuration.execution_plan
+    finally:
+        filename.unlink()

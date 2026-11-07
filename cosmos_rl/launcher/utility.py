@@ -859,7 +859,7 @@ def dump_config_with_literal_patterns_to_tmpfile(config: Dict[str, Any]) -> str:
         mode="w+", suffix=".toml", delete=False
     ) as tmp_file:
         config_for_dump = copy.deepcopy(config)
-        lora_config = (config_for_dump.get("policy", {})).get("lora", {})
+        lora_config = (config_for_dump.get("policy", {})).get("lora") or {}
         alpha_pattern_table = lora_config.pop("alpha_pattern", None)
         r_pattern_table = lora_config.pop("r_pattern", None)
 
