@@ -164,6 +164,15 @@ def resolve_execution(config) -> ExecutionPlan:
                 raise ValueError("train_from_data requires zero rollout replicas")
             if execution.actor is not None:
                 raise ValueError("train_from_data has no actor")
+            if execution.source is not None and execution.source.kind == "corpus":
+                if policy.enable_dataset_cache:
+                    raise ValueError(
+                        "Corpus sources own their revision; disable the legacy dataset cache"
+                    )
+                if execution.source.score_records and policy.dataloader_num_workers:
+                    raise ValueError(
+                        "Record scoring initially runs in the learner process; use dataloader_num_workers=0"
+                    )
             if (
                 execution.source is not None
                 and execution.source.kind == "corpus"

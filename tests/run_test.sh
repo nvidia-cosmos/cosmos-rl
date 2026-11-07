@@ -91,6 +91,7 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run python tests/execution_workflow_canary.py
 
 # run tests
 run python tests/test_video_decode.py
@@ -277,7 +278,6 @@ run python -m pytest -q tests/test_dispatch_fetch_bounds.py
 run python -m pytest -q tests/test_strict_refill_batch_versions.py
 run python -m pytest -q tests/test_prompt_dispatch_liveness.py
 run python -m pytest -q tests/test_execution_plan.py tests/test_execution_corpus.py tests/test_execution_objectives.py tests/test_execution_models.py tests/test_execution_native_sft.py tests/test_execution_distributed.py tests/test_execution_generation_resume.py
-run python tests/execution_workflow_canary.py
 run python -m pytest -q tests/test_rank_dispatch_refill.py
 run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend gloo
 run python -m pytest -q tests/test_dispatch_failure_reporting.py
