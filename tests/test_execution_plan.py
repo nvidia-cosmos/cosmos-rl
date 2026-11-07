@@ -138,3 +138,21 @@ def test_resolved_execution_config_roundtrips_through_native_launcher_toml(
         assert restored.execution_plan == configuration.execution_plan
     finally:
         filename.unlink()
+
+
+def test_recorded_distillation_does_not_allocate_a_live_teacher():
+    configuration = Config.model_validate(
+        {
+            "execution": {
+                "path": "train_from_data",
+                "source": {"kind": "corpus", "path": "/recorded-targets"},
+                "objectives": {"distillation": 1},
+            },
+            "train": {"train_policy": {"type": "sft"}},
+            "policy": {"parallelism": {"tp_size": 1}},
+            "distillation": {"enable": True},
+        }
+    )
+    assert configuration.execution_plan.distillation == 1
+    assert configuration.execution_plan.teachers == 0
+    assert not configuration.distillation.enable

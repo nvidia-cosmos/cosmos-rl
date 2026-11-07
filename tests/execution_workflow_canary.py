@@ -192,8 +192,8 @@ def run(root):
                 group_slot=i % 2,
                 producer=ModelIdentity(
                     role="actor",
-                    name=str(model),
-                    revision="recorded",
+                    name="uniform-token-sampler",
+                    revision="fixture-v1",
                     behavior_version=0,
                 ),
                 inputs={"prompt": "recorded trajectory"},
@@ -204,6 +204,8 @@ def run(root):
             )
         )
     mixed = copy.deepcopy(common)
+    mixed["policy"]["parallelism"]["dp_shard_size"] = 2
+    mixed["train"]["train_batch_per_replica"] = 1
     mixed["execution"].update(
         source={"kind": "corpus", "path": str(root / "mixed-corpus")},
         objectives={"supervised": 0.5, "policy_gradient": 0.5},
