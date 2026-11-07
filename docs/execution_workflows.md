@@ -224,6 +224,8 @@ with original rollout likelihoods enabled, off-policy operation, and no validati
 or retry budget tied to learner versions. Different checkpoints require identical
 fast-tokenizer pipelines, special-token semantics and chat templates. Broader
 alignment requires an application/algorithm adapter.
+Using original rollout likelihoods also preserves the sampled token IDs;
+decoding and retokenizing them can change the sequence those probabilities describe.
 
 Student-actor OPD uses its existing trainer and synchronization path. Teacher
 configuration is copied before projection, and the teacher retains the student

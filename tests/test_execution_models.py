@@ -153,3 +153,46 @@ def test_hf_tokenizer_and_packer_use_the_configured_model_revision(monkeypatch):
     assert loaded == [
         ("student", {"trust_remote_code": True, "revision": "student-revision"})
     ]
+
+
+@pytest.mark.parametrize("independent", [False, True])
+def test_original_behavior_likelihoods_preserve_non_roundtripping_sampled_tokens(
+    independent,
+):
+    from tokenizers import Tokenizer, decoders, models
+    from transformers import PreTrainedTokenizerFast
+    from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+        DecoderOnlyLLMDataPacker,
+    )
+
+    values = {
+        "train": {
+            "train_policy": {
+                "type": "grpo",
+                "use_rollout_logprobs_for_loss": True,
+                "rollout_as_token_ids": False,
+            }
+        }
+    }
+    if independent:
+        values["execution"] = {
+            "path": "train_from_generation",
+            "actor": {"weight_source": "checkpoint"},
+        }
+    config = Config.model_validate(values)
+    backend = Tokenizer(
+        models.BPE({"a": 0, "b": 1, "ab": 2, "p": 3, "<pad>": 4}, [("a", "b")])
+    )
+    backend.decoder = decoders.Fuse()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="<pad>")
+    sampled_ids = [0, 1]
+    text = tokenizer.decode(sampled_ids)
+    assert tokenizer(text, add_special_tokens=False).input_ids == [2]
+    policy = config.train.train_policy
+    completion = sampled_ids if policy.rollout_as_token_ids else text
+    packer = DecoderOnlyLLMDataPacker()
+    packer.config, packer.tokenizer = config, tokenizer
+    prepared = packer.get_policy_input("p", completion)
+    assert prepared.input_ids == [3, 0, 1]
+    assert prepared.logprob_masks == [1, 1, 0]
+    assert policy.collect_rollout_logprobs

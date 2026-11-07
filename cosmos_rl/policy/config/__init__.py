@@ -702,8 +702,11 @@ class GrpoConfig(BaseModel):
             )
         if self.use_rollout_logprobs_for_loss:
             self.collect_rollout_logprobs = True
+            # Decoding and retokenizing a completion can merge tokens or drop
+            # special tokens. Original likelihoods belong to the sampled IDs.
+            self.rollout_as_token_ids = True
             logger.warning(
-                "use_rollout_logprobs_for_loss is enabled, so collect_rollout_logprobs is set to True."
+                "use_rollout_logprobs_for_loss requires collected logprobs and original rollout token IDs."
             )
         assert not (self.use_rollout_logprobs_for_loss and self.use_decoupled_loss), (
             "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."

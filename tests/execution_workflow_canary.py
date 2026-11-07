@@ -148,7 +148,6 @@ def run(root):
     model = root / "actor"
     vocab = checkpoint(model)
     common = base(root / "unused", model)
-    launch(root, "direct-pretraining", common)
 
     generation = copy.deepcopy(common)
     generation["execution"] = {
@@ -166,6 +165,37 @@ def run(root):
     )
     generation["train"]["ckpt"]["enable_checkpoint"] = False
     generation["rollout"].update(max_prompts=2, max_inflight_prompts=2)
+    actor = copy.deepcopy(generation)
+    actor["execution"] = {
+        "path": "train_from_generation",
+        "actor": {"weight_source": "checkpoint", "model_name_or_path": str(model)},
+    }
+    actor["rollout"].pop("max_prompts")
+    actor["rollout"].pop("max_inflight_prompts")
+    actor["train"]["train_batch_per_replica"] = 4
+    actor["train"]["ckpt"]["enable_checkpoint"] = True
+    actor["train"]["train_policy"].update(
+        bypass_reward=False,
+        on_policy=False,
+        use_rollout_logprobs_for_loss=True,
+        max_retry_for_on_policy=-1,
+    )
+    launch(root, "independent-actor", actor)
+
+    opd = copy.deepcopy(actor)
+    opd["execution"] = {"path": "train_from_generation"}
+    opd["distillation"] = {
+        "enable": True,
+        "model_name_or_path": str(model),
+        "compile": False,
+        "batch_size_per_replica": 2,
+        "mini_batch": 1,
+        "top_k": 16,
+        "trainer_token_ids_from_teacher": True,
+        "parallelism": {"tp_size": 1, "dp_shard_size": 1},
+    }
+    launch(root, "on-policy-distillation", opd)
+    launch(root, "direct-pretraining", common)
     launch(root, "generation", generation, training=False)
     dataset = CorpusDataset(root / "generated-corpus")
     assert len(dataset) == 4
@@ -212,36 +242,6 @@ def run(root):
     )
     launch(root, "mixed-recorded-objectives", mixed, corpus=True)
 
-    actor = copy.deepcopy(generation)
-    actor["execution"] = {
-        "path": "train_from_generation",
-        "actor": {"weight_source": "checkpoint", "model_name_or_path": str(model)},
-    }
-    actor["rollout"].pop("max_prompts")
-    actor["rollout"].pop("max_inflight_prompts")
-    actor["train"]["train_batch_per_replica"] = 4
-    actor["train"]["ckpt"]["enable_checkpoint"] = True
-    actor["train"]["train_policy"].update(
-        bypass_reward=False,
-        on_policy=False,
-        use_rollout_logprobs_for_loss=True,
-        max_retry_for_on_policy=-1,
-    )
-    launch(root, "independent-actor", actor)
-
-    opd = copy.deepcopy(actor)
-    opd["execution"] = {"path": "train_from_generation"}
-    opd["distillation"] = {
-        "enable": True,
-        "model_name_or_path": str(model),
-        "compile": False,
-        "batch_size_per_replica": 2,
-        "mini_batch": 1,
-        "top_k": 16,
-        "trainer_token_ids_from_teacher": True,
-        "parallelism": {"tp_size": 1, "dp_shard_size": 1},
-    }
-    launch(root, "on-policy-distillation", opd)
     (root / "results.json").write_text(
         json.dumps({"passed": True, "scenarios": 7}, indent=2)
     )
