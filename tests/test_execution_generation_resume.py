@@ -131,3 +131,22 @@ def test_changed_sampling_configuration_cannot_append_to_existing_run(tmp_path):
     resumed.config.train.train_policy.temperature = 0.5
     with pytest.raises(ValueError, match="another dataset run"):
         resumed._get_rollout_only_prompts(1)
+
+
+def test_restart_validates_committed_artifacts_before_skipping_input(tmp_path):
+    from dataclasses import replace
+    import torch
+
+    initial = generation(tmp_path, count=1)
+    work, _ = initial._get_rollout_only_prompts(1)
+    consumer = sink(initial)
+    result = event(initial, work[0])
+    consumer(
+        replace(
+            result, outcomes=(replace(result.outcomes[0], completion=torch.arange(4)),)
+        )
+    )
+    artifact = next((tmp_path / "artifacts").glob("*.pt"))
+    artifact.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="length"):
+        generation(tmp_path, count=1)._get_rollout_only_prompts(1)

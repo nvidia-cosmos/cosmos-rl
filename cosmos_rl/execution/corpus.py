@@ -104,6 +104,8 @@ class ArtifactCodec:
         if isinstance(value, np.ndarray):
             if value.dtype.hasobject:
                 raise TypeError("Object arrays are not durable tensor data")
+            if self.used_bytes + value.nbytes > self.max_bytes:
+                raise ValueError("Corpus record exceeds its artifact byte budget")
             return {
                 "kind": "ndarray",
                 "tensor": self.encode(torch.from_numpy(value.copy())),
