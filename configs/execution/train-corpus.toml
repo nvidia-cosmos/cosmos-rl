@@ -1,0 +1,42 @@
+# Run after configs/execution/generate.toml has committed its dataset.
+# cosmos-rl --config configs/execution/train-corpus.toml
+mode = "disaggregated"
+
+[execution]
+path = "train_from_data"
+
+[execution.source]
+kind = "corpus"
+path = "./generated-corpus"
+max_prefetch_bytes = 67108864
+
+[execution.objectives]
+supervised = 1.0
+
+[train]
+output_dir = "./outputs/train-corpus"
+epoch = 1
+compile = false
+sequence_packing = false
+train_batch_per_replica = 2
+optm_lr = 0.00001
+
+[train.train_policy]
+type = "sft"
+mini_batch = 1
+dataloader_shuffle = false
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 4
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-0.5B-Instruct"
+model_max_length = 1024
+enable_liger_fused_cross_entropy = false
+
+[logging]
+logger = ["console"]
+
+[policy.parallelism]
+tp_size = 1

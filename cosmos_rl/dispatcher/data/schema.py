@@ -55,6 +55,8 @@ class TrainingCompletionIdentity(BaseModel):
 
 
 class RLPayload(BaseModel):
+    generation_occurrence: Optional[int] = Field(default=None, ge=0)
+    producer_model: Optional[Dict[str, Any]] = None
     """
     The payload schema of RL sample.
     """
@@ -212,6 +214,7 @@ IdxAndRLPayload = Tuple[int, RLPayload]
 
 
 class Rollout(BaseModel):
+    producer_model: Optional[Dict[str, Any]] = None
     prompt: Optional[Union[ConversationType, str, Any]] = Field(
         default=None,
         description="The input prompt for the rollout, can be a conversation type, a string, or any other type of objects.",

@@ -170,10 +170,36 @@ class SFTTrainer(LLMTrainer):
         data_arrival_event: Optional[torch.cuda.Event] = None,
     ):
         pp_last_stage = False
-        if self.lr_schedulers is None:
-            assert train_step == 0, (
-                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+        execution_window = None
+        if self.config.execution.objectives is not None:
+            from cosmos_rl.execution.token_objectives import TokenObjectiveBatch
+
+            model_config = getattr(self.model, "config", None)
+            text_config = getattr(model_config, "text_config", model_config)
+            execution_window = TokenObjectiveBatch(
+                global_batch,
+                self.config,
+                device=self.device,
+                group=self.parallel_dims.mesh["dp"].get_group(),
+                vocab_size=getattr(text_config, "vocab_size", None),
             )
+            if execution_window.window.empty:
+                self._execution_seen_empty_prefix = True
+                if self.lr_schedulers is None:
+                    self.lr_schedulers = build_lr_schedulers(
+                        self.optimizers, self.config, total_steps
+                    )
+                return {
+                    "train/loss_avg": 0.0,
+                    "train/loss_max": 0.0,
+                    "optimizer/grad_norm": 0.0,
+                    "train/iteration_time": 0.0,
+                    "train/empty_objective_window": 1,
+                }
+        if self.lr_schedulers is None:
+            assert train_step == 0 or getattr(
+                self, "_execution_seen_empty_prefix", False
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
@@ -400,10 +426,10 @@ class SFTTrainer(LLMTrainer):
                     # of lm_head to the loss function to fuse the linear and cross entropy.
                     kwargs["lin_weight"] = self.model.lm_head.weight
 
-                ce_loss = self.loss_fn(
-                    logits,
-                    labels,
-                    **kwargs,
+                ce_loss = (
+                    execution_window.loss(logits, labels, start=i)
+                    if execution_window is not None
+                    else self.loss_fn(logits, labels, **kwargs)
                 )
                 aux_loss_dict["loss"] = (
                     ce_loss.detach()
@@ -674,6 +700,8 @@ class SFTTrainer(LLMTrainer):
         do_save: bool = False,
         **kwargs,
     ):
+        if hasattr(self, "execution_source_state"):
+            kwargs["execution_source"] = self.execution_source_state
         if (
             is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.config.train.ckpt.enable_checkpoint:

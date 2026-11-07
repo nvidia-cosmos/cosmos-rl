@@ -63,6 +63,45 @@ def request():
     return {"prompt_idx": 0, "completion_token_ids": [[[1], [2]], [[3], [4]]]}
 
 
+def test_teacher_pending_byte_capacity_is_atomic_and_released_once(client):
+    transport = handler(client)
+    data = {"prompt_idx": 0, "completion_token_ids": [[[1], [2]]]}
+    identities = transport.publish_teacher_request(data, "rollout")
+    budget_key = transport.teacher_request_stream + ":bytes"
+    occupied = int(client.get(budget_key))
+    assert occupied > 0
+    transport.teacher_max_pending_bytes = occupied
+    with pytest.raises(redis.ResponseError, match="byte capacity"):
+        transport.publish_teacher_request(
+            {"prompt_idx": 1, "completion_token_ids": [[[3]]]}, "rollout"
+        )
+    assert client.xlen(transport.teacher_request_stream) == 1
+    assert int(client.get(budget_key)) == occupied
+    assert transport.set_teacher_result(identities[0], {"logprobs": [0.0]}, "teacher")
+    assert int(client.get(budget_key)) == 0
+    assert transport.set_teacher_result(identities[0], {"logprobs": [0.0]}, "teacher")
+    assert int(client.get(budget_key)) == 0
+
+
+def test_teacher_oversized_request_is_not_published(client):
+    transport = handler(client)
+    transport.teacher_max_request_bytes = 1
+    with pytest.raises(ValueError, match="request exceeds"):
+        transport.publish_teacher_request(request(), "rollout")
+    assert client.xlen(transport.teacher_request_stream) == 0
+
+
+def test_teacher_oversized_result_keeps_request_ownership(client):
+    transport = handler(client)
+    identities = transport.publish_teacher_request(request(), "rollout")
+    before = int(client.get(transport.teacher_request_stream + ":bytes"))
+    transport.teacher_max_result_bytes = 1
+    with pytest.raises(ValueError, match="result exceeds"):
+        transport.set_teacher_result(identities[0], {"logprobs": [0.0]}, "teacher")
+    assert client.xlen(transport.teacher_request_stream) == 2
+    assert int(client.get(transport.teacher_request_stream + ":bytes")) == before
+
+
 def test_pending_body_survives_teacher_death_and_completion_retires_pel(client):
     transport = handler(client)
     identities = transport.publish_teacher_request(request(), "rollout")

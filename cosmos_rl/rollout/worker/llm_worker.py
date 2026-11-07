@@ -51,6 +51,13 @@ class LLMRolloutWorker(WorkerBase):
             metadata["config"]
         )  # just use config as key temporarily
 
+        from cosmos_rl.execution.models import (
+            actor_config,
+            validate_actor_representation,
+        )
+
+        validate_actor_representation(cosmos_rollout_config)
+        cosmos_rollout_config = actor_config(cosmos_rollout_config)
         task_type = cosmos_rollout_config.train.train_policy.type
         if task_type not in ["grpo"]:
             logger.info(

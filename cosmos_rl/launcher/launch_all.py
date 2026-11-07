@@ -502,6 +502,15 @@ def main():
 
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
+    if "execution" in cosmos_config:
+        from cosmos_rl.policy.config import Config
+
+        resolved_config = Config.model_validate(cosmos_config)
+        from cosmos_rl.execution.models import validate_actor_representation
+
+        validate_actor_representation(resolved_config)
+        cosmos_config = resolved_config.model_dump()
+        logger.info("Execution plan: %s", resolved_config.execution_plan)
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
     rollout_parallelism = cosmos_config.get("rollout", {}).get("parallelism", {})
     reference_parallelism = cosmos_config.get("distillation", {}).get("parallelism", {})
@@ -590,6 +599,21 @@ def main():
         n_reference = reference_parallelism.get("n_init_replicas", 1)
     else:
         n_reference = args.reference
+
+    if cosmos_config.get("execution", {}).get("path") is not None:
+        # Validate effective command-line counts before SFT/disabled-role
+        # defaults can erase a contradictory override.
+        from cosmos_rl.policy.config import Config
+
+        cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
+        cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        cosmos_config["distillation"]["parallelism"]["n_init_replicas"] = n_reference
+        effective = Config.model_validate(cosmos_config)
+        if (
+            args.reference is not None
+            and n_reference != effective.execution_plan.teachers
+        ):
+            parser.error("The reference override contradicts the execution plan")
 
     rl_mode = cosmos_config.get("mode", "disaggregated")
     is_colocated = rl_mode in ["colocated", "colocated_separated"]
@@ -1027,8 +1051,9 @@ cosmos-rl --config config.toml"""
     _monitor_processes(
         processes,
         processes[controller_id] if controller_id >= 0 else None,
-        fail_on_worker_error=cosmos_config.get("rollout", {}).get(
-            "rollout_only", False
+        fail_on_worker_error=(
+            cosmos_config.get("rollout", {}).get("rollout_only", False)
+            or cosmos_config.get("execution", {}).get("path") is not None
         ),
     )
 

@@ -28,6 +28,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.rollout_only import RolloutOnlyState
+from cosmos_rl.execution.models import checkpoint_actor
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.dispatcher.command as command
@@ -796,6 +797,8 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> bool:
         """Whether ``train_ack`` should schedule P2R/R2R for ``step``."""
+        if checkpoint_actor(self.config):
+            return False
         if self.job_phase == JobPhase.DRAINING and not (
             self.config.validation.enable
             and self.data_fetcher.activated_val_iter is not None
@@ -1178,7 +1181,7 @@ class PolicyStatusManager:
                         valid_rollout_replicas.append(r)
                         if any_valid_rollout_replica is None:
                             any_valid_rollout_replica = r
-                if any_valid_rollout_replica:
+                if any_valid_rollout_replica and not checkpoint_actor(config):
                     command.PolicyToRolloutUnicastCommand.trigger(
                         src_replica=current_policy_replica,
                         dst_replica=any_valid_rollout_replica,
@@ -2029,6 +2032,8 @@ class PolicyStatusManager:
         cleanup messages so the rollout worker releases them immediately
         instead of waiting for age-based cleanup.
         """
+        if checkpoint_actor(self.config):
+            return rollouts
         allowed_outdated_steps = self.config.train.train_policy.allowed_outdated_steps
         filtered_rollouts = []
         accepted_staleness: List[int] = []
@@ -2673,6 +2678,8 @@ class PolicyStatusManager:
         *,
         force_validation: bool = False,
     ):
+        if checkpoint_actor(self.config):
+            return
         valid_rollout_replicas = self._weight_sync_rollout_targets(
             rollout_status_manager
         )
@@ -3663,7 +3670,10 @@ class RolloutStatusManager:
         replica has ever registered this is permanently True, so the skip only
         ever applies to a job configured with no policy replicas at all.
         """
-        return self.config.policy.parallelism.n_init_replicas > 0
+        return (
+            self.config.policy.parallelism.n_init_replicas > 0
+            and not checkpoint_actor(self.config)
+        )
 
     def trigger_rebuild_mesh(
         self,
@@ -3705,6 +3715,7 @@ class RolloutStatusManager:
                 ]
             )
             and any_loaded_policy_replica is not None
+            and not checkpoint_actor(config)
         ):
             command.PolicyToRolloutUnicastCommand.trigger(
                 src_replica=any_loaded_policy_replica,
@@ -3745,7 +3756,7 @@ class RolloutStatusManager:
                     # to broadcast weights
                     any_loaded_rollout_replica = replica
                     break
-            if any_loaded_rollout_replica is not None:
+            if any_loaded_rollout_replica is not None and not checkpoint_actor(config):
                 command.RolloutToRolloutBroadcastCommand.trigger(
                     src_replica=any_loaded_rollout_replica,
                     dst_replicas=valid_replicas,

@@ -8,6 +8,7 @@ from cosmos_rl.dispatcher.data.schema import RLPayload
 
 @dataclass
 class RolloutOnlyState:
+    source_occurrences_seen: int = 0
     prompts_issued: int = 0
     pending_prompts: list[RLPayload] = field(default_factory=list)
     input_ended: bool = False
