@@ -91,7 +91,7 @@ def base(root, model):
     }
 
 
-def launch(root, name, config, *, corpus=False, training=True):
+def launch(root, name, config, *, corpus=False, training=True, profile=False):
     config = copy.deepcopy(config)
     config["train"]["output_dir"] = str(root / name)
     config["train"]["timestamp"] = name
@@ -106,6 +106,9 @@ def launch(root, name, config, *, corpus=False, training=True):
         EXECUTION_CANARY_CORPUS="1" if corpus else "0",
         TOKENIZERS_PARALLELISM="false",
         WANDB_MODE="disabled",
+        EXECUTION_CANARY_PROFILE="1"
+        if profile
+        else os.environ.get("EXECUTION_CANARY_PROFILE", "0"),
     )
     command = [
         sys.executable,
@@ -134,10 +137,11 @@ def launch(root, name, config, *, corpus=False, training=True):
     text = log.read_text()
     assert result == 0, f"{name} exited {result}; see {log}\n{text[-6000:]}"
     if training:
-        assert "Step: 2/2" in text or "step 2/2" in text, (
+        steps = config["train"]["max_num_steps"]
+        assert f"Step: {steps}/{steps}" in text or f"step {steps}/{steps}" in text, (
             f"{name}: no completed optimizer schedule; see {log}"
         )
-        assert (root / name / "safetensors" / "step_2").is_dir(), (
+        assert (root / name / "safetensors" / f"step_{steps}").is_dir(), (
             f"{name}: no final checkpoint"
         )
     print(json.dumps({"scenario": name, "passed": True, "log": str(log)}), flush=True)
@@ -211,8 +215,9 @@ def run(root):
     launch(root, "generated-corpus-sft", sft, corpus=True)
 
     writer = CorpusWriter(root / "mixed-corpus", run_id="recorded-behavior")
-    for i in range(4):
-        ids = [100 + i, 200 + i, 300 + i, 400 + i]
+    for i in range(8):
+        ids = [100 + i, 200 + i, 300 + i, 400 + i, 500 + i][: (4, 2, 3, 5)[i % 4]]
+        n = len(ids) - 1
         writer.commit(
             SampleRecord(
                 sample_id=str(i),
@@ -228,9 +233,9 @@ def run(root):
                 ),
                 inputs={"prompt": "recorded trajectory"},
                 targets={"token_ids": ids, "label_ids": ids},
-                masks={"policy_gradient": [True] * 3},
-                behavior_logprobs=[-math.log(vocab)] * 3,
-                annotations={"advantages": [0.5 if i % 2 else -0.5] * 3},
+                masks={"policy_gradient": [True] * n},
+                behavior_logprobs=[-math.log(vocab)] * n,
+                annotations={"advantages": [0.5 if i % 2 else -0.5] * n},
             )
         )
     mixed = copy.deepcopy(common)
@@ -241,9 +246,38 @@ def run(root):
         objectives={"supervised": 0.5, "policy_gradient": 0.5},
     )
     launch(root, "mixed-recorded-objectives", mixed, corpus=True)
+    packed = copy.deepcopy(mixed)
+    packed["train"].update(sequence_packing=True, train_batch_per_replica=2)
+    packed["train"]["train_policy"]["mini_batch"] = 2
+    launch(root, "packed-recorded-objectives", packed, corpus=True, profile=True)
+    assert (
+        '"train/packing_active": 1'
+        in (root / "packed-recorded-objectives.log").read_text()
+    )
+    checkpoints = list((root / "packed-recorded-objectives").glob("**/step_1/policy"))
+    assert len(checkpoints) == 1, checkpoints
+    resumed = copy.deepcopy(packed)
+    resumed["train"]["resume"] = str(checkpoints[0])
+    launch(root, "packed-recorded-resume", resumed, corpus=True, profile=True)
+    from safetensors.torch import load_file
+
+    def final_weights(name):
+        weights = {}
+        for path in (root / name / "safetensors" / "step_2").rglob("*.safetensors"):
+            weights.update(load_file(path))
+        assert weights
+        return weights
+
+    before, after = (
+        final_weights("packed-recorded-objectives"),
+        final_weights("packed-recorded-resume"),
+    )
+    assert before.keys() == after.keys()
+    for key in before:
+        torch.testing.assert_close(before[key], after[key], rtol=0, atol=0)
 
     (root / "results.json").write_text(
-        json.dumps({"passed": True, "scenarios": 7}, indent=2)
+        json.dumps({"passed": True, "scenarios": 9}, indent=2)
     )
 
 

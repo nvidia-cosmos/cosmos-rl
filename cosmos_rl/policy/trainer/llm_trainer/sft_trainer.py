@@ -121,6 +121,7 @@ def async_safe_ce(
 @TrainerRegistry.register(trainer_type="sft")
 class SFTTrainer(LLMTrainer):
     recorded_objectives = frozenset({"supervised", "policy_gradient", "distillation"})
+    recorded_sequence_packing = True
 
     def __init__(
         self,
@@ -173,6 +174,8 @@ class SFTTrainer(LLMTrainer):
     ):
         pp_last_stage = False
         execution_window = None
+        model_input_tokens = 0
+        packing_active = False
         if self.config.execution.objectives is not None:
             from cosmos_rl.execution.token_objectives import TokenObjectiveBatch
 
@@ -305,8 +308,10 @@ class SFTTrainer(LLMTrainer):
                     label_ids=labels,
                     ignore_label_id=-100,
                     seq_len_multiple=self.seq_len_multiple,
+                    min_input_len=1 if execution_window is not None else 0,
                 )
                 batch.update(packed_args)
+                packing_active = True
                 labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
                 packed_args = pack_sequences_for_masks(
                     batch["valid_input_len"], batch["valid_input_len"]
@@ -407,6 +412,8 @@ class SFTTrainer(LLMTrainer):
                 with self.act_offloading_ctx_manager:
                     output = self.forward_model(**batch)
                     logits = output.logits
+                    if execution_window is not None:
+                        model_input_tokens += logits.shape[0] * logits.shape[1]
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
                         if "loss" in k.lower() and isinstance(v, torch.Tensor):
@@ -429,7 +436,12 @@ class SFTTrainer(LLMTrainer):
                     kwargs["lin_weight"] = self.model.lm_head.weight
 
                 ce_loss = (
-                    execution_window.loss(logits, labels, start=i)
+                    execution_window.loss(
+                        logits,
+                        labels,
+                        start=i,
+                        valid_input_len=batch.get("valid_input_len"),
+                    )
                     if execution_window is not None
                     else self.loss_fn(logits, labels, **kwargs)
                 )
@@ -591,6 +603,16 @@ class SFTTrainer(LLMTrainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
+        if execution_window is not None:
+            report_data.update(
+                {
+                    "train/useful_input_tokens": sum(
+                        row["n"] + 1 for row in execution_window.rows
+                    ),
+                    "train/model_input_tokens": model_input_tokens,
+                    "train/packing_active": int(packing_active),
+                }
+            )
         return report_data
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):

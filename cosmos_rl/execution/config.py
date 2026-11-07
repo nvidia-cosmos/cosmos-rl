@@ -15,6 +15,7 @@ class SourceConfig(BaseModel):
     path: str | None = None
     revision: str | None = None
     max_prefetch_bytes: int = Field(default=256 * 1024**2, gt=0)
+    max_prepared_bytes: int | None = Field(default=None, gt=0)
     reward_weighting: Literal["none", "nonnegative"] = "none"
     teacher_targets: Literal["recorded", "online"] = "recorded"
     score_records: bool = False
@@ -279,10 +280,8 @@ def resolve_execution(config) -> ExecutionPlan:
                 raise ValueError(
                     "Recorded objectives currently require one pure-DP learner replica"
                 )
-            if config.train.sequence_packing or policy.enable_dp_load_balancing:
-                raise ValueError(
-                    "Recorded objectives require unpacked fixed-schedule batches"
-                )
+            if policy.enable_dp_load_balancing:
+                raise ValueError("Recorded objectives require fixed-schedule batches")
             if (
                 policy.trainer_type == "sft"
                 and config.policy.enable_liger_fused_cross_entropy

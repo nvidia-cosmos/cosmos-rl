@@ -308,9 +308,16 @@ def prepare_supervised_record(record, packer):
 
 def source_compatibility(dataset, execution, training=None):
     """Stable input/objective identity persisted with learner checkpoints."""
+    settings = execution.model_dump(mode="json")
+    if (
+        settings.get("source") is not None
+        and settings["source"].get("max_prepared_bytes") is None
+    ):
+        # Preserve checkpoint compatibility when the new optional limit is unused.
+        settings["source"].pop("max_prepared_bytes", None)
     value = {
         "source_revision": dataset.revision,
-        "execution": execution.model_dump(mode="json"),
+        "execution": settings,
         "training": training,
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()

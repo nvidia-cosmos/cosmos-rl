@@ -203,6 +203,14 @@ class BaseDataPacker(ABC):
             "This method should be implemented by the subclass for SFT training"
         )
 
+    def record_preparation_state(self) -> Any:
+        """JSON-serializable preparation identity for corpus checkpoint checks.
+
+        Override when application settings change temporal windows, masks or
+        weighting. The default adds no application-specific compatibility state.
+        """
+        return None
+
     def sft_collate_fn(
         self,
         sub_batch: List[Dict[str, Any]],

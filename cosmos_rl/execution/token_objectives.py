@@ -182,19 +182,41 @@ class TokenObjectiveBatch:
             coefficients, counts, device=device, group=group
         )
 
-    def loss(self, logits, labels, *, start):
+    def loss(self, logits, labels, *, start, valid_input_len=None):
         shifted_logits, shifted_labels = logits[:, :-1], labels[:, 1:]
         values = {}
         masks = {}
-        selected = self.rows[start : start + len(labels)]
+        if valid_input_len is None:
+            selected = self.rows[start : start + len(labels)]
+            placements = [(i, 0, row["n"]) for i, row in enumerate(selected)]
+        else:
+            lengths = valid_input_len.tolist()
+            if (
+                labels.shape[0] != 1
+                or any(length < 1 for length in lengths)
+                or sum(lengths) != labels.shape[1]
+            ):
+                raise ValueError("Packed token layout does not match the model output")
+            selected = self.rows[start : start + len(lengths)]
+            if len(selected) != len(lengths):
+                raise ValueError("Packed token layout does not match its records")
+            placements, offset = [], 0
+            for row, length in zip(selected, lengths):
+                n = min(row["n"], length - 1)
+                if any(mask[n:].any() for mask in row["masks"].values()):
+                    raise ValueError("Packing omitted contributing token positions")
+                placements.append((0, offset, n))
+                offset += length
         for name, _ in self.window.coefficients:
             mask = torch.zeros_like(shifted_labels, dtype=torch.bool)
-            for i, row in enumerate(selected):
-                mask[i, : row["n"]] = row["masks"][name].to(mask.device)
+            for row, (i, offset, n) in zip(selected, placements):
+                mask[i, offset : offset + n] = row["masks"][name][:n].to(mask.device)
             masks[name] = mask
             if name == "supervised":
                 loss = supervised_token_loss(shifted_logits, shifted_labels)
-                weights = loss.new_tensor([row["weight"] for row in selected])[:, None]
+                weights = torch.zeros_like(loss)
+                for row, (i, offset, n) in zip(selected, placements):
+                    weights[i, offset : offset + n] = row["weight"]
                 values[name] = loss * weights
             elif name == "policy_gradient":
                 current = (
@@ -204,9 +226,13 @@ class TokenObjectiveBatch:
                 )
                 behavior = torch.zeros_like(current)
                 advantages = torch.zeros_like(current)
-                for i, row in enumerate(selected):
-                    behavior[i, : row["n"]] = row["behavior"].to(current.device)
-                    advantages[i, : row["n"]] = row["advantages"].to(current.device)
+                for row, (i, offset, n) in zip(selected, placements):
+                    behavior[i, offset : offset + n] = row["behavior"][:n].to(
+                        current.device
+                    )
+                    advantages[i, offset : offset + n] = row["advantages"][:n].to(
+                        current.device
+                    )
                 # Excluded padding cannot overflow an importance ratio.
                 current = torch.where(mask, current, 0)
                 behavior = torch.where(mask, behavior, 0)
@@ -215,14 +241,16 @@ class TokenObjectiveBatch:
                 )
             else:
                 target = torch.zeros_like(shifted_logits, dtype=torch.float32)
-                for i, row in enumerate(selected):
+                for row, (i, offset, n) in zip(selected, placements):
                     if row["teacher"] is None:
                         continue
                     if row["teacher"].shape[-1] != target.shape[-1]:
                         raise ValueError(
                             "Teacher and student token vocabularies differ"
                         )
-                    target[i, : row["n"]] = row["teacher"].to(target.device)
+                    target[i, offset : offset + n] = row["teacher"][:n].to(
+                        target.device
+                    )
                 target = target.exp()
                 target = torch.where(mask.unsqueeze(-1), target, 0)
                 values[name] = F.kl_div(

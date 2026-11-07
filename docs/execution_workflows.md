@@ -124,10 +124,20 @@ unsupported for corpus sources because it lacks their revision identity.
 
 ## Explicit recorded objectives
 
-The initial token adapter uses the native SFT training loop with unpacked,
-fixed-schedule batches and materialized logits. TP/PP/CP/EP, multiple learner
-replicas, sequence packing, dynamic load balancing and fused cross entropy are
-rejected for this adapter. Native legacy trainers retain their own support.
+The token adapter uses the native SFT training loop with fixed-schedule batches
+and materialized logits. Set `train.sequence_packing = true` to reuse native
+packing within each microbatch on a compatible model. Attention segments and
+positions remain separate; the last logit of one record never predicts the next
+record's first token. Behavior probabilities, teacher targets, reward weights
+and objective masks retain their original next-token positions. Denominators
+still cover the entire distributed optimizer window. Packing metadata is
+reconstructed from the same deterministic source batch after resume.
+
+TP/PP/CP/EP, multiple learner replicas, dynamic load balancing and fused cross
+entropy remain rejected for this adapter. Native legacy trainers retain their
+own support. `train/packing_active`, `train/useful_input_tokens` and
+`train/model_input_tokens` report actual packing and padding work, including a
+model's existing fallback when packing is unsupported.
 
 ```toml
 [execution]
@@ -184,6 +194,60 @@ backend. Initially this runs in the learner process with
 annotations. Group standardization uses committed scores, so rescore and commit
 a new corpus before requesting it; transient per-record rescoring and group
 standardization cannot be combined.
+
+### Application-defined temporal batches
+
+Observation/action trainers may use the optional helpers in
+`cosmos_rl.execution.sequences`. A `SequenceSample` holds application-owned,
+time-aligned tensor fields, named boolean loss masks and optional episode ends.
+The application decides how observations, actions and targets align; no token
+representation or temporal-policy implementation is imposed.
+
+```python
+from cosmos_rl.execution.sequences import SequenceSample, iter_sequence_batches
+
+sample = SequenceSample(
+    record.sample_id,
+    fields={"observations": observations, "actions": actions},
+    loss_masks={"supervised": valid_actions},
+    episode_ends=terminated | truncated,
+)
+for batch in iter_sequence_batches(
+    [sample], window_steps=32, context_steps=8, batch_size=4,
+    max_bytes=256 * 1024**2, device=learner_device,
+):
+    # batch.fields, valid_mask, loss_masks, reset_mask and windows are available.
+    # The trainer owns forward/backward, global normalization and optimizer step.
+    ...
+```
+
+Windows never cross episode ends. Each step belongs to one contributing window;
+overlapping context has no loss mass. Every window starts fresh model state,
+with context serving as warmup. A recurrent application that carries state
+between windows needs its own explicit state contract. Chunking changes temporal
+context relative to a full episode; compare gradients against a reference using
+the same declared windows, rather than claiming full-episode equivalence.
+
+The iterator checks exact padded tensor bytes before allocating a batch and
+flushes at its count or byte limit. A single oversized window fails. Compatible
+field shapes/dtypes and objective names are required within a batch; applications
+own bucketing for heterogeneous representations. Source tensors stay immutable.
+The budget covers one prepared batch, excluding loaded source records, model,
+optimizer and application workspace. `source.max_prefetch_bytes` continues to
+bound admitted records; optional `source.max_prepared_bytes` is available for an
+application trainer's staging budget. A custom reader may implement efficient
+chunked or mapped reads; the filesystem baseline loads a whole admitted record.
+
+Packers may override `record_preparation_state()` with JSON-serializable
+windowing, mask and weighting settings. These are pinned in corpus checkpoints;
+changing them on resume fails. Preparation finishes within an optimizer window,
+so an unfinished window never advances committed source progress.
+
+The bundled RL-Gym packer supplies `prepare_sequence`; its pointwise MLP trainer
+accumulates all window gradients before one optimizer step. Application options
+`recorded_window_steps`, `recorded_context_steps` and
+`recorded_window_batch_size` select its temporal preparation. Its loss remains
+supervised MSE, optionally weighted by per-episode discounted returns.
 
 ## Generation and restart
 

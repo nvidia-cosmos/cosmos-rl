@@ -448,6 +448,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 raise ValueError(
                     f"Trainer {trainer_type} does not support recorded objectives: {sorted(unsupported)}"
                 )
+            if self.config.train.sequence_packing and not vars(trainer_cls).get(
+                "recorded_sequence_packing", False
+            ):
+                raise ValueError(
+                    f"Trainer {trainer_type} does not support recorded sequence packing"
+                )
         if source is not None and source.kind == "corpus":
             if dataset is not None:
                 raise ValueError(
@@ -524,6 +530,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 "trainer": trainer_type,
                 "packer": f"{type(self.data_packer).__module__}.{type(self.data_packer).__qualname__}",
             }
+            preparation = getattr(
+                self.data_packer, "record_preparation_state", lambda: None
+            )()
+            if preparation is not None:
+                geometry["preparation"] = preparation
             state = {
                 "compatibility": source_compatibility(
                     dataset.corpus, self.config.execution, geometry
