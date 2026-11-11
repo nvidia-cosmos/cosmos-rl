@@ -175,8 +175,8 @@ class TokenObjectiveBatch:
         if dist.is_initialized():
             errors = [None] * dist.get_world_size(group)
             dist.all_gather_object(errors, error, group=group)
-            error = next((failure for failure in errors if failure), None)
-        if error:
+            error = next((failure for failure in errors if failure is not None), None)
+        if error is not None:
             raise ValueError(error)
         self.window = ObjectiveWindow.prepare(
             coefficients, counts, device=device, group=group
@@ -207,23 +207,37 @@ class TokenObjectiveBatch:
                     raise ValueError("Packing omitted contributing token positions")
                 placements.append((0, offset, n))
                 offset += length
+        # A mixed objective needs one vocabulary normalization, shared by CE,
+        # sampled-token policy loss and KL. Keep the native CE-only fast path.
+        logprobs = (
+            None
+            if self.window.coefficients == (("supervised", self.spec.supervised),)
+            else F.log_softmax(shifted_logits.float(), dim=-1)
+        )
         for name, _ in self.window.coefficients:
             mask = torch.zeros_like(shifted_labels, dtype=torch.bool)
             for row, (i, offset, n) in zip(selected, placements):
                 mask[i, offset : offset + n] = row["masks"][name][:n].to(mask.device)
             masks[name] = mask
             if name == "supervised":
-                loss = supervised_token_loss(shifted_logits, shifted_labels)
+                loss = (
+                    supervised_token_loss(shifted_logits, shifted_labels)
+                    if logprobs is None
+                    else F.nll_loss(
+                        logprobs.reshape(-1, logprobs.shape[-1]),
+                        shifted_labels.reshape(-1),
+                        reduction="none",
+                        ignore_index=-100,
+                    ).reshape(shifted_labels.shape)
+                )
                 weights = torch.zeros_like(loss)
                 for row, (i, offset, n) in zip(selected, placements):
                     weights[i, offset : offset + n] = row["weight"]
                 values[name] = loss * weights
             elif name == "policy_gradient":
-                current = (
-                    F.log_softmax(shifted_logits.float(), dim=-1)
-                    .gather(-1, shifted_labels.clamp_min(0).unsqueeze(-1))
-                    .squeeze(-1)
-                )
+                current = logprobs.gather(
+                    -1, shifted_labels.clamp_min(0).unsqueeze(-1)
+                ).squeeze(-1)
                 behavior = torch.zeros_like(current)
                 advantages = torch.zeros_like(current)
                 for row, (i, offset, n) in zip(selected, placements):
@@ -254,7 +268,7 @@ class TokenObjectiveBatch:
                 target = target.exp()
                 target = torch.where(mask.unsqueeze(-1), target, 0)
                 values[name] = F.kl_div(
-                    F.log_softmax(shifted_logits.float(), dim=-1),
+                    logprobs,
                     target,
                     reduction="none",
                 ).sum(-1)

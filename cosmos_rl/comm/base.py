@@ -553,6 +553,7 @@ class CommMixin:
             "max_pending_bytes",
             "max_request_bytes",
             "max_result_bytes",
+            "max_completed_bytes",
         ):
             setattr(
                 self.redis_controller, "teacher_" + name, getattr(teacher, name, None)

@@ -26,6 +26,14 @@ jobs:
         run: |
           cd docs
           make html
+          python - <<'PY'
+          from pathlib import Path
+          output = Path('_build/html')
+          assert (output / 'execution_workflows.html').is_file(), 'Execution guide was not rendered'
+          assert 'href="execution_workflows.html"' in (output / 'index.html').read_text(), 'Execution guide is missing from navigation'
+          schema = (output / 'quickstart/configuration.html').read_text()
+          assert 'ExecutionConfig' in schema and '<p>execution</p>' in schema, 'Execution schema was not rendered'
+          PY
 
       - name: Deploy to GitHub Pages
         if: github.event_name == 'push'

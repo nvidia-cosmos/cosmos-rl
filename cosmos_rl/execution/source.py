@@ -1,101 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Transactional corpus input progress at optimizer boundaries."""
+"""Native corpus loading, scoring and checkpoint compatibility."""
 
-from dataclasses import dataclass
 import copy
+from dataclasses import dataclass
 import hashlib
 import json
 
-from cosmos_rl.execution.corpus import CorpusDataset
-
 
 @dataclass(frozen=True)
-class RecordBatch:
-    records: tuple
-    next_cursor: int
-    source_revision: str
+class RecordPreparationContext:
+    """Independent randomness for one corpus occurrence in one training epoch.
 
-
-class CorpusSource:
-    """Reserve a global group window; commit only after its optimizer boundary.
-
-    Sharding is by whole group. All ranks advance the same global cursor and
-    may receive an empty local contribution, without padding duplicate records.
-    Only one batch is owned at a time, keeping initial prefetch bounded.
+    Applications construct local generators from ``seed`` instead of reseeding
+    process-wide Python, NumPy or Torch randomness. The v1 seed derivation is
+    independent of source location, rank, loader workers and prefetch timing.
     """
 
-    def __init__(
-        self,
-        dataset: CorpusDataset,
-        *,
-        rank=0,
-        world_size=1,
-        max_batch_bytes=256 * 1024**2,
-    ):
-        if not 0 <= rank < world_size:
-            raise ValueError("Invalid corpus shard")
-        self.dataset = dataset
-        self.rank, self.world_size = rank, world_size
-        self.max_batch_bytes = max_batch_bytes
-        self.cursor = 0
-        self.pending = None
-        groups = {}
-        for i, path in enumerate(dataset.paths):
-            encoded = json.loads(path.read_bytes())["record"]["items"]
-            # Identity fields are scalar strings; no tensors are loaded here.
-            key = encoded["group_id"] or encoded["sample_id"]
-            groups.setdefault(key, []).append(i)
-        self.groups = tuple(tuple(indices) for indices in groups.values())
-
-    def reserve(self, groups_per_rank: int) -> RecordBatch | None:
-        if groups_per_rank < 1:
-            raise ValueError("A source batch must contain a positive group budget")
-        if self.pending is not None:
-            raise RuntimeError("Commit or roll back the previous source batch first")
-        if self.cursor >= len(self.groups):
-            return None
-        end = min(len(self.groups), self.cursor + groups_per_rank * self.world_size)
-        owned_groups = self.groups[self.cursor + self.rank : end : self.world_size]
-        indices = [i for group in owned_groups for i in group]
-        # Check the full declared artifact size before reading any tensor.
-        total = sum(self.dataset.record_bytes(i) for i in indices)
-        if total > self.max_batch_bytes:
-            raise ValueError("Prepared corpus batch exceeds its byte budget")
-        self.pending = RecordBatch(
-            tuple(self.dataset[i] for i in indices), end, self.dataset.revision
-        )
-        return self.pending
-
-    def commit(self, batch: RecordBatch):
-        if batch is not self.pending:
-            raise ValueError("Source commit does not own the pending batch")
-        self.cursor = batch.next_cursor
-        self.pending = None
-
-    def rollback(self):
-        self.pending = None
-
-    def state_dict(self):
-        # In-flight reservations deliberately do not advance durable progress.
-        return {
-            "revision": self.dataset.revision,
-            "cursor": self.cursor,
-            "rank": self.rank,
-            "world_size": self.world_size,
-        }
-
-    def load_state_dict(self, state):
-        if self.pending is not None:
-            raise RuntimeError("Cannot restore over a pending source batch")
-        if any(
-            state[k] != self.state_dict()[k] for k in ("revision", "rank", "world_size")
-        ):
-            raise ValueError("Source checkpoint revision or topology changed")
-        cursor = state["cursor"]
-        if type(cursor) is not int or not 0 <= cursor <= len(self.groups):
-            raise ValueError("Invalid source cursor")
-        self.cursor = cursor
+    seed: int
+    epoch: int
 
 
 class CorpusSupervisedDataset:
@@ -105,22 +28,43 @@ class CorpusSupervisedDataset:
     a supervised target. Quality decisions remain application annotations.
     """
 
-    def __init__(self, corpus, *, max_batch_bytes=None):
+    def __init__(self, corpus, *, max_batch_bytes=None, preparation_seed=None):
         self.corpus = corpus
+        self.preparation_seed = preparation_seed
+        self.epoch = 0
         self.max_batch_bytes = (
             corpus.max_record_bytes if max_batch_bytes is None else max_batch_bytes
         )
         self.scorer = None
         self.indices = []
         self.group_advantages = {}
-        for i, path in enumerate(corpus.paths):
-            fields = json.loads(path.read_bytes())["record"]["items"]
-            annotations = fields["annotations"]["items"]
-            if annotations.get("status") != "generation_failed":
+        for i, fields in enumerate(corpus.record_metadata):
+            if fields["status"] != "generation_failed":
                 self.indices.append(i)
 
     def __len__(self):
         return len(self.indices)
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def preparation_context(self, record):
+        if self.preparation_seed is None:
+            return None
+        identity = [
+            "cosmos-record-preparation-v1",
+            self.preparation_seed,
+            self.corpus.revision,
+            self.epoch,
+            record.sample_id,
+            record.occurrence_id,
+        ]
+        digest = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()
+        ).digest()
+        return RecordPreparationContext(
+            seed=int.from_bytes(digest[:8], "big") % 2**63, epoch=self.epoch
+        )
 
     def __getitem__(self, index):
         if index is None:
@@ -149,8 +93,14 @@ class CorpusSupervisedDataset:
         import math
 
         groups = {}
-        for path in self.corpus.paths:
-            fields = json.loads(path.read_bytes())["record"]["items"]
+        for fields in self.corpus.record_metadata:
+            if advantages == "recorded":
+                self.group_advantages[fields["sample_id"]] = (
+                    None,
+                    fields["status"] != "generation_failed"
+                    and fields["quality_trainable"] is not False,
+                )
+                continue
             group_id, size, slot = (
                 fields["group_id"],
                 fields["group_size"],
@@ -172,11 +122,11 @@ class CorpusSupervisedDataset:
             eligible = [
                 row
                 for row in group
-                if row["annotations"]["items"].get("status") != "generation_failed"
-                and row["annotations"]["items"].get("quality_trainable") is not False
+                if row["status"] != "generation_failed"
+                and row["quality_trainable"] is not False
             ]
             if advantages == "group_standardized":
-                rewards = [row["annotations"]["items"].get("score") for row in eligible]
+                rewards = [row["score"] for row in eligible]
                 if any(
                     not isinstance(score, (int, float)) or not math.isfinite(score)
                     for score in rewards
@@ -276,11 +226,13 @@ class ExactCorpusSampler:
         yield from indices[self.rank :: self.replicas]
 
 
-def prepare_supervised_record(record, packer):
+def prepare_supervised_record(record, packer, *, context=None):
     """Keep application packers in charge of model-specific representations."""
     custom = getattr(packer, "prepare_record", None)
     if custom is not None:
-        prepared = custom(record)
+        prepared = (
+            custom(record, context=context) if context is not None else custom(record)
+        )
     elif isinstance(record.targets, dict) and "label_ids" in record.targets:
         prepared = copy.deepcopy(record.targets)
     elif isinstance(record.targets, str):
@@ -306,15 +258,30 @@ def prepare_supervised_record(record, packer):
     return prepared
 
 
-def source_compatibility(dataset, execution, training=None):
+def source_compatibility(dataset, execution, training=None, *, legacy=False):
     """Stable input/objective identity persisted with learner checkpoints."""
     settings = execution.model_dump(mode="json")
+    if settings.get("source") is not None:
+        # Location and admission do not identify training data or its schedule.
+        # Prepared-batch limits remain pinned: they can change window grouping.
+        for key in (
+            ("allow_partial",)
+            if legacy
+            else ("path", "max_prefetch_bytes", "allow_partial", "revision")
+        ):
+            settings["source"].pop(key, None)
     if (
         settings.get("source") is not None
         and settings["source"].get("max_prepared_bytes") is None
     ):
         # Preserve checkpoint compatibility when the new optional limit is unused.
         settings["source"].pop("max_prepared_bytes", None)
+    if (
+        settings.get("source") is not None
+        and settings["source"].get("preparation_seed") is None
+    ):
+        # Keep existing deterministic-preparation checkpoint fingerprints.
+        settings["source"].pop("preparation_seed", None)
     value = {
         "source_revision": dataset.revision,
         "execution": settings,

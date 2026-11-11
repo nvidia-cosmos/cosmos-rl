@@ -41,8 +41,6 @@ class SampleRecord(BaseModel):
             raise ValueError(
                 "Recorded RL requires original producer identity and behavior log probabilities"
             )
-        if self.group_id is None:
-            raise ValueError("Recorded grouped RL requires a group_id")
 
 
 def output_id(run_id: str, occurrence: int, slot: int) -> str:

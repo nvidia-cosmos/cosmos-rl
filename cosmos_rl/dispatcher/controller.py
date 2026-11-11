@@ -821,6 +821,33 @@ maxmemory-policy noeviction
         )
         return payloads, ended
 
+    def finalize_generation(self):
+        """Seal the corpus only after all admitted completion slots settle."""
+        if self.config.execution.output is None:
+            return
+        if self.policy_status_manager.stop_reason is not None:
+            return
+        if getattr(self, "_generation_finalized", False):
+            return
+        if self.rollout_only_state.outstanding_completions:
+            raise ValueError("Cannot finalize generation with unsettled outputs")
+        state = self.rollout_only_state
+        limit = self.config.rollout.max_prompts
+        if not (
+            state.input_ended
+            and not state.pending_prompts
+            or limit is not None
+            and state.source_occurrences_seen >= limit
+        ):
+            raise ValueError("Cannot finalize generation before input admission closes")
+        ledger = getattr(self, "_generation_ledger", None)
+        if ledger is None:
+            from cosmos_rl.execution.sink import GenerationLedger
+
+            ledger = self._generation_ledger = GenerationLedger(self.config)
+        ledger.finalize(self.rollout_only_state.source_occurrences_seen)
+        self._generation_finalized = True
+
     def _get_checkpoint_actor_prompts(self, n):
         status = self.policy_status_manager
         if len(status) == 0:

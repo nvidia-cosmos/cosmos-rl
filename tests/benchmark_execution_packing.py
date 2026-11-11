@@ -99,6 +99,7 @@ def main():
                 annotations={"advantages": [0.2 if i % 2 else -0.2] * (length - 1)},
             )
         )
+    writer.finalize()
     common = base(root, model)
     common["policy"]["model_max_length"] = 2048 if long else 256
     common["execution"].update(

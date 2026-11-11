@@ -89,6 +89,10 @@ class SFTDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def set_epoch(self, epoch):
+        if getattr(self.dataset, "preparation_seed", None) is not None:
+            self.dataset.set_epoch(epoch)
+
     def __getitems__(self, indices):
         check = getattr(self.dataset, "check_batch_budget", None)
         if check is not None:
@@ -112,7 +116,15 @@ class SFTDataset(Dataset):
 
             try:
                 if isinstance(raw_item, SampleRecord):
-                    item = prepare_supervised_record(raw_item, self.data_packer)
+                    context_factory = getattr(self.dataset, "preparation_context", None)
+                    context = (
+                        context_factory(raw_item)
+                        if context_factory is not None
+                        else None
+                    )
+                    item = prepare_supervised_record(
+                        raw_item, self.data_packer, context=context
+                    )
                 elif isinstance(idx, list):  # a batch of items
                     item = [self.data_packer.sft_process_sample(x) for x in raw_item]
                 else:
@@ -465,26 +477,51 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 ExactCorpusSampler,
             )
 
-            dataset = CorpusSupervisedDataset(
-                CorpusDataset(
-                    source.path,
-                    revision=source.revision,
-                    max_record_bytes=source.max_prefetch_bytes,
-                ),
-                max_batch_bytes=source.max_prefetch_bytes
-                // (
-                    1
-                    + self.config.train.train_policy.dataloader_num_workers
-                    * (self.config.train.train_policy.dataloader_prefetch_factor or 2)
-                ),
-            )
-            if len(dataset) == 0:
-                raise ValueError("Corpus contains no successful training records")
-            objectives = self.config.execution.objectives
-            if objectives is not None and objectives.policy_gradient:
-                dataset.validate_policy_groups(advantages=source.advantages)
-            if sampler is not None or batch_sampler is not None:
-                raise ValueError("Corpus sources own their exact distributed sampler")
+            dataset, source_error = None, None
+            try:
+                dataset = CorpusSupervisedDataset(
+                    CorpusDataset(
+                        source.path,
+                        revision=source.revision,
+                        max_record_bytes=source.max_prefetch_bytes,
+                        allow_partial=source.allow_partial,
+                    ),
+                    max_batch_bytes=source.max_prefetch_bytes
+                    // (
+                        1
+                        + self.config.train.train_policy.dataloader_num_workers
+                        * (
+                            self.config.train.train_policy.dataloader_prefetch_factor
+                            or 2
+                        )
+                    ),
+                    preparation_seed=source.preparation_seed,
+                )
+                if len(dataset) == 0:
+                    raise ValueError("Corpus contains no successful training records")
+                objectives = self.config.execution.objectives
+                if objectives is not None and objectives.policy_gradient:
+                    dataset.validate_policy_groups(advantages=source.advantages)
+                if sampler is not None or batch_sampler is not None:
+                    raise ValueError(
+                        "Corpus sources own their exact distributed sampler"
+                    )
+            except Exception as error:
+                source_error = str(error)
+            reports = [(source_error, dataset.corpus.revision if dataset else None)]
+            if dist.is_initialized():
+                group = self.parallel_dims.mesh["dp"].get_group()
+                reports = [None] * dist.get_world_size(group)
+                dist.all_gather_object(
+                    reports,
+                    (source_error, dataset.corpus.revision if dataset else None),
+                    group=group,
+                )
+            failure = next((error for error, _ in reports if error), None)
+            if failure:
+                raise ValueError(f"Corpus source initialization failed: {failure}")
+            if len({revision for _, revision in reports}) != 1:
+                raise ValueError("Corpus ranks disagree on the source revision")
             sampler = partial(
                 ExactCorpusSampler, seed=self.config.train.train_policy.dataloader_seed
             )
@@ -492,6 +529,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
+        if source is not None and source.preparation_seed is not None:
+            prepare = getattr(self.data_packer, "prepare_record", None)
+            try:
+                if prepare is None:
+                    raise TypeError("No recorded preparation adapter")
+                inspect.signature(prepare).bind(None, context=None)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "preparation_seed requires packer.prepare_record(record, *, context)"
+                ) from error
         if source is not None and source.kind == "corpus" and source.score_records:
             from cosmos_rl.execution.source import RecordScorer
 
@@ -535,14 +582,39 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )()
             if preparation is not None:
                 geometry["preparation"] = preparation
+            if source.preparation_seed is not None:
+                geometry["preparation_context"] = 1
             state = {
                 "compatibility": source_compatibility(
                     dataset.corpus, self.config.execution, geometry
-                )
+                ),
+                "mini_batch": self.config.train.train_policy.mini_batch,
             }
             saved = (checkpoint_extra or {}).get("execution_source")
-            if self.config.train.resume and saved != state:
-                raise ValueError("Checkpoint corpus or objective configuration changed")
+            legacy_state = {
+                "compatibility": source_compatibility(
+                    dataset.corpus, self.config.execution, geometry, legacy=True
+                ),
+                "mini_batch": state["mini_batch"],
+            }
+            if self.config.train.resume:
+                if not isinstance(saved, dict) or "mini_batch" not in saved:
+                    raise ValueError(
+                        "Recorded checkpoint lacks microbatch metadata; exact resume "
+                        "requires a checkpoint created with microbatch pinning"
+                    )
+                if (
+                    type(saved["mini_batch"]) is not int
+                    or saved["mini_batch"] != state["mini_batch"]
+                ):
+                    raise ValueError(
+                        "Checkpoint microbatch configuration changed (mini_batch); "
+                        "preserve its original value for exact resume"
+                    )
+                if saved not in (state, legacy_state):
+                    raise ValueError(
+                        "Checkpoint corpus or objective configuration changed"
+                    )
             self.trainer.execution_source_state = state
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
@@ -655,6 +727,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
             batch_sampler = batch_sampler(**filtered)
         self.train_batch_sampler = batch_sampler
 
+        loader_kwargs = {}
+        if source is not None and source.preparation_seed is not None:
+            # Iterator creation must not consume the model's checkpointed RNG.
+            # Preparation uses explicit occurrence seeds, not worker base seeds.
+            loader_kwargs["generator"] = torch.Generator().manual_seed(
+                source.preparation_seed
+            )
+
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
             sampler_in_batch: Optional[Sampler[list[int]]] = None,
@@ -668,6 +748,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     num_workers=self.config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=collate_fn,  # Still need collate_fn for final batch formatting
+                    **loader_kwargs,
                 )
             elif sampler_in_batch is not None:
                 logger.info(
@@ -679,6 +760,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
+                    **loader_kwargs,
                 )
             else:
                 # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
@@ -692,6 +774,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     collate_fn=collate_fn,
                     drop_last=self.config.train.train_policy.dataloader_drop_last
                     or self.parallel_dims.pp_enabled,
+                    **loader_kwargs,
                 )
             return data_loader
 
@@ -826,6 +909,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 batch_sampler=val_batch_sampler,
                 collate_fn=collate_fn,
+                **loader_kwargs,
             )
         else:
             self.val_data_loader = DataLoader(
@@ -837,6 +921,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=self.config.train.train_policy.dataloader_drop_last,
+                **loader_kwargs,
             )
 
         steps_by_dataset = (
@@ -1042,8 +1127,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 if dist.is_initialized():
                     reports = [None] * dist.get_world_size(group)
                     dist.all_gather_object(reports, (error, ended), group=group)
-                failure = next((report[0] for report in reports if report[0]), None)
-                if failure:
+                failure = next(
+                    (report[0] for report in reports if report[0] is not None), None
+                )
+                if failure is not None:
                     raise ValueError(
                         f"Corpus preparation failed across the gradient cohort: {failure}"
                     )

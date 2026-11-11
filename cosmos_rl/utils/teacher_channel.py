@@ -164,8 +164,31 @@ local request_bytes = tonumber(redis.call('HGET', KEYS[2], 'bytes') or '0')
 if request_bytes > tonumber(redis.call('GET', KEYS[4]) or '0') then
     return redis.error_reply('teacher byte budget state is invalid')
 end
+if ARGV[3] ~= 'control' and tonumber(ARGV[5]) > 0 then
+    local now = redis.call('TIME')
+    local seconds = tonumber(now[1]) + tonumber(now[2]) / 1000000
+    for _, identity in ipairs(redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', seconds)) do
+        redis.call('DEL', 'cosmos:teacher:result:' .. identity)
+        redis.call('HDEL', KEYS[5], identity)
+        redis.call('ZREM', KEYS[6], identity)
+    end
+    local retained = 0
+    for _, bytes in ipairs(redis.call('HVALS', KEYS[5])) do
+        retained = retained + tonumber(bytes)
+    end
+    if retained + string.len(ARGV[1]) > tonumber(ARGV[5]) or
+       redis.call('HLEN', KEYS[5]) >= tonumber(ARGV[6]) then
+        return redis.error_reply('teacher completed result capacity exhausted')
+    end
+end
 redis.call('HSET', KEYS[2], 'state', 'completing')
+redis.call('EXPIRE', KEYS[2], ARGV[2])
 if ARGV[3] ~= 'control' then
+    if tonumber(ARGV[5]) > 0 then
+        local now = redis.call('TIME')
+        redis.call('ZADD', KEYS[6], tonumber(now[1]) + tonumber(now[2]) / 1000000 + tonumber(ARGV[2]), ARGV[7])
+        redis.call('HSET', KEYS[5], ARGV[7], string.len(ARGV[1]))
+    end
     redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 end
 -- Once XDEL frees stream capacity, a partial completion must not leave an
@@ -176,6 +199,31 @@ redis.call('XDEL', KEYS[1], entry)
 if request_bytes > 0 then redis.call('DECRBY', KEYS[4], request_bytes) end
 redis.call('HSET', KEYS[2], 'state', 'complete')
 redis.call('EXPIRE', KEYS[2], ARGV[2])
+return 1
+"""
+
+
+_ACK = """
+local state = redis.call('HGET', KEYS[2], 'state')
+if state and state ~= 'pending' and state ~= 'complete' then
+    return redis.error_reply('teacher acknowledgement completion uncertain')
+end
+if state == 'pending' then
+    local bytes = tonumber(redis.call('HGET', KEYS[2], 'bytes') or '0')
+    if bytes > tonumber(redis.call('GET', KEYS[4]) or '0') then
+        return redis.error_reply('teacher byte budget state is invalid')
+    end
+    local entry = redis.call('HGET', KEYS[2], 'entry')
+    redis.call('HSET', KEYS[2], 'state', 'completing')
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    redis.call('XACK', KEYS[1], ARGV[2], entry)
+    redis.call('XDEL', KEYS[1], entry)
+    if bytes > 0 then redis.call('DECRBY', KEYS[4], bytes) end
+    redis.call('HSET', KEYS[2], 'state', 'complete')
+end
+redis.call('DEL', KEYS[3])
+redis.call('HDEL', KEYS[5], ARGV[1])
+redis.call('ZREM', KEYS[6], ARGV[1])
 return 1
 """
 
@@ -277,15 +325,20 @@ def complete(handler, identity, packed, timeout, *, control=False):
             deadline_after(timeout),
             lambda client: client.eval(
                 _COMPLETE,
-                4,
+                6,
                 handler.teacher_request_stream,
                 marker(identity),
                 result_key(identity),
                 handler.teacher_request_stream + ":bytes",
+                handler.teacher_request_stream + ":completed_sizes",
+                handler.teacher_request_stream + ":completed_expiry",
                 packed,
                 RETENTION_SECONDS,
                 "control" if control else "result",
                 handler.teacher_request_group,
+                getattr(handler, "teacher_max_completed_bytes", None) or 0,
+                getattr(handler, "teacher_max_pending_requests", None) or 10000,
+                identity,
             ),
         )
     )
@@ -313,10 +366,22 @@ def read_result(handler, identity, timeout, stop=None):
 
 
 def acknowledge_result(handler, identity, timeout=1.0):
-    # Only after the consumer owns the bytes. Duplicate completion does not
+    # Only after consumption or cancellation. Duplicate completion does not
     # resurrect an acknowledged result, and deletion itself is replay-safe.
     bounded_call(
         handler.redis_clients,
         deadline_after(timeout),
-        lambda client: client.delete(result_key(identity)),
+        lambda client: client.eval(
+            _ACK,
+            6,
+            handler.teacher_request_stream,
+            marker(identity),
+            result_key(identity),
+            handler.teacher_request_stream + ":bytes",
+            handler.teacher_request_stream + ":completed_sizes",
+            handler.teacher_request_stream + ":completed_expiry",
+            identity,
+            handler.teacher_request_group,
+            RETENTION_SECONDS,
+        ),
     )

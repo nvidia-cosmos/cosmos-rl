@@ -69,6 +69,79 @@ class Packer:
         }
 
 
+class RandomPreparationPacker(Packer):
+    def prepare_record(self, record, *, context):
+        import random
+        import numpy as np
+
+        row = super().prepare_record(record)
+        generator = torch.Generator().manual_seed(context.seed)
+        offset = random.Random(context.seed).uniform(-0.1, 0.1)
+        scale = np.random.default_rng(context.seed).uniform(0.8, 1.2)
+        row["image"] = (
+            row["image"] * scale
+            + offset
+            + torch.rand(row["image"].shape, generator=generator)
+        )
+        row["label_ids"] = list(row["label_ids"])
+        if random.Random(context.seed).random() < 0.5:
+            row["label_ids"][1] = -100
+        return row
+
+
+class StochasticObservationModel(ObservationModel):
+    def __init__(self):
+        super().__init__()
+        self.dropout = torch.nn.Dropout(0.25)
+
+    def forward(self, *args, **kwargs):
+        result = super().forward(*args, **kwargs)
+        result["logits"] = self.dropout(result.logits)
+        return result
+
+
+def test_seeded_preparation_requires_context_adapter_before_model_setup(tmp_path):
+    from unittest.mock import patch
+    from cosmos_rl.policy.config import Config
+    from cosmos_rl.policy.trainer.base import TrainerRegistry
+    from test_resume_data_index import _WorkerHarness
+
+    samples(tmp_path)
+    config = Config.model_validate(
+        {
+            "execution": {
+                "path": "train_from_data",
+                "source": {
+                    "kind": "corpus",
+                    "path": str(tmp_path),
+                    "preparation_seed": 1,
+                },
+                "objectives": {"supervised": 1},
+            },
+            "train": {"sequence_packing": False, "train_policy": {"type": "sft"}},
+            "policy": {
+                "enable_liger_fused_cross_entropy": False,
+                "parallelism": {"tp_size": 1},
+            },
+        }
+    )
+
+    class NeverLoaded:
+        recorded_objectives = {"supervised"}
+
+        def __init__(self, **kwargs):
+            raise AssertionError(
+                "Model setup must not start for an incompatible adapter"
+            )
+
+    worker = _WorkerHarness(config)
+    worker._packer = Packer()
+    worker.parallel_dims.mesh = {"dp": NS(get_group=lambda: None)}
+    with patch.object(TrainerRegistry, "get_trainer_cls", lambda _: NeverLoaded):
+        with pytest.raises(ValueError, match="requires packer.prepare_record"):
+            worker.build_runner()
+
+
 def samples(root):
     writer = CorpusWriter(root, run_id="observations")
     for i, tokens in enumerate(([0, 1, 2], [1, 0], [2, 0, 1, 2])):
@@ -91,6 +164,7 @@ def samples(root):
                 annotations={"advantages": [0.4] * n},
             )
         )
+    writer.finalize()
     dataset = CorpusSupervisedDataset(CorpusDataset(root))
     return [
         prepare_supervised_record(dataset[i], Packer()) for i in range(len(dataset))
@@ -149,15 +223,16 @@ def cpu_runtime(monkeypatch):
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
 
 
+@pytest.mark.parametrize("mini_batch", [1, 2])
 def test_native_corpus_training_matches_independent_multimodal_reference(
-    tmp_path, cpu_runtime
+    tmp_path, cpu_runtime, mini_batch
 ):
     torch.manual_seed(9)
     model = ObservationModel()
     reference = ObservationModel()
     reference.load_state_dict(model.state_dict())
     rows = samples(tmp_path)
-    actual = trainer(model, 1)
+    actual = trainer(model, mini_batch)
     actual.step_training(rows, total_steps=2, train_step=0, save_freq=1)
 
     ce, policy = [], []
@@ -200,10 +275,31 @@ def test_native_all_empty_window_preserves_optimizer_and_scheduler(
 def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
     tmp_path, cpu_runtime, monkeypatch
 ):
+    qualify_corpus_resume(tmp_path, stochastic=False, workers=(0, 0), saved_step=1)
+
+
+def test_microbatch_guard_with_valid_fixed_optimizer_batch(tmp_path, cpu_runtime):
+    qualify_corpus_resume(
+        tmp_path, stochastic=False, workers=(0, 0), saved_step=1, batch=2
+    )
+
+
+@pytest.mark.parametrize("workers", [(0, 2), (2, 0)])
+@pytest.mark.parametrize("saved_step", [1, 4])
+def test_random_preparation_and_dropout_resume_across_loader_workers(
+    tmp_path, cpu_runtime, workers, saved_step
+):
+    qualify_corpus_resume(
+        tmp_path, stochastic=True, workers=workers, saved_step=saved_step
+    )
+
+
+def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1):
     import copy
     from unittest.mock import patch
     from cosmos_rl.policy.config import Config
     from cosmos_rl.policy.trainer.base import TrainerRegistry
+    from cosmos_rl.utils.checkpoint import CheckpointMananger
     from test_resume_data_index import _WorkerHarness
 
     corpus_path = tmp_path / "corpus"
@@ -212,20 +308,25 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
         {
             "execution": {
                 "path": "train_from_data",
-                "source": {"kind": "corpus", "path": str(corpus_path)},
+                "source": {
+                    "kind": "corpus",
+                    "path": str(corpus_path),
+                    "preparation_seed": 71 if stochastic else None,
+                },
                 "objectives": {"supervised": 1},
             },
             "train": {
-                "epoch": 1,
+                "epoch": 2,
                 "compile": False,
                 "sequence_packing": False,
-                "train_batch_per_replica": 1,
+                "train_batch_per_replica": batch,
                 "optm_grad_norm_clip": 0,
                 "train_policy": {
                     "type": "sft",
                     "mini_batch": 1,
                     "dataloader_shuffle": True,
-                    "dataloader_num_workers": 0,
+                    "dataloader_num_workers": workers[0],
+                    "dataloader_prefetch_factor": 1 if workers[0] else None,
                 },
             },
             "policy": {
@@ -238,14 +339,15 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
         }
     )
     torch.manual_seed(17)
-    initial = copy.deepcopy(ObservationModel().state_dict())
+    factory = StochasticObservationModel if stochastic else ObservationModel
+    initial = copy.deepcopy(factory().state_dict())
     saved = None
 
     class NativeTrainer:
         recorded_objectives = {"supervised"}
 
         def __init__(self, config, **kwargs):
-            self.inner = trainer(ObservationModel(), 1)
+            self.inner = trainer(factory(), 1)
             self.inner.config = config
             self.inner.model.load_state_dict(initial)
             self.config = config
@@ -255,12 +357,13 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
                 self.inner.model.load_state_dict(saved["model"])
                 self.inner.optimizers.load_state_dict(saved["optimizer"])
                 self.inner.lr_schedulers.load_state_dict(saved["scheduler"])
-                return 3, 1, {"execution_source": saved["source"]}
+                CheckpointMananger.set_rng_state(saved["rng"])
+                return 6, saved_step, {"execution_source": saved["source"]}
             return 0, 0, {}
 
     def build(configuration):
         worker = _WorkerHarness(configuration)
-        worker._packer = Packer()
+        worker._packer = RandomPreparationPacker() if stochastic else Packer()
         group = NS(get_group=lambda: None)
         worker.parallel_dims.mesh = {"dp": group}
         worker.build_runner()
@@ -269,29 +372,55 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
     with patch.object(TrainerRegistry, "get_trainer_cls", lambda _: NativeTrainer):
         uninterrupted = build(config)
         seen = []
-        for step, rows in enumerate(uninterrupted.train_data_loader):
-            seen.extend(row["_execution_record"].sample_id for row in rows)
-            inner = uninterrupted.trainer.inner
-            inner.step_training(rows, total_steps=3, train_step=step, save_freq=1)
-            if step == 0:
-                saved = copy.deepcopy(
-                    {
-                        "model": inner.model.state_dict(),
-                        "optimizer": inner.optimizers.state_dict(),
-                        "scheduler": inner.lr_schedulers.state_dict(),
-                        "source": uninterrupted.trainer.execution_source_state,
-                    }
-                )
+        step = 0
+        for epoch in range(2):
+            uninterrupted.train_sampler.set_epoch(epoch)
+            uninterrupted.train_data_loader.dataset.set_epoch(epoch)
+            for rows in uninterrupted.train_data_loader:
+                seen.extend(row["_execution_record"].sample_id for row in rows)
+                inner = uninterrupted.trainer.inner
+                inner.step_training(rows, total_steps=6, train_step=step, save_freq=1)
+                step += 1
+                if step == saved_step:
+                    saved = copy.deepcopy(
+                        {
+                            "model": inner.model.state_dict(),
+                            "optimizer": inner.optimizers.state_dict(),
+                            "scheduler": inner.lr_schedulers.state_dict(),
+                            "source": uninterrupted.trainer.execution_source_state,
+                            "rng": CheckpointMananger.get_rng_state(),
+                        }
+                    )
+        final_rng = torch.get_rng_state().clone()
         resumed_config = config.model_copy(deep=True)
         resumed_config.train.resume = True
+        # Relocation and a larger admission budget preserve the same training
+        # identity, sample order and optimizer continuation.
+        import shutil
+
+        relocated = tmp_path / "relocated"
+        shutil.copytree(corpus_path, relocated)
+        resumed_config.execution.source.path = str(relocated)
+        resumed_config.execution.source.max_prefetch_bytes *= 2
+        resumed_config.train.train_policy.dataloader_num_workers = workers[1]
+        resumed_config.train.train_policy.dataloader_prefetch_factor = (
+            1 if workers[1] else None
+        )
         resumed = build(resumed_config)
         resumed_seen = []
-        for step, rows in enumerate(resumed.train_data_loader, start=1):
-            resumed_seen.extend(row["_execution_record"].sample_id for row in rows)
-            resumed.trainer.inner.step_training(
-                rows, total_steps=3, train_step=step, save_freq=1
-            )
-        assert resumed_seen == seen[1:]
+        step = saved_step
+        for epoch in range(resumed.start_epoch, 2):
+            resumed.train_sampler.set_epoch(epoch)
+            resumed.train_data_loader.dataset.set_epoch(epoch)
+            for rows in resumed.train_data_loader:
+                resumed_seen.extend(row["_execution_record"].sample_id for row in rows)
+                resumed.trainer.inner.step_training(
+                    rows, total_steps=6, train_step=step, save_freq=1
+                )
+                step += 1
+        assert resumed_seen == seen[saved_step * batch :]
+        if stochastic:
+            assert torch.equal(final_rng, torch.get_rng_state())
         for name, value in uninterrupted.trainer.inner.model.state_dict().items():
             assert torch.equal(value, resumed.trainer.inner.model.state_dict()[name]), (
                 name
@@ -306,6 +435,26 @@ def test_native_corpus_resume_matches_uninterrupted_optimizer_boundary(
             uninterrupted.trainer.inner.lr_schedulers.state_dict()
             == resumed.trainer.inner.lr_schedulers.state_dict()
         )
+        assert saved["source"]["mini_batch"] == 1
+        changed_microbatch = resumed_config.model_copy(deep=True)
+        changed_microbatch.train.train_policy.mini_batch = 2
+        with pytest.raises(ValueError, match="microbatch configuration changed"):
+            build(changed_microbatch)
+        original_source = copy.deepcopy(saved["source"])
+        del saved["source"]["mini_batch"]
+        with pytest.raises(ValueError, match="lacks microbatch metadata"):
+            build(resumed_config)
+        saved["source"] = original_source
+        saved["source"]["mini_batch"] = True
+        with pytest.raises(ValueError, match="microbatch configuration changed"):
+            build(resumed_config)
+        saved["source"] = original_source
+        saved["source"]["mini_batch"] = 1
         resumed_config.execution.source.reward_weighting = "nonnegative"
         with pytest.raises(ValueError, match="configuration changed"):
             build(resumed_config)
+        if stochastic:
+            resumed_config.execution.source.reward_weighting = "none"
+            resumed_config.execution.source.preparation_seed += 1
+            with pytest.raises(ValueError, match="configuration changed"):
+                build(resumed_config)

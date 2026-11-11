@@ -110,8 +110,10 @@ def corpus_result_factory(config, *, packer=None):
 
 
 def generation_metadata(config):
+    from cosmos_rl.execution.config import validate_generation_identity
     from cosmos_rl.execution.models import actor_config
 
+    validate_generation_identity(config)
     config = actor_config(config)
     actor = config.execution.actor
     policy = config.train.train_policy
@@ -119,6 +121,8 @@ def generation_metadata(config):
         "model": config.policy.model_name_or_path,
         "revision": config.policy.model_revision,
         "artifact_digest": actor.artifact_digest if actor else None,
+        "resumable": config.execution.output.resume,
+        "generation_fingerprint": config.execution.output.generation_fingerprint,
         "dataset": policy.dataset.model_dump(mode="json"),
         "epochs": config.train.epoch,
         "n_generation": config.rollout.n_generation,
@@ -140,8 +144,19 @@ class GenerationLedger:
 
     def __init__(self, config):
         import json
+        from pathlib import Path
 
         self.output = config.execution.output
+        root = Path(self.output.path)
+        if not self.output.resume and (
+            (root / "complete.json").exists()
+            or any((root / "dispatch").glob("*.json"))
+            or any((root / "records").glob("*.json"))
+        ):
+            raise ValueError(
+                "One-off generation cannot reopen journaled or committed work; "
+                "use a fresh output path and run_id"
+            )
         self.writer = CorpusWriter(
             self.output.path,
             run_id=self.output.run_id,
@@ -165,6 +180,10 @@ class GenerationLedger:
     def reserve(self, payload, occurrence):
         from cosmos_rl.execution.corpus import ArtifactCodec, _json, _publish
 
+        if (self.writer.root / "complete.json").exists() and self.completed.get(
+            occurrence, set()
+        ) != self.slots:
+            raise ValueError("A completed generation run cannot admit new occurrences")
         codec = ArtifactCodec(self.writer.root, self.output.max_record_bytes)
         data = _json(
             codec.encode(
@@ -183,3 +202,6 @@ class GenerationLedger:
                 "Generation source changed at an existing input occurrence"
             )
         return self.completed.get(occurrence, set()) == self.slots
+
+    def finalize(self, occurrences):
+        return self.writer.finalize(expected_records=occurrences * len(self.slots))

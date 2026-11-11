@@ -25,3 +25,5 @@ def test_real_distributed_objective_update_and_failure_agreement():
     assert '"peer_preparation_failure": true' in result.stdout
     assert '"empty_rank": true' in result.stdout
     assert '"malformed_teacher_agreement": true' in result.stdout
+    assert '"source_revision_agreement": true' in result.stdout
+    assert '"source_opening_failure_agreement": true' in result.stdout

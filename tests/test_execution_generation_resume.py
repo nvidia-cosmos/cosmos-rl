@@ -18,7 +18,12 @@ def generation(tmp_path, *, generation=1, count=4):
     data = item.config.model_dump()
     data["execution"] = {
         "path": "generate",
-        "output": {"path": str(tmp_path), "run_id": "stable-run"},
+        "actor": {"weight_source": "checkpoint", "artifact_digest": "test-weights-v1"},
+        "output": {
+            "path": str(tmp_path),
+            "run_id": "stable-run",
+            "generation_fingerprint": "test-application-v1",
+        },
     }
     data["rollout"].update(
         n_generation=generation, max_inflight_prompts=8, max_prompts=count
@@ -37,7 +42,13 @@ def generation(tmp_path, *, generation=1, count=4):
 
 def sink(item):
     return CorpusResultSink(
-        item.config.execution.output, metadata=generation_metadata(item.config)
+        item.config.execution.output,
+        actor_digest=(
+            item.config.execution.actor.artifact_digest
+            if item.config.execution.actor
+            else None
+        ),
+        metadata=generation_metadata(item.config),
     )
 
 
@@ -80,6 +91,8 @@ def test_controller_resume_skips_committed_outputs_and_keeps_logical_limit(tmp_p
         sink(resumed)(event(resumed, payload))
     replay = generation(tmp_path)
     assert replay._get_rollout_only_prompts(4) == ([], True)
+    resumed.rollout_only_state.settle(len(pending))
+    resumed.finalize_generation()
     assert len(CorpusDataset(tmp_path)) == 4
 
 
@@ -116,7 +129,7 @@ def test_partial_prompt_publication_replays_only_missing_commit(tmp_path, monkey
     pending, ended = resumed._get_rollout_only_prompts(1)
     assert ended and len(pending) == 1
     sink(resumed)(event(resumed, pending[0], text="second"))
-    corpus = CorpusDataset(tmp_path)
+    corpus = CorpusDataset(tmp_path, allow_partial=True)
     rows = [corpus[i] for i in range(len(corpus))]
     assert {row.group_slot: row.targets for row in rows} == {
         0: "first-0",
@@ -173,3 +186,66 @@ def test_restart_reconciles_identity_without_tensor_io(tmp_path, monkeypatch):
     )
     resumed, ended = generation(tmp_path, count=1)._get_rollout_only_prompts(1)
     assert not resumed and ended
+
+
+def test_generation_completion_requires_settlement_and_all_slots(tmp_path):
+    item = generation(tmp_path, count=1)
+    work, ended = item._get_rollout_only_prompts(1)
+    assert ended
+    with pytest.raises(ValueError, match="unsettled"):
+        item.finalize_generation()
+    item.rollout_only_state.settle(1)
+    with pytest.raises(ValueError, match="count"):
+        item.finalize_generation()
+    sink(item)(event(item, work[0]))
+    item.finalize_generation()
+    assert len(CorpusDataset(tmp_path)) == 1
+    assert generation(tmp_path, count=1)._get_rollout_only_prompts(1) == ([], True)
+
+
+@pytest.mark.parametrize("change", ["model", "application"])
+def test_changed_immutable_generation_identity_cannot_append(tmp_path, change):
+    initial = generation(tmp_path)
+    initial._get_rollout_only_prompts(1)
+    resumed = generation(tmp_path)
+    if change == "model":
+        resumed.config.execution.actor.artifact_digest = "test-weights-v2"
+    else:
+        resumed.config.execution.output.generation_fingerprint = "test-application-v2"
+    with pytest.raises(ValueError, match="another dataset run"):
+        resumed._get_rollout_only_prompts(1)
+
+
+@pytest.mark.parametrize("stage", ["journaled", "committed", "completed"])
+def test_one_off_generation_allows_unknown_model_but_cannot_reopen_work(
+    tmp_path, stage
+):
+    from cosmos_rl.execution.sink import GenerationLedger
+
+    item = generation(tmp_path)
+    data = item.config.model_dump()
+    data["execution"]["actor"] = None
+    data["policy"]["model_revision"] = None
+    data["execution"]["output"].update(resume=False, generation_fingerprint=None)
+    item.config = Config.model_validate(data)
+    # Producer sink initialization may publish dataset metadata before dispatch.
+    sink(item)
+    pending, _ = item._get_rollout_only_prompts(1)
+    assert len(pending) == 1
+    if stage != "journaled":
+        sink(item)(event(item, pending[0]))
+    if stage == "completed":
+        item.rollout_only_state.settle(1)
+        # The fixture's source normally has four inputs; close admission here.
+        item.rollout_only_state.input_ended = True
+        item._generation_ledger.finalize(1)
+    with pytest.raises(ValueError, match="One-off generation cannot reopen"):
+        GenerationLedger(item.config)
+
+
+def test_generation_metadata_rechecks_identity_after_configuration_mutation(tmp_path):
+    item = generation(tmp_path)
+    item.config.execution.actor.artifact_digest = None
+    item.config.policy.model_revision = "main"
+    with pytest.raises(ValueError, match="immutable"):
+        generation_metadata(item.config)

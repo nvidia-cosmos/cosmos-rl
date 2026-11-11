@@ -1,9 +1,35 @@
 # Execution workflows
 
-This implements the initial supported phases of the execution infrastructure
-[design](https://chatgpt.com/space/page_9dd048a396f48191a8a04bce375c84af).
-It reuses the native controller, SFT/GRPO trainers, rollout backends, packers,
+Three explicit execution paths reuse the native controller, SFT/GRPO trainers, rollout backends, packers,
 reward functions and teacher channel. Existing recipes keep their defaults.
+
+## Infrastructure scope
+
+Batch size, SFT microbatch size, rollout/learner allocation, generation count,
+policy freshness and weight-sync cadence are user-owned workload settings.
+Execution infrastructure consumes those settings; it does not tune them.
+Zero counts for absent roles express the selected execution path, not a
+rollout/learner capacity optimization.
+
+Evaluate infrastructure optimizations with the workload fixed: source bytes,
+sample order, preparation, model, precision, objectives, batch geometry,
+topology and freshness rules. Removing redundant reads, copies or serialization,
+and reducing scheduling or communication overhead within those contracts, are
+in scope. Application models, image resizing, augmentation, reward/loss choices
+and payload encodings belong in application adapters. Example recipes and
+qualification fixtures demonstrate the interfaces; their configuration changes
+are not generic Cosmos-RL speedups.
+
+Storage retains synchronous immutable publication and the exclusive metadata
+publication/finalization lock. Initialization durably establishes the corpus
+directory layout, including newly created ancestors. Every metadata publication
+fences its directory, including duplicate retries after a previous fsync failure.
+Loader/preparation exceptions fail the whole learner cohort even when their
+exception message is empty.
+
+No speedup is claimed from the rejected reporting or storage experiments.
+The design Page retains their measurements and historical qualification evidence.
+PR qualification uses the exact final source and installed wheel.
 
 ## Select a path
 
@@ -54,8 +80,8 @@ application data:
   revision, and its actual behavior version when known. A learner step never
   replaces a recorded behavior identity.
 - `sampling` and `attempt_id` distinguish the logical output from the attempt
-  that produced it. Unknown revisions remain unknown; pin revisions or provide
-  an artifact digest when reproducibility requires an immutable model identity.
+  that produced it. Unknown revisions remain explicit for one-off generation.
+  Resumable output requires an immutable producer identity as described below.
 
 The native SFT packer handles generated text targets. A preprocessed mapping
 contains the packer's usual fields: for the decoder packer these are
@@ -96,9 +122,22 @@ files do not enter the dataset. Readers check lengths and checksums and load
 owned CPU data. Arbitrary Python objects and object arrays require an application
 adapter; the codec does not serialize them with pickle.
 
+After all writers drain, call `writer.finalize(expected_records=N)` to publish
+`complete.json`: the exact manifest membership, hashes, count and corpus revision.
+Manifest publication and finalization share a filesystem lock; payload IO stays
+outside that lock. Completed corpora reject new records. `close()` only closes
+owned writes and never claims that a multi-writer dataset is complete.
+
 `execution.source.kind = "corpus"` reads committed records from `source.path`.
-The source takes an immutable manifest snapshot. Its revision covers dataset
+Training requires a completed snapshot by default. Its revision covers dataset
 metadata and manifest contents; `source.revision` can pin that snapshot.
+For intentional partial training, set `source.allow_partial=true` and pin
+`source.revision`; use `CorpusDataset(path, allow_partial=True)` to inspect an
+unfinished run. All learner ranks agree the selected revision and source-opening
+failures before model setup. Compact metadata read at snapshot creation supplies
+filtering, group validation and byte admission without repeated manifest scans.
+Each record read verifies and decodes the same manifest buffer against the
+snapshot's dataset identity; it does not reopen the manifest or dataset metadata.
 Unavailable artifacts, changed manifests and checksum failures are errors.
 The supervised view excludes generation failures while retaining quality
 annotations and successful targets that an RL quality gate rejected.
@@ -107,14 +146,93 @@ The initial native corpus path supports one learner replica with pure data
 parallelism. Its exact sampler pads schedules with fully masked occurrences,
 without duplicating contributing examples. A global optimizer window may have
 empty local contributions. Native checkpoint metadata pins corpus revision,
-objectives, topology, batch geometry, shuffle seed, model and preparation length.
+objectives, topology, optimizer batch and microbatch sizes, shuffle seed, model
+and preparation length.
 Resume uses the native optimizer-boundary step and deterministic sampler
 progress; changing that compatibility state is rejected.
+Relocating the same corpus or changing `max_prefetch_bytes` preserves that
+identity. Prepared-batch limits remain pinned because they can affect grouping.
+Older location-sensitive fingerprints can migrate with their original settings
+when the checkpoint also declares its microbatch size; a new checkpoint then
+carries the portable identity. Recorded checkpoints created before microbatch
+pinning are rejected for exact resume because the missing value cannot be
+verified. Use their weights to start a new training run instead. Exact continuation assumes
+deterministic preparation and repeatable model/optimizer kernels. To use
+reproducible stochastic preparation, opt into
+`execution.source.preparation_seed` and implement
+`prepare_record(record, *, context)`. The frozen `RecordPreparationContext`
+from `cosmos_rl.execution.source` supplies `seed` and `epoch`. The v1 seed
+includes the configured seed, pinned corpus revision, durable sample/occurrence
+IDs and training epoch; it excludes rank, loader worker, path and prefetch
+timing. Changing the seed rejects checkpoint continuation.
 
-`CorpusSource` separately supplies group-preserving transactional reservations
-for application trainers: reserve one bounded window, commit its cursor only at
-the optimizer boundary, or roll it back. `state_dict` saves committed progress.
-A reservation in flight does not advance the durable cursor.
+```python
+def prepare_record(self, record, *, context):
+    generator = torch.Generator().manual_seed(context.seed)
+    # Use this local generator for crop/noise/sampling operations.
+    # NumPy default_rng(context.seed) and random.Random(context.seed) work too.
+    return self.prepare_with_generator(record, generator)
+```
+
+Do not reseed process-wide randomness inside the adapter: with zero loader
+workers, it shares the learner process. On this opt-in path, native train and
+validation DataLoaders use an independent generator so iterator construction
+does not advance the model's checkpointed RNG. The existing epoch lifecycle
+updates preparation before native nonpersistent workers start. Preparation and
+collation must otherwise be reproducible; random record scoring or external
+state still requires an application contract. Pin augmentation settings through
+`record_preparation_state()`. Existing adapters retain `prepare_record(record)`
+and their checkpoint identity when the seed is unset.
+
+For the native text replay recipe, set `train.deterministic=true` and export
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` before launching workers. Attention now
+auto-selects FA2 in this opt-in mode; ordinary training retains hardware-based
+selection. An explicit `train.fa_version=3` is still honored (subject to existing
+compile compatibility) and warns that replay is unqualified. Startup logs the
+resolved version, request, deterministic flag and compile setting. The pinned
+H100/FA3 environment failed repeated native updates even with the deterministic
+flag; this does not establish a limitation for every FA3 build. PyTorch's
+deterministic mode currently uses warnings for unsupported operations. Neither
+that flag nor the preparation seed guarantees bitwise replay across arbitrary
+models, kernels, hardware, batch geometry or library versions. Retain the same
+qualified environment when comparing checkpoints.
+
+`train.train_policy.mini_batch` and `train.train_batch_per_replica` remain
+user-owned settings. The historical microbatch comparison changes workload
+configuration and does not establish a generic infrastructure speedup. BF16
+batch geometry can change numerical updates. Recorded checkpoint metadata pins
+microbatch size separately from the optimizer batch; a microbatch-only change
+is rejected on resume. Preserve the original full training configuration for
+continuation.
+
+`tests/microbatch_numerics_probe.py` compares native BF16 GPT/FSDP2 loss,
+gradients and AdamW updates against an independent functional FP64 reference
+at several microbatch sizes. It checks declared numerical bounds, including a
+wrong-gradient scaling control; it does not require bitwise BF16 equivalence.
+The sibling RL-Gym `scripts/qualify_microbatch_quality.py` uses disjoint cached
+ShareGPT examples and fixed evaluation geometry to compare convergence and
+held-out loss separately from per-update numerical agreement.
+
+The standalone tokenized-text recipe is
+`configs/execution/train-text-throughput.toml`, with the public entry point
+`examples/train_recorded_text.py`. Set `execution.source.path` to a completed
+corpus and `policy.model_name_or_path` to the desired checkpoint, then run from
+the Cosmos-RL checkout:
+
+```bash
+CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
+  cosmos-rl --config configs/execution/train-text-throughput.toml \
+  examples/train_recorded_text.py
+```
+
+This recipe consumes `token_ids` and optional `label_ids` in inline record
+targets or filesystem `DataReference` targets. Explicit labels retain SFT
+prompt masks; omitted labels supervise every token for PT. Raw generated text
+can use the existing `train-corpus.toml` recipe instead. The example recipe uses
+optimizer batch two, microbatch two, two loader workers and prefetch factor one.
+It initializes no rollout workers. Its settings are explicit example choices;
+generic defaults are unchanged. The historical microbatch throughput difference
+does not measure a Cosmos-RL code optimization or prescribe a user's batch size.
 
 `source.max_prefetch_bytes` bounds serialized records admitted to native loader
 batches. The worker divides it across the active batch and configured prefetch
@@ -173,10 +291,12 @@ group-standardization option above. This is an opt-in clipped off-policy token
 objective; it does not claim to reproduce on-policy GRPO from old trajectories.
 The application adapter owns token/representation alignment.
 
-Groups must declare a complete set of original slots. Group standardization
+Supplied aligned advantages do not require groups or a minimum group size.
+Generation failures and RL-quality-rejected completions remain ineligible.
+For group standardization, groups must declare all original slots. It
 uses finite committed scores from the original eligible group. Generation
-failures and quality-rejected completions contribute no RL mass; groups with
-fewer than two eligible completions contribute no RL mass. Their valid
+failures and quality-rejected completions contribute no RL mass; standardization
+groups with fewer than two eligible completions contribute no RL mass. Their valid
 supervised targets remain eligible. Complete group statistics are prepared
 before distributing individual records to training ranks.
 
@@ -185,6 +305,9 @@ finite normalized dense `annotations.teacher_logprobs` aligned with the student
 next-token vocabulary. It uses forward KL from teacher to student, normalized
 by contributing tokens. Missing or incompatible contributing targets fail;
 arbitrary tokenizer mappings and sparse target codecs need an explicit adapter.
+Mixed token losses share one vocabulary normalization; the CE-only path retains
+its native cross entropy implementation. This changes no objective coefficients,
+masks, normalization units or optimizer boundaries.
 
 For scalar record scoring, set `source.score_records = true` and provide
 `source.reward_function` or application `reward_fns`. This reuses the native
@@ -292,6 +415,8 @@ resolve references through their reader, which validates integrity and returns
 owned training data. Controller restart reconciles identity and reference
 metadata without loading, hashing or serializing payloads. Tensor checksums are
 verified by readers; full integrity scrubbing belongs outside controller startup.
+The baseline filesystem reader can remap the reference URI to a configured root
+on another machine, while checking the same relative content-addressed artifacts.
 
 The RL-Gym application example uses its modular simulator, rewards, MLP and
 optimizer with these interfaces. `scripts/qualify_execution_workflows.py` in
@@ -305,6 +430,21 @@ supervision; it is not advertised as likelihood-based policy gradient.
 can instead register their own required result consumer, following its ownership
 and failure contract.
 
+Output is resumable by default. Supply a full immutable model commit revision
+or `execution.actor.artifact_digest`, plus
+`execution.output.generation_fingerprint`. The application owns that fingerprint:
+change it when simulator/environment, scorer, representation or export semantics
+change. Include semantic versions/settings, rather than operational settings
+such as log verbosity, profiling or artificial sink delays. The controller
+compares these small declarations; it never loads or hashes model weights.
+An artifact digest is a caller/backend assertion of immutable content, not
+automatic detection of edits to a local checkpoint under a stale declaration.
+Moving branches/tags and a bare model path are insufficient for resumable output.
+For a one-off run, set `execution.output.resume=false`; unknown model provenance
+is allowed, but reopening journaled or committed work is rejected. Use a fresh
+output path and logical run ID for the next one-off run. Existing corpora without
+these identity fields cannot be resumed under the new contract.
+
 Before dispatch, the controller journals the input occurrence. Output IDs
 combine logical run ID, source occurrence and original completion slot. The
 first committed output wins; duplicate attempts cannot replace it with another
@@ -317,6 +457,11 @@ while retaining earlier commits. Logical prompt limits include already-seen
 source occurrences. Changed input at an existing occurrence or changed run
 metadata is rejected. This supports replayable finite datasets; it is not a
 checkpoint protocol for a mutable external stream.
+After input admission closes and every completion settles, the controller
+finalizes the exact dataset snapshot before normal shutdown. A required
+completion-publication failure fails execution. Early requested stops leave
+an unfinished corpus for explicit inspection or partial training; it is
+resumable only when `execution.output.resume=true` and its identity is pinned.
 
 The controller bounds outstanding prompts globally across rollout workers.
 Writing the required sink blocks report settlement and therefore admission of
@@ -324,6 +469,12 @@ more work. A slow sink cannot silently drop data. Source exhaustion ends the
 job only after outstanding results are settled. Tensor and manifest byte limits
 apply to each committed record; failed partial writes can leave unreferenced
 artifacts for a future offline cleanup tool.
+
+The baseline reference format is `cosmos.artifacts.v2`. Its declared size includes
+both serialized artifacts and inline values, keys and encoding metadata. Save
+and load enforce the same budget before returning data. Pre-release v1 references
+underreported inline bytes and are rejected by this reader; regenerate those
+local qualification datasets. Custom saver/reader formats remain application-owned.
 
 ## Independent actor and teacher
 
@@ -344,7 +495,24 @@ Student-actor OPD uses its existing trainer and synchronization path. Teacher
 configuration is copied before projection, and the teacher retains the student
 tokenizer identity independently. Explicit execution recipes have bounded
 teacher request count, aggregate pending request bytes, individual request
-bytes and individual result bytes. Legacy settings remain compatible. Existing
+bytes and individual result bytes. `distillation.max_completed_bytes` adds an
+aggregate retained-result limit (256 MiB by default for explicit execution).
+The same limit bounds packed bytes in each learner inbox. Fetching a result
+keeps its Redis capacity charged until training consumes or cancels it. A
+waiting update takes priority over prefetched replies; local future copies may
+be dropped and reread from Redis. If the update itself exceeds the inbox budget,
+all ranks use the existing coordinated skip before model or optimizer work.
+Retirement retries failed acknowledgments without recreating local entries.
+These limits bound logical packed targets, not decoded Python objects, model
+memory or total process RSS; Redis and the inbox can hold copies of the same
+charged result, and one read may be in flight.
+The pending-request count limit also bounds retained-result count. Publication
+checks both limits atomically before changing request ownership. Capacity
+exhaustion fails clearly; configure enough capacity for the application's cohort.
+Acknowledgment/cancellation removes retained bodies and accounting once; expiry
+pruning removes both together. Late completion cannot resurrect a cancelled or
+consumed result. Small deduplication markers retain their TTL lifecycle.
+Legacy settings remain compatible. Existing
 teacher deadlines and cohort agreement decide an update together when targets
 are delayed, missing or malformed. Completed results retain their existing TTL
 and acknowledgment lifecycle.
@@ -376,7 +544,7 @@ preservation of diagnostic outcomes. Actor/teacher tests cover independent model
 projection, original versions, synchronization suppression and bounded teacher
 traffic.
 
-`tests/execution_workflow_canary.py` runs seven real GPU scenarios through the
+`tests/execution_workflow_canary.py` runs nine real GPU scenarios through the
 public launcher and installed package: direct PT, generation, restart, generated
 corpus SFT, mixed recorded losses, an independent actor, and OPD. It uses a tiny
 random Qwen2 model with a cached production tokenizer to qualify infrastructure;

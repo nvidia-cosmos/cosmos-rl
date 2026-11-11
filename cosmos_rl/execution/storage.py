@@ -115,13 +115,14 @@ class FileSystemDataStore:
     no registry or replacement launcher is needed.
     """
 
-    format = "cosmos.artifacts.v1"
+    format = "cosmos.artifacts.v2"
 
     def __init__(self, root):
         self.root = Path(root).resolve()
+        self._initialized = False
 
     def save(self, value, *, max_bytes):
-        from cosmos_rl.execution.corpus import ArtifactCodec
+        from cosmos_rl.execution.corpus import ArtifactCodec, _initialize_storage, _json
         import numpy as np
         import torch
 
@@ -131,35 +132,53 @@ class FileSystemDataStore:
             if isinstance(item, np.ndarray):
                 return item.nbytes
             if isinstance(item, dict):
-                return sum(raw_bytes(child) for child in item.values())
+                return sum(
+                    len(_json(key)) + raw_bytes(child) for key, child in item.items()
+                )
             if isinstance(item, (list, tuple)):
                 return sum(raw_bytes(child) for child in item)
+            if isinstance(item, np.generic):
+                item = item.item()
             if isinstance(item, str) and len(item) > 64 * 1024:
                 raise ValueError("Baseline saver metadata exceeds 64 KiB")
-            return 0
+            return len(_json(item))
 
         if type(max_bytes) is not int or max_bytes <= 0 or raw_bytes(value) > max_bytes:
             raise ValueError("Payload exceeds its byte budget before serialization")
 
+        if not self._initialized:
+            _initialize_storage(self.root)
+            self._initialized = True
         codec = ArtifactCodec(self.root, max_bytes)
         tree = codec.encode(value)
+        size = codec.used_bytes + len(_json(tree))
+        if size > max_bytes:
+            raise ValueError("Payload including inline data exceeds its byte budget")
         return DataReference(
             uri=self.root.as_uri(),
             format=self.format,
-            size_bytes=codec.used_bytes,
+            size_bytes=size,
             metadata={"tree": tree},
         )
 
     def load(self, reference, *, max_bytes):
-        from cosmos_rl.execution.corpus import ArtifactCodec
+        from cosmos_rl.execution.corpus import ArtifactCodec, _json
 
-        if reference.format != self.format or reference.uri != self.root.as_uri():
-            raise ValueError("Data reference belongs to a different store or format")
-        if reference.size_bytes > max_bytes:
+        if reference.format != self.format:
+            raise ValueError("Data reference belongs to a different format")
+        # The configured root may remap the original URI on another machine.
+        # Relative content-addressed artifacts still verify every byte.
+        inline_bytes = len(_json(reference.metadata["tree"]))
+        if (
+            type(max_bytes) is not int
+            or max_bytes <= 0
+            or reference.size_bytes > max_bytes
+            or inline_bytes > reference.size_bytes
+        ):
             raise ValueError("Referenced payload exceeds its byte budget")
-        codec = ArtifactCodec(self.root, max_bytes)
+        codec = ArtifactCodec(self.root, reference.size_bytes - inline_bytes)
         value = codec.decode(reference.metadata["tree"])
-        if codec.used_bytes != reference.size_bytes:
+        if codec.used_bytes + inline_bytes != reference.size_bytes:
             raise ValueError("Data reference size does not match its artifacts")
         return value
 

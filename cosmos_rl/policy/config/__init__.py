@@ -959,7 +959,7 @@ class TrainingConfig(BaseModel):
     )
     deterministic: bool = Field(
         default=False,
-        description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
+        description="Request reproducible training kernels (potentially slower). Native attention auto-selects FA2; explicit fa_version overrides it. Other non-repeatable operations emit PyTorch warnings, so validate exact replay for the model and environment.",
     )
     activation_offload: bool = Field(
         default=False,
@@ -967,7 +967,7 @@ class TrainingConfig(BaseModel):
     )
     fa_version: Optional[int] = Field(
         default=None,
-        description="FlashAttention version to use. If None, will use the default version.",
+        description="FlashAttention version. None selects FA2 for deterministic training, otherwise the hardware default. Explicit FA3 with deterministic training warns about unqualified replay; compile compatibility may still fall back to FA2.",
         choices=[2, 3],
     )
 
@@ -1810,6 +1810,11 @@ class VLAConfig(BaseModel):
 
 
 class DistillationConfig(BaseModel):
+    max_completed_bytes: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Maximum logical packed teacher-result bytes retained in Redis and in each learner inbox; ownership retires after consumption or cancellation.",
+    )
     max_pending_requests: Optional[int] = Field(default=None, gt=0)
     max_pending_bytes: Optional[int] = Field(default=None, gt=0)
     max_request_bytes: Optional[int] = Field(default=None, gt=0)
@@ -2058,6 +2063,7 @@ class Config(BaseModel):
                 ("max_pending_bytes", 256 * 1024**2),
                 ("max_request_bytes", 16 * 1024**2),
                 ("max_result_bytes", 64 * 1024**2),
+                ("max_completed_bytes", 256 * 1024**2),
             ):
                 if getattr(self.distillation, name) is None:
                     setattr(self.distillation, name, default)

@@ -5,6 +5,21 @@ import pytest
 from cosmos_rl.policy.config import Config
 
 
+@pytest.mark.parametrize("seed", [-1, True, 0.5, 2**63])
+def test_record_preparation_seed_is_a_bounded_integer(seed):
+    from cosmos_rl.execution.config import SourceConfig
+
+    with pytest.raises(ValueError):
+        SourceConfig(kind="corpus", path="/corpus", preparation_seed=seed)
+
+
+def test_record_preparation_seed_requires_a_corpus():
+    from cosmos_rl.execution.config import SourceConfig
+
+    with pytest.raises(ValueError, match="requires source.kind=corpus"):
+        SourceConfig(preparation_seed=0)
+
+
 def recipe(policy="sft", **execution):
     return Config.model_validate(
         {
@@ -84,6 +99,45 @@ def test_shipped_execution_examples_validate():
 
     for path in Path("configs/execution").glob("*.toml"):
         Config.model_validate(toml.load(path))
+
+
+@pytest.mark.parametrize("revision", [None, "main", "v1", "", " " * 40])
+def test_resumable_generation_rejects_unknown_or_moving_model_identity(revision):
+    with pytest.raises(ValueError, match="immutable"):
+        Config.model_validate(
+            {
+                "train": {"train_policy": {"type": "grpo"}},
+                "policy": {"model_revision": revision},
+                "execution": {
+                    "path": "generate",
+                    "output": {
+                        "path": "/corpus",
+                        "run_id": "run",
+                        "generation_fingerprint": "text-v1",
+                    },
+                },
+            }
+        )
+
+
+def test_resumable_generation_accepts_full_commit_and_requires_app_semantics():
+    output = {"path": "/corpus", "run_id": "run"}
+    data = {
+        "train": {"train_policy": {"type": "grpo"}},
+        "policy": {"model_revision": "a" * 40},
+        "execution": {"path": "generate", "output": output},
+    }
+    with pytest.raises(ValueError, match="generation_fingerprint"):
+        Config.model_validate(data)
+    output["generation_fingerprint"] = "text-v1"
+    assert Config.model_validate(data).execution.output.resume
+    # An independent actor cannot inherit the learner's pinned revision.
+    data["execution"]["actor"] = {
+        "weight_source": "checkpoint",
+        "model_name_or_path": "another-model",
+    }
+    with pytest.raises(ValueError, match="immutable"):
+        Config.model_validate(data)
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,61 @@
+# From the Cosmos-RL checkout:
+# cosmos-rl --config configs/execution/train-text-throughput.toml examples/train_recorded_text.py
+# Set source.path to a completed tokenized corpus (token_ids, optional label_ids).
+# This is an explicit recipe, not a change to generic defaults. Microbatch is
+# checkpoint-pinned: preserve it for exact continuation. BF16 updates can differ
+# from microbatch=1 even at this fixed optimizer batch of two.
+mode = "disaggregated"
+redis = "12808"
+
+[execution]
+path = "train_from_data"
+
+[execution.source]
+kind = "corpus"
+path = "./text-corpus"
+preparation_seed = 73
+max_prefetch_bytes = 67108864
+
+[execution.objectives]
+supervised = 1.0
+
+[train]
+output_dir = "./outputs/recorded-text"
+epoch = 1
+max_num_steps = 64
+train_batch_per_replica = 2
+sequence_packing = false
+compile = false
+deterministic = true
+param_dtype = "bfloat16"
+master_dtype = "float32"
+fsdp_reduce_dtype = "float32"
+optm_lr = 0.000001
+
+[train.train_policy]
+type = "sft"
+mini_batch = 2
+dataloader_shuffle = true
+dataloader_seed = 11
+dataloader_num_workers = 2
+dataloader_prefetch_factor = 1
+
+[train.ckpt]
+enable_checkpoint = true
+save_mode = "sync"
+save_freq = 64
+max_keep = 1
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-3B-Instruct"
+model_max_length = 2048
+enable_liger_fused_cross_entropy = false
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 1
+dp_replicate_size = 1
+dp_shard_size = 1
+
+[logging]
+logger = ["console"]

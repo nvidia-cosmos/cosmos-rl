@@ -4,6 +4,9 @@
 
 import json
 import os
+import tempfile
+from datetime import timedelta
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -15,7 +18,7 @@ from cosmos_rl.execution.token_objectives import TokenObjectiveBatch
 
 
 def main():
-    dist.init_process_group("gloo")
+    dist.init_process_group("gloo", timeout=timedelta(seconds=20))
     rank = dist.get_rank()
     all_rows = [sample([0, 1, 2]), sample([1, 0]), sample([2, 1, 0, 2], rl=False)]
     dummy = sample([0, 1])
@@ -121,6 +124,90 @@ def main():
     else:
         raise AssertionError("Malformed teacher targets entered training")
 
+    # Source opening agrees both membership and failures before model setup.
+    from cosmos_rl.execution.corpus import CorpusWriter
+    from cosmos_rl.execution.records import SampleRecord
+    from cosmos_rl.policy.config import Config
+    from test_resume_data_index import _WorkerHarness
+
+    with tempfile.TemporaryDirectory() as root:
+        writer = CorpusWriter(root, run_id="source-agreement")
+        writer.commit(
+            SampleRecord(
+                sample_id=str(rank), occurrence_id=str(rank), inputs={}, targets="data"
+            )
+        )
+        writer.finalize()
+        source_config = Config.model_validate(
+            {
+                "execution": {
+                    "path": "train_from_data",
+                    "source": {"kind": "corpus", "path": root},
+                    "objectives": {"supervised": 1},
+                },
+                "train": {"train_policy": {"type": "sft"}},
+                "policy": {"parallelism": {"tp_size": 1}},
+            }
+        )
+        worker = _WorkerHarness(source_config)
+        worker.parallel_dims.mesh = {"dp": SimpleNamespace(get_group=lambda: None)}
+        try:
+            worker.build_runner()
+        except ValueError as error:
+            assert "source revision" in str(error)
+        else:
+            raise AssertionError("Different source snapshots entered training")
+        if rank == 1:
+            from pathlib import Path
+
+            (Path(root) / "complete.json").unlink()
+        try:
+            worker.build_runner()
+        except ValueError as error:
+            assert "not complete" in str(error)
+        else:
+            raise AssertionError("A rank-local source opening failure entered training")
+
+    # An empty exception message still denotes failure on the whole cohort.
+    from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
+
+    worker = object.__new__(SFTPolicyWorker)
+    worker.parallel_dims = SimpleNamespace(
+        mesh={"dp": SimpleNamespace(get_group=lambda: None)}
+    )
+    worker.config = SimpleNamespace(
+        execution=SimpleNamespace(source=SimpleNamespace(kind="corpus"))
+    )
+
+    def broken_loader():
+        if rank == 1:
+            raise RuntimeError("")
+        yield 1
+
+    try:
+        list(worker.get_batch_from_dataloader(broken_loader()))
+    except ValueError as error:
+        assert "Corpus preparation failed" in str(error)
+    else:
+        raise AssertionError("An empty-message peer failure entered training")
+
+    class BrokenSample(dict):
+        def __getitem__(self, key):
+            if rank == 1:
+                raise RuntimeError("")
+            return super().__getitem__(key)
+
+    try:
+        TokenObjectiveBatch(
+            [BrokenSample(label_ids=[0, 1])],
+            configuration(supervised=1),
+            device="cpu",
+        )
+    except ValueError as error:
+        assert str(error) == ""
+    else:
+        raise AssertionError("An empty-message peer preparation failure was ignored")
+
     dist.barrier()
     if rank == 0:
         print(
@@ -133,6 +220,8 @@ def main():
                     "empty_rank": True,
                     "all_empty": True,
                     "malformed_teacher_agreement": True,
+                    "source_revision_agreement": True,
+                    "source_opening_failure_agreement": True,
                 }
             ),
             flush=True,

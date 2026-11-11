@@ -8,6 +8,10 @@ path = "generate"
 path = "./generated-corpus"
 run_id = "qwen-gsm8k-example-v1"
 max_record_bytes = 16777216
+# This example uses the model's current default revision and cannot resume.
+# For resume=true, pin a full model commit (or actor.artifact_digest) and set
+# generation_fingerprint for the application's generation semantics.
+resume = false
 
 [train]
 output_dir = "./outputs/generate-corpus"

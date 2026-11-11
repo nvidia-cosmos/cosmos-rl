@@ -8,6 +8,7 @@ Run on >=3 GPUs: python tests/execution_workflow_canary.py
 """
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -156,9 +157,16 @@ def run(root):
     generation = copy.deepcopy(common)
     generation["execution"] = {
         "path": "generate",
+        "actor": {
+            "weight_source": "checkpoint",
+            "artifact_digest": hashlib.sha256(
+                (model / "model.safetensors").read_bytes()
+            ).hexdigest(),
+        },
         "output": {
             "path": str(root / "generated-corpus"),
             "run_id": "generation-canary",
+            "generation_fingerprint": "execution-text-canary-v1",
         },
     }
     generation["train"]["train_policy"].update(
@@ -238,6 +246,7 @@ def run(root):
                 annotations={"advantages": [0.5 if i % 2 else -0.5] * n},
             )
         )
+    writer.finalize()
     mixed = copy.deepcopy(common)
     mixed["policy"]["parallelism"]["dp_shard_size"] = 2
     mixed["train"]["train_batch_per_replica"] = 1

@@ -3,9 +3,10 @@
 """Small, declarative execution configuration; no model or transport imports."""
 
 from dataclasses import dataclass
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 
 class SourceConfig(BaseModel):
@@ -14,8 +15,10 @@ class SourceConfig(BaseModel):
     kind: Literal["dataset", "corpus"] = "dataset"
     path: str | None = None
     revision: str | None = None
+    allow_partial: bool = False
     max_prefetch_bytes: int = Field(default=256 * 1024**2, gt=0)
     max_prepared_bytes: int | None = Field(default=None, gt=0)
+    preparation_seed: StrictInt | None = Field(default=None, ge=0, lt=2**63)
     reward_weighting: Literal["none", "nonnegative"] = "none"
     teacher_targets: Literal["recorded", "online"] = "recorded"
     score_records: bool = False
@@ -25,8 +28,14 @@ class SourceConfig(BaseModel):
 
     @model_validator(mode="after")
     def check(self):
+        if self.preparation_seed is not None and self.kind != "corpus":
+            raise ValueError("preparation_seed requires source.kind=corpus")
         if self.kind == "corpus" and not self.path:
             raise ValueError("A corpus source requires execution.source.path")
+        if self.allow_partial and not self.revision:
+            raise ValueError(
+                "Partial corpus training requires a pinned source.revision"
+            )
         if self.score_records and self.advantages == "group_standardized":
             raise ValueError(
                 "Group advantages use committed scores; commit a rescored corpus before group standardization"
@@ -58,6 +67,15 @@ class OutputConfig(BaseModel):
     path: str
     run_id: str
     max_record_bytes: int = Field(default=1024**3, gt=0)
+    resume: bool = Field(
+        default=True,
+        description="Require immutable generation identity and allow replay of committed work.",
+    )
+    generation_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Application-owned immutable identity of semantic generation settings and code.",
+    )
 
     @model_validator(mode="after")
     def check(self):
@@ -74,6 +92,39 @@ class ExecutionConfig(BaseModel):
     objectives: ObjectiveConfig | None = None
     actor: ActorConfig | None = None
     output: OutputConfig | None = None
+
+
+def validate_generation_identity(config):
+    """Resumable output requires caller-resolved immutable semantic identity.
+
+    A revision must be a full Git commit, not a moving branch or tag. Other
+    backends supply their immutable artifact identity explicitly; the controller
+    never opens model weights or guesses application generation semantics.
+    """
+    output = config.execution.output
+    if output is None or not output.resume:
+        return
+    actor = config.execution.actor
+    revision = config.policy.model_revision
+    if actor is not None and actor.weight_source == "checkpoint":
+        revision = (
+            actor.model_revision
+            if actor.model_name_or_path
+            else actor.model_revision or revision
+        )
+    digest = actor.artifact_digest if actor is not None else None
+    if not (digest and digest.strip()) and not re.fullmatch(
+        r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision or ""
+    ):
+        raise ValueError(
+            "Resumable generation requires an immutable actor.artifact_digest or "
+            "a full model commit revision; use output.resume=false for one-off output"
+        )
+    if not output.generation_fingerprint or not output.generation_fingerprint.strip():
+        raise ValueError(
+            "Resumable generation requires output.generation_fingerprint for "
+            "application generation semantics"
+        )
 
 
 @dataclass(frozen=True)
@@ -217,6 +268,7 @@ def resolve_execution(config) -> ExecutionPlan:
             raise ValueError("A distillation objective requires a configured teacher")
         if execution.output is not None and path != "generate":
             raise ValueError("execution.output currently belongs to generate")
+        validate_generation_identity(config)
         if execution.source is not None and path != "train_from_data":
             raise ValueError("execution.source belongs to train_from_data")
         if execution.source is not None and execution.source.kind != "corpus":

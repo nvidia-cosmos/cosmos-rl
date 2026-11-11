@@ -91,10 +91,13 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_update.py -k two_replicas
 run python tests/execution_workflow_canary.py
 
 # run tests
 run python tests/test_video_decode.py
+run python -m pytest -q tests/test_deterministic_attention.py
+run python tests/microbatch_numerics_probe.py --output "${TEST_LOG_DIR}/microbatch-numerics"
 run python -m pytest -q tests/test_slurm_ci_job.py
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_distributed_kv_store.py

@@ -112,6 +112,8 @@ def qualify_action_trainer(
             )
         )
 
+    writer.finalize()
+
     class ActionTrainer:
         recorded_objectives = {"supervised", "policy_gradient"}
 
