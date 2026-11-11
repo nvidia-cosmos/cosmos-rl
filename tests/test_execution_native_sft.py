@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the native trainer with real multimodal gradients on CPU."""
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 from contextlib import nullcontext
 from types import SimpleNamespace as NS
 
@@ -48,7 +49,7 @@ class Packer:
     )
 
     def prepare_record(self, record):
-        return {**record.targets, "image": record.inputs["image"]}
+        return {**record.rollout.completion, "image": record.rollout.prompt["image"]}
 
     def sft_collate_fn(self, rows, computed_max_len, ignore_label_id):
         return {
@@ -157,11 +158,14 @@ def samples(root):
                     revision="original",
                     behavior_version=4,
                 ),
-                inputs={"image": torch.full((3, 2, 2), 0.1 * (i + 1))},
-                targets={"token_ids": tokens, "label_ids": tokens},
-                behavior_logprobs=[-1.4] * n,
                 masks={"policy_gradient": [i != 2] * n},
-                annotations={"advantages": [0.4] * n},
+                annotations={},
+                rollout=Rollout(
+                    prompt={"image": torch.full((3, 2, 2), 0.1 * (i + 1))},
+                    completion={"token_ids": tokens, "label_ids": tokens},
+                    completion_logprobs=[-1.4] * n,
+                    advantage=[0.4] * n,
+                ),
             )
         )
     writer.finalize()

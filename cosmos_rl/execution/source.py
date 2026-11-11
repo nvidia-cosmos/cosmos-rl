@@ -179,12 +179,12 @@ class RecordScorer:
         import math
 
         prompt = (
-            record.inputs.get("prompt")
-            if isinstance(record.inputs, dict)
-            else record.inputs
+            record.rollout.prompt.get("prompt")
+            if isinstance(record.rollout.prompt, dict)
+            else record.rollout.prompt
         )
         scores, _, metrics = self.scorer.compute_reward(
-            [record.targets],
+            [record.rollout.completion],
             record.annotations.get("reference"),
             prompt=prompt,
             record=record,
@@ -192,8 +192,9 @@ class RecordScorer:
         score = float(scores[0])
         if not math.isfinite(score):
             raise ValueError("Record scoring returned a nonfinite reward")
+        record.rollout.reward = score
         record.annotations.update(
-            score=score, scorer_metrics=metrics[0], scorer_revision=self.revision
+            scorer_metrics=metrics[0], scorer_revision=self.revision
         )
 
 
@@ -233,18 +234,23 @@ def prepare_supervised_record(record, packer, *, context=None):
         prepared = (
             custom(record, context=context) if context is not None else custom(record)
         )
-    elif isinstance(record.targets, dict) and "label_ids" in record.targets:
-        prepared = copy.deepcopy(record.targets)
-    elif isinstance(record.targets, str):
-        inputs = record.inputs
-        conversation = inputs.get("conversation") if isinstance(inputs, dict) else None
+    elif (
+        isinstance(record.rollout.completion, dict)
+        and "label_ids" in record.rollout.completion
+    ):
+        prepared = copy.deepcopy(record.rollout.completion)
+    elif isinstance(record.rollout.completion, str):
+        inputs = record.rollout.prompt
+        conversation = record.rollout.conversation or (
+            inputs.get("conversation") if isinstance(inputs, dict) else None
+        )
         prompt = inputs.get("prompt", "") if isinstance(inputs, dict) else inputs
         messages = (
             copy.deepcopy(conversation)
             if conversation
             else [{"role": "user", "content": prompt}]
         )
-        messages.append({"role": "assistant", "content": record.targets})
+        messages.append({"role": "assistant", "content": record.rollout.completion})
         prepared = packer.sft_process_sample(messages)
     else:
         raise ValueError(

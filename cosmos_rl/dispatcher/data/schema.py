@@ -236,7 +236,7 @@ class Rollout(BaseModel):
         default="", description="The uuid of the teacher result."
     )
 
-    teacher_logprobs: Optional[List[List[float]]] = Field(
+    teacher_logprobs: Any = Field(
         default=None, description="The logprobs of the teacher for the current rollout."
     )
 
@@ -248,22 +248,27 @@ class Rollout(BaseModel):
         default=False, description="Whether the rollout is the last one."
     )
 
-    reward: float = Field(default=0.0, description="The reward for the rollout.")
+    reward: Optional[float] = Field(
+        default=0.0, description="The reward for the rollout; None means unscored."
+    )
 
-    advantage: float = Field(default=0.0, description="The advantage for the rollout.")
+    advantage: Any = Field(
+        default=0.0,
+        description="Scalar or application-aligned advantages; None means unavailable.",
+    )
 
     n_ignore_prefix_tokens: int = 0
 
-    filter_reward: float = Field(
+    filter_reward: Optional[float] = Field(
         default=0.0, description="The filter reward for the rollout."
     )
 
-    completion_token_ids: Optional[List[List[int]]] = Field(
+    completion_token_ids: Any = Field(
         default=None,
         description="The token ids of current rollout's completion considering top-k tokens at each position.",
     )
 
-    completion_logprobs: Optional[List[List[float]]] = Field(
+    completion_logprobs: Any = Field(
         default=None,
         description="The logprobs of current rollout's completion considering top-k tokens at each position.",
     )
@@ -283,7 +288,7 @@ class Rollout(BaseModel):
         description="The extra information returned by the rollout engine.",
     )
 
-    weight_version: int = Field(
+    weight_version: Optional[int] = Field(
         default=0, description="The weight version for the rollout."
     )
 

@@ -61,14 +61,11 @@ def rows():
         row["token_ids"] = row["input_ids"]
         n = len(row["input_ids"]) - 1
         record = row["_execution_record"]
-        record.annotations.update(
-            teacher={"role": "teacher", "name": "teacher"},
-            teacher_logprobs=torch.tensor([0.2, -0.3, 0.5])
-            .log_softmax(-1)
-            .expand(n, -1)
-            .clone(),
-            score=0.0 if i == 0 else i + 0.5,
+        record.rollout.teacher_logprobs = (
+            torch.tensor([0.2, -0.3, 0.5]).log_softmax(-1).expand(n, -1).clone()
         )
+        record.rollout.reward = 0.0 if i == 0 else i + 0.5
+        record.annotations.update(teacher={"role": "teacher", "name": "teacher"})
         record.masks["distillation"] = [i != 3] * n
         if i == 2:
             record.masks["policy_gradient"][1] = False

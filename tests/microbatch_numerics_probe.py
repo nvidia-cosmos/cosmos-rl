@@ -7,6 +7,7 @@ global masked-token mean. Native runs retain FP32 master weights/AdamW state.
 This is a small-model arithmetic qualification, not a model-quality benchmark.
 """
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import argparse
 import copy
 import json
@@ -114,9 +115,8 @@ def examples(seed):
         record = SampleRecord(
             sample_id=str(index),
             occurrence_id=str(index),
-            inputs={},
-            targets={},
             masks={"supervised": mask},
+            rollout=Rollout(prompt={}, completion={}),
         )
         rows.append(
             dict(

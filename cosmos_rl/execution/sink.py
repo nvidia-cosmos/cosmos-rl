@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Required synchronous generation sink; persistence precedes settlement."""
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.execution.corpus import CorpusWriter
 from cosmos_rl.execution.records import ModelIdentity, SampleRecord, output_id
 
@@ -44,25 +45,25 @@ class CorpusResultSink:
                     artifact_digest=self.actor_digest,
                     behavior_version=event.weight_version,
                 ),
-                inputs={
-                    "prompt": event.prompt,
-                    "conversation": event.conversation,
-                    "extra_info": event.extra_info,
-                },
-                targets=outcome.completion,
-                behavior_logprobs=outcome.logprobs,
                 sampling=self.sampling,
                 annotations={
                     "status": outcome.status,
-                    "score": outcome.score,
                     "quality_trainable": outcome.quality_trainable,
                     "quality_reason": outcome.quality_reason,
                     "failure_reason": outcome.failure_reason,
-                    "token_ids": outcome.token_ids,
-                    "completed_conversation": outcome.completed_conversation,
                     "scorer_metrics": outcome.scorer_metrics,
                 },
                 attempt_id=f"{event.execution_id}:{event.work_id}:{outcome.slot}",
+                rollout=Rollout(
+                    prompt=event.prompt,
+                    conversation=event.conversation,
+                    extra_info=event.extra_info,
+                    completion=outcome.completion,
+                    completed_conversation=outcome.completed_conversation,
+                    completion_token_ids=outcome.token_ids,
+                    completion_logprobs=outcome.logprobs,
+                    reward=outcome.score,
+                ),
             )
             export = getattr(
                 self.packer() if self.packer else None, "export_record", None

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
+from cosmos_rl.dispatcher.data.schema import Rollout
 from types import SimpleNamespace
 
 import pytest
@@ -33,11 +34,14 @@ def sample(ids, *, supervised=True, rl=True):
             revision="old-checkpoint",
             behavior_version=2,
         ),
-        inputs={"image": torch.zeros(3, 2, 2)},
-        targets={"input_ids": ids, "label_ids": ids},
-        behavior_logprobs=[-1.4] * n,
         masks={"supervised": [supervised] * n, "policy_gradient": [rl] * n},
-        annotations={"advantages": [0.3] * n},
+        annotations={},
+        rollout=Rollout(
+            prompt={"image": torch.zeros(3, 2, 2)},
+            completion={"input_ids": ids, "label_ids": ids},
+            completion_logprobs=[-1.4] * n,
+            advantage=[0.3] * n,
+        ),
     )
     return {"input_ids": ids, "label_ids": ids, "_execution_record": record}
 
@@ -137,14 +141,14 @@ def test_exact_sampler_keeps_every_real_record_once_and_masks_schedule_padding()
 
 def test_missing_behavior_rejected_before_forward():
     row = sample([0, 1])
-    row["_execution_record"].behavior_logprobs = None
+    row["_execution_record"].rollout.completion_logprobs = None
     with pytest.raises(ValueError, match="behavior"):
         TokenObjectiveBatch([row], configuration(policy_gradient=1), device="cpu")
 
 
 def test_fractional_reward_mass_is_the_supervised_denominator():
     row = sample([0, 1])
-    row["_execution_record"].annotations["score"] = 0.25
+    row["_execution_record"].rollout.reward = 0.25
     config = configuration(supervised=1)
     config.execution.source = SimpleNamespace(reward_weighting="nonnegative")
     window = TokenObjectiveBatch([row], config, device="cpu")
@@ -157,9 +161,9 @@ def test_cached_distillation_and_supervision_match_reference_gradient():
     row = sample([0, 1, 2], rl=False)
     record = row["_execution_record"]
     teacher = torch.tensor([[0.1, 0.6, 0.3], [0.2, 0.3, 0.5]])
+    record.rollout.teacher_logprobs = teacher.log()
     record.annotations.update(
-        teacher=ModelIdentity(role="teacher", name="fixed").model_dump(),
-        teacher_logprobs=teacher.log(),
+        teacher=ModelIdentity(role="teacher", name="fixed").model_dump()
     )
     config = configuration(supervised=0.4, distillation=0.6)
     logits = torch.randn(1, 3, 3, requires_grad=True)

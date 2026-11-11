@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Durable payload plugins preserve metadata-only control and byte admission."""
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import json
 
 import pytest
@@ -27,9 +28,11 @@ def test_filesystem_payload_is_saved_once_and_read_by_application(
     reference = save_data(store, data, max_bytes=1024**2)
     data["observations"].zero_()
     sample = SampleRecord(
-        sample_id="one", occurrence_id="one", inputs={}, targets=reference
+        sample_id="one",
+        occurrence_id="one",
+        rollout=Rollout(prompt={}, completion=reference),
     )
-    assert isinstance(sample.model_dump()["targets"], DataReference)
+    assert isinstance(sample.model_dump()["rollout"]["completion"], DataReference)
     with monkeypatch.context() as patch:
         patch.setattr(
             torch, "load", lambda *a, **k: pytest.fail("control loaded payload")
@@ -42,8 +45,8 @@ def test_filesystem_payload_is_saved_once_and_read_by_application(
         )
         assert CorpusWriter(tmp_path, run_id="test").commit(sample)
         read = CorpusDataset(tmp_path, allow_partial=True)[0]
-        assert read.targets.to_dict() == reference.to_dict()
-    actual = store.load(read.targets, max_bytes=1024**2)
+        assert read.rollout.completion.to_dict() == reference.to_dict()
+    actual = store.load(read.rollout.completion, max_bytes=1024**2)
     assert actual["observations"].sum() == 496
     assert actual["observations"].device.type == "cpu"
     assert not list((tmp_path / "artifacts").glob(".pending-*"))
@@ -79,7 +82,11 @@ def test_byte_admission_uses_payload_size_instead_of_pointer_size(
         uri="custom://large", format="custom", size_bytes=64 * 1024**2
     )
     CorpusWriter(tmp_path, run_id="test", max_record_bytes=128 * 1024**2).commit(
-        SampleRecord(sample_id="one", occurrence_id="one", inputs={}, targets=reference)
+        SampleRecord(
+            sample_id="one",
+            occurrence_id="one",
+            rollout=Rollout(prompt={}, completion=reference),
+        )
     )
     dataset = CorpusDataset(
         tmp_path, max_record_bytes=128 * 1024**2, allow_partial=True
@@ -282,7 +289,11 @@ def test_new_storage_ancestors_are_fenced_and_retry_failure(
     reference = save_data(store, torch.ones(8), max_bytes=65536)
     writer = CorpusWriter(root, run_id="parent-durability")
     writer.commit(
-        SampleRecord(sample_id="one", occurrence_id="one", inputs={}, targets=reference)
+        SampleRecord(
+            sample_id="one",
+            occurrence_id="one",
+            rollout=Rollout(prompt={}, completion=reference),
+        )
     )
     # The established layout needs no extra ancestor fsync on subsequent saves
     # and commits; each publication still fences its containing directory.
@@ -291,6 +302,8 @@ def test_new_storage_ancestors_are_fenced_and_retry_failure(
         store.save(torch.ones(8), max_bytes=65536)
         assert not writer.commit(
             SampleRecord(
-                sample_id="one", occurrence_id="one", inputs={}, targets=reference
+                sample_id="one",
+                occurrence_id="one",
+                rollout=Rollout(prompt={}, completion=reference),
             )
         )

@@ -16,7 +16,7 @@ from cosmos_rl.launcher.worker_entry import main
 
 class TokenCorpusPacker(DecoderOnlyLLMDataPacker):
     def prepare_record(self, record, *, context=None):
-        row = record.targets
+        row = record.rollout.completion
         if isinstance(row, DataReference):
             source = self.config.execution.source
             if not hasattr(self, "reader"):

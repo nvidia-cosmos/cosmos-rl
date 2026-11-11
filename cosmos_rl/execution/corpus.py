@@ -279,7 +279,12 @@ class CorpusWriter:
         self.run_id = run_id
         self.max_record_bytes = max_record_bytes
         metadata = _json(
-            {"schema_version": 1, "run_id": run_id, "metadata": metadata or {}}
+            {
+                "schema_version": 1,
+                "record_schema_version": 2,
+                "run_id": run_id,
+                "metadata": metadata or {},
+            }
         )
         _initialize_storage(self.root)
         _publish(self.root / "dataset.json", metadata)
@@ -308,7 +313,6 @@ class CorpusWriter:
                         "sample_id",
                         "occurrence_id",
                         "producer",
-                        "inputs",
                         "sampling",
                         "group_id",
                         "group_size",
@@ -318,6 +322,13 @@ class CorpusWriter:
                     raise ValueError(
                         "Output identity conflicts with committed provenance"
                     )
+                old_rollout = existing["rollout"]["items"]
+                new_rollout = incoming["rollout"]["items"]
+                if any(
+                    old_rollout[k] != new_rollout[k]
+                    for k in ("prompt", "conversation", "extra_info")
+                ):
+                    raise ValueError("Replay changed the original input identity")
         return created
 
     def finalize(self, *, expected_records=None):
@@ -385,6 +396,10 @@ class CorpusDataset:
         self.run_id = metadata["run_id"]
         if metadata.get("schema_version") != 1:
             raise ValueError("Unsupported corpus schema")
+        if metadata.get("record_schema_version") != 2:
+            raise ValueError(
+                "Unsupported record schema; regenerate pre-release corpora"
+            )
         complete_path = self.root / "complete.json"
         complete = (
             json.loads(complete_path.read_bytes()) if complete_path.exists() else None
@@ -429,16 +444,15 @@ class CorpusDataset:
             manifest = json.loads(data)
             fields = manifest["record"]["items"]
             annotations = fields["annotations"]["items"]
+            content = fields["rollout"]["items"]
             self.record_metadata.append(
                 {
                     **{
                         k: fields[k]
                         for k in ("sample_id", "group_id", "group_size", "group_slot")
                     },
-                    **{
-                        k: annotations.get(k)
-                        for k in ("status", "quality_trainable", "score")
-                    },
+                    **{k: annotations.get(k) for k in ("status", "quality_trainable")},
+                    "score": content["reward"],
                 }
             )
             self._record_bytes.append(len(data) + _payload_bytes(manifest["record"]))

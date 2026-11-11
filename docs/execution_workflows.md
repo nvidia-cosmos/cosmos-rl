@@ -74,8 +74,9 @@ application data:
 
 - `sample_id`, `occurrence_id`, and optional original group identity, size and
   slot identify content independently of controller reservations.
-- `inputs`, `targets`, `masks` and `annotations` hold text, tensors, arrays or
-  nested durable values. Original behavior probabilities remain attached.
+- `rollout` holds the existing `Rollout` content: prompt, completion, token IDs,
+  behavior/teacher probabilities, reward and advantages. `masks` and
+  `annotations` retain per-objective and dataset metadata.
 - `producer` records the actor/checkpoint, optional artifact and representation
   revision, and its actual behavior version when known. A learner step never
   replaces a recorded behavior identity.
@@ -83,12 +84,22 @@ application data:
   that produced it. Unknown revisions remain explicit for one-off generation.
   Resumable output requires an immutable producer identity as described below.
 
+Records use composition: `SampleRecord(rollout=Rollout(prompt=..., completion=...),
+sample_id=..., occurrence_id=...)`. The v2 storage serializer defines a stable
+subset of Rollout content. It excludes prompt indices, stream markers, runtime
+telemetry and transient teacher handles; resolve teacher targets before saving.
+Native Rollout defaults remain unchanged. At the durable boundary, absent
+rewards/advantages stay `None`, distinct from explicit zero. Tensor and
+`DataReference` values pass through the envelope without copying payloads.
+Pre-release flat v1 corpora must be regenerated; their revisions/checkpoints
+cannot be treated as the same dataset after this format change.
+
 The native SFT packer handles generated text targets. A preprocessed mapping
 contains the packer's usual fields: for the decoder packer these are
 `token_ids` and `label_ids`. Application packers may implement
 `prepare_record(record)` to return their trainer input mapping. For example,
-an observation/action adapter can put camera tensors from `record.inputs`
-alongside action targets from `record.targets`. The attached
+an observation/action adapter can put camera tensors from `record.rollout.prompt`
+alongside action targets from `record.rollout.completion`. The attached
 `_execution_record` retains provenance and objective views.
 
 For continuous actions and other application losses, select an existing
@@ -392,7 +403,7 @@ from cosmos_rl.execution.storage import FileSystemDataStore, save_data
 store = FileSystemDataStore("/shared/corpus")
 # Run in the producer, while it owns the trajectory and its buffers.
 reference = save_data(store, trajectory, max_bytes=2 * 1024**3)
-# The packer attaches the reference as SampleRecord.targets. The required
+# The packer attaches the reference as SampleRecord.rollout.completion. The required
 # result consumer commits its small manifest before report settlement.
 owned_trajectory = store.load(reference, max_bytes=2 * 1024**3)
 ```

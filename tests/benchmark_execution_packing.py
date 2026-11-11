@@ -6,6 +6,7 @@ Uses the same tiny random Qwen2 setup as the execution canary. Reports warm
 optimizer throughput and peak allocation, separate from launcher startup.
 """
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import argparse
 import copy
 import json
@@ -92,11 +93,14 @@ def main():
                 producer=ModelIdentity(
                     role="actor", name="uniform", revision="v1", behavior_version=0
                 ),
-                inputs={},
-                targets={"token_ids": ids, "label_ids": ids},
                 masks={"policy_gradient": [True] * (length - 1)},
-                behavior_logprobs=[-math.log(vocab)] * (length - 1),
-                annotations={"advantages": [0.2 if i % 2 else -0.2] * (length - 1)},
+                annotations={},
+                rollout=Rollout(
+                    prompt={},
+                    completion={"token_ids": ids, "label_ids": ids},
+                    completion_logprobs=[-math.log(vocab)] * (length - 1),
+                    advantage=[0.2 if i % 2 else -0.2] * (length - 1),
+                ),
             )
         )
     writer.finalize()

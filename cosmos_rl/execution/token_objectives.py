@@ -75,9 +75,9 @@ class TokenObjectiveBatch:
                                 "Recorded policy loss requires an explicit aligned token mask"
                             )
                         old = torch.as_tensor(
-                            record.behavior_logprobs, dtype=torch.float32
+                            record.rollout.completion_logprobs, dtype=torch.float32
                         )
-                        raw_advantages = record.annotations.get("advantages")
+                        raw_advantages = record.rollout.advantage
                         if raw_advantages is None:
                             advantage = record.annotations.get("group_advantage")
                             if advantage is None:
@@ -88,6 +88,8 @@ class TokenObjectiveBatch:
                         advantages = torch.as_tensor(
                             raw_advantages, dtype=torch.float32
                         )
+                        if advantages.ndim == 0:
+                            advantages = advantages.expand_as(old)
                         if (
                             old.ndim != 1
                             or len(old) < n
@@ -117,7 +119,7 @@ class TokenObjectiveBatch:
                                 "Recorded distillation requires teacher identity and targets"
                             )
                         teacher = torch.as_tensor(
-                            record.annotations["teacher_logprobs"], dtype=torch.float32
+                            record.rollout.teacher_logprobs, dtype=torch.float32
                         )
                         if teacher.ndim != 2 or len(teacher) < n:
                             raise ValueError(
@@ -156,7 +158,7 @@ class TokenObjectiveBatch:
                     and self.spec.supervised
                 ):
                     weight = (
-                        float(record.annotations["score"])
+                        float(record.rollout.reward)
                         if masks["supervised"].any()
                         else 0.0
                     )

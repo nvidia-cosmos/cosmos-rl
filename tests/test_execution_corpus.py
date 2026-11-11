@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
+from cosmos_rl.dispatcher.data.schema import Rollout
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
@@ -21,14 +22,28 @@ from cosmos_rl.rollout.results import CompletionOutcome, RolloutResultEvent
 
 
 def record(index=0, **kwargs):
+    annotations = dict(kwargs.pop("annotations", {}))
+    content = {
+        name: annotations.pop(key)
+        for key, name in (
+            ("score", "reward"),
+            ("advantages", "advantage"),
+            ("teacher_logprobs", "teacher_logprobs"),
+        )
+        if key in annotations
+    }
     return SampleRecord(
         sample_id=str(index),
         occurrence_id=f"occurrence-{index}",
         group_id=f"group-{index // 2}",
         producer=ModelIdentity(role="actor", name="model", revision="pinned"),
-        inputs={"image": torch.arange(12).reshape(3, 2, 2)},
-        targets=torch.tensor([0.1, 0.2]),
+        annotations=annotations,
         **kwargs,
+        rollout=Rollout(
+            prompt={"image": torch.arange(12).reshape(3, 2, 2)},
+            completion=torch.tensor([0.1, 0.2]),
+            **content,
+        ),
     )
 
 
@@ -77,15 +92,18 @@ def test_preparation_context_uses_durable_identity_and_epoch_without_global_rng(
 
 def test_owned_tensor_roundtrip_and_typed_mapping(tmp_path):
     sample = record()
-    sample.inputs["literal"] = {"kind": "tensor", "path": "ordinary application data"}
+    sample.rollout.prompt["literal"] = {
+        "kind": "tensor",
+        "path": "ordinary application data",
+    }
     writer = CorpusWriter(tmp_path, run_id="run")
     assert writer.commit(sample)
-    sample.inputs["image"].zero_()
-    sample.targets.zero_()
+    sample.rollout.prompt["image"].zero_()
+    sample.rollout.completion.zero_()
     result = CorpusDataset(tmp_path, allow_partial=True)[0]
-    assert result.inputs["image"].sum() == 66
-    assert torch.allclose(result.targets, torch.tensor([0.1, 0.2]))
-    assert result.inputs["literal"]["path"] == "ordinary application data"
+    assert result.rollout.prompt["image"].sum() == 66
+    assert torch.allclose(result.rollout.completion, torch.tensor([0.1, 0.2]))
+    assert result.rollout.prompt["literal"]["path"] == "ordinary application data"
 
 
 def test_concurrent_commit_and_replay_keep_first_durable_output(tmp_path):
@@ -96,11 +114,12 @@ def test_concurrent_commit_and_replay_keep_first_durable_output(tmp_path):
         assert sum(workers.map(commit, range(8))) == 1
     writer = CorpusWriter(tmp_path, run_id="run")
     replay = record()
-    replay.targets = torch.tensor([9.0])
+    replay.rollout.completion = torch.tensor([9.0])
     assert not writer.commit(replay)
     assert len(CorpusDataset(tmp_path, allow_partial=True)) == 1
     assert torch.allclose(
-        CorpusDataset(tmp_path, allow_partial=True)[0].targets, torch.tensor([0.1, 0.2])
+        CorpusDataset(tmp_path, allow_partial=True)[0].rollout.completion,
+        torch.tensor([0.1, 0.2]),
     )
 
 
@@ -207,7 +226,7 @@ def test_manifest_decodes_exactly_the_verified_buffer(tmp_path, monkeypatch):
 
     writer = CorpusWriter(tmp_path, run_id="run")
     sample = record()
-    sample.targets = "original"
+    sample.rollout.completion = "original"
     writer.commit(sample)
     writer.finalize(expected_records=1)
     dataset = CorpusDataset(tmp_path)
@@ -223,12 +242,12 @@ def test_manifest_decodes_exactly_the_verified_buffer(tmp_path, monkeypatch):
         if target == path:
             reads.append(target)
             changed = json.loads(data)
-            changed["record"]["items"]["targets"] = "changed"
+            changed["record"]["items"]["rollout"]["items"]["completion"] = "changed"
             target.write_text(json.dumps(changed))
         return data
 
     monkeypatch.setattr(Path, "read_bytes", mutate_after_read)
-    assert dataset[0].targets == "original"
+    assert dataset[0].rollout.completion == "original"
     assert reads == [path]
     with pytest.raises(ValueError, match="manifest changed"):
         dataset[0]
@@ -268,7 +287,7 @@ def test_result_sink_keeps_all_outcomes_and_resumes_with_new_attempt(tmp_path):
         "generated",
         "generation_failed",
     }
-    assert all(r.annotations["score"] is None for r in samples)
+    assert all(r.rollout.reward is None for r in samples)
     training = CorpusSupervisedDataset(corpus)
     assert len(training) == 1
     assert training[0].annotations["quality_trainable"] is False
@@ -284,7 +303,9 @@ def test_manifest_path_escape_is_rejected(tmp_path):
     writer.commit(record())
     manifest = next((tmp_path / "records").iterdir())
     payload = json.loads(manifest.read_text())
-    payload["record"]["items"]["targets"]["path"] = "../outside.pt"
+    payload["record"]["items"]["rollout"]["items"]["completion"]["path"] = (
+        "../outside.pt"
+    )
     manifest.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="escapes"):
         CorpusDataset(tmp_path, allow_partial=True)[0]
@@ -300,7 +321,7 @@ def test_group_standardization_uses_complete_original_groups(tmp_path):
     for i, score in enumerate((1.0, 3.0)):
         item = record(i)
         item.group_size, item.group_slot = 2, i
-        item.annotations["score"] = score
+        item.rollout.reward = score
         writer.commit(item)
     dataset = CorpusSupervisedDataset(CorpusDataset(tmp_path, allow_partial=True))
     dataset.validate_policy_groups(advantages="group_standardized")
@@ -351,7 +372,7 @@ def test_record_scoring_reuses_reference_free_callbacks_without_an_engine(tmp_pa
     item = record()
     scorer(item)
     assert seen == [None]
-    assert item.annotations["score"] == pytest.approx(0.3)
+    assert item.rollout.reward == pytest.approx(0.3)
 
 
 def test_complete_snapshot_requires_finalization_and_rejects_new_records(tmp_path):
@@ -414,15 +435,18 @@ def test_supplied_advantages_retain_single_sample_policy_gradient(tmp_path, grou
     item = SampleRecord(
         sample_id="one",
         occurrence_id="one",
-        inputs={},
-        targets={"token_ids": [0, 1, 2], "label_ids": [0, 1, 2]},
         producer=ModelIdentity(role="actor", name="behavior"),
         group_id="one" if grouped else None,
         group_size=1 if grouped else None,
         group_slot=0 if grouped else None,
-        behavior_logprobs=[-1.0, -1.0],
         masks={"policy_gradient": [True, True]},
-        annotations={"advantages": [1.0, 1.0]},
+        annotations={},
+        rollout=Rollout(
+            prompt={},
+            completion={"token_ids": [0, 1, 2], "label_ids": [0, 1, 2]},
+            completion_logprobs=[-1.0, -1.0],
+            advantage=[1.0, 1.0],
+        ),
     )
     writer = CorpusWriter(tmp_path, run_id="run")
     writer.commit(item)

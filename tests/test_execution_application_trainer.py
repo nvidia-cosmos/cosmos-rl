@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Application-owned continuous-action losses through the native data worker."""
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import copy
 from types import SimpleNamespace as NS
 
@@ -26,8 +27,8 @@ class ActionPacker:
 
     def prepare_record(self, record):
         trajectory = {
-            "observations": record.inputs["observations"],
-            "actions": record.targets,
+            "observations": record.rollout.prompt["observations"],
+            "actions": record.rollout.completion,
         }
         if self.delegate is not None:
             trajectory = self.delegate.get_policy_input(rollout_output=trajectory)
@@ -39,8 +40,8 @@ class ActionPacker:
         return {
             **trajectory,
             "masks": masks,
-            "behavior": record.behavior_logprobs,
-            "advantages": record.annotations["advantages"],
+            "behavior": record.rollout.completion_logprobs,
+            "advantages": record.rollout.advantage,
         }
 
 
@@ -98,17 +99,17 @@ def qualify_action_trainer(
                 producer=ModelIdentity(
                     role="actor", name="original-actor", behavior_version=7
                 ),
-                inputs={"observations": observations},
-                targets=actions,
-                behavior_logprobs=behavior,
                 masks={
                     "supervised": torch.ones(length, dtype=torch.bool),
                     "policy_gradient": torch.ones(length, dtype=torch.bool),
                 },
-                annotations={
-                    "advantages": torch.full((length,), 0.5 if i % 2 else -0.5),
-                    "quality_trainable": i != 3,
-                },
+                annotations={"quality_trainable": i != 3},
+                rollout=Rollout(
+                    prompt={"observations": observations},
+                    completion=actions,
+                    completion_logprobs=behavior,
+                    advantage=torch.full((length,), 0.5 if i % 2 else -0.5),
+                ),
             )
         )
 

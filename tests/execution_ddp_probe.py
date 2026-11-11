@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Two-process numerical qualification, launched by test_execution_distributed."""
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import json
 import os
 import tempfile
@@ -100,7 +101,7 @@ def main():
         broken[0]["_execution_record"].masks["policy_gradient"] = [True] * (
             len(broken[0]["input_ids"]) - 1
         )
-        broken[0]["_execution_record"].behavior_logprobs = None
+        broken[0]["_execution_record"].rollout.completion_logprobs = None
     try:
         TokenObjectiveBatch(broken, config, device="cpu")
     except ValueError as error:
@@ -109,11 +110,13 @@ def main():
         raise AssertionError("A peer preparation error entered training")
 
     teacher_row = sample([0, 1], rl=False)
-    teacher_row["_execution_record"].annotations.update(
-        teacher={"role": "teacher", "name": "recorded-teacher"},
-        teacher_logprobs=torch.zeros(1, 3)
+    teacher_row["_execution_record"].rollout.teacher_logprobs = (
+        torch.zeros(1, 3)
         if rank == 1
-        else torch.full((1, 3), -torch.log(torch.tensor(3.0))),
+        else torch.full((1, 3), -torch.log(torch.tensor(3.0)))
+    )
+    teacher_row["_execution_record"].annotations.update(
+        teacher={"role": "teacher", "name": "recorded-teacher"}
     )
     try:
         TokenObjectiveBatch(
@@ -134,7 +137,9 @@ def main():
         writer = CorpusWriter(root, run_id="source-agreement")
         writer.commit(
             SampleRecord(
-                sample_id=str(rank), occurrence_id=str(rank), inputs={}, targets="data"
+                sample_id=str(rank),
+                occurrence_id=str(rank),
+                rollout=Rollout(prompt={}, completion="data"),
             )
         )
         writer.finalize()

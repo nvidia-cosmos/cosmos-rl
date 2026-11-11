@@ -7,6 +7,7 @@ qualifies execution and optimizer plumbing; it measures no model quality.
 Run on >=3 GPUs: python tests/execution_workflow_canary.py
 """
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 import copy
 import hashlib
 import json
@@ -239,11 +240,14 @@ def run(root):
                     revision="fixture-v1",
                     behavior_version=0,
                 ),
-                inputs={"prompt": "recorded trajectory"},
-                targets={"token_ids": ids, "label_ids": ids},
                 masks={"policy_gradient": [True] * n},
-                behavior_logprobs=[-math.log(vocab)] * n,
-                annotations={"advantages": [0.5 if i % 2 else -0.5] * n},
+                annotations={},
+                rollout=Rollout(
+                    prompt={"prompt": "recorded trajectory"},
+                    completion={"token_ids": ids, "label_ids": ids},
+                    completion_logprobs=[-math.log(vocab)] * n,
+                    advantage=[0.5 if i % 2 else -0.5] * n,
+                ),
             )
         )
     writer.finalize()

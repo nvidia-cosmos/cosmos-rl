@@ -131,7 +131,7 @@ def test_partial_prompt_publication_replays_only_missing_commit(tmp_path, monkey
     sink(resumed)(event(resumed, pending[0], text="second"))
     corpus = CorpusDataset(tmp_path, allow_partial=True)
     rows = [corpus[i] for i in range(len(corpus))]
-    assert {row.group_slot: row.targets for row in rows} == {
+    assert {row.group_slot: row.rollout.completion for row in rows} == {
         0: "first-0",
         1: "second-1",
     }
