@@ -148,20 +148,15 @@ def worker(args):
         if args.case == "cycle":
             assert all(store.check([key(rank, r, 0)]) for r in (2, 3))
         stream = get_transfer_stream_pool(device=device).acquire()
-        sent = set()
+        sent = {2: 0, 3: 0}
         order = (3, 2) if rank == 0 else (2, 3)
-        while len(sent) < 2 * sequences:
+        while sum(sent.values()) < 2 * sequences:
             progressed = False
             for receiver in order:
-                candidates = [
-                    (int(store.get(key(rank, receiver, sequence))), sequence)
-                    for sequence in range(sequences)
-                    if (receiver, sequence) not in sent
-                    and store.check([key(rank, receiver, sequence)])
-                ]
-                if not candidates:
+                request = f"request/{rank}/{receiver}/{sent[receiver] + 1}"
+                if not store.check([request]):
                     continue
-                _, sequence = min(candidates)
+                sequence = int(store.get(request))
                 operation = TransportDeadline(
                     5, f"send {identity(rank, receiver, sequence)}"
                 )
@@ -179,7 +174,7 @@ def worker(args):
                 )
                 operation.wait_event(record_event(stream))
                 operation.close()
-                sent.add((receiver, sequence))
+                sent[receiver] += 1
                 progressed = True
             if not progressed:
                 time.sleep(0.001)
@@ -221,6 +216,7 @@ def worker(args):
                 operation = Deadline(5, f"receive {ref['transfer_id']}")
                 strategy._comm_cache.pins += 1
                 store.set(key(sender, rank, sequence), str(ordinal))
+                store.set(f"request/{sender}/{rank}/{ordinal}", str(sequence))
                 print(
                     f"ACCEPT receiver={rank} sender={sender} sequence={sequence}",
                     flush=True,
