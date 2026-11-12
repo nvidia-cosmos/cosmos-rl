@@ -82,6 +82,28 @@ def worker(args):
         [TensorSpec(name="sample", shape=(args.nbytes,), dtype=np.uint8)]
     )
     frame_bytes = HEADER_NBYTES + layout.payload_nbytes
+    # Communicator creation does not connect every data channel. A first P2P
+    # launch can block the host waiting for its peer before it returns an
+    # enqueue. Warm the actual message size in matching pair order so the
+    # adversarial schedule exercises the steady-state shared-stream cycle.
+    warm_buffer = torch.zeros(frame_bytes, dtype=torch.uint8, device=device)
+    warm_stream = get_transfer_stream_pool(device=device).acquire()
+    wait_event(warm_stream, record_event())
+    for sender in (0, 1):
+        for receiver in (2, 3):
+            if rank in (sender, receiver):
+                operation = TransportDeadline(30, f"warm {sender}:{receiver}")
+                native = pynccl.nccl_send if rank == sender else pynccl.nccl_recv
+                native(
+                    warm_buffer,
+                    1 if rank == sender else 0,
+                    pairs[sender, receiver],
+                    stream=warm_stream,
+                    timeout_ms=operation.remaining_ms(),
+                )
+                operation.wait_event(record_event(warm_stream))
+                operation.close()
+            dist.barrier()
     sequences = (
         16 if args.case == "benchmark" else 4 if args.case == "concurrent" else 2
     )
@@ -310,7 +332,9 @@ def main():
     parser.add_argument("--case", default="all")
     parser.add_argument("--expect-cycle", action="store_true")
     parser.add_argument("--store")
-    parser.add_argument("--nbytes", type=int, default=1024**2)
+    # Small messages may fit eagerly in NCCL's internal buffers and complete
+    # despite the unsafe dependency graph. Exercise a large trajectory frame.
+    parser.add_argument("--nbytes", type=int, default=256 * 1024**2)
     args = parser.parse_args()
     if args.worker:
         worker(args)
