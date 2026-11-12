@@ -78,6 +78,7 @@ from cosmos_rl.utils.trajectory import (
 from cosmos_rl.utils.payload_transport.nccl.streams import (
     bind_thread_device,
     get_transfer_stream_pool,
+    get_receive_lock,
     record_event,
     wait_event,
 )
@@ -218,7 +219,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         self._max_attempts = max(1, max_attempts)
         self._recv_timeout = recv_timeout
         self._first_transfer_timeout = max(recv_timeout, first_transfer_timeout)
-        self._recv_lock = threading.Lock()
+        self._recv_lock = get_receive_lock(device)
         self._warm_pairs = set()
         self._receiver_rank = _resolve_global_rank()
         if receiver_replica:
@@ -550,23 +551,14 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         budget=None,
         reserved=0,
     ) -> Tuple[dict, int, float]:
-        """Rendezvous + ``nccl_recv``, interleaved per ref.
+        """Complete each accepted receive before admitting the next one.
 
-        Returns ``(results_by_idx, total_bytes, transfer_ms)``.  Each ref is
-        negotiated over Redis and then IMMEDIATELY has its matching recv
-        enqueued, before the next ref is negotiated -- a producer must never
-        be left holding an accepted send whose recv this consumer has not
-        posted yet (see the interleaving note below).  Each recv is issued as
-        a STANDALONE ``nccl_recv`` on its own 2-rank pair comm (deliberately
-        NOT wrapped in a cross-communicator ``ncclGroupStart/End``, which
-        would couple independent producers into one completion unit -- the
-        N_POLICY>=2 wedge).  Completion is synchronized once, after the whole
-        batch is enqueued, so transfers still overlap.
-
-        A per-ref ``max_attempts`` fresh-call retry wraps the rendezvous; a
-        ref that still fails to resolve is dropped and re-attempted on the
-        next prefetch round (there is no in-batch multi-round layer above
-        this).
+        The process/device receive lock covers rendezvous, native completion
+        and decoding. A receiver therefore never queues a different peer
+        behind an unfinished transfer, even across overlapping fetch calls or
+        separate strategy instances. Producer FIFOs cannot form a cross-peer
+        stream cycle without such a receive dependency. Preserve caller order,
+        original result indices and each accepted operation's existing deadline.
         """
         from cosmos_rl.utils import pynccl
 
@@ -587,7 +579,7 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
         stream = None
         operations = []
         results: Dict[int, dict] = {}
-        # Pins taken during phase 1 must be released on EVERY exit path,
+        # Pins taken during rendezvous must be released on EVERY exit path,
         # including the early returns and any raise below.
         try:
             # A batch is "warming" until every pair in it has transferred at
@@ -611,53 +603,15 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
 
             total_bytes = 0
             posted: List[Tuple[Any, dict, int, torch.Tensor, ReceiveBufferLease]] = []
-            # Serialize the NCCL recv LAUNCH on this consumer's GPU, mirroring the
-            # producer's _nccl_send_lock.  Both the prefetch worker (_fetch_all off the
-            # prefetch thread) and a trainer-thread cache-miss _sync_fetch can reach
-            # here; concurrent multi-comm recv launches on one device deadlock
-            # natively -- and because run_task arms its deadline only AFTER the native
-            # call returns, the recv timeout can't rescue a launch deadlock.  Only the
-            # async ENQUEUE + event record run under the lock (every op is a stream
-            # enqueue); the blocking synchronize() below stays lock-free so real
-            # transfers still overlap across the two callers.
-            #
-            # The rendezvous round-trips now run INSIDE this lock, because each recv
-            # is enqueued as soon as its own rendezvous returns (see below) and the
-            # lock therefore spans them.  It has to: transfer streams are handed out
-            # round-robin rather than leased, so a concurrent caller can share our
-            # stream -- and the completion event recorded at the end of this block
-            # would then also cover ITS recvs, leaving our lock-free synchronize()
-            # waiting on a peer we never negotiated with (an unbounded wait: the
-            # stream sync takes no timeout).  Holding the lock across the whole
-            # enqueue sequence keeps `done` covering exactly our own recvs.
             recv_lock = self._recv_lock
             if recv_lock is None:  # bare test harness that skipped setup
-                recv_lock = self._recv_lock = threading.Lock()
-            with recv_lock:
-                stream = self._streams.acquire() if self._streams else None
-                # Rendezvous (control plane) and recv enqueue (data plane) are
-                # INTERLEAVED per ref: every accepted transfer gets its matching
-                # recv posted BEFORE the next ref is negotiated.
-                #
-                # Negotiating the whole batch first (the previous structure)
-                # deadlocks whenever one producer accepts more refs in this batch
-                # than it has sender threads: those threads block in nccl_send
-                # waiting for recvs this consumer will not post until every
-                # remaining rendezvous has returned -- including the ones queued
-                # behind those very sends.  That is a circular wait, not slowness,
-                # and a bigger sender pool only moves the batch size that trips it.
-                # Posting recv(A) before negotiating B removes the cycle outright.
-                #
-                # Each recv is issued STANDALONE on its own 2-rank pair comm,
-                # deliberately NOT wrapped in a cross-communicator
-                # ncclGroupStart/End: each comm carries a single send/recv, so
-                # grouping adds no overlap and only fuses independent producers
-                # into one completion unit whose native ncclGroupEnd blocks -- with
-                # no pynccl watchdog, since run_task arms its deadline only after
-                # the native call returns -- if any one producer has not yet posted
-                # its send.  That coupling was the N_POLICY>=2 wedge.  Ungrouped, a
-                # slow producer delays only its own recv.
-                for idx, ref in refs:
+                recv_lock = self._recv_lock = get_receive_lock(device)
+            for idx, ref in refs:
+                # Do not accept a second transfer while the first can still
+                # block the shared stream. Launch-only locking or sorting one
+                # batch cannot enforce this across partial/overlapping fetches.
+                with recv_lock:
+                    stream = self._streams.acquire() if self._streams else None
                     prepared = self._rendezvous_one(ref, pynccl)
                     if prepared is None:
                         continue
@@ -672,21 +626,13 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                     if lease is None:
                         lease = _DetachedReceiveLease(recv_buf)
                     operations.append((operation, response_key, None))
-                    # Record the pin BEFORE attempting the recv so the finally
-                    # below unpins this comm even if the enqueue raises.
                     recvs.append((idx, ref, comm_idx, recv_buf, lease))
-                    # Mark before issue: a raising native call may already have
-                    # enqueued work or partially written the destination.
                     native_pending = True
                     try:
-                        # The allocator may reuse storage whose previous user
-                        # is still queued on the allocation stream. Raw NCCL
-                        # writes on a different stream must wait for that use,
-                        # even though torch.empty itself launches no kernel.
                         wait_event(stream, record_event(None))
                         pynccl.nccl_recv(
                             recv_buf,
-                            SENDER_LOCAL_RANK,  # peer in the 2-rank comm is the sender
+                            SENDER_LOCAL_RANK,
                             comm_idx,
                             stream=stream,
                             timeout_ms=operation.remaining_ms(),
@@ -695,95 +641,78 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                         raise TransportUnusableError(
                             "NCCL receive enqueue failed; native completion unknown"
                         ) from exc
-                    operations[-1] = (operation, response_key, record_event(stream))
+                    event = record_event(stream)
+                    operations[-1] = (operation, response_key, event)
+                    operation.wait_event(
+                        event,
+                        check_peer=(
+                            (lambda key=response_key: rv.check_failure(key))
+                            if response_key
+                            else None
+                        ),
+                    )
+                    wait_event(None, event)
+                    native_pending = False
+                    if cache.get(_pair_key(ref, receiver_rank)) != comm_idx:
+                        raise TransportUnusableError(
+                            "Accepted receive communicator was invalidated: "
+                            + ref["transfer_id"]
+                        )
+                    try:
+                        cached_views = lease.bind_views(
+                            ref["layout"],
+                            offset=HEADER_NBYTES,
+                            reset_fields=VARLEN_FIELDS,
+                        )
+                        if self._decode_account is None:
+                            gpu_data = _verify_and_unpack(
+                                recv_buf, ref, device, views=cached_views
+                            )
+                        else:
+                            gpu_data = _verify_and_unpack(
+                                recv_buf,
+                                ref,
+                                device,
+                                on_allocate=self._decode_account,
+                                views=cached_views,
+                            )
+                    except PayloadHeaderMismatch as exc:
+                        # Completion alone does not make an incorrectly paired
+                        # stream reusable. Rebuilding one half cannot prove that
+                        # queued peer work is settled; never replay as a cache miss.
+                        raise TransportUnusableError(
+                            f"Accepted payload identity mismatch: {exc}"
+                        ) from exc
+                    results[idx] = gpu_data
+                    total_bytes += recv_buf.numel() * recv_buf.element_size()
+                    # First successful transfer -> this pair is warm (tight timeouts +
+                    # normal quarantine from here on).
+                    warm.add(_pair_key(ref, receiver_rank))
+
+                    # Retire this deadline after decoding, before accepting
+                    # another peer; cold setup must not consume a completed
+                    # transfer's warm deadline. The result's buffer lease stays
+                    # owned by the returned batch until consumer release.
+                    operation.wait_event(record_event(None))
+                    operation.close()
+                    operations.pop()
                     posted.append((idx, ref, comm_idx, recv_buf, lease))
 
-                if not posted:
-                    if budget is not None:
-                        budget.release(reserved)
-                    rejected = {
-                        idx
-                        for idx, ref in refs
-                        if self._bounded_rejections is not None
-                        and ref["transfer_id"] in self._bounded_rejections
-                    }
-                    return (
-                        ReceivedBatch({}, budget, 0, rejected_keys=rejected),
-                        0,
-                        get_trace_time() - t0,
-                    )
-
-                # Recv-complete event gates downstream training consumption.
-                done = record_event(stream)
-
-            for operation, response_key, event in operations:
-                operation.wait_event(
-                    event,
-                    check_peer=(
-                        (lambda key=response_key: rv.check_failure(key))
-                        if response_key
-                        else None
-                    ),
+            if not posted:
+                if budget is not None:
+                    budget.release(reserved)
+                rejected = {
+                    idx
+                    for idx, ref in refs
+                    if self._bounded_rejections is not None
+                    and ref["transfer_id"] in self._bounded_rejections
+                }
+                return (
+                    ReceivedBatch({}, budget, 0, rejected_keys=rejected),
+                    0,
+                    get_trace_time() - t0,
                 )
-            wait_event(None, done)  # current (compute) stream waits before reads
 
-            native_pending = False
-
-            # A pair aborted DURING this batch takes its already-posted recvs
-            # down with it.  Their own enqueue succeeded, so nothing raised for
-            # them -- but the communicator they were posted on is gone, and NCCL
-            # will never write their buffers.  Unpacking one reads uninitialised
-            # memory, which the header check then reports as a desynced stream:
-            # an abort we performed ourselves, blamed on the peer.
-            #
-            # Detect it by identity rather than by tracking abort sites: the
-            # comm is PINNED for the whole batch, so eviction cannot move it and
-            # the cached comm_idx changes only if someone explicitly aborted the
-            # pair (recv enqueue failure, recv-buffer alloc failure, quarantine
-            # from any path).  Anything that no longer maps to the comm_idx we
-            # posted on is dead.
-            for entry in posted:
-                if cache.get(_pair_key(entry[1], receiver_rank)) != entry[2]:
-                    raise TransportUnusableError(
-                        "Accepted receive communicator was invalidated: "
-                        + entry[1]["transfer_id"]
-                    )
-
-            for idx, ref, _comm_idx, recv_buf, _lease in posted:
-                try:
-                    cached_views = _lease.bind_views(
-                        ref["layout"],
-                        offset=HEADER_NBYTES,
-                        reset_fields=VARLEN_FIELDS,
-                    )
-                    if self._decode_account is None:
-                        gpu_data = _verify_and_unpack(
-                            recv_buf, ref, device, views=cached_views
-                        )
-                    else:
-                        gpu_data = _verify_and_unpack(
-                            recv_buf,
-                            ref,
-                            device,
-                            on_allocate=self._decode_account,
-                            views=cached_views,
-                        )
-                except PayloadHeaderMismatch as exc:
-                    # Completion alone does not make an incorrectly paired
-                    # stream reusable. Rebuilding one half cannot prove that
-                    # queued peer work is settled; never replay as a cache miss.
-                    raise TransportUnusableError(
-                        f"Accepted payload identity mismatch: {exc}"
-                    ) from exc
-                results[idx] = gpu_data
-                total_bytes += recv_buf.numel() * recv_buf.element_size()
-                # First successful transfer -> this pair is warm (tight timeouts +
-                # normal quarantine from here on).
-                warm.add(_pair_key(ref, receiver_rank))
-
-            decoded = record_event(None)
-            for operation, _key, _event in operations:
-                operation.wait_event(decoded)
             actual = sum(
                 lease.tensor.untyped_storage().nbytes() for *_, lease in posted
             )
@@ -839,8 +768,8 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
             raise
         finally:
             # Release the eviction pins taken by _rendezvous_one.  The comm
-            # was leased from build through recv completion (the
-            # synchronize above), so unpinning earlier would reopen the
+            # was leased from build through confirmed receive completion,
+            # so unpinning earlier would reopen the
             # mid-collective eviction window.
             receiver_rank = self._receiver_rank
             for operation, response_key, _event in operations:

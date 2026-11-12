@@ -29,6 +29,10 @@ against either.  This module owns:
   for SMs / NIC, so the default is deliberately small.  The pool runs at
   **low priority** so compute kernels win at scheduling boundaries.
 
+* :func:`get_receive_lock` shares receive admission through completion per
+  device. This prevents cross-peer dependency cycles across callers even
+  when stream-pool configurations or device aliases differ.
+
 * Event helpers (:func:`record_event`, :func:`wait_event`) mirroring the
   ``activation_offloading`` s0/s1 hand-off.  Correctness is event-based:
 
@@ -63,6 +67,7 @@ from cosmos_rl.utils.logging import logger
 __all__ = [
     "TransferStreamPool",
     "get_transfer_stream_pool",
+    "get_receive_lock",
     "reset_transfer_stream_pools",
     "record_event",
     "wait_event",
@@ -181,6 +186,28 @@ class TransferStreamPool:
 
 _POOLS: Dict[Tuple[Any, int], TransferStreamPool] = {}
 _POOLS_LOCK = threading.Lock()
+_RECEIVE_LOCKS: Dict[Any, Any] = {}
+
+
+def get_receive_lock(device: Any) -> Any:
+    """Share receive admission through device completion across all callers.
+
+    One outstanding receive per device prevents shared-stream dependencies
+    between independent producer pairs. Separate packers and foreground/cache
+    misses must participate in the same schedule, including device aliases.
+    """
+    if isinstance(device, int):
+        device = torch.device("cuda", device)
+    elif device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device(
+            "cuda", torch.cuda.current_device() if torch.cuda.is_available() else 0
+        )
+    with _POOLS_LOCK:
+        return _RECEIVE_LOCKS.setdefault(device, threading.Lock())
 
 
 def get_transfer_stream_pool(
