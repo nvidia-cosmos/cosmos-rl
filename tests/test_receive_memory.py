@@ -419,7 +419,9 @@ def test_uncertain_receive_retains_pins_storage_and_budget(monkeypatch, failure)
     elif failure == "wait":
         monkeypatch.setattr(nccl, "wait_event", fail)
     else:
-        monkeypatch.setattr(nccl, "record_event", lambda *args: mock.Mock(query=fail))
+        monkeypatch.setattr(
+            nccl, "record_event", lambda *args: mock.Mock(synchronize=fail)
+        )
 
     budget, cache = receiver._receive_budget, receiver._comm_cache
     with pytest.raises(TransportUnusableError):

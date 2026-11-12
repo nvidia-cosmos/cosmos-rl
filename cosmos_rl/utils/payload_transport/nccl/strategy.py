@@ -31,6 +31,7 @@ import os
 import socket
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -612,91 +613,100 @@ class NCCLTransportStrategy(PayloadTransportStrategy):
                 # batch cannot enforce this across partial/overlapping fetches.
                 with recv_lock:
                     stream = self._streams.acquire() if self._streams else None
-                    prepared = self._rendezvous_one(ref, pynccl)
-                    if prepared is None:
-                        continue
-                    comm_idx, recv_buf = prepared
-                    operation = getattr(prepared, "operation", None)
-                    if operation is None:
-                        operation = TransportDeadline(
-                            recv_timeout_ms / 1000, "NCCL receive"
-                        )
-                    response_key = getattr(prepared, "response_key", None)
-                    lease = getattr(prepared, "lease", None)
-                    if lease is None:
-                        lease = _DetachedReceiveLease(recv_buf)
-                    operations.append((operation, response_key, None))
-                    recvs.append((idx, ref, comm_idx, recv_buf, lease))
-                    native_pending = True
-                    try:
-                        wait_event(stream, record_event(None))
-                        pynccl.nccl_recv(
-                            recv_buf,
-                            SENDER_LOCAL_RANK,
-                            comm_idx,
-                            stream=stream,
-                            timeout_ms=operation.remaining_ms(),
-                        )
-                    except Exception as exc:
-                        raise TransportUnusableError(
-                            "NCCL receive enqueue failed; native completion unknown"
-                        ) from exc
-                    event = record_event(stream)
-                    operations[-1] = (operation, response_key, event)
-                    operation.wait_event(
-                        event,
-                        check_peer=(
-                            (lambda key=response_key: rv.check_failure(key))
-                            if response_key
-                            else None
-                        ),
-                    )
-                    wait_event(None, event)
-                    native_pending = False
-                    if cache.get(_pair_key(ref, receiver_rank)) != comm_idx:
-                        raise TransportUnusableError(
-                            "Accepted receive communicator was invalidated: "
-                            + ref["transfer_id"]
-                        )
-                    try:
-                        cached_views = lease.bind_views(
-                            ref["layout"],
-                            offset=HEADER_NBYTES,
-                            reset_fields=VARLEN_FIELDS,
-                        )
-                        if self._decode_account is None:
-                            gpu_data = _verify_and_unpack(
-                                recv_buf, ref, device, views=cached_views
+                    # Allocate and decode on the transfer stream so unrelated
+                    # learner compute cannot delay an accepted payload. Native
+                    # and decode completion are established before returning.
+                    with (
+                        torch.cuda.stream(stream)
+                        if stream is not None
+                        else nullcontext()
+                    ):
+                        prepared = self._rendezvous_one(ref, pynccl)
+                        if prepared is None:
+                            continue
+                        comm_idx, recv_buf = prepared
+                        operation = getattr(prepared, "operation", None)
+                        if operation is None:
+                            operation = TransportDeadline(
+                                recv_timeout_ms / 1000, "NCCL receive"
                             )
-                        else:
-                            gpu_data = _verify_and_unpack(
+                        response_key = getattr(prepared, "response_key", None)
+                        lease = getattr(prepared, "lease", None)
+                        if lease is None:
+                            lease = _DetachedReceiveLease(recv_buf)
+                        operations.append((operation, response_key, None))
+                        recvs.append((idx, ref, comm_idx, recv_buf, lease))
+                        native_pending = True
+                        try:
+                            wait_event(stream, record_event(None))
+                            pynccl.nccl_recv(
                                 recv_buf,
-                                ref,
-                                device,
-                                on_allocate=self._decode_account,
-                                views=cached_views,
+                                SENDER_LOCAL_RANK,
+                                comm_idx,
+                                stream=stream,
+                                timeout_ms=operation.remaining_ms(),
                             )
-                    except PayloadHeaderMismatch as exc:
-                        # Completion alone does not make an incorrectly paired
-                        # stream reusable. Rebuilding one half cannot prove that
-                        # queued peer work is settled; never replay as a cache miss.
-                        raise TransportUnusableError(
-                            f"Accepted payload identity mismatch: {exc}"
-                        ) from exc
-                    results[idx] = gpu_data
-                    total_bytes += recv_buf.numel() * recv_buf.element_size()
-                    # First successful transfer -> this pair is warm (tight timeouts +
-                    # normal quarantine from here on).
-                    warm.add(_pair_key(ref, receiver_rank))
+                        except Exception as exc:
+                            raise TransportUnusableError(
+                                "NCCL receive enqueue failed; native completion unknown"
+                            ) from exc
+                        event = record_event(stream)
+                        operations[-1] = (operation, response_key, event)
+                        operation.wait_event(
+                            event,
+                            synchronize=True,
+                            check_peer=(
+                                (lambda key=response_key: rv.check_failure(key))
+                                if response_key
+                                else None
+                            ),
+                        )
+                        wait_event(None, event)
+                        native_pending = False
+                        if cache.get(_pair_key(ref, receiver_rank)) != comm_idx:
+                            raise TransportUnusableError(
+                                "Accepted receive communicator was invalidated: "
+                                + ref["transfer_id"]
+                            )
+                        try:
+                            cached_views = lease.bind_views(
+                                ref["layout"],
+                                offset=HEADER_NBYTES,
+                                reset_fields=VARLEN_FIELDS,
+                            )
+                            if self._decode_account is None:
+                                gpu_data = _verify_and_unpack(
+                                    recv_buf, ref, device, views=cached_views
+                                )
+                            else:
+                                gpu_data = _verify_and_unpack(
+                                    recv_buf,
+                                    ref,
+                                    device,
+                                    on_allocate=self._decode_account,
+                                    views=cached_views,
+                                )
+                        except PayloadHeaderMismatch as exc:
+                            # Completion alone does not make an incorrectly paired
+                            # stream reusable. Rebuilding one half cannot prove that
+                            # queued peer work is settled; never replay as a cache miss.
+                            raise TransportUnusableError(
+                                f"Accepted payload identity mismatch: {exc}"
+                            ) from exc
+                        results[idx] = gpu_data
+                        total_bytes += recv_buf.numel() * recv_buf.element_size()
+                        # First successful transfer -> this pair is warm (tight timeouts +
+                        # normal quarantine from here on).
+                        warm.add(_pair_key(ref, receiver_rank))
 
-                    # Retire this deadline after decoding, before accepting
-                    # another peer; cold setup must not consume a completed
-                    # transfer's warm deadline. The result's buffer lease stays
-                    # owned by the returned batch until consumer release.
-                    operation.wait_event(record_event(None))
-                    operation.close()
-                    operations.pop()
-                    posted.append((idx, ref, comm_idx, recv_buf, lease))
+                        # Retire this deadline after decoding, before accepting
+                        # another peer; cold setup must not consume a completed
+                        # transfer's warm deadline. The result's buffer lease stays
+                        # owned by the returned batch until consumer release.
+                        operation.wait_event(record_event(None), synchronize=True)
+                        operation.close()
+                        operations.pop()
+                        posted.append((idx, ref, comm_idx, recv_buf, lease))
 
             if not posted:
                 if budget is not None:

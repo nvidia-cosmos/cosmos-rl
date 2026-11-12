@@ -1240,7 +1240,7 @@ class NCCLPayloadProducer:
                     # A single point-to-point operation does not need a group.
                     # Omitting it also removes a half-open group on exceptions.
                     registry_done = record_event(stream)
-                operation.wait_event(registry_done)
+                operation.wait_event(registry_done, synchronize=True)
                 completed = True
                 # Release only after confirmed device completion, including
                 # the communicator eviction pin and registry's payload lease.

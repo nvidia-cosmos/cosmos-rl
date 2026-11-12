@@ -32,7 +32,13 @@ indices, pair FIFO, wire format or accepted-operation timeout values. Sorting
 individual batches cannot enforce this rule across partial or concurrent calls.
 
 Transfers on one receiver device are serialized; training can still overlap
-background fetching. Bounded batches retain their existing admission reservation
+background fetching. Allocation and decoding run on the transfer stream, and
+native CUDA completion uses a blocking host wait rather than a fixed polling
+sleep. The independent hard deadline and background peer-failure observer remain
+active during that wait. Rendezvous polls start at 100 microseconds and back off
+to the existing 10 ms maximum; this avoids a 10 ms acknowledgement floor without
+busy-spinning on an unavailable peer. Accepted-operation budgets are unchanged.
+Bounded batches retain their existing admission reservation
 and hold completed buffer leases until consumer release. Uncertain native
 completion still retains storage and communicator pins and is terminal.
 `python -m pytest -q -s tests/test_nccl_payload_schedule.py` checks the scheduling

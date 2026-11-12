@@ -251,7 +251,7 @@ def record_event(stream: Any = None) -> Optional[torch.cuda.Event]:
     """
     if not torch.cuda.is_available():
         return None
-    event = torch.cuda.Event()
+    event = torch.cuda.Event(blocking=True)
     if stream is not None:
         event.record(stream)
     else:

@@ -69,7 +69,19 @@ class TransportDeadline:
         if expired:
             raise TransportUnusableError(f"{self.context}: completion after deadline")
 
-    def wait_event(self, event, *, check_peer=None):
+    def wait_event(self, event, *, check_peer=None, synchronize=False):
+        # NCCL also watches peer outcomes in an independent thread. Its CUDA
+        # wait can therefore block without polling sleeps; the hard timer still
+        # terminates a hung native call. Other backends retain caller polling.
+        if synchronize and event is not None:
+            self.remaining_ms()
+            if check_peer is not None:
+                check_peer()
+            event.synchronize()
+            if check_peer is not None:
+                check_peer()
+            self.remaining_ms()
+            return
         while event is not None and not event.query():
             self.remaining_ms()
             if check_peer is not None:
