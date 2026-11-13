@@ -17,7 +17,7 @@ import requests
 
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.status import PolicyStatusManager
-from test_dispatch_fetch_bounds import fetcher
+from test_dispatch_fetch_bounds import batched_fetcher, fetcher
 from test_zero_staleness_refill_deadlock import _config
 
 
@@ -89,6 +89,31 @@ def test_large_fetch_is_bounded_before_advancing_dataset():
     assert item.data_fetcher.pulled == [0, 1]
     assert fetch(item, 8) == []
     assert item.data_fetcher.pulled == [0, 1]
+
+
+@pytest.mark.parametrize("lag", [0, 1, 4])
+@pytest.mark.parametrize("group", [1, 2, 8])
+def test_terminal_losses_with_dataloader_batches_larger_than_window(lag, group):
+    item = controller(lag=lag, group=group)
+    item.data_fetcher = batched_fetcher()
+    item.data_fetcher.config.rollout.n_generation = group
+    issued_indices = []
+    for _ in range(3):
+        issued = fetch(item, 8)
+        assert [p.weight_version for p in issued] == list(range(lag + 1))
+        assert item.policy_status_manager.samples_on_the_fly == (lag + 1) * group
+        issued_indices.extend(p.prompt_idx for p in issued)
+        assert issued_indices == list(range(len(issued_indices)))
+        assert all(
+            p.training_work_id is None for _, p in item.data_fetcher.fetched_data_buffer
+        )
+        before = list(item.data_fetcher.pulled)
+        assert fetch(item, 8) == []
+        assert item.data_fetcher.pulled == before
+        for payload in issued:
+            assert discard(item, payload, report=f"drop-{payload.prompt_idx}") == group
+        assert item.policy_status_manager.samples_on_the_fly == 0
+        assert item.policy_status_manager.current_step == 0
 
 
 def test_window_diagnostics_include_capacity_and_admitted_work(caplog):
