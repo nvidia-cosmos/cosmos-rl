@@ -7,13 +7,16 @@ global masked-token mean. Native runs retain FP32 master weights/AdamW state.
 This is a small-model arithmetic qualification, not a model-quality benchmark.
 """
 
-from cosmos_rl.dispatcher.data.schema import Rollout
 import argparse
 import copy
 import json
 import math
+import os
 import tempfile
 from pathlib import Path
+
+# Deterministic CUDA matmuls require this before the first cuBLAS context.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import torch
 import torch.distributed as dist
@@ -21,6 +24,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import Qwen2Config
 
+from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.execution.config import ExecutionConfig
 from cosmos_rl.execution.records import SampleRecord
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
