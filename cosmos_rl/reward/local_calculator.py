@@ -21,6 +21,12 @@ from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.reward.base import RolloutGroup
+from cosmos_rl.reward.callbacks import (
+    annotate_reward_result,
+    initialize_reward_callbacks,
+    reward_callbacks_for,
+    reward_read_scope,
+)
 from cosmos_rl.reward.admission import (
     aggregate_excluded_reward_metrics,
     select_payload_completions,
@@ -92,6 +98,8 @@ class LocalRewardCalculator:
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
+        hook_fns=None,
+        callback_context=None,
     ) -> None:
         """
         Setup the LocalRewardCalculator with the given configuration and data packers.
@@ -109,6 +117,9 @@ class LocalRewardCalculator:
             )
             return
         self.config = config
+        initialize_reward_callbacks(self, hook_fns, callback_context)
+        self.data_packer = data_packer
+        self.val_data_packer = val_data_packer
         self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
 
         self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
@@ -160,6 +171,35 @@ class LocalRewardCalculator:
         return cls._instance
 
     def compute_validation_rewards(
+        self, payloads: List[RLPayload], step: int
+    ) -> Tuple[List[RLPayload], bool, int]:
+        with reward_read_scope(
+            getattr(self, "val_data_packer", None),
+            payloads,
+            is_validation=True,
+            callbacks=reward_callbacks_for(self, True),
+        ):
+            return self._compute_validation_rewards(payloads, step)
+
+    def _compute_group(self, group, *, is_validation):
+        rollouts = group.compute_rollouts(
+            self.val_rl_algo if is_validation else self.rl_algo,
+            apply_completion_admission=not is_validation,
+        )
+        annotate_reward_result(
+            getattr(self, "val_data_packer" if is_validation else "data_packer", None),
+            group.payload,
+            group.completion_admission,
+            group.all_rewards,
+            group.all_filter_rewards,
+            [rollout.advantage for rollout in rollouts],
+            group.all_reward_metrics,
+            is_validation=is_validation,
+            callbacks=reward_callbacks_for(self, is_validation),
+        )
+        return rollouts
+
+    def _compute_validation_rewards(
         self,
         payloads: List[RLPayload],
         step: int,
@@ -191,9 +231,7 @@ class LocalRewardCalculator:
         ]
 
         rollouts_list: List[List[Rollout]] = [
-            rollout_group.compute_rollouts(
-                self.val_rl_algo, apply_completion_admission=False
-            )
+            self._compute_group(rollout_group, is_validation=True)
             for rollout_group in rollout_groups
         ]
         payload_list: List[RLPayload] = []
@@ -227,6 +265,7 @@ class LocalRewardCalculator:
                         for rollout in rollouts_group
                     ],
                     cumulative_logprob=payloads[idx].cumulative_logprob,
+                    completion_diagnostics=payloads[idx].completion_diagnostics,
                     teacher_result_uuids=payloads[idx].teacher_result_uuids,
                     prompt_logprobs=payloads[idx].prompt_logprobs,
                     prompt_token_ids=payloads[idx].prompt_token_ids,
@@ -235,9 +274,21 @@ class LocalRewardCalculator:
         return payload_list, True, step
 
     def compute_rewards(
+        self, payloads: List[RLPayload], is_validation: bool, step: int
+    ) -> Tuple[List[RLPayload], bool, int]:
+        if is_validation:
+            return self.compute_validation_rewards(payloads, step)
+        with reward_read_scope(
+            getattr(self, "data_packer", None),
+            payloads,
+            is_validation=False,
+            callbacks=reward_callbacks_for(self, False),
+        ):
+            return self._compute_training_rewards(payloads, step)
+
+    def _compute_training_rewards(
         self,
         payloads: List[RLPayload],
-        is_validation: bool,
         step: int,
     ) -> Tuple[List[RLPayload], bool, int]:
         """
@@ -255,9 +306,6 @@ class LocalRewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        if is_validation:
-            return self.compute_validation_rewards(payloads, step)
-
         assert all(payload.prompt_idx >= 0 for payload in payloads), (
             "[Reward] All payloads should have a valid prompt index"
         )
@@ -273,7 +321,7 @@ class LocalRewardCalculator:
         ]
 
         rollouts_list: List[List[Rollout]] = [
-            rollout_group.compute_rollouts(self.rl_algo)
+            self._compute_group(rollout_group, is_validation=False)
             for rollout_group in rollout_groups
         ]
         payload_list: List[RLPayload] = []

@@ -72,6 +72,15 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     calculator = object.__new__(LocalRewardCalculator)
     calculator.config = config
     calculator.rl_algo = algo
+    annotations = Mock(
+        side_effect=lambda payload, result: [
+            {"original_slot": index} for index in range(len(result.rewards))
+        ]
+    )
+    cleanup = Mock()
+    calculator.data_packer = SimpleNamespace(
+        annotate_reward_result=annotations, on_reward_read_complete=cleanup
+    )
     pending = Queue()
 
     def enqueue(payloads, is_validation, step, **kwargs):
@@ -117,8 +126,22 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     trainable = len(selected) >= algo.minimum_trainable_completions
     assert algo.advantage_inputs == ([selected] if trainable else [])
     expected_count = len(selected) if trainable else 0
+    assert annotations.call_count == cleanup.call_count == 1
+    result = annotations.call_args.args[1]
+    assert result.selected_indices == (
+        tuple(index for index, keep in enumerate(mask) if keep) if trainable else ()
+    )
+    assert result.rewards == (0.0, 1.0, 100.0)
     if mode == "identified":
         assert len(request.completion_failures) == 3 - expected_count
+        assert {
+            failure.diagnostics.original_index
+            for failure in request.completion_failures
+        } == set(range(3)) - set(result.selected_indices)
+        assert [
+            item.original_index for item in request.completion_diagnostics or []
+        ] == list(result.selected_indices)
+        request = type(request).model_validate_json(request.model_dump_json())
     else:
         assert request.metrics.get("discarded_samples", 0) == 3 - expected_count
 

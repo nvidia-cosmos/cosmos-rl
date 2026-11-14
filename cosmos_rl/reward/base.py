@@ -42,6 +42,8 @@ class RolloutGroup:
         self.reference_answer: str = reference_answer
         self.completion_admission: Optional[CompletionAdmission] = None
         self.all_reward_metrics: List[Dict[str, Any]] = []
+        self.all_rewards: List[float] = []
+        self.all_filter_rewards: List[float] = []
         self.excluded_reward_metrics: Dict[int, Dict[str, Any]] = {}
 
     def compute_rollouts(
@@ -90,6 +92,8 @@ class RolloutGroup:
         )
         self.completion_admission = admission
         self.all_reward_metrics = rewards[2]
+        self.all_rewards = rewards[0]
+        self.all_filter_rewards = rewards[1]
         training_excluded_indices = (
             range(admission.original_size)
             if admission.group_excluded

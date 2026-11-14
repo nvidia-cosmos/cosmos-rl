@@ -169,7 +169,7 @@ class Controller:
                 raise ValueError(
                     "Application admission currently requires disaggregated non-DAPO GRPO"
                 )
-            self.completion_admission = CompletionAdmissionState()
+            self.completion_admission = CompletionAdmissionState(hook_fns=hook_fns)
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )

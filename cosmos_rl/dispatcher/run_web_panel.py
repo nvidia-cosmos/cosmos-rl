@@ -412,18 +412,40 @@ async def lifespan(app: FastAPI):
 
     task = asyncio.create_task(monitor_replica_status())
     task.add_done_callback(_observe_controller_monitor)
+    primary_error = None
     try:
         yield
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
+        first_error = primary_error
         shutdown_event.set()
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        try:
+            with suppress(asyncio.CancelledError):
+                await task
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
         from cosmos_rl.dispatcher.publication import ControllerPublisher
 
         publisher = getattr(controller, "redis_controller", None)
-        if isinstance(publisher, ControllerPublisher):
-            await publisher.close()
+        try:
+            if isinstance(publisher, ControllerPublisher):
+                await publisher.close()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        admission = getattr(controller, "completion_admission", None)
+        try:
+            if admission is not None:
+                await asyncio.to_thread(admission.close)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        if primary_error is None and first_error is not None:
+            raise first_error
 
 
 def _observe_controller_monitor(task):

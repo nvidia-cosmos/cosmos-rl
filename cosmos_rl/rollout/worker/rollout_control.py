@@ -77,6 +77,7 @@ from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
 )
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.dispatcher import RewardDispatcher
+from cosmos_rl.utils.application_callbacks import CallbackContext
 from cosmos_rl.reward.identity import CompletionReporter
 from cosmos_rl.reward.reservations import (
     attach_training_rejections,
@@ -320,6 +321,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_dataset=kwargs.get("val_dataset"),
             val_data_packer=kwargs.get("val_data_packer"),
             val_reward_fns=kwargs.get("val_reward_fns"),
+            hook_fns=kwargs.get("hook_fns"),
         )
         self.non_trainable_params_received = False
 
@@ -371,6 +373,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[Union[BaseDataPacker, Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
+        hook_fns=None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -410,6 +413,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             num_workers=COSMOS_REWARD_DISPATCHER_CONCURRENCY
             if self.should_report
             else 0,
+            hook_fns=hook_fns,
+            callback_context=CallbackContext(
+                role="reward",
+                replica_name=self.replica_name,
+                global_rank=self.global_rank,
+            ),
         )
 
         if self._is_async_rollout:
