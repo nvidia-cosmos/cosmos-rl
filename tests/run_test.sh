@@ -95,6 +95,7 @@ run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_
 run python tests/execution_workflow_canary.py
 
 # run tests
+run python -m pytest -q -s tests/test_nccl_payload_schedule.py
 run python tests/test_video_decode.py
 run python -m pytest -q tests/test_deterministic_attention.py
 run python tests/microbatch_numerics_probe.py --output "${TEST_LOG_DIR}/microbatch-numerics"
@@ -210,6 +211,7 @@ run python tests/test_nccl_e2e.py
 # listing them is far below the cost of a silent gap this size.
 run python tests/test_comm_base_attach.py
 run python tests/test_logging_level.py
+run python -m pytest -q tests/test_report_aggregation.py
 run /bin/bash -c "python -m pip install --quiet 'pytest>=8,<9' && python -m pytest -q tests/test_wandb_identity.py"
 run /bin/bash -c "python -m pip install --quiet 'pytest>=8,<9' && python -m pytest -q tests/test_rollout_resource_ownership.py"
 run python tests/test_nccl_addressing.py

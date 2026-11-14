@@ -224,6 +224,91 @@ def remote(packer, source):
     return calculator, pending
 
 
+@pytest.mark.parametrize("path", ["local", "remote", "bypass"])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_rollout_only_preserves_results_and_finishes_both_reward_readers(
+    path, cleanup_failure
+):
+    packer = Packer()
+    source = payload([False] * 3)
+    original = source.completions
+    cleanup_error = RuntimeError("registered reader cleanup failed")
+    cleanup = Mock(side_effect=cleanup_error if cleanup_failure else None)
+    if path == "local":
+        owner = local(packer)
+        owner.scorer = SimpleNamespace(
+            compute_reward=Mock(return_value=([1.0, 100.0, 3.0], [], [{}, {}, {}]))
+        )
+
+        def compute():
+            return owner.compute_rewards([source], False, 7)
+
+    elif path == "remote":
+        owner, pending = remote(packer, source)
+
+        def compute():
+            return owner.get_results(pending)
+
+    else:
+        owner = RewardDispatcher()
+        owner.data_packer = owner.val_data_packer = packer
+        owner.is_remote = False
+
+        def compute():
+            owner.enqueue_rewards_cal([source], False, 7, bypass_reward=True)
+            return owner.dequeue_rewards_cal()[:3]
+
+    owner.rollout_only = True
+    initialize_reward_callbacks(owner, {"reward_read_complete": cleanup})
+    if cleanup_failure:
+        with pytest.raises(RuntimeError) as error:
+            compute()
+        assert error.value is cleanup_error
+    else:
+        output, validation, step = compute()
+        assert output == [source] and not validation and step == 7
+        assert source.completions is original
+        assert source.completion_trainable == [False] * 3
+        assert source.rewards == ([0.0] * 3 if path == "bypass" else [1.0, 100.0, 3.0])
+        assert source.advantages == [0.0] * 3
+    cleanup.assert_called_once_with(source, is_validation=False, error=None)
+    assert packer.notifications == [(5, False, None)]
+
+
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_rollout_only_synchronous_failure_finishes_unprocessed_batches_once(
+    monkeypatch, cleanup_failure
+):
+    packer = Packer()
+    sources = [payload([False] * 3) for _ in range(3)]
+    for index, source in enumerate(sources):
+        source.prompt_idx = index
+    primary = ValueError("scoring failed")
+    calculator = local(packer)
+    calculator.rollout_only = True
+    calculator.scorer = SimpleNamespace(compute_reward=Mock(side_effect=primary))
+    monkeypatch.setattr(LocalRewardCalculator, "get_instance", lambda: calculator)
+    dispatcher = RewardDispatcher()
+    dispatcher.rollout_only = True
+    dispatcher.is_remote = False
+    dispatcher.payload_per_task = 1
+    dispatcher.data_packer = packer
+    cleanup = Mock(
+        side_effect=RuntimeError("secondary cleanup failed")
+        if cleanup_failure
+        else None
+    )
+    for owner in (calculator, dispatcher):
+        initialize_reward_callbacks(owner, {"reward_read_complete": cleanup})
+    with pytest.raises(ValueError) as error:
+        dispatcher.enqueue_rewards_cal(sources, False, 7)
+    assert error.value is primary
+    assert cleanup.call_count == 3
+    assert [call.args[0].prompt_idx for call in cleanup.call_args_list] == [0, 1, 2]
+    assert packer.notifications == [(index, False, primary) for index in range(3)]
+    assert dispatcher.task_queue.empty()
+
+
 @pytest.mark.parametrize("failure", [None, "annotation", "advantage", "enqueue"])
 def test_remote_reward_callbacks_and_terminal_failure_cleanup(failure):
     packer = Packer()
