@@ -187,8 +187,8 @@ class Controller:
             task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
         )
         self.is_diffusers = self.config.policy.is_diffusers
-        self.weight_version_to_prompt_num = {}  # Only for on-policy.
-        # Completion-level rejection can leave an on-policy step short after
+        self.weight_version_to_prompt_num = {}  # Non-DAPO disaggregated quotas.
+        # Completion-level rejection can leave a training step short after
         # its normal prompt quota has already been issued.  Credits reopen
         # prompt slots for that same weight version without erasing the total
         # attempt count used by max_retry_for_on_policy.
@@ -448,19 +448,12 @@ maxmemory-policy noeviction
         """
 
         train_policy = self.config.train.train_policy
-        # The prompt-version quota applies to every non-DAPO disaggregated run,
-        # not just those that set ``on_policy``.  What decides whether a leaked
-        # slot deadlocks is the staleness window: a worker with
-        # ``allowed_outdated_steps=0`` can never accept the next-version prompt
-        # a leak produces, so refill on strictness, not on the flag alone.
-        strict = bool(getattr(train_policy, "on_policy", False)) or (
-            getattr(train_policy, "allowed_outdated_steps", None) == 0
-        )
+        # Every non-DAPO disaggregated RL run spends a prompt-version quota.
+        # Positive staleness only postpones exhaustion: losing all usable
+        # groups leaves no update that could unlock the next version.
         if (
             discarded_samples <= 0
-            or not (
-                strict or getattr(train_policy, "data_dispatch_as_rank_in_mesh", False)
-            )
+            or getattr(train_policy, "type", None) == "sft"
             or train_policy.variant == "dapo"
             or self.config.mode == "colocated"
         ):
@@ -586,6 +579,100 @@ maxmemory-policy noeviction
             self.weight_version_to_prompt_num[weight_version] = (
                 self.weight_version_to_prompt_num.get(weight_version, 0) + 1
             )
+
+    def _limit_prompt_fetch_to_window(
+        self, n: int, *, starting_weight_version: int, prompt_quota: int
+    ) -> int:
+        """Bound the whole fetch before it advances the dataset.
+
+        Queued/admitted batches determine the starting stamp, as in native
+        assignment. Use weights already reported or staged for transfer to
+        bound what workers can reach without another generation. The controller
+        can be ahead of those weights between sync intervals or while syncs
+        are coalesced. Blocked future work must not occupy every throttle slot
+        and prevent terminal-loss replacements.
+        """
+        status = self.policy_status_manager
+        policy = self.config.train.train_policy
+        available_versions = [
+            version
+            for version in (
+                getattr(status, "_weight_last_staged_step", None),
+                getattr(status, "_weight_max_adopted_version", None),
+            )
+            if type(version) is int and version >= 0
+        ]
+        # Before the initial sync, the restored controller step is the weight
+        # version the startup protocol will deliver. Staged transfers may still
+        # be in flight; waiting for them does not require another training step.
+        reachable_weight_version = min(
+            status.current_step, max(available_versions, default=status.current_step)
+        )
+        ceiling = reachable_weight_version + policy.allowed_outdated_steps
+        self._prune_refill_state(before_weight_version=starting_weight_version)
+        replacements = getattr(self, "weight_version_to_replacement_prompt_issued", {})
+        credits = getattr(self, "weight_version_to_replacement_prompt_num", {})
+        normal = {
+            version: max(
+                0,
+                prompt_quota
+                - self.weight_version_to_prompt_num.get(version, 0)
+                + replacements.get(version, 0),
+            )
+            for version in range(starting_weight_version, ceiling + 1)
+        }
+        refill = {version: credits.get(version, 0) for version in normal}
+        bounded = min(n, sum(normal.values()) + sum(refill.values()))
+
+        # Preserve intentional soft-throttle overflow, but enforce a configured
+        # hard ceiling over the whole batch. Round up to one complete prompt:
+        # a partial group must not strand a batch that needs its last completion.
+        inflight_steps = policy.max_inflight_steps
+        if policy.outdated_rollout_fetch_batch_size == 0:
+            soft_steps = policy.allowed_outdated_steps + 1
+            inflight_steps = (
+                soft_steps
+                if inflight_steps is None
+                else min(inflight_steps, soft_steps)
+            )
+        if inflight_steps is not None:
+            remaining = max(
+                0,
+                inflight_steps * self.config.train.train_batch_per_replica * len(status)
+                - status.samples_on_the_fly,
+            )
+            bounded = min(
+                bounded, math.ceil(remaining / self.config.rollout.n_generation)
+            )
+        now = time.monotonic()
+        if (
+            bounded < n
+            and now - getattr(self, "_prompt_window_last_log_ts", -math.inf)
+            >= self._SOFT_THROTTLE_HEARTBEAT_S
+        ):
+            self._prompt_window_last_log_ts = now
+            logger.info(
+                "[Controller] Prompt window limited fetch %d -> %d: "
+                "current_step=%d latest_reported_weight_version=%s "
+                "staged_weight_version=%s reachable_weight_version=%d "
+                "starting_version=%d ceiling=%d "
+                "pending_admitted=%d dispatched_steps=%s outstanding=%d "
+                "normal_slots=%s refill_slots=%s",
+                n,
+                bounded,
+                status.current_step,
+                getattr(status, "_weight_max_adopted_version", None),
+                getattr(status, "_weight_last_staged_step", None),
+                reachable_weight_version,
+                starting_weight_version,
+                ceiling,
+                status.total_pending_rollouts(),
+                list(status.dispatched_rollouts_by_step),
+                status.samples_on_the_fly,
+                normal,
+                refill,
+            )
+        return bounded
 
     def _update_soft_throttle_state(
         self,
@@ -847,6 +934,17 @@ maxmemory-policy noeviction
             # Don't do the weight version control at fetching when there is replica scaling since the pending rollout count may not reflect the real training status of the policy replicas during scaling, which may lead to too aggressive throttling and cause starvation of rollout generation.
             and len(self.policy_status_manager.replica_scaling_log) == 0
         ):
+            if self.config.train.train_policy.variant != "dapo" and not rank_dispatch:
+                n = self._limit_prompt_fetch_to_window(
+                    n,
+                    starting_weight_version=weight_version_for_current_batch,
+                    prompt_quota=global_batch_size,
+                )
+                if n == 0:
+                    return [], (
+                        not self.config.validation.enable
+                        and self.policy_status_manager.training_finished()
+                    )
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
                 validation_step,
@@ -893,21 +991,20 @@ maxmemory-policy noeviction
                     # Assign estimated weight version to each payload for weight version control.
                     payloads_list[i].weight_version = weight_version_for_current_batch
 
-            # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
+            # Replacements at later stamps also consume their version's budget.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                already_retried_times = math.ceil(
-                    self.weight_version_to_prompt_num.get(
-                        weight_version_for_current_batch, 0
+                for version in dict.fromkeys(p.weight_version for p in payloads_list):
+                    already_retried_times = math.ceil(
+                        self.weight_version_to_prompt_num.get(version, 0)
+                        / global_batch_size
                     )
-                    / global_batch_size
-                )
-                if (
-                    already_retried_times
-                    > self.config.train.train_policy.max_retry_for_on_policy
-                ):
-                    raise RuntimeError(
-                        f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
-                    )
+                    if (
+                        already_retried_times
+                        > self.config.train.train_policy.max_retry_for_on_policy
+                    ):
+                        raise RuntimeError(
+                            f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {version} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
+                        )
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             # Colocated preparation owns its refill budget. A fixed prompt

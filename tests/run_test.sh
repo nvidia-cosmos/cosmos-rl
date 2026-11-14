@@ -274,6 +274,8 @@ run python -m pytest -q tests/test_objective_weighting.py tests/test_vla_objecti
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_rollout_mesh_retirement.py tests/test_weight_sync_rebuild_safety.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
 run python -m pytest -q tests/test_dispatch_fetch_bounds.py
+run python -m pytest -q tests/test_strict_refill_batch_versions.py
+run python -m pytest -q tests/test_prompt_dispatch_liveness.py
 run python -m pytest -q tests/test_rank_dispatch_refill.py
 run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend gloo
 run python -m pytest -q tests/test_dispatch_failure_reporting.py

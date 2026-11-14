@@ -124,6 +124,34 @@ Replacement prompts do not consume still-unissued normal prompt quota. This is
 essential when a producer reports a failure before other producers finish
 fetching their initial batch, especially with zero allowed staleness.
 
+Every disaggregated non-DAPO RL run reopens same-version prompt capacity after
+terminal sample loss, including runs with positive allowed staleness. Losing all
+usable groups must leave replacement work that can run without a training update.
+
+In shared-queue dispatch, each fetch is bounded before reading dataset rows or
+charging samples. Capacity is the unused normal quota plus replacement credits
+from the native admission-derived starting version through
+`reachable_weight_version + allowed_outdated_steps`. Reachable weights include
+versions already reported by rollouts or staged for transfer, bounded by the
+controller step. This prevents a sync interval or coalesced sync from issuing
+work that needs a version unavailable until another training update. Before
+the initial sync, the startup protocol delivers the restored controller version.
+With zero allowed staleness, a request
+for four prompts with one replacement credit and no ordinary capacity returns
+that one replacement, leaving the next version's quota untouched. In-flight
+limits apply to the whole fetch, rounded up to a complete generation group so
+the final missing completion can be supplied. Empty capacity gives a temporary
+empty response; the existing training-completion signal remains authoritative.
+Validation, DAPO, colocated and scaling paths retain their existing behavior;
+rank-affine dispatch uses its destination quotas.
+
+The existing `max_retry_for_on_policy` setting also bounds asynchronous
+disaggregated attempts despite its name. A positive value limits attempted
+prompt batches per weight version, counting replacements and every version in
+a fetch. Exhaustion is terminal: the HTTP receipt marks controller failure, the
+controller monitor exits with code 86, and the launcher fails the run and kills
+its worker processes. A nonpositive value permits unbounded replacements.
+
 Admission and replica changes share the controller lifecycle lock. Closed
 admission discards without reopening prompt capacity. An infrastructure error
 after settlement starts terminates the controller process with exit code 86.
