@@ -371,26 +371,26 @@ def test_partial_decode_failure_releases_all_accounting(monkeypatch):
     )
 
 
-def test_mid_window_allocation_failure_retains_pending_receive(monkeypatch):
+def test_next_allocation_failure_releases_completed_receive(monkeypatch):
+    monkeypatch.setattr(nccl, "_FAILED_RECEIVE_OWNERS", [])
     receiver, raw_refs, _ = make_receiver(monkeypatch)
     rendezvous = receiver._rendezvous_one
 
     def fail_second_allocation(ref, pynccl):
         if ref["transfer_id"] == f"1:{1:032x}":
-            raise torch.OutOfMemoryError("injected allocation after pending recv")
+            raise torch.OutOfMemoryError("injected allocation after completed recv")
         return rendezvous(ref, pynccl)
 
     monkeypatch.setattr(receiver, "_rendezvous_one", fail_second_allocation)
-    with pytest.raises(TransportUnusableError, match="before native completion"):
+    with pytest.raises(ReceiveMemoryError, match="after completed recv"):
         receiver._fetch_all(refs_for([3, 5, 9]))
     gc.collect()
-    # nccl_recv enqueued work; no receive-complete event was recorded before
-    # the next allocation failed. A compute-stream sync cannot prove this
-    # independent transfer stream stopped using its raw receive storage.
-    assert len(raw_refs) == 1 and raw_refs[0]() is not None
-    assert receiver._receive_budget.closed
-    assert receiver._receive_budget.used > 0
-    assert receiver._receive_budget.raw > 0
+    # A subsequent allocation is reached only after the previous native
+    # receive and decode completed; no uncertain operand needs quarantine.
+    assert len(raw_refs) == 1
+    assert not nccl._FAILED_RECEIVE_OWNERS
+    assert not receiver._receive_budget.closed
+    assert receiver._receive_budget.used == receiver._receive_budget.raw == 0
 
 
 @pytest.mark.parametrize("failure", ["enqueue", "record", "wait", "completion"])
@@ -419,7 +419,9 @@ def test_uncertain_receive_retains_pins_storage_and_budget(monkeypatch, failure)
     elif failure == "wait":
         monkeypatch.setattr(nccl, "wait_event", fail)
     else:
-        monkeypatch.setattr(nccl, "record_event", lambda *args: mock.Mock(query=fail))
+        monkeypatch.setattr(
+            nccl, "record_event", lambda *args: mock.Mock(synchronize=fail)
+        )
 
     budget, cache = receiver._receive_budget, receiver._comm_cache
     with pytest.raises(TransportUnusableError):

@@ -43,6 +43,7 @@ from cosmos_rl.reward.callbacks import (
     reward_read_scope,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.utils.network_util import make_request_with_retry
 
 try:
@@ -132,12 +133,21 @@ class RemoteRewardCalculator:
         self.data_packer = data_packer
         self.val_data_packer = val_data_packer
         self.val_config = config.validation.remote_reward
-        self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
-            reward_fn=None,
-            unbiased=config.train.train_policy.unbiased_advantage,
-            config=config,
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
         )
-        self.minimum_trainable_completions = self.rl_algo.minimum_trainable_completions
+        self.rl_algo = (
+            None
+            if self.rollout_only
+            else REGISTERED_ALGOs[config.train.train_policy.algo](
+                reward_fn=None,
+                unbiased=config.train.train_policy.unbiased_advantage,
+                config=config,
+            )
+        )
+        self.minimum_trainable_completions = (
+            0 if self.rollout_only else self.rl_algo.minimum_trainable_completions
+        )
         # We use wan2pt1 VAE tokenizer to encode the images/videos into latents.
         try:
             self.tokenizer = Wan2pt1VAEInterface(
@@ -471,7 +481,7 @@ class RemoteRewardCalculator:
                 and 400 <= response.status_code < 500
                 and response.status_code not in (408, 425, 429)
             )
-            if permanent:
+            if permanent or getattr(self, "rollout_only", False):
                 self.close(error)
                 raise
             logger.info("[RemoteRewardCalculator] Reward fetch deferred: %s", error)
@@ -539,12 +549,17 @@ class RemoteRewardCalculator:
         assert all(step == valid_steps[0] for step in valid_steps), (
             "[Reward] All steps should be the same"
         )
+        if getattr(self, "rollout_only", False) and not valid_payloads:
+            return None, False, -1
         is_validation = valid_stages[0] == "validation"
         step = valid_steps[0]
 
         payload_list: List[RLPayload] = []
         for i, payload in enumerate(valid_payloads):
             rewards = valid_results[i]
+            if getattr(self, "rollout_only", False):
+                payload_list.append(prepare_scored_payload(payload, rewards.tolist()))
+                continue
             admission = resolve_completion_admission(
                 payload,
                 self.minimum_trainable_completions,

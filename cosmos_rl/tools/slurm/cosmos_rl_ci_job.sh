@@ -119,7 +119,8 @@ Options:
                                        Default: a fresh dir under --scratch-path.
   --repo-root-path DIR                 Repo to mount + test (provides tests/)
   --package-wheel PATH                Install this candidate wheel in the ephemeral
-                                       container; mount only tests/ (GitHub layout).
+                                       container; mount tests/ and optional configs/
+                                       and examples/ assets (GitHub layout).
                                        Requires --repo-root-path. No source overlay.
   --test-deps-dir DIR                  Optional offline wheelhouse for pytest>=8,<9
                                        and GitHub's ucxx-cu12>=0.40.0 extra.
@@ -383,9 +384,15 @@ fi
 # Mount the repo so the latest tests/ (and optionally working-tree code) run,
 # rather than only the code baked into the container image.
 if [[ -n "${COSMOS_CI_PACKAGE_WHEEL:-}" ]]; then
-    # Mount only tests, as GitHub does. Installing into the container interpreter
-    # also pins subprocess imports when a test replaces PYTHONPATH.
+    # Match GitHub's test and example assets without overlaying package code.
+    # Installing into the container interpreter also pins subprocess imports
+    # when a test replaces PYTHONPATH.
     MOUNTS="${MOUNTS},${REPO_ROOT_PATH}/tests:/workspace/cosmos-rl/tests:ro"
+    for asset_dir in configs examples; do
+        if [[ -d "${REPO_ROOT_PATH}/${asset_dir}" ]]; then
+            MOUNTS="${MOUNTS},${REPO_ROOT_PATH}/${asset_dir}:/workspace/cosmos-rl/${asset_dir}:ro"
+        fi
+    done
     MOUNTS="${MOUNTS},${COSMOS_CI_PACKAGE_WHEEL}:/ci-wheel/$(basename "${COSMOS_CI_PACKAGE_WHEEL}"):ro"
 elif [[ -n "${REPO_ROOT_PATH}" ]]; then
     MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"

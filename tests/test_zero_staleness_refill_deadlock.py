@@ -165,11 +165,11 @@ def test_strict_staleness_without_on_policy_flag_also_refills():
     assert [p.weight_version for p in payloads] == [8]
 
 
-def test_lenient_staleness_does_not_refill():
-    """With slack to spare, a next-version prompt is admissible; don't refill."""
+def test_lenient_staleness_also_refills():
+    """A finite staleness window can also lose every usable prompt slot."""
     config = _config(on_policy=False, allowed_outdated_steps=1)
     controller = _controller(config, samples_on_the_fly=16, pending_rollouts=16)
-    assert controller.register_discarded_samples_for_refill(8, N_GENERATION) == 0
+    assert controller.register_discarded_samples_for_refill(8, N_GENERATION) == 1
 
 
 def test_settlement_through_the_manager_also_reopens_the_slot():

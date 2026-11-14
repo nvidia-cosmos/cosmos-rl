@@ -79,6 +79,8 @@ jobs:
             --shm-size=24G \
             -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
             -v /tmp/cache:/root/.cache \
+            -v ${{ github.workspace }}/configs:/workspace/cosmos-rl/configs:ro \
+            -v ${{ github.workspace }}/examples:/workspace/cosmos-rl/examples:ro \
             -e PYTHONPYCACHEPREFIX=/tmp/pycache \
             -w /workspace/cosmos-rl \
             ${{ steps.vars.outputs.image_tag }} /bin/bash)

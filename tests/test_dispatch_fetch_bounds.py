@@ -56,6 +56,62 @@ def fetcher(*, rollout_size=2, policy_size=1, quota=1, indices=range(100)):
     return item
 
 
+def batched_fetcher(*, batch_size=8, indices=range(31)):
+    from torch.utils.data import DataLoader, IterableDataset
+
+    from cosmos_rl.dispatcher.data.schema import RLPayload
+
+    item = fetcher()
+    item.config.train.train_policy.data_dispatch_as_rank_in_mesh = False
+    item.rollout_batch_size = item.val_batch_size = batch_size
+
+    class Dataset(IterableDataset):
+        def __iter__(self):
+            for index in indices:
+                item.pulled.append(index)
+                yield index, RLPayload(prompt_idx=index, prompt="p")
+
+    item.train_dataloader = DataLoader(
+        Dataset(), batch_size=batch_size, collate_fn=RLPayload.collate_fn
+    )
+    item.train_dataloader_iter = iter(item.train_dataloader)
+    return item
+
+
+def test_shared_queue_splits_dataloader_batches_without_loss_or_early_exhaustion():
+    item = batched_fetcher(indices=range(17))
+    item.config.train.epoch = 1
+    received = []
+    for requested in (1, 3, 0, 7, 1, 10):
+        values, exhausted = item.get_batched_prompt(requested, weight_version=7)
+        assert len(values) <= requested
+        received.extend(value.prompt_idx for value in values)
+        assert received == list(range(len(received)))
+        assert not exhausted
+        if requested in (1, 3, 0) and len(received) <= 4:
+            assert item.pulled == list(range(8))
+            assert item.epoch == 1
+    assert received == list(range(17))
+    assert item.pulled == received
+    assert not item.fetched_data_buffer
+    assert item.get_batched_prompt(1, weight_version=7) == ([], True)
+
+
+def test_validation_preserves_legacy_batches_and_training_remainders():
+    item = batched_fetcher()
+    validation_iterator = iter(item.train_dataloader)
+    item.validation_get_dataloader = lambda step: validation_iterator
+    train, _ = item.get_batched_prompt(1, weight_version=7)
+    validation, _ = item.get_batched_prompt(2, validation_step=0)
+    assert [p.prompt_idx for p in train] == [0]
+    assert [p.prompt_idx for p in validation] == list(range(8))
+    assert [idx for idx, _ in item.fetched_data_buffer] == list(range(1, 8))
+    assert not item.fetched_data_buffer_for_validation
+    train, _ = item.get_batched_prompt(2, weight_version=8)
+    assert [p.prompt_idx for p in train] == [1, 2]
+    assert item.pulled == list(range(8)) * 2
+
+
 def test_full_shared_quota_does_not_pull_or_roll_epochs():
     item = fetcher()
     values, exhausted = item.get_batched_prompt(1, rank_in_mesh=0, weight_version=1)

@@ -40,6 +40,7 @@ from cosmos_rl.reward.callbacks import (
     reward_read_scope,
 )
 from cosmos_rl.reward.remote_calculator import RemoteRewardCalculator
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.reward.local_calculator import LocalRewardCalculator
 
 
@@ -160,10 +161,19 @@ class RewardDispatcher:
         self.callback_context = callback_context
         self.data_packer = data_packer
         self.val_data_packer = val_data_packer
-        self.is_remote = config.train.train_policy.use_remote_reward
-        self.minimum_trainable_completions = REGISTERED_ALGOs[
-            config.train.train_policy.algo
-        ].minimum_trainable_completions
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+        )
+        self.is_remote = config.train.train_policy.use_remote_reward and not (
+            self.rollout_only and config.train.train_policy.bypass_reward
+        )
+        self.minimum_trainable_completions = (
+            0
+            if self.rollout_only
+            else REGISTERED_ALGOs[
+                config.train.train_policy.algo
+            ].minimum_trainable_completions
+        )
         if self.is_remote:
             self.remote_batch_size = config.train.train_policy.remote_reward.batch_size
 
@@ -198,7 +208,11 @@ class RewardDispatcher:
             data_packer,
             val_data_packer,
         )
-        if not self.is_remote and num_workers > 0:
+        if (
+            not self.is_remote
+            and num_workers > 0
+            and not (self.rollout_only and config.train.train_policy.bypass_reward)
+        ):
             # Use multiprocessing for local reward calculation
             # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor in non-text mode.
             # Unlike ProcessPoolExecutor, ThreadPoolExecutor can parse the tensors, videos, images directly
@@ -304,6 +318,23 @@ class RewardDispatcher:
                         "val_data_packer" if is_validation else "data_packer",
                         None,
                     )
+                    if self.executor is None and getattr(self, "rollout_only", False):
+                        try:
+                            computed = RewardDispatcher.compute_rewards(
+                                batch, is_validation, step, False
+                            )
+                        except BaseException:
+                            # The calculator scope already cleaned this batch.
+                            # Only later, unprocessed groups remain owned here.
+                            with reward_read_scope(
+                                packer,
+                                payloads[i + self.payload_per_task :],
+                                is_validation=is_validation,
+                                callbacks=reward_callbacks_for(self, is_validation),
+                            ):
+                                raise
+                        self.task_queue.put(computed)
+                        continue
                     try:
                         future = self.executor.submit(
                             RewardDispatcher.compute_rewards,
@@ -345,6 +376,10 @@ class RewardDispatcher:
                     self.task_queue.put(future)
 
     def _bypass_rewards(self, payloads, is_validation, step):
+        if getattr(self, "rollout_only", False):
+            for payload in payloads:
+                prepare_scored_payload(payload)
+            return [(payloads, is_validation, step)]
         results = []
         for i in range(0, len(payloads), self.payload_per_task):
             # Directly return the payloads with zero rewards and advantages

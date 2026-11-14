@@ -178,7 +178,7 @@ def test_partial_discard_reports_share_one_replacement_prompt():
     assert controller.weight_version_to_replacement_prompt_num == {5: 1}
 
 
-def test_non_on_policy_discard_does_not_change_prompt_version_capacity():
+def test_non_on_policy_discard_reopens_prompt_version_capacity():
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         mode="disaggregated",
@@ -188,8 +188,8 @@ def test_non_on_policy_discard_does_not_change_prompt_version_capacity():
         ),
     )
 
-    assert controller.register_discarded_samples_for_refill(5, 1) == 0
-    assert not hasattr(controller, "weight_version_to_replacement_prompt_num")
+    assert controller.register_discarded_samples_for_refill(5, 1) == 1
+    assert controller.weight_version_to_replacement_prompt_num == {5: 1}
 
 
 def test_prompt_without_refill_credit_advances_to_next_weight_version():

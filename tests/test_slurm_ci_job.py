@@ -77,8 +77,14 @@ def test_wheel_submission_preserves_identity_and_offline_dependencies(
     "installed,readonly", [(False, False), (True, False), (True, True)]
 )
 @pytest.mark.parametrize("exit_code", [0, 42])
-def test_job_mounts_and_full_suite_entrypoint(tmp_path, installed, readonly, exit_code):
+@pytest.mark.parametrize("example_assets", [False, True])
+def test_job_mounts_and_full_suite_entrypoint(
+    tmp_path, installed, readonly, exit_code, example_assets
+):
     repo, wheel, deps = candidate(tmp_path)
+    if example_assets:
+        for directory in ("configs", "examples"):
+            (repo / directory).mkdir()
     binary = tmp_path / "bin"
     binary.mkdir()
     srun = binary / "srun"
@@ -111,6 +117,11 @@ def test_job_mounts_and_full_suite_entrypoint(tmp_path, installed, readonly, exi
         assert f"{repo}/tests:/workspace/cosmos-rl/tests:ro" in output
         assert f"{repo}:/opt/cosmos-rl" not in output
         assert f"{wheel}:/ci-wheel/{wheel.name}:ro" in output
+        assert f"{repo}/cosmos_rl:/workspace/cosmos-rl/cosmos_rl" not in output
+        for directory in ("configs", "examples"):
+            assert (
+                f"{repo}/{directory}:/workspace/cosmos-rl/{directory}:ro" in output
+            ) == example_assets
     else:
         assert f"{repo}:/opt/cosmos-rl" in output
     assert f"{deps}:/ci-test-deps:ro" in output

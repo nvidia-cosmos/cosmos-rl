@@ -146,8 +146,10 @@ def test_disaggregated_shutdown_still_closes_after_final_ack_set():
     policy = status.config.train.train_policy
     policy.allowed_outdated_steps = 100
     policy.max_inflight_steps = None
+    policy.outdated_rollout_fetch_batch_size = 0
     policy.max_retry_for_on_policy = 0
     controller._assign_prompt_weight_versions = Mock()
+    controller.weight_version_to_prompt_num = {}
     controller._soft_throttle_engaged_since = None
     controller._soft_throttle_last_log_ts = 0
     assert not prompt_end(controller)

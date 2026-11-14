@@ -269,13 +269,17 @@ class NCCLPayloadProducer:
         if not self._nccl_enabled:
             raise RuntimeError("NCCL payload producer is not attached")
         selected = layout or self._nccl_layout
+        device = self._nccl_device
+        if isinstance(device, int):
+            # NCCL ordinals always name CUDA, even in CPU-only inspection tools.
+            device = torch.device("cuda", device)
+        else:
+            device = torch.device(device if device is not None else "cpu")
         return PayloadStorageRequirements(
             total_nbytes=HEADER_NBYTES + selected.payload_nbytes,
             payload_offset=HEADER_NBYTES,
             alignment=selected.alignment,
-            device=torch.device(
-                self._nccl_device if self._nccl_device is not None else "cpu"
-            ),
+            device=device,
         )
 
     def borrow(
@@ -1240,7 +1244,7 @@ class NCCLPayloadProducer:
                     # A single point-to-point operation does not need a group.
                     # Omitting it also removes a half-open group on exceptions.
                     registry_done = record_event(stream)
-                operation.wait_event(registry_done)
+                operation.wait_event(registry_done, synchronize=True)
                 completed = True
                 # Release only after confirmed device completion, including
                 # the communicator eviction pin and registry's payload lease.

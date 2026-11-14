@@ -27,6 +27,7 @@ from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
+from cosmos_rl.dispatcher.rollout_only import RolloutOnlyState
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.dispatcher.command as command
@@ -339,6 +340,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
+        self.rollout_only_state = RolloutOnlyState()
         self._applied_discard_report_ids: Dict[str, OrderedDict[str, None]] = {}
         # Set by the controller; see ``set_discard_refill_hook``.
         self._discard_refill_hook: Optional[Callable[..., int]] = None
@@ -762,6 +764,15 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> None:
         """Single entry for rollout HTTP ``is_end`` POST (not prompt fetch)."""
+        if (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        ):
+            return
         if not rollout_status_manager.all_rollouts_ended():
             return
         self.finish_draining_phase(rollout_status_manager)
@@ -1617,6 +1628,16 @@ class PolicyStatusManager:
         """
         if count <= 0:
             return
+        if (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        ):
+            self.rollout_only_state.settle(count)
+            return
         before = self.samples_on_the_fly
         if type(count) is not int or count > before:
             raise ValueError("Rollout settlement exceeds outstanding reservations")
@@ -1723,12 +1744,28 @@ class PolicyStatusManager:
         )
         if report_id in applied_ids:
             return 0
-        if type(count) is not int or count > self.samples_on_the_fly:
+        rollout_only = (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        )
+        outstanding = (
+            self.rollout_only_state.outstanding_completions
+            if rollout_only
+            else self.samples_on_the_fly
+        )
+        if type(count) is not int or count > outstanding:
             raise ValueError("Discard report exceeds outstanding reservations")
         applied_ids[report_id] = None
         if len(applied_ids) > _REPORT_DEDUP_WINDOW:
             applied_ids.popitem(last=False)
 
+        if rollout_only:
+            self.rollout_only_state.settle(count)
+            return count
         self.filter_records["rollout_failed"] = (
             self.filter_records.get("rollout_failed", 0) + count
         )

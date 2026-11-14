@@ -137,7 +137,7 @@ class ControllerDataFetcher(DataFetcherBase):
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
 
-        # Buffers for undispatched fetched data when data_dispatch_as_rank_in_mesh is enabled.
+        # Undispatched dataloader rows, including shared-queue batch remainders.
         self.fetched_data_buffer: List = []
         self.fetched_data_buffer_for_validation: List = []
         # Dict to track the number of data fetched for each policy at current step when data_dispatch_as_rank_in_mesh is enabled.
@@ -668,6 +668,13 @@ class ControllerDataFetcher(DataFetcherBase):
                     del fetched_data_buffer[index]
                 else:
                     break
+        elif weight_version is not None:
+            # The training window/inflight cap applies to rows, not whole
+            # dataloader batches. Drain retained rows before advancing input;
+            # only returned payloads receive versions and admission accounting.
+            take = min(n, len(fetched_data_buffer))
+            payloads_list.extend(payload for _, payload in fetched_data_buffer[:take])
+            del fetched_data_buffer[:take]
 
         # Rank filtering can reject a whole scan (for example a shuffled batch
         # containing only other ranks). Bound work per request and let callers
@@ -675,7 +682,7 @@ class ControllerDataFetcher(DataFetcherBase):
         pulls_left = (
             max(1, math.ceil(n / batch_size)) * self.rollout_global_mesh_size
             if rank_dispatch
-            else math.ceil(n / batch_size)
+            else math.ceil((n - len(payloads_list)) / batch_size)
         )
         if (
             rank_dispatch
@@ -687,7 +694,7 @@ class ControllerDataFetcher(DataFetcherBase):
             is_end = True
         while n - len(payloads_list) > 0 and pulls_left > 0:
             for _ in range(math.ceil(n / batch_size)):
-                if pulls_left <= 0:
+                if pulls_left <= 0 or len(payloads_list) >= n:
                     break
                 pulls_left -= 1
                 payload: RLPayload | None = None
@@ -758,8 +765,10 @@ class ControllerDataFetcher(DataFetcherBase):
                         else:
                             # For data_dispatch_as_rank_in_mesh, we store the fetched data into the buffer if not suitable for current rank_in_mesh.
                             fetched_data_buffer.append((idx, payload))
-                    else:
+                    elif weight_version is None or len(payloads_list) < n:
                         payloads_list.append(payload)
+                    else:
+                        fetched_data_buffer.append((idx, payload))
             if (
                 is_end
                 or not self.config.train.train_policy.data_dispatch_as_rank_in_mesh
