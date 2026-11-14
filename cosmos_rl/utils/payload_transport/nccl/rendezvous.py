@@ -173,8 +173,8 @@ class NcclRendezvous:
             recommended; the parser tolerates bytes either way).
         prefix: The rollout-replica Redis prefix
             (``build_rollout_prefix(build_nccl_prefix(...), idx)``).
-        poll_interval: Receiver poll granularity (seconds) while waiting
-            on the sender's reply.
+        poll_interval: Maximum receiver poll interval (seconds). Start with a
+            short wait for healthy peers and back off while waiting for a reply.
         uid_ttl_s: Expiry on the per-pair unique-ID key so a crashed
             transfer cannot leave a stale UID around forever.
         resp_ttl_s: Expiry on the response key (defensive GC).
@@ -305,6 +305,7 @@ class NcclRendezvous:
             # same operation; do not blindly retry or start a different stream.
             pass
 
+        poll_delay = min(0.0001, self._poll_interval)
         while True:
             reply = self._consume_reply(resp_key)
             if reply is not None:
@@ -352,7 +353,8 @@ class NcclRendezvous:
                     response_key=resp_key,
                     deadline=deadline,
                 )
-            self._sleep(self._poll_interval)
+            self._sleep(poll_delay)
+            poll_delay = min(2 * poll_delay, self._poll_interval)
 
     def _consume_reply(self, resp_key: str) -> Optional[TransferStatus]:
         raw = self._safe_get(resp_key)

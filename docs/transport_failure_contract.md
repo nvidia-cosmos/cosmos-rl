@@ -22,6 +22,29 @@ such a callback could hang the watchdog itself. Backend-supported safe recovery
 must finish within the operation deadline. General asynchronous cancellation and
 live replica replacement are not implemented.
 
+## NCCL receive progress
+
+Receive admission is shared per process and CUDA device, including separate
+strategy instances, foreground fetches and prefetch calls. Each accepted receive
+completes and retires its deadline before another is negotiated. This prevents
+cross-peer shared-stream circular waits without changing caller order, result
+indices, pair FIFO, wire format or accepted-operation timeout values. Sorting
+individual batches cannot enforce this rule across partial or concurrent calls.
+
+Transfers on one receiver device are serialized; training can still overlap
+background fetching. Allocation and decoding run on the transfer stream, and
+native CUDA completion uses a blocking host wait rather than a fixed polling
+sleep. The independent hard deadline and background peer-failure observer remain
+active during that wait. Rendezvous polls start at 100 microseconds and back off
+to the existing 10 ms maximum; this avoids a 10 ms acknowledgement floor without
+busy-spinning on an unavailable peer. Accepted-operation budgets are unchanged.
+Bounded batches retain their existing admission reservation
+and hold completed buffer leases until consumer release. Uncertain native
+completion still retains storage and communicator pins and is terminal.
+`python -m pytest -q -s tests/test_nccl_payload_schedule.py` checks the scheduling
+rule on CPU and, with four GPUs, the native cycle negative control and fixed
+opposite-order, bounded, partial and concurrent fetches.
+
 ## Supervisor boundary
 
 Exit code 86 is reserved for an unusable transport. Cosmos's torchrun wrapper

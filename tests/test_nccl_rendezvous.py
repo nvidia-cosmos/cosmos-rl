@@ -298,3 +298,30 @@ class TestSenderSide(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_reply_polling_backs_off_without_extending_attempt():
+    redis = FakeRedis()
+    now = [100.0]
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    rv = NcclRendezvous(redis, PREFIX, clock=lambda: now[0], sleep=sleep)
+    result = rv.initiate(
+        transfer_id="no-reply",
+        sender_replica="sender",
+        sender_rank=0,
+        receiver_replica="receiver",
+        receiver_rank=1,
+        request_channel=REQ_CHANNEL,
+        need_uid=False,
+        timeout=0.05,
+    )
+    assert result.status is TransferStatus.CANCELLED
+    assert sleeps[:3] == [0.0001, 0.0002, 0.0004]
+    assert max(sleeps) == 0.01
+    assert result.deadline == 100.05
+    assert now[0] < result.deadline + 0.01

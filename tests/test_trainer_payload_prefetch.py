@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
 import threading
@@ -63,8 +64,21 @@ def test_native_receive_waits_for_allocation_stream_before_write(monkeypatch):
     consumer = _consumer(cache, warm_pairs={pair})
     consumer._streams = SimpleNamespace(acquire=lambda: "receive-stream")
     order = []
+    active_stream = [None]
+
+    @contextmanager
+    def stream_context(stream):
+        previous = active_stream[0]
+        active_stream[0] = stream
+        try:
+            yield
+        finally:
+            active_stream[0] = previous
+
+    monkeypatch.setattr(torch.cuda, "stream", stream_context)
 
     def allocate(ref, module):
+        assert active_stream[0] == "receive-stream"
         order.append("allocate")
         return 55, strategy._alloc_recv_buffer(ref["layout"], None)
 
@@ -73,6 +87,7 @@ def test_native_receive_waits_for_allocation_stream_before_write(monkeypatch):
         return SimpleNamespace(
             name="allocation-ready" if stream is None else "receive-done",
             query=lambda: True,
+            synchronize=lambda: None,
         )
 
     def receive(*args, **kwargs):
@@ -91,12 +106,16 @@ def test_native_receive_waits_for_allocation_stream_before_write(monkeypatch):
         lambda stream, event: order.append(("wait", stream, event.name)),
     )
     decoded = torch.tensor([1])
-    monkeypatch.setattr(
-        strategy, "_verify_and_unpack", lambda *a, **kw: {"value": decoded}
-    )
+
+    def decode(*args, **kwargs):
+        assert active_stream[0] == "receive-stream"
+        return {"value": decoded}
+
+    monkeypatch.setattr(strategy, "_verify_and_unpack", decode)
     monkeypatch.setattr(pynccl, "nccl_recv", receive)
     result, _, _ = consumer._fetch_all([(0, ref)])
     assert result[0]["value"] is decoded
+    assert active_stream[0] is None
     result.release()
 
 

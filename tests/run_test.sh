@@ -93,6 +93,7 @@ run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
 
 # run tests
+run python -m pytest -q -s tests/test_nccl_payload_schedule.py
 run python tests/test_video_decode.py
 run python -m pytest -q tests/test_slurm_ci_job.py
 run python -m pytest -q tests/test_high_availability_nccl_harness.py

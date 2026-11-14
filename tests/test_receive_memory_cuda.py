@@ -428,8 +428,8 @@ def test_decode_fault_releases_budget_and_pools_safe_cuda_allocations(
     assert stats["reserved_bytes"] == stats["current_tensor_bytes"] == 0
 
 
-def test_mid_window_fault_keeps_actual_pending_nccl_storage(endpoint, monkeypatch):
-    """A real NCCL receive stays owned when the next allocation cannot proceed.
+def test_enqueue_fault_keeps_actual_pending_nccl_storage(endpoint, monkeypatch):
+    """A real NCCL receive stays owned if enqueue raises with GPU work pending.
 
     Call below the worker's fatal-exit boundary to inspect ownership. The test
     subsequently proves stream completion for fixture teardown; production must
@@ -447,7 +447,6 @@ def test_mid_window_fault_keeps_actual_pending_nccl_storage(endpoint, monkeypatc
         ref["layout"] = env.strategy._resolve_layout(ref)
         refs.append((i, ref))
     original_recv = pynccl.nccl_recv
-    original_rendezvous = env.strategy._rendezvous_one
     done = torch.cuda.Event()
     raw_refs, streams = [], []
 
@@ -458,15 +457,10 @@ def test_mid_window_fault_keeps_actual_pending_nccl_storage(endpoint, monkeypatc
             torch.cuda._sleep(3_000_000_000)
         original_recv(tensor, *args, stream=stream, **kwargs)
         done.record(stream)
-
-    def fail_second(ref, module):
-        if ref["transfer_id"] == refs[1][1]["transfer_id"]:
-            assert not done.query(), "fault must occur with actual pending GPU work"
-            raise torch.OutOfMemoryError("injected mid-window allocation failure")
-        return original_rendezvous(ref, module)
+        assert not done.query(), "fault must occur with actual pending GPU work"
+        raise torch.OutOfMemoryError("injected after real NCCL enqueue")
 
     monkeypatch.setattr(pynccl, "nccl_recv", delayed_recv)
-    monkeypatch.setattr(env.strategy, "_rendezvous_one", fail_second)
     with pytest.raises(TransportUnusableError, match="before native completion"):
         env.strategy._fetch_all(refs)
     gc.collect()
