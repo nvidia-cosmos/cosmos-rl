@@ -11,7 +11,10 @@ from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.protocol import RolloutRequest
 
 
-def test_setup_replaces_saved_execution_id_and_disables_legacy_fence(monkeypatch):
+@pytest.mark.parametrize("rollout_only", [None, False])
+def test_setup_replaces_saved_execution_id_and_disables_legacy_fence(
+    monkeypatch, rollout_only
+):
     from cosmos_rl.dispatcher.controller import Controller, ParallelizedShardMapper
 
     # Stop after runtime config initialization, before resources are allocated.
@@ -25,6 +28,8 @@ def test_setup_replaces_saved_execution_id_and_disables_legacy_fence(monkeypatch
         train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
         rollout=SimpleNamespace(completion_admission=False),
     )
+    if rollout_only is not None:
+        config.rollout.rollout_only = rollout_only
     identities = []
     for adapter in (object(), object(), None):
         controller = Controller.__new__(Controller)

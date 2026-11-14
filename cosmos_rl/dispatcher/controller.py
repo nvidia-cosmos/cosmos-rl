@@ -52,6 +52,11 @@ from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 from cosmos_rl.dispatcher.publication import ControllerPublisher
 
 
+def _is_rollout_only(controller) -> bool:
+    config = getattr(controller, "config", None)
+    return getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+
+
 def _fatal_publication(error):
     logger.critical("Controller publication failed; terminating execution: %s", error)
     os._exit(86)
@@ -99,6 +104,7 @@ class Controller:
     def _init_status(self):
         self.completion_admission = None
         self.policy_status_manager = PolicyStatusManager()
+        self.rollout_only_state = self.policy_status_manager.rollout_only_state
         self.rollout_status_manager = RolloutStatusManager()
         self.teacher_result_manager = set()
         self.stat_prompt_tokens_count = 0
@@ -144,13 +150,18 @@ class Controller:
                 "[Controller] Config has been set. Please do not call setup again."
             )
 
+        rollout_only = getattr(config.rollout, "rollout_only", False) is True
+        if rollout_only and (completion_admission or resume_adapter is not None):
+            raise ValueError(
+                "rollout_only does not support completion admission or controller resume"
+            )
         self.config = config
         # Never restore an execution fence from a checkpoint/config file. A
         # resumed application starts a fresh attempt and discards old results.
         from uuid import uuid4
 
         config.controller_execution_id = (
-            uuid4().hex if resume_adapter is not None else None
+            uuid4().hex if resume_adapter is not None or rollout_only else None
         )
         task_type = config.train.train_policy.type
         if type(completion_admission) is not bool:
@@ -290,10 +301,12 @@ maxmemory-policy noeviction
             config,
             self.redis_controller,
             data_fetcher=self.data_fetcher,
-            remain_samples_num=self.data_fetcher.remain_samples_num,
+            remain_samples_num=0
+            if config.rollout.rollout_only
+            else self.data_fetcher.remain_samples_num,
             samples_per_epoch=len(self.data_fetcher.dataset.train_set)
             * config.rollout.n_generation
-            if self.is_rl
+            if self.is_rl and not config.rollout.rollout_only
             else 0,
             tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
             if (self.is_rl and not self.is_diffusers)
@@ -360,6 +373,17 @@ maxmemory-policy noeviction
         return value acknowledges the request, not completion of shutdown.
         """
         async with self.life_cycle_lock:
+            if _is_rollout_only(self):
+                if not self.rollout_status_manager.rollout_init_done:
+                    raise RuntimeError(
+                        "request_stop requires initialized rollout replicas"
+                    )
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("stop reason must be a nonempty string")
+                if self.policy_status_manager.stop_reason is not None:
+                    return False
+                self.policy_status_manager.stop_reason = reason
+                return True
             if (
                 self.policy_status_manager.stop_reason is None
                 and self.config.train.train_policy.type != "sft"
@@ -447,6 +471,8 @@ maxmemory-policy noeviction
         handled by the existing staleness filter after the current step fills.
         """
 
+        if _is_rollout_only(self):
+            return 0
         train_policy = self.config.train.train_policy
         # Every non-DAPO disaggregated RL run spends a prompt-version quota.
         # Positive staleness only postpones exhaustion: losing all usable
@@ -734,6 +760,46 @@ maxmemory-policy noeviction
                     threshold,
                 )
 
+    def _get_rollout_only_prompts(self, n: int) -> Tuple[List[RLPayload], bool]:
+        """Issue bounded producer work without any training step or policy quota."""
+        if self.policy_status_manager.stop_reason is not None:
+            return [], True
+        state = self.rollout_only_state
+        pending = state.pending_prompts
+        dataset = getattr(self.data_fetcher, "dataset", None)
+        if dataset is not None and len(dataset.train_set) == 0:
+            state.input_ended = True
+            return [], True
+        limit = self.config.rollout.max_prompts
+        remaining = None if limit is None else limit - state.prompts_issued
+        if remaining is not None and remaining <= 0:
+            return [], True
+        generation = self.config.rollout.n_generation
+        # Charge a prompt until every one of its completion slots settles.
+        # Counting slots/n_generation would undercharge partially reported work.
+        outstanding_prompts = sum(
+            replica.producer_reservations.outstanding_prompts
+            for replica in self.rollout_status_manager
+        )
+        capacity = self.config.rollout.max_inflight_prompts - outstanding_prompts
+        n = min(n, capacity, remaining if remaining is not None else n)
+        if n <= 0:
+            return [], state.input_ended and not pending
+        if not pending and not state.input_ended:
+            fetched, state.input_ended = self.data_fetcher.get_batched_prompt(n)
+            # Dataloader batches may exceed n. Retain the remainder so neither
+            # the global prompt limit nor the inflight cap can be overrun.
+            pending.extend(fetched)
+        payloads, pending[:] = pending[:n], pending[n:]
+        for payload in payloads:
+            payload.weight_version = 0
+        state.prompts_issued += len(payloads)
+        state.outstanding_completions += len(payloads) * generation
+        ended = (state.input_ended and not pending) or (
+            limit is not None and state.prompts_issued >= limit
+        )
+        return payloads, ended
+
     async def _get_batched_prompt_impl(
         self,
         n: int,
@@ -741,6 +807,10 @@ maxmemory-policy noeviction
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        if _is_rollout_only(self):
+            if is_validation:
+                raise ValueError("Validation is unavailable in rollout_only mode")
+            return self._get_rollout_only_prompts(n)
         if not is_validation and getattr(self, "_rank_input_exhausted", False) is True:
             return [], True
         if not is_validation and self.policy_status_manager.stop_reason is not None:
@@ -1240,6 +1310,8 @@ maxmemory-policy noeviction
                 raise RuntimeError(
                     "Cannot register new participants after request_stop"
                 )
+            if _is_rollout_only(self) and role != Role.ROLLOUT:
+                raise ValueError("rollout_only accepts only rollout replicas")
             if role == Role.POLICY:
                 self.policy_status_manager.register(
                     atom, self.config, self.rollout_status_manager

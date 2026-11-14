@@ -43,6 +43,8 @@ from cosmos_rl.utils.constant import (
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.rollout_base import RolloutRegistry, RolloutBase
 from cosmos_rl.rollout.prompt_batch import PromptBatch, required_weight_version
+from cosmos_rl.rollout.results import CompletionOutcome, RolloutResultEvent
+from cosmos_rl.utils.application_callbacks import CallbackContext, CallbackRegistry
 from cosmos_rl.dispatcher.protocol import RolloutRequest
 from cosmos_rl.rollout.validation import ValidationSession, validation_round_for_command
 from cosmos_rl.dispatcher.command import (
@@ -150,6 +152,10 @@ def _warn_legacy_prefetch_hook_once() -> None:
     )
 
 
+def _is_rollout_only(config) -> bool:
+    return getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+
+
 class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     """
     DisaggregatedRolloutControlWorker will be a replica instance of single DP.
@@ -178,6 +184,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             raise ValueError("async_r2r_sync requires one rank per rollout replica")
         super(DisaggregatedRolloutControlWorker, self).__init__(config, parallel_dims)
 
+        self.application_callbacks = CallbackRegistry(
+            kwargs.get("hook_fns"),
+            CallbackContext(
+                role="rollout",
+                replica_name=getattr(self, "replica_name", None),
+                global_rank=getattr(self, "global_rank", None),
+            ),
+        )
+        self.application_callbacks.validate(
+            "rollout_result", borrowed=True, required=True
+        )
         self.state = State()
         self.is_diffusers = self.config.policy.is_diffusers
 
@@ -600,6 +617,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         raise_scheduler_failure = getattr(scheduler, "raise_if_failed", None)
         if scheduler_quiesced and callable(raise_scheduler_failure):
             attempt("scheduler worker", raise_scheduler_failure)
+        callbacks = getattr(self, "application_callbacks", None)
+        if callbacks is not None:
+            # Borrowed result lifetimes ended on invoke() return. close() owns
+            # only application resources, never payload or transport storage.
+            attempt("result consumer", callbacks.close)
         self._shutdown_resources_released = resources_released
         attempt("unregister", self.unregister_from_controller)
         shutdown_mp = getattr(self, "shutdown_mp_signal", None)
@@ -1450,7 +1472,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.report_rollouts,
                     self.validation_flag,
                 )
-            self.prepare_shard_infos_for_weight_sync_insts()
+            if not _is_rollout_only(self.config):
+                self.prepare_shard_infos_for_weight_sync_insts()
 
             async_mode = get_async_r2r_sync_mode(self)
             if async_mode != AsyncR2RSyncMode.DISABLED:
@@ -2278,11 +2301,29 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     if getattr(self, "completion_reporter", None) is not None
                     else None
                 )
-                payloads, metadata = consume_completion_admission_metrics(payloads)
-                metadata = prepare_completion_admission_report(
-                    metadata,
-                    step,
-                )
+                if _is_rollout_only(self.config):
+                    for payload in payloads:
+                        self._consume_rollout_result(payload)
+                    metadata = {
+                        "discarded_samples": sum(
+                            len(payload.training_rejected_slots) for payload in payloads
+                        )
+                    }
+                    # Quality annotations belong to the public result envelope.
+                    # The existing training-shaped transport accepts every
+                    # generated slot; it must not reinterpret that quality mask.
+                    payloads = [
+                        payload.model_copy(
+                            update={
+                                "completion_trainable": None,
+                                "completion_drop_reasons": None,
+                            }
+                        )
+                        for payload in payloads
+                    ]
+                else:
+                    payloads, metadata = consume_completion_admission_metrics(payloads)
+                    metadata = prepare_completion_admission_report(metadata, step)
                 if self.config.train.train_policy.variant == "dapo":
                     payloads, metadata_from_dapo = self.dynamic_sampling(payloads)
                     metadata.update(metadata_from_dapo)
@@ -2320,7 +2361,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self._post_identified_report(response)
                 else:
                     attach_training_rejections(response, reservation_payloads)
-                    self.api_client.post_rollout_completion(response)
+                    acknowledged = self.api_client.post_rollout_completion(response)
+                    if _is_rollout_only(self.config) and not acknowledged:
+                        raise RuntimeError("Rollout-only result report delivery failed")
             elif not block or empty:
                 break
         return payloads, is_validation, step, empty
@@ -2367,7 +2410,25 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 else nullcontext()
             ):
                 results = self.rollout.rollout_generation(**kwargs)
+                if (
+                    _is_rollout_only(self.config)
+                    and results
+                    and len(results) != len(payloads)
+                ):
+                    raise ValueError(
+                        "Generation must return one result per reserved prompt"
+                    )
         except Exception:
+            if _is_rollout_only(self.config) and self.should_report:
+                for payload in payloads:
+                    try:
+                        self._consume_rollout_result(payload, failed=True)
+                    except BaseException:
+                        # Attempt each prompt while preserving the original
+                        # generation exception as the primary failure.
+                        logger.exception(
+                            "Result consumer failed while recording generation failure"
+                        )
             if identified:
                 self._post_identified_report(
                     reporter.generation_failure(kwargs["payloads"], "generation_error")
@@ -2639,7 +2700,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 batch_version = required_weight_version(self._prompt_queue.queue[0])
                 allowed = self.config.train.train_policy.allowed_outdated_steps
                 ceiling = self.current_weight_version + allowed
-                is_valid_prompt_for_current_weight_version = batch_version <= ceiling
+                is_valid_prompt_for_current_weight_version = (
+                    _is_rollout_only(self.config) or batch_version <= ceiling
+                )
 
                 if not is_valid_prompt_for_current_weight_version:
                     self._mainloop_branch_counts["version_fail"] += 1
@@ -2727,6 +2790,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             training_rejections=training_rejections or [],
         )
         if not self.api_client.post_rollout_completion(response):
+            if _is_rollout_only(self.config):
+                raise RuntimeError("Rollout-only failure report delivery failed")
             logger.error(
                 "[Rollout] Failed to report %d discarded samples "
                 "(discard_report_id=%s)",
@@ -2741,6 +2806,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         Filter the rollout results with valid completions or valid completed_conversations.
         Returns the valid payloads and valid results for reporting.
         """
+        if _is_rollout_only(self.config):
+            return self._enqueue_rollout_only_results(rollout_results, payloads_list)
         if getattr(self, "completion_reporter", None) is not None or any(
             result.completion_trainable is not None for result in rollout_results
         ):
@@ -2882,6 +2949,122 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
         return valid_payloads_list, valid_result
 
+    def _consume_rollout_result(self, payload, *, failed=False):
+        if not self.should_report:
+            return
+        callbacks = getattr(self, "application_callbacks", None)
+        if callbacks is None or not callbacks.has("rollout_result"):
+            return
+        slots = payload.training_completion_slots
+        if payload.training_work_id is None or slots is None:
+            raise ValueError(
+                "Result consumer requires native controller work and slots"
+            )
+        completions = (
+            [] if failed or payload.completions is None else payload.completions
+        )
+        outcomes = []
+        scored = not self.config.train.train_policy.bypass_reward
+        for index, completion in enumerate(completions):
+
+            def aligned(values):
+                return None if values is None else values[index]
+
+            outcomes.append(
+                CompletionOutcome(
+                    slot=slots[index],
+                    status="generated",
+                    completion=completion,
+                    score=float(payload.rewards[index]) if scored else None,
+                    quality_trainable=aligned(payload.completion_trainable),
+                    quality_reason=aligned(payload.completion_drop_reasons),
+                    completed_conversation=aligned(payload.completed_conversations),
+                    token_ids=aligned(payload.completion_token_ids),
+                    logprobs=aligned(payload.completion_logprobs),
+                    scorer_metrics=aligned(payload.report_metrics),
+                )
+            )
+        missing = slots if failed else payload.training_rejected_slots
+        outcomes.extend(
+            CompletionOutcome(
+                slot=slot,
+                status="generation_failed",
+                failure_reason="generation_error",
+            )
+            for slot in missing
+        )
+        callbacks.invoke(
+            "rollout_result",
+            RolloutResultEvent(
+                execution_id=self.config.controller_execution_id,
+                replica_name=self.replica_name,
+                global_rank=self.global_rank,
+                work_id=payload.training_work_id,
+                prompt_idx=payload.prompt_idx,
+                model_name_or_path=self.config.policy.model_name_or_path,
+                model_revision=self.config.policy.model_revision,
+                weight_version=0,
+                prompt=payload.prompt,
+                conversation=payload.conversation,
+                outcomes=tuple(sorted(outcomes, key=lambda outcome: outcome.slot)),
+                extra_info=payload.extra_info,
+            ),
+            borrowed=True,
+            required=True,
+        )
+
+    def _enqueue_rollout_only_results(self, results, payloads):
+        if len(results) != len(payloads):
+            raise ValueError("Generation must return one result per reserved prompt")
+        if not self.should_report:
+            return payloads, results
+        ready = []
+        for result, source in zip(results, payloads):
+            count = len(result.completions)
+            slots = source.training_completion_slots
+            if slots is None or count > len(slots):
+                raise ValueError("Generation exceeds native reserved completion slots")
+            for values in (
+                result.completion_trainable,
+                result.completion_drop_reasons,
+                result.completed_conversations,
+                result.completion_logprobs,
+                result.completion_token_ids,
+            ):
+                if values is not None and len(values) != count:
+                    raise ValueError(
+                        "Result annotations must match generated completions"
+                    )
+            if not count:
+                self._consume_rollout_result(source, failed=True)
+                self._report_discarded_samples(
+                    len(slots),
+                    training_rejections=discarded_training_slots([source], []),
+                )
+                continue
+            payload = select_training_slots(source, list(range(count)))
+            payload.training_rejected_slots = list(slots[count:])
+            apply_rollout_result_to_payload(
+                payload, result, include_completed_conversations=True
+            )
+            payload.weight_version = 0
+            if (
+                self.config.train.local_dataset
+                and not self.config.train.train_policy.bypass_reward
+            ):
+                payload.reference_answer = self.data_fetcher.query_reference_answer(
+                    payload.prompt_idx
+                )
+            ready.append(payload)
+        if ready:
+            self.reward_dispatcher.enqueue_rewards_cal(
+                ready,
+                False,
+                0,
+                bypass_reward=self.config.train.train_policy.bypass_reward,
+            )
+        return payloads, results
+
     def _enqueue_masked_results(self, results, payloads):
         if len(results) != len(payloads):
             raise ValueError("Generation must return one result per reserved prompt")
@@ -3011,6 +3194,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
 
         if len(rollout_results) == 0:
+            if _is_rollout_only(self.config):
+                return self._enqueue_rollout_only_results(
+                    [RolloutResult(completions=[]) for _ in payloads_list],
+                    payloads_list,
+                )
             self._report_discarded_samples(
                 len(payloads_list) * self.config.rollout.n_generation,
                 training_rejections=discarded_training_slots(payloads_list, []),
@@ -3090,7 +3278,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if not is_validation and not self._prompt_queue.empty():
             batch_version = required_weight_version(self._prompt_queue.queue[0])
             is_valid_prompt_for_current_weight_version = (
-                batch_version
+                _is_rollout_only(self.config)
+                or batch_version
                 <= self.current_weight_version
                 + self.config.train.train_policy.allowed_outdated_steps
             )
@@ -3454,7 +3643,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             ):
                 self.state.set_prompt_fetch_end()
 
-    def work(self):
+    def _work_impl(self):
+        if _is_rollout_only(self.config):
+            # There is no trainer to send the first weight command. Load the
+            # configured checkpoint/application model before admitting work.
+            self.lazy_initialize_rollout_engine(load_format="auto")
+            self.state.set_weight_synced()
         # Start the thread with daemon=True, so it will exit when the main program exits.
         if self.global_rank == 0:
             # create a thread to query command as a producer
@@ -3499,12 +3693,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             self.teacher_interact_thread.start()
 
+        self.main_loop()
+        scheduler = getattr(self, "scheduler", None)
+        raise_scheduler_failure = getattr(scheduler, "raise_if_failed", None)
+        if callable(raise_scheduler_failure):
+            raise_scheduler_failure()
+
+    def work(self):
         try:
-            self.main_loop()
-            scheduler = getattr(self, "scheduler", None)
-            raise_scheduler_failure = getattr(scheduler, "raise_if_failed", None)
-            if callable(raise_scheduler_failure):
-                raise_scheduler_failure()
+            self._work_impl()
         except BaseException:
             try:
                 self.handle_shutdown()

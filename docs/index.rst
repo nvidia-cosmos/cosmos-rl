@@ -61,6 +61,7 @@ Main Features
    :caption: Rollout
 
    rollout/overview
+   rollout_only
    rollout/vllm
    rollout/trtllm
 
