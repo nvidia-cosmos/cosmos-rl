@@ -139,6 +139,11 @@ _replicas_were_registered = False
 _policy_replicas_were_registered = False
 
 
+def _is_rollout_only() -> bool:
+    config = getattr(controller, "config", None)
+    return getattr(getattr(config, "rollout", None), "rollout_only", False) is True
+
+
 def _all_replicas_gone() -> bool:
     return (
         len(controller.policy_status_manager) == 0
@@ -172,10 +177,16 @@ def _maybe_finalize(reason: str) -> bool:
         ready = _replicas_were_registered
     else:
         ready = (
-            controller.policy_status_manager.training_finished() or not controller.is_rl
+            controller.policy_status_manager.training_finished()
+            or not controller.is_rl
+            or _is_rollout_only()
         )
 
     if ready:
+        if _is_rollout_only() and reason.startswith("clean unregister"):
+            finalize = getattr(controller, "finalize_generation", None)
+            if finalize is not None:
+                finalize()
         global server
         if server is not None and not server.should_exit:
             data_fetcher = getattr(
@@ -312,20 +323,29 @@ async def lifespan(app: FastAPI):
             # ``training_finished()`` instead would fire at dispatch time,
             # before the policy has pulled the final outputs over UCXX.
             n_policy = len(controller.policy_status_manager)
-            if should_broadcast_stop(
-                n_policy=n_policy,
-                had_policy_replicas=_policy_replicas_were_registered,
-                stop_broadcast_sent=stop_broadcast_sent,
-                # Requested stop and validation-aware early exhaustion finish
-                # validation before completion ACKs. Neither needs a fake
-                # final-horizon R2R flag; use ordinary STOP after policy exit.
-                validation_enabled=(
-                    controller.config.validation.enable
-                    and controller.policy_status_manager.stop_reason is None
-                    and not controller.policy_status_manager.validation_drained
-                ),
-                training_finished=controller.policy_status_manager.training_finished(),
-                all_rollouts_ended=controller.rollout_status_manager.all_rollouts_ended(),
+            rollout_only_drained = (
+                _is_rollout_only()
+                and controller.rollout_status_manager.rollout_init_done
+                and controller.rollout_status_manager.all_rollouts_ended()
+            )
+            if (
+                rollout_only_drained
+                and not stop_broadcast_sent
+                or should_broadcast_stop(
+                    n_policy=n_policy,
+                    had_policy_replicas=_policy_replicas_were_registered,
+                    stop_broadcast_sent=stop_broadcast_sent,
+                    # Requested stop and validation-aware early exhaustion finish
+                    # validation before completion ACKs. Neither needs a fake
+                    # final-horizon R2R flag; use ordinary STOP after policy exit.
+                    validation_enabled=(
+                        controller.config.validation.enable
+                        and controller.policy_status_manager.stop_reason is None
+                        and not controller.policy_status_manager.validation_drained
+                    ),
+                    training_finished=controller.policy_status_manager.training_finished(),
+                    all_rollouts_ended=controller.rollout_status_manager.all_rollouts_ended(),
+                )
             ):
                 # Publish STOP over the redis command channel (NCCL-free) so
                 # it reaches every rollout via ``consume_command`` -- including
@@ -345,6 +365,11 @@ async def lifespan(app: FastAPI):
                 rollout_replicas = list(
                     controller.rollout_status_manager.rollout_replicas.values()
                 )
+                if rollout_only_drained:
+                    # Completion publication is required durability, not a
+                    # retryable best-effort STOP notification. Failure aborts
+                    # the monitor and therefore the execution.
+                    controller.finalize_generation()
                 # Guard the publish: this monitor thread also drives
                 # ``maintain_life_status`` (rollout reaping) and the
                 # no-policy SIGTERM escalation below.  An unguarded redis
@@ -354,7 +379,7 @@ async def lifespan(app: FastAPI):
                 try:
                     if rollout_replicas:
                         logger.info(
-                            "[Controller] Policy side finished; broadcasting "
+                            "[Controller] Execution drained; broadcasting "
                             "STOP to %d rollout replica(s).",
                             len(rollout_replicas),
                         )
@@ -412,18 +437,40 @@ async def lifespan(app: FastAPI):
 
     task = asyncio.create_task(monitor_replica_status())
     task.add_done_callback(_observe_controller_monitor)
+    primary_error = None
     try:
         yield
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
+        first_error = primary_error
         shutdown_event.set()
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        try:
+            with suppress(asyncio.CancelledError):
+                await task
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
         from cosmos_rl.dispatcher.publication import ControllerPublisher
 
         publisher = getattr(controller, "redis_controller", None)
-        if isinstance(publisher, ControllerPublisher):
-            await publisher.close()
+        try:
+            if isinstance(publisher, ControllerPublisher):
+                await publisher.close()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        admission = getattr(controller, "completion_admission", None)
+        try:
+            if admission is not None:
+                await asyncio.to_thread(admission.close)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        if primary_error is None and first_error is not None:
+            raise first_error
 
 
 def _observe_controller_monitor(task):
@@ -1133,6 +1180,26 @@ async def _apply_rollout_group(
             return {"message": "Identified rollout report processed"}
         if rollout.completion_identities is not None or rollout.completion_failures:
             raise ValueError("Identified completions require completion_admission=True")
+        if _is_rollout_only():
+            # Native report receipts and producer reservations still fence
+            # retries and settle failed slots. There is no trainer consumer:
+            # release successful payloads after worker-side reward calculation
+            # and never put them in a policy buffer.
+            if training_plan is None:
+                raise ValueError("Rollout-only results require producer reservations")
+            controller.rollout_only_state.settle(
+                sum(count for _, count in training_plan.rejected_version_counts)
+            )
+            controller.stat_n_samples += len(rollouts)
+            policy_status.cleanup_terminal_rollouts(
+                rollouts, rollout.metrics, is_dapo=False
+            )
+            logger.info(
+                "[Controller] Rollout-only report: %d completions, %d outstanding slots",
+                len(rollouts),
+                controller.rollout_only_state.outstanding_completions,
+            )
+            return {"message": "Rollout-only report processed"}
         is_dapo = controller.config.train.train_policy.variant == "dapo"
         if any(
             key.startswith(COMPLETION_ADMISSION_METRIC_PREFIX)

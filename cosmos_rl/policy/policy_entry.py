@@ -92,6 +92,7 @@ def policy_entry(**kwargs):
             val_batch_sampler=kwargs.get("val_batch_sampler", None),
             custom_logger_fns=custom_logger_fns,
             hook_fns=hook_fns,
+            record_reward_fns=kwargs.get("reward_fns"),
         )
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")

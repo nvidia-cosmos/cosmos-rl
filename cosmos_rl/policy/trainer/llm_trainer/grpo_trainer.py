@@ -650,7 +650,9 @@ class GRPOTrainer(LLMTrainer):
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
         # For teacher model interaction
-        self.teacher_results = TeacherResultInbox()
+        self.teacher_results = TeacherResultInbox(
+            max_bytes=config.distillation.max_completed_bytes
+        )
         self.fetched_teacher_uuids: Set[str] = set()
 
     def collate_teacher_logprobs(

@@ -84,6 +84,7 @@ def extract_rollouts(
                 completion_token_ids=completion_token_ids,
                 completion_logprobs=completion_logprobs,
                 weight_version=payload.weight_version,
+                producer_model=payload.producer_model,
                 report_metrics=report_metrics,
                 teacher_result_uuid=teacher_result_uuid,
                 prompt_logprobs=payload.prompt_logprobs,

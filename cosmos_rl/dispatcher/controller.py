@@ -46,10 +46,16 @@ from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.execution.models import checkpoint_actor
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
 from cosmos_rl.dispatcher.publication import ControllerPublisher
+
+
+def _is_rollout_only(controller) -> bool:
+    config = getattr(controller, "config", None)
+    return getattr(getattr(config, "rollout", None), "rollout_only", False) is True
 
 
 def _fatal_publication(error):
@@ -99,6 +105,7 @@ class Controller:
     def _init_status(self):
         self.completion_admission = None
         self.policy_status_manager = PolicyStatusManager()
+        self.rollout_only_state = self.policy_status_manager.rollout_only_state
         self.rollout_status_manager = RolloutStatusManager()
         self.teacher_result_manager = set()
         self.stat_prompt_tokens_count = 0
@@ -144,13 +151,18 @@ class Controller:
                 "[Controller] Config has been set. Please do not call setup again."
             )
 
+        rollout_only = getattr(config.rollout, "rollout_only", False) is True
+        if rollout_only and (completion_admission or resume_adapter is not None):
+            raise ValueError(
+                "rollout_only does not support completion admission or controller resume"
+            )
         self.config = config
         # Never restore an execution fence from a checkpoint/config file. A
         # resumed application starts a fresh attempt and discards old results.
         from uuid import uuid4
 
         config.controller_execution_id = (
-            uuid4().hex if resume_adapter is not None else None
+            uuid4().hex if resume_adapter is not None or rollout_only else None
         )
         task_type = config.train.train_policy.type
         if type(completion_admission) is not bool:
@@ -169,7 +181,7 @@ class Controller:
                 raise ValueError(
                     "Application admission currently requires disaggregated non-DAPO GRPO"
                 )
-            self.completion_admission = CompletionAdmissionState()
+            self.completion_admission = CompletionAdmissionState(hook_fns=hook_fns)
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
@@ -187,8 +199,8 @@ class Controller:
             task_type != "sft" or self.config.policy.parallelism.n_init_replicas > 1
         )
         self.is_diffusers = self.config.policy.is_diffusers
-        self.weight_version_to_prompt_num = {}  # Only for on-policy.
-        # Completion-level rejection can leave an on-policy step short after
+        self.weight_version_to_prompt_num = {}  # Non-DAPO disaggregated quotas.
+        # Completion-level rejection can leave a training step short after
         # its normal prompt quota has already been issued.  Credits reopen
         # prompt slots for that same weight version without erasing the total
         # attempt count used by max_retry_for_on_policy.
@@ -290,10 +302,12 @@ maxmemory-policy noeviction
             config,
             self.redis_controller,
             data_fetcher=self.data_fetcher,
-            remain_samples_num=self.data_fetcher.remain_samples_num,
+            remain_samples_num=0
+            if config.rollout.rollout_only
+            else self.data_fetcher.remain_samples_num,
             samples_per_epoch=len(self.data_fetcher.dataset.train_set)
             * config.rollout.n_generation
-            if self.is_rl
+            if self.is_rl and not config.rollout.rollout_only
             else 0,
             tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
             if (self.is_rl and not self.is_diffusers)
@@ -360,6 +374,17 @@ maxmemory-policy noeviction
         return value acknowledges the request, not completion of shutdown.
         """
         async with self.life_cycle_lock:
+            if _is_rollout_only(self):
+                if not self.rollout_status_manager.rollout_init_done:
+                    raise RuntimeError(
+                        "request_stop requires initialized rollout replicas"
+                    )
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("stop reason must be a nonempty string")
+                if self.policy_status_manager.stop_reason is not None:
+                    return False
+                self.policy_status_manager.stop_reason = reason
+                return True
             if (
                 self.policy_status_manager.stop_reason is None
                 and self.config.train.train_policy.type != "sft"
@@ -447,22 +472,18 @@ maxmemory-policy noeviction
         handled by the existing staleness filter after the current step fills.
         """
 
+        if _is_rollout_only(self):
+            return 0
         train_policy = self.config.train.train_policy
-        # The prompt-version quota applies to every non-DAPO disaggregated run,
-        # not just those that set ``on_policy``.  What decides whether a leaked
-        # slot deadlocks is the staleness window: a worker with
-        # ``allowed_outdated_steps=0`` can never accept the next-version prompt
-        # a leak produces, so refill on strictness, not on the flag alone.
-        strict = bool(getattr(train_policy, "on_policy", False)) or (
-            getattr(train_policy, "allowed_outdated_steps", None) == 0
-        )
+        # Every non-DAPO disaggregated RL run spends a prompt-version quota.
+        # Positive staleness only postpones exhaustion: losing all usable
+        # groups leaves no update that could unlock the next version.
         if (
             discarded_samples <= 0
-            or not (
-                strict or getattr(train_policy, "data_dispatch_as_rank_in_mesh", False)
-            )
+            or getattr(train_policy, "type", None) == "sft"
             or train_policy.variant == "dapo"
             or self.config.mode == "colocated"
+            or checkpoint_actor(self.config)
         ):
             return 0
         if type(weight_version) is not int or weight_version < 0:
@@ -587,6 +608,100 @@ maxmemory-policy noeviction
                 self.weight_version_to_prompt_num.get(weight_version, 0) + 1
             )
 
+    def _limit_prompt_fetch_to_window(
+        self, n: int, *, starting_weight_version: int, prompt_quota: int
+    ) -> int:
+        """Bound the whole fetch before it advances the dataset.
+
+        Queued/admitted batches determine the starting stamp, as in native
+        assignment. Use weights already reported or staged for transfer to
+        bound what workers can reach without another generation. The controller
+        can be ahead of those weights between sync intervals or while syncs
+        are coalesced. Blocked future work must not occupy every throttle slot
+        and prevent terminal-loss replacements.
+        """
+        status = self.policy_status_manager
+        policy = self.config.train.train_policy
+        available_versions = [
+            version
+            for version in (
+                getattr(status, "_weight_last_staged_step", None),
+                getattr(status, "_weight_max_adopted_version", None),
+            )
+            if type(version) is int and version >= 0
+        ]
+        # Before the initial sync, the restored controller step is the weight
+        # version the startup protocol will deliver. Staged transfers may still
+        # be in flight; waiting for them does not require another training step.
+        reachable_weight_version = min(
+            status.current_step, max(available_versions, default=status.current_step)
+        )
+        ceiling = reachable_weight_version + policy.allowed_outdated_steps
+        self._prune_refill_state(before_weight_version=starting_weight_version)
+        replacements = getattr(self, "weight_version_to_replacement_prompt_issued", {})
+        credits = getattr(self, "weight_version_to_replacement_prompt_num", {})
+        normal = {
+            version: max(
+                0,
+                prompt_quota
+                - self.weight_version_to_prompt_num.get(version, 0)
+                + replacements.get(version, 0),
+            )
+            for version in range(starting_weight_version, ceiling + 1)
+        }
+        refill = {version: credits.get(version, 0) for version in normal}
+        bounded = min(n, sum(normal.values()) + sum(refill.values()))
+
+        # Preserve intentional soft-throttle overflow, but enforce a configured
+        # hard ceiling over the whole batch. Round up to one complete prompt:
+        # a partial group must not strand a batch that needs its last completion.
+        inflight_steps = policy.max_inflight_steps
+        if policy.outdated_rollout_fetch_batch_size == 0:
+            soft_steps = policy.allowed_outdated_steps + 1
+            inflight_steps = (
+                soft_steps
+                if inflight_steps is None
+                else min(inflight_steps, soft_steps)
+            )
+        if inflight_steps is not None:
+            remaining = max(
+                0,
+                inflight_steps * self.config.train.train_batch_per_replica * len(status)
+                - status.samples_on_the_fly,
+            )
+            bounded = min(
+                bounded, math.ceil(remaining / self.config.rollout.n_generation)
+            )
+        now = time.monotonic()
+        if (
+            bounded < n
+            and now - getattr(self, "_prompt_window_last_log_ts", -math.inf)
+            >= self._SOFT_THROTTLE_HEARTBEAT_S
+        ):
+            self._prompt_window_last_log_ts = now
+            logger.info(
+                "[Controller] Prompt window limited fetch %d -> %d: "
+                "current_step=%d latest_reported_weight_version=%s "
+                "staged_weight_version=%s reachable_weight_version=%d "
+                "starting_version=%d ceiling=%d "
+                "pending_admitted=%d dispatched_steps=%s outstanding=%d "
+                "normal_slots=%s refill_slots=%s",
+                n,
+                bounded,
+                status.current_step,
+                getattr(status, "_weight_max_adopted_version", None),
+                getattr(status, "_weight_last_staged_step", None),
+                reachable_weight_version,
+                starting_weight_version,
+                ceiling,
+                status.total_pending_rollouts(),
+                list(status.dispatched_rollouts_by_step),
+                status.samples_on_the_fly,
+                normal,
+                refill,
+            )
+        return bounded
+
     def _update_soft_throttle_state(
         self,
         *,
@@ -647,6 +762,124 @@ maxmemory-policy noeviction
                     threshold,
                 )
 
+    def _get_rollout_only_prompts(self, n: int) -> Tuple[List[RLPayload], bool]:
+        """Issue bounded producer work without any training step or policy quota."""
+        if self.policy_status_manager.stop_reason is not None:
+            return [], True
+        state = self.rollout_only_state
+        pending = state.pending_prompts
+        dataset = getattr(self.data_fetcher, "dataset", None)
+        if dataset is not None and len(dataset.train_set) == 0:
+            state.input_ended = True
+            return [], True
+        limit = self.config.rollout.max_prompts
+        remaining = None if limit is None else limit - state.source_occurrences_seen
+        if remaining is not None and remaining <= 0:
+            return [], True
+        generation = self.config.rollout.n_generation
+        # Charge a prompt until every one of its completion slots settles.
+        # Counting slots/n_generation would undercharge partially reported work.
+        outstanding_prompts = sum(
+            replica.producer_reservations.outstanding_prompts
+            for replica in self.rollout_status_manager
+        )
+        capacity = self.config.rollout.max_inflight_prompts - outstanding_prompts
+        n = min(n, capacity, remaining if remaining is not None else n)
+        if n <= 0:
+            return [], state.input_ended and not pending
+        output = getattr(getattr(self.config, "execution", None), "output", None)
+        ledger = getattr(self, "_generation_ledger", None)
+        if output is not None and ledger is None:
+            from cosmos_rl.execution.sink import GenerationLedger
+
+            ledger = self._generation_ledger = GenerationLedger(self.config)
+        payloads = []
+        scanned = 0
+        while len(payloads) < n and scanned < max(n, 128):
+            if limit is not None and state.source_occurrences_seen >= limit:
+                break
+            if not pending and not state.input_ended:
+                fetched, state.input_ended = self.data_fetcher.get_batched_prompt(
+                    n - len(payloads)
+                )
+                pending.extend(fetched)
+            if not pending:
+                break
+            payload = pending.pop(0)
+            occurrence = state.source_occurrences_seen
+            state.source_occurrences_seen += 1
+            scanned += 1
+            if ledger is not None and ledger.reserve(payload, occurrence):
+                continue
+            payload.weight_version = 0
+            payload.generation_occurrence = occurrence
+            payloads.append(payload)
+        state.prompts_issued += len(payloads)
+        state.outstanding_completions += len(payloads) * generation
+        ended = (state.input_ended and not pending) or (
+            limit is not None and state.source_occurrences_seen >= limit
+        )
+        return payloads, ended
+
+    def finalize_generation(self):
+        """Seal the corpus only after all admitted completion slots settle."""
+        if self.config.execution.output is None:
+            return
+        if self.policy_status_manager.stop_reason is not None:
+            return
+        if getattr(self, "_generation_finalized", False):
+            return
+        if self.rollout_only_state.outstanding_completions:
+            raise ValueError("Cannot finalize generation with unsettled outputs")
+        state = self.rollout_only_state
+        limit = self.config.rollout.max_prompts
+        if not (
+            state.input_ended
+            and not state.pending_prompts
+            or limit is not None
+            and state.source_occurrences_seen >= limit
+        ):
+            raise ValueError("Cannot finalize generation before input admission closes")
+        ledger = getattr(self, "_generation_ledger", None)
+        if ledger is None:
+            from cosmos_rl.execution.sink import GenerationLedger
+
+            ledger = self._generation_ledger = GenerationLedger(self.config)
+        ledger.finalize(self.rollout_only_state.source_occurrences_seen)
+        self._generation_finalized = True
+
+    def _get_checkpoint_actor_prompts(self, n):
+        status = self.policy_status_manager
+        if len(status) == 0:
+            return [], bool(getattr(status, "_first_policy_replica_arrived", False))
+        if status.training_finished():
+            return [], True
+        policy = self.config.train.train_policy
+        inflight = policy.max_inflight_steps or (policy.allowed_outdated_steps + 1)
+        remaining = max(
+            0,
+            inflight * self.config.train.train_batch_per_replica * len(status)
+            - status.samples_on_the_fly,
+        )
+        n = min(n, math.ceil(remaining / self.config.rollout.n_generation))
+        if n <= 0:
+            return [], False
+        pending = getattr(self, "_checkpoint_actor_pending", None)
+        if pending is None:
+            pending = self._checkpoint_actor_pending = []
+            self._checkpoint_actor_input_ended = False
+        if not pending and not self._checkpoint_actor_input_ended:
+            fetched, self._checkpoint_actor_input_ended = (
+                self.data_fetcher.get_batched_prompt(n)
+            )
+            pending.extend(fetched)
+        payloads, pending[:] = pending[:n], pending[n:]
+        for payload in payloads:
+            # This is the actor's own immutable lineage, never a learner step.
+            payload.weight_version = 0
+        status.samples_on_the_fly += len(payloads) * self.config.rollout.n_generation
+        return payloads, self._checkpoint_actor_input_ended and not pending
+
     async def _get_batched_prompt_impl(
         self,
         n: int,
@@ -654,6 +887,10 @@ maxmemory-policy noeviction
         rank_in_mesh: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        if _is_rollout_only(self):
+            if is_validation:
+                raise ValueError("Validation is unavailable in rollout_only mode")
+            return self._get_rollout_only_prompts(n)
         if not is_validation and getattr(self, "_rank_input_exhausted", False) is True:
             return [], True
         if not is_validation and self.policy_status_manager.stop_reason is not None:
@@ -669,6 +906,9 @@ maxmemory-policy noeviction
             and self.config.mode != "colocated"
         ):
             return [], True
+
+        if not is_validation and checkpoint_actor(self.config):
+            return self._get_checkpoint_actor_prompts(n)
 
         # Short-circuit when all policy replicas have unregistered during
         # teardown.  Without this guard, global_batch_size becomes 0 and
@@ -847,6 +1087,17 @@ maxmemory-policy noeviction
             # Don't do the weight version control at fetching when there is replica scaling since the pending rollout count may not reflect the real training status of the policy replicas during scaling, which may lead to too aggressive throttling and cause starvation of rollout generation.
             and len(self.policy_status_manager.replica_scaling_log) == 0
         ):
+            if self.config.train.train_policy.variant != "dapo" and not rank_dispatch:
+                n = self._limit_prompt_fetch_to_window(
+                    n,
+                    starting_weight_version=weight_version_for_current_batch,
+                    prompt_quota=global_batch_size,
+                )
+                if n == 0:
+                    return [], (
+                        not self.config.validation.enable
+                        and self.policy_status_manager.training_finished()
+                    )
             payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n,
                 validation_step,
@@ -893,21 +1144,20 @@ maxmemory-policy noeviction
                     # Assign estimated weight version to each payload for weight version control.
                     payloads_list[i].weight_version = weight_version_for_current_batch
 
-            # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
+            # Replacements at later stamps also consume their version's budget.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                already_retried_times = math.ceil(
-                    self.weight_version_to_prompt_num.get(
-                        weight_version_for_current_batch, 0
+                for version in dict.fromkeys(p.weight_version for p in payloads_list):
+                    already_retried_times = math.ceil(
+                        self.weight_version_to_prompt_num.get(version, 0)
+                        / global_batch_size
                     )
-                    / global_batch_size
-                )
-                if (
-                    already_retried_times
-                    > self.config.train.train_policy.max_retry_for_on_policy
-                ):
-                    raise RuntimeError(
-                        f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
-                    )
+                    if (
+                        already_retried_times
+                        > self.config.train.train_policy.max_retry_for_on_policy
+                    ):
+                        raise RuntimeError(
+                            f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {version} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
+                        )
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             # Colocated preparation owns its refill budget. A fixed prompt
@@ -1143,6 +1393,8 @@ maxmemory-policy noeviction
                 raise RuntimeError(
                     "Cannot register new participants after request_stop"
                 )
+            if _is_rollout_only(self) and role != Role.ROLLOUT:
+                raise ValueError("rollout_only accepts only rollout replicas")
             if role == Role.POLICY:
                 self.policy_status_manager.register(
                     atom, self.config, self.rollout_status_manager
@@ -1166,6 +1418,7 @@ maxmemory-policy noeviction
     async def unregister(self, replica_name: str):
         logger.info(f"[Controller] Unregistering replica {replica_name}")
         async with self.life_cycle_lock:
+            teacher_departed = replica_name in self.teacher_result_manager
             if replica_name in self.policy_status_manager:
                 self.policy_status_manager.unregister(replica_name)
             elif replica_name in self.rollout_status_manager:
@@ -1174,10 +1427,17 @@ maxmemory-policy noeviction
                 )
             elif replica_name in self.teacher_result_manager:
                 self.teacher_result_manager.remove(replica_name)
-                if len(self.teacher_result_manager) > 0:
-                    await self.end_reference_replica()
             else:
                 raise Exception(f"[Controller] Replica {replica_name} not found")
+            if self.teacher_result_manager and (
+                teacher_departed
+                or (not self.policy_status_manager and not self.rollout_status_manager)
+            ):
+                # No producer can submit another teacher request after both
+                # learner and rollout departure. STOP does not require a final
+                # weight sync, so that sync cannot own teacher termination.
+                # Each departing teacher passes the marker to the next one.
+                await self.end_reference_replica()
 
     async def end_reference_replica(self):
         self.redis_controller.publish_teacher_request(

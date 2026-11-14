@@ -91,9 +91,13 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_update.py -k two_replicas
+run python tests/execution_workflow_canary.py
 
 # run tests
 run python tests/test_video_decode.py
+run python -m pytest -q tests/test_deterministic_attention.py
+run python tests/microbatch_numerics_probe.py --output "${TEST_LOG_DIR}/microbatch-numerics"
 run python -m pytest -q tests/test_slurm_ci_job.py
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_distributed_kv_store.py
@@ -104,6 +108,7 @@ run python -m pytest -q tests/test_weight_adoption.py
 run python -m pytest -q tests/test_mpi_rank.py
 run python -m pytest -q tests/test_empty_rollout_batch.py
 run torchrun --standalone --nproc-per-node=2 tests/empty_rollout_batch_canary.py
+run python -m pytest -q tests/test_rollout_only.py tests/test_rollout_only_results.py tests/test_application_callbacks.py
 run python -m pytest -q tests/test_rollout_phase_boundaries.py
 run python -m pytest -q tests/test_r2r_command_selection.py
 run python -m pytest -q tests/test_multi_turn_termination.py
@@ -270,9 +275,13 @@ run python tests/test_trajectory_iteration.py
 run python tests/test_gym_example.py
 # Pytest-style CPU suites; install pytest in case the image lacks it.
 run python -m pytest -q tests/test_objective_weighting.py tests/test_vla_objective_weighting.py tests/test_objective_cohort.py
-run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py"
+run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission_modes.py tests/test_completion_reporting.py tests/test_controller_completion_admission.py tests/test_reward_callbacks.py tests/test_application_callbacks.py"
 run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q tests/test_completion_admission.py tests/test_discarded_rollout_accounting.py tests/test_zero_staleness_refill_deadlock.py tests/test_weight_sync.py tests/test_checkpoint.py tests/test_ranked_rollout_end_and_wst_fence.py tests/test_rollout_mesh_guard.py tests/test_rollout_mesh_retirement.py tests/test_weight_sync_rebuild_safety.py tests/test_r2r_unseeded_source.py tests/test_terminal_checkpoint_trainer_hooks.py tests/test_terminal_drain_protocol.py tests/test_training_complete_checkpoint.py tests/test_p2r_grouping.py tests/test_tensor_packing.py"
 run python -m pytest -q tests/test_dispatch_fetch_bounds.py
+run python -m pytest -q tests/test_strict_refill_batch_versions.py
+run python -m pytest -q tests/test_prompt_dispatch_liveness.py
+run python -m pytest -q tests/test_execution_plan.py tests/test_execution_corpus.py tests/test_execution_storage.py tests/test_execution_objectives.py tests/test_execution_models.py tests/test_execution_native_sft.py tests/test_execution_distributed.py tests/test_execution_generation_resume.py
+run python -m pytest -q tests/test_execution_application_trainer.py tests/test_execution_packing.py tests/test_execution_sequences.py tests/test_execution_record_content.py
 run python -m pytest -q tests/test_rank_dispatch_refill.py
 run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend gloo
 run python -m pytest -q tests/test_dispatch_failure_reporting.py

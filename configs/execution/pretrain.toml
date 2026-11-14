@@ -1,0 +1,27 @@
+# cosmos-rl --config configs/execution/pretrain.toml examples/pretrain_local_text.py
+mode = "disaggregated"
+
+[execution]
+path = "train_from_data"
+
+[train]
+output_dir = "./outputs/pretrain-local-text"
+epoch = 1
+compile = false
+train_batch_per_replica = 2
+
+[train.train_policy]
+type = "sft"
+mini_batch = 1
+dataloader_shuffle = false
+dataloader_drop_last = false
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-0.5B-Instruct"
+model_max_length = 256
+
+[logging]
+logger = ["console"]
+
+[policy.parallelism]
+tp_size = 1

@@ -27,6 +27,8 @@ from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
+from cosmos_rl.dispatcher.rollout_only import RolloutOnlyState
+from cosmos_rl.execution.models import checkpoint_actor
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import MESH_NAMES, Role
 import cosmos_rl.dispatcher.command as command
@@ -339,6 +341,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.samples_on_the_fly = 0
+        self.rollout_only_state = RolloutOnlyState()
         self._applied_discard_report_ids: Dict[str, OrderedDict[str, None]] = {}
         # Set by the controller; see ``set_discard_refill_hook``.
         self._discard_refill_hook: Optional[Callable[..., int]] = None
@@ -762,6 +765,15 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> None:
         """Single entry for rollout HTTP ``is_end`` POST (not prompt fetch)."""
+        if (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        ):
+            return
         if not rollout_status_manager.all_rollouts_ended():
             return
         self.finish_draining_phase(rollout_status_manager)
@@ -785,6 +797,8 @@ class PolicyStatusManager:
         rollout_status_manager: "RolloutStatusManager",
     ) -> bool:
         """Whether ``train_ack`` should schedule P2R/R2R for ``step``."""
+        if checkpoint_actor(self.config):
+            return False
         if self.job_phase == JobPhase.DRAINING and not (
             self.config.validation.enable
             and self.data_fetcher.activated_val_iter is not None
@@ -1167,7 +1181,7 @@ class PolicyStatusManager:
                         valid_rollout_replicas.append(r)
                         if any_valid_rollout_replica is None:
                             any_valid_rollout_replica = r
-                if any_valid_rollout_replica:
+                if any_valid_rollout_replica and not checkpoint_actor(config):
                     command.PolicyToRolloutUnicastCommand.trigger(
                         src_replica=current_policy_replica,
                         dst_replica=any_valid_rollout_replica,
@@ -1617,6 +1631,16 @@ class PolicyStatusManager:
         """
         if count <= 0:
             return
+        if (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        ):
+            self.rollout_only_state.settle(count)
+            return
         before = self.samples_on_the_fly
         if type(count) is not int or count > before:
             raise ValueError("Rollout settlement exceeds outstanding reservations")
@@ -1723,12 +1747,28 @@ class PolicyStatusManager:
         )
         if report_id in applied_ids:
             return 0
-        if type(count) is not int or count > self.samples_on_the_fly:
+        rollout_only = (
+            getattr(
+                getattr(getattr(self, "config", None), "rollout", None),
+                "rollout_only",
+                False,
+            )
+            is True
+        )
+        outstanding = (
+            self.rollout_only_state.outstanding_completions
+            if rollout_only
+            else self.samples_on_the_fly
+        )
+        if type(count) is not int or count > outstanding:
             raise ValueError("Discard report exceeds outstanding reservations")
         applied_ids[report_id] = None
         if len(applied_ids) > _REPORT_DEDUP_WINDOW:
             applied_ids.popitem(last=False)
 
+        if rollout_only:
+            self.rollout_only_state.settle(count)
+            return count
         self.filter_records["rollout_failed"] = (
             self.filter_records.get("rollout_failed", 0) + count
         )
@@ -1992,6 +2032,8 @@ class PolicyStatusManager:
         cleanup messages so the rollout worker releases them immediately
         instead of waiting for age-based cleanup.
         """
+        if checkpoint_actor(self.config):
+            return rollouts
         allowed_outdated_steps = self.config.train.train_policy.allowed_outdated_steps
         filtered_rollouts = []
         accepted_staleness: List[int] = []
@@ -2636,6 +2678,8 @@ class PolicyStatusManager:
         *,
         force_validation: bool = False,
     ):
+        if checkpoint_actor(self.config):
+            return
         valid_rollout_replicas = self._weight_sync_rollout_targets(
             rollout_status_manager
         )
@@ -3626,7 +3670,10 @@ class RolloutStatusManager:
         replica has ever registered this is permanently True, so the skip only
         ever applies to a job configured with no policy replicas at all.
         """
-        return self.config.policy.parallelism.n_init_replicas > 0
+        return (
+            self.config.policy.parallelism.n_init_replicas > 0
+            and not checkpoint_actor(self.config)
+        )
 
     def trigger_rebuild_mesh(
         self,
@@ -3668,6 +3715,7 @@ class RolloutStatusManager:
                 ]
             )
             and any_loaded_policy_replica is not None
+            and not checkpoint_actor(config)
         ):
             command.PolicyToRolloutUnicastCommand.trigger(
                 src_replica=any_loaded_policy_replica,
@@ -3708,7 +3756,7 @@ class RolloutStatusManager:
                     # to broadcast weights
                     any_loaded_rollout_replica = replica
                     break
-            if any_loaded_rollout_replica is not None:
+            if any_loaded_rollout_replica is not None and not checkpoint_actor(config):
                 command.RolloutToRolloutBroadcastCommand.trigger(
                     src_replica=any_loaded_rollout_replica,
                     dst_replicas=valid_replicas,

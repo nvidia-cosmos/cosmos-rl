@@ -106,6 +106,11 @@ def extract_from_cuda_tensor(device, key, obj, tensor):
 
 
 class Trainer(ABC):
+    # Opt in only when the trainer consumes owned prepared records through
+    # the SFT worker's step/checkpoint interface. The application owns loss
+    # mathematics, per-objective masks/counts and empty-contribution handling.
+    recorded_objectives = frozenset()
+
     def payload_prefetch_optimizers(self):
         """Optimizers to observe without changing their update decisions.
 

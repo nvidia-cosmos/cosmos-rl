@@ -120,6 +120,9 @@ def async_safe_ce(
 
 @TrainerRegistry.register(trainer_type="sft")
 class SFTTrainer(LLMTrainer):
+    recorded_objectives = frozenset({"supervised", "policy_gradient", "distillation"})
+    recorded_sequence_packing = True
+
     def __init__(
         self,
         config: CosmosConfig,
@@ -170,10 +173,38 @@ class SFTTrainer(LLMTrainer):
         data_arrival_event: Optional[torch.cuda.Event] = None,
     ):
         pp_last_stage = False
-        if self.lr_schedulers is None:
-            assert train_step == 0, (
-                "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+        execution_window = None
+        model_input_tokens = 0
+        packing_active = False
+        if self.config.execution.objectives is not None:
+            from cosmos_rl.execution.token_objectives import TokenObjectiveBatch
+
+            model_config = getattr(self.model, "config", None)
+            text_config = getattr(model_config, "text_config", model_config)
+            execution_window = TokenObjectiveBatch(
+                global_batch,
+                self.config,
+                device=self.device,
+                group=self.parallel_dims.mesh["dp"].get_group(),
+                vocab_size=getattr(text_config, "vocab_size", None),
             )
+            if execution_window.window.empty:
+                self._execution_seen_empty_prefix = True
+                if self.lr_schedulers is None:
+                    self.lr_schedulers = build_lr_schedulers(
+                        self.optimizers, self.config, total_steps
+                    )
+                return {
+                    "train/loss_avg": 0.0,
+                    "train/loss_max": 0.0,
+                    "optimizer/grad_norm": 0.0,
+                    "train/iteration_time": 0.0,
+                    "train/empty_objective_window": 1,
+                }
+        if self.lr_schedulers is None:
+            assert train_step == 0 or getattr(
+                self, "_execution_seen_empty_prefix", False
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
             self.lr_schedulers = build_lr_schedulers(
                 self.optimizers, self.config, total_steps
             )
@@ -277,8 +308,10 @@ class SFTTrainer(LLMTrainer):
                     label_ids=labels,
                     ignore_label_id=-100,
                     seq_len_multiple=self.seq_len_multiple,
+                    min_input_len=1 if execution_window is not None else 0,
                 )
                 batch.update(packed_args)
+                packing_active = True
                 labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
                 packed_args = pack_sequences_for_masks(
                     batch["valid_input_len"], batch["valid_input_len"]
@@ -379,6 +412,8 @@ class SFTTrainer(LLMTrainer):
                 with self.act_offloading_ctx_manager:
                     output = self.forward_model(**batch)
                     logits = output.logits
+                    if execution_window is not None:
+                        model_input_tokens += logits.shape[0] * logits.shape[1]
                     # Enumerate the output to involve any `loss` like output
                     for k, v in output.items():
                         if "loss" in k.lower() and isinstance(v, torch.Tensor):
@@ -400,10 +435,15 @@ class SFTTrainer(LLMTrainer):
                     # of lm_head to the loss function to fuse the linear and cross entropy.
                     kwargs["lin_weight"] = self.model.lm_head.weight
 
-                ce_loss = self.loss_fn(
-                    logits,
-                    labels,
-                    **kwargs,
+                ce_loss = (
+                    execution_window.loss(
+                        logits,
+                        labels,
+                        start=i,
+                        valid_input_len=batch.get("valid_input_len"),
+                    )
+                    if execution_window is not None
+                    else self.loss_fn(logits, labels, **kwargs)
                 )
                 aux_loss_dict["loss"] = (
                     ce_loss.detach()
@@ -563,6 +603,16 @@ class SFTTrainer(LLMTrainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
+        if execution_window is not None:
+            report_data.update(
+                {
+                    "train/useful_input_tokens": sum(
+                        row["n"] + 1 for row in execution_window.rows
+                    ),
+                    "train/model_input_tokens": model_input_tokens,
+                    "train/packing_active": int(packing_active),
+                }
+            )
         return report_data
 
     def step_validation(self, val_global_batch, train_step: int, total_steps: int):
@@ -674,6 +724,8 @@ class SFTTrainer(LLMTrainer):
         do_save: bool = False,
         **kwargs,
     ):
+        if hasattr(self, "execution_source_state"):
+            kwargs["execution_source"] = self.execution_source_state
         if (
             is_last_step or do_save or (train_step % save_freq == 0 and train_step > 0)
         ) and self.config.train.ckpt.enable_checkpoint:

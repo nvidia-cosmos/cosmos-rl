@@ -15,10 +15,13 @@
 
 
 import inspect
+from functools import partial
 import os
 import atexit
 import traceback as _tb
 import torch
+from cosmos_rl.execution.records import SampleRecord
+from cosmos_rl.execution.source import prepare_supervised_record
 from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -86,6 +89,16 @@ class SFTDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def set_epoch(self, epoch):
+        if getattr(self.dataset, "preparation_seed", None) is not None:
+            self.dataset.set_epoch(epoch)
+
+    def __getitems__(self, indices):
+        check = getattr(self.dataset, "check_batch_budget", None)
+        if check is not None:
+            check(indices)
+        return [self[index] for index in indices]
+
     def __getitem__(self, idx):
         # we only cache on_the_fly result
         if self.cache is not None:
@@ -102,12 +115,24 @@ class SFTDataset(Dataset):
             )
 
             try:
-                if isinstance(idx, list):  # a batch of items
+                if isinstance(raw_item, SampleRecord):
+                    context_factory = getattr(self.dataset, "preparation_context", None)
+                    context = (
+                        context_factory(raw_item)
+                        if context_factory is not None
+                        else None
+                    )
+                    item = prepare_supervised_record(
+                        raw_item, self.data_packer, context=context
+                    )
+                elif isinstance(idx, list):  # a batch of items
                     item = [self.data_packer.sft_process_sample(x) for x in raw_item]
                 else:
                     item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
                 break
             except Exception as e:
+                if isinstance(raw_item, SampleRecord):
+                    raise
                 msg_info = []
                 try:
                     msgs = raw_item if isinstance(raw_item, list) else []
@@ -346,6 +371,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         self.train_step = 0
         self.start_epoch = 0
+        self.record_reward_fns = kwargs.get("record_reward_fns")
         self.enable_dp_load_balancing = (
             self.config.train.train_policy.enable_dp_load_balancing
         )
@@ -412,14 +438,119 @@ class SFTPolicyWorker(PolicyWorkerBase):
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     ):
+        source = getattr(getattr(self.config, "execution", None), "source", None)
+        trainer_cls = None
+        objectives = getattr(
+            getattr(self.config, "execution", None), "objectives", None
+        )
+        if objectives is not None:
+            trainer_type = self.config.train.train_policy.trainer_type
+            if self.config.policy.is_diffusers:
+                trainer_type = "diffusers_" + trainer_type
+            trainer_cls = TrainerRegistry.get_trainer_cls(trainer_type)
+            active = {
+                name
+                for name in ("supervised", "policy_gradient", "distillation")
+                if getattr(objectives, name) > 0
+            }
+            unsupported = active.difference(
+                vars(trainer_cls).get("recorded_objectives", ())
+            )
+            if unsupported:
+                raise ValueError(
+                    f"Trainer {trainer_type} does not support recorded objectives: {sorted(unsupported)}"
+                )
+            if self.config.train.sequence_packing and not vars(trainer_cls).get(
+                "recorded_sequence_packing", False
+            ):
+                raise ValueError(
+                    f"Trainer {trainer_type} does not support recorded sequence packing"
+                )
+        if source is not None and source.kind == "corpus":
+            if dataset is not None:
+                raise ValueError(
+                    "Configure a corpus source or an application dataset, not both"
+                )
+            from cosmos_rl.execution.corpus import CorpusDataset
+            from cosmos_rl.execution.source import (
+                CorpusSupervisedDataset,
+                ExactCorpusSampler,
+            )
+
+            dataset, source_error = None, None
+            try:
+                dataset = CorpusSupervisedDataset(
+                    CorpusDataset(
+                        source.path,
+                        revision=source.revision,
+                        max_record_bytes=source.max_prefetch_bytes,
+                        allow_partial=source.allow_partial,
+                    ),
+                    max_batch_bytes=source.max_prefetch_bytes
+                    // (
+                        1
+                        + self.config.train.train_policy.dataloader_num_workers
+                        * (
+                            self.config.train.train_policy.dataloader_prefetch_factor
+                            or 2
+                        )
+                    ),
+                    preparation_seed=source.preparation_seed,
+                )
+                if len(dataset) == 0:
+                    raise ValueError("Corpus contains no successful training records")
+                objectives = self.config.execution.objectives
+                if objectives is not None and objectives.policy_gradient:
+                    dataset.validate_policy_groups(advantages=source.advantages)
+                if sampler is not None or batch_sampler is not None:
+                    raise ValueError(
+                        "Corpus sources own their exact distributed sampler"
+                    )
+            except Exception as error:
+                source_error = str(error)
+            reports = [(source_error, dataset.corpus.revision if dataset else None)]
+            if dist.is_initialized():
+                group = self.parallel_dims.mesh["dp"].get_group()
+                reports = [None] * dist.get_world_size(group)
+                dist.all_gather_object(
+                    reports,
+                    (source_error, dataset.corpus.revision if dataset else None),
+                    group=group,
+                )
+            failure = next((error for error, _ in reports if error), None)
+            if failure:
+                raise ValueError(f"Corpus source initialization failed: {failure}")
+            if len({revision for _, revision in reports}) != 1:
+                raise ValueError("Corpus ranks disagree on the source revision")
+            sampler = partial(
+                ExactCorpusSampler, seed=self.config.train.train_policy.dataloader_seed
+            )
         self.setup(
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
-        trainer_type = self.config.train.train_policy.trainer_type
-        if self.config.policy.is_diffusers:
-            trainer_type = "diffusers_" + trainer_type
-        self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
+        if source is not None and source.preparation_seed is not None:
+            prepare = getattr(self.data_packer, "prepare_record", None)
+            try:
+                if prepare is None:
+                    raise TypeError("No recorded preparation adapter")
+                inspect.signature(prepare).bind(None, context=None)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "preparation_seed requires packer.prepare_record(record, *, context)"
+                ) from error
+        if source is not None and source.kind == "corpus" and source.score_records:
+            from cosmos_rl.execution.source import RecordScorer
+
+            dataset.scorer = RecordScorer(
+                self.config, self.data_packer, self.record_reward_fns
+            )
+        if trainer_cls is None:
+            trainer_type = self.config.train.train_policy.trainer_type
+            if self.config.policy.is_diffusers:
+                trainer_type = "diffusers_" + trainer_type
+            trainer_cls = TrainerRegistry.get_trainer_cls(trainer_type)
+        self.trainer = trainer_cls(
             config=self.config,
             parallel_dims=self.parallel_dims,
             train_stream=self.train_stream,
@@ -427,7 +558,64 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_data_packer=self.val_data_packer,
             hook_fns=self.hook_fns,
         )
-        self.ckpt_total_steps, self.train_step, _ = self.trainer.load_model()
+        self.ckpt_total_steps, self.train_step, checkpoint_extra = (
+            self.trainer.load_model()
+        )
+        if source is not None and source.kind == "corpus":
+            from cosmos_rl.execution.source import source_compatibility
+
+            geometry = {
+                "parallelism": self.config.policy.parallelism.model_dump(mode="json"),
+                "batch": self.config.train.train_batch_per_replica,
+                "seed": self.config.train.train_policy.dataloader_seed,
+                "shuffle": self.config.train.train_policy.dataloader_shuffle,
+                "drop_last": self.config.train.train_policy.dataloader_drop_last,
+                "model": self.config.policy.model_name_or_path,
+                "model_revision": self.config.policy.model_revision,
+                "max_length": self.config.policy.model_max_length,
+                "packing": self.config.train.sequence_packing,
+                "trainer": trainer_type,
+                "packer": f"{type(self.data_packer).__module__}.{type(self.data_packer).__qualname__}",
+            }
+            preparation = getattr(
+                self.data_packer, "record_preparation_state", lambda: None
+            )()
+            if preparation is not None:
+                geometry["preparation"] = preparation
+            if source.preparation_seed is not None:
+                geometry["preparation_context"] = 1
+            state = {
+                "compatibility": source_compatibility(
+                    dataset.corpus, self.config.execution, geometry
+                ),
+                "mini_batch": self.config.train.train_policy.mini_batch,
+            }
+            saved = (checkpoint_extra or {}).get("execution_source")
+            legacy_state = {
+                "compatibility": source_compatibility(
+                    dataset.corpus, self.config.execution, geometry, legacy=True
+                ),
+                "mini_batch": state["mini_batch"],
+            }
+            if self.config.train.resume:
+                if not isinstance(saved, dict) or "mini_batch" not in saved:
+                    raise ValueError(
+                        "Recorded checkpoint lacks microbatch metadata; exact resume "
+                        "requires a checkpoint created with microbatch pinning"
+                    )
+                if (
+                    type(saved["mini_batch"]) is not int
+                    or saved["mini_batch"] != state["mini_batch"]
+                ):
+                    raise ValueError(
+                        "Checkpoint microbatch configuration changed (mini_batch); "
+                        "preserve its original value for exact resume"
+                    )
+                if saved not in (state, legacy_state):
+                    raise ValueError(
+                        "Checkpoint corpus or objective configuration changed"
+                    )
+            self.trainer.execution_source_state = state
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
@@ -539,6 +727,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
             batch_sampler = batch_sampler(**filtered)
         self.train_batch_sampler = batch_sampler
 
+        loader_kwargs = {}
+        if source is not None and source.preparation_seed is not None:
+            # Iterator creation must not consume the model's checkpointed RNG.
+            # Preparation uses explicit occurrence seeds, not worker base seeds.
+            loader_kwargs["generator"] = torch.Generator().manual_seed(
+                source.preparation_seed
+            )
+
         def get_train_data_loader(
             sampler: Union[Sampler[int], Sampler[list[int]]],
             sampler_in_batch: Optional[Sampler[list[int]]] = None,
@@ -552,6 +748,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     num_workers=self.config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=collate_fn,  # Still need collate_fn for final batch formatting
+                    **loader_kwargs,
                 )
             elif sampler_in_batch is not None:
                 logger.info(
@@ -563,6 +760,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
+                    **loader_kwargs,
                 )
             else:
                 # drop_last=True when PP is enabled to avoid incomplete microbatches at epoch end
@@ -576,6 +774,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     collate_fn=collate_fn,
                     drop_last=self.config.train.train_policy.dataloader_drop_last
                     or self.parallel_dims.pp_enabled,
+                    **loader_kwargs,
                 )
             return data_loader
 
@@ -710,6 +909,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 batch_sampler=val_batch_sampler,
                 collate_fn=collate_fn,
+                **loader_kwargs,
             )
         else:
             self.val_data_loader = DataLoader(
@@ -721,6 +921,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=self.config.train.train_policy.dataloader_drop_last,
+                **loader_kwargs,
             )
 
         steps_by_dataset = (
@@ -910,6 +1111,37 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
     def get_batch_from_dataloader(self, data_loader):
+        source = getattr(getattr(self.config, "execution", None), "source", None)
+        if source is not None and source.kind == "corpus":
+            iterator = iter(data_loader)
+            group = self.parallel_dims.mesh["dp"].get_group()
+            while True:
+                batch, error, ended = None, None, False
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    ended = True
+                except Exception as failure:
+                    error = str(failure)
+                reports = [(error, ended)]
+                if dist.is_initialized():
+                    reports = [None] * dist.get_world_size(group)
+                    dist.all_gather_object(reports, (error, ended), group=group)
+                failure = next(
+                    (report[0] for report in reports if report[0] is not None), None
+                )
+                if failure is not None:
+                    raise ValueError(
+                        f"Corpus preparation failed across the gradient cohort: {failure}"
+                    )
+                if any(report[1] for report in reports):
+                    if not all(report[1] for report in reports):
+                        raise ValueError(
+                            "Corpus ranks disagree on the optimizer schedule"
+                        )
+                    return
+                yield batch
+            return
         # self.iter = iter(self.train_data_loader)
         if self.config.train.train_policy.dataloader_broadcast and (
             self.parallel_dims.pp_enabled

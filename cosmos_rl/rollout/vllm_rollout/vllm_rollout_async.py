@@ -159,6 +159,11 @@ class vLLMRolloutAsync(vLLMRollout):
             self.quantization = quantization
 
             policy_config = self.config.policy
+            if getattr(policy_config, "model_revision", None) is not None:
+                extra_kwargs.update(
+                    revision=policy_config.model_revision,
+                    tokenizer_revision=policy_config.model_revision,
+                )
 
             engine_args = AsyncEngineArgs(
                 model=model_path,

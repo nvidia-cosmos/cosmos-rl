@@ -45,6 +45,11 @@ class ProducerReservations:
     def outstanding(self) -> int:
         return sum(len(slots) for _, slots in self._work.values())
 
+    @property
+    def outstanding_prompts(self) -> int:
+        """Prompts retaining any producer-owned slot, including partial reports."""
+        return len(self._work)
+
     def issue(
         self, requested_weight_version: int, count: int, *, policy_rank=None
     ) -> str:

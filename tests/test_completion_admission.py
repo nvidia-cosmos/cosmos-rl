@@ -675,13 +675,14 @@ def test_rollout_reporter_accounts_for_excluded_completion():
         dequeue_rewards_cal=lambda: next(results)
     )
     worker.config = SimpleNamespace(
+        policy=SimpleNamespace(model_name_or_path="test-policy", model_revision=None),
         train=SimpleNamespace(
             local_dataset=False,
             train_policy=SimpleNamespace(
                 variant="grpo",
                 rollout_as_token_ids=False,
             ),
-        )
+        ),
     )
     worker.data_packer = SimpleNamespace(
         get_rollout_output=lambda *values: (*values, None)

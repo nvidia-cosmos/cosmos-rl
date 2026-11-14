@@ -58,7 +58,9 @@ from cosmos_rl.utils.worker_threads import start_worker_thread, stop_worker_thre
 class TeacherWorker(PolicyWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         # parallel_dims is built from distillation parallelism config
-        config = self.update_config(config)
+        student_model = config.policy.model_name_or_path
+        student_revision = config.policy.model_revision
+        config = self.update_config(config.model_copy(deep=True))
         assert isinstance(config, CosmosConfig), (
             "config must be a CosmosConfig object for this trainer"
         )
@@ -69,7 +71,10 @@ class TeacherWorker(PolicyWorkerBase):
             config, parallel_dims=parallel_dims, **kwargs
         )
 
-        self.student_tokenizer = setup_tokenizer(config.policy.model_name_or_path)
+        self.student_tokenizer = setup_tokenizer(
+            student_model,
+            **({"revision": student_revision} if student_revision is not None else {}),
+        )
 
         # Initialize the teacher
         dataset = kwargs.get("dataset", None)

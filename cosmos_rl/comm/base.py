@@ -547,6 +547,17 @@ class CommMixin:
         self.redis_controller = RedisStreamHandler(
             ips=self.api_client.remote_ips, port=int(self.config.redis)
         )
+        teacher = getattr(self.config, "distillation", None)
+        for name in (
+            "max_pending_requests",
+            "max_pending_bytes",
+            "max_request_bytes",
+            "max_result_bytes",
+            "max_completed_bytes",
+        ):
+            setattr(
+                self.redis_controller, "teacher_" + name, getattr(teacher, name, None)
+            )
         logger.debug(
             f"[{self.role}] Init redis at {self.api_client.remote_ips}:{self.redis_controller.port}"
         )

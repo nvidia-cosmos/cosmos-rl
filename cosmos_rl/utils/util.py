@@ -1360,7 +1360,9 @@ def clear_tokenizer_loaders() -> None:
 
 
 @functools.lru_cache(maxsize=None)
-def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
+def setup_tokenizer(
+    model_name_or_path: str, *, revision: Optional[str] = None
+) -> AutoTokenizer:
     # Registry first so non-text RL workloads can short-circuit the
     # HuggingFace path.  Loaders raising on a non-match should fall back
     # gracefully to the default path.
@@ -1381,6 +1383,7 @@ def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
     tokenizer = retry(AutoTokenizer.from_pretrained)(
         model_name_or_path,
         trust_remote_code=True,
+        **({"revision": revision} if revision is not None else {}),
     )
 
     # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)

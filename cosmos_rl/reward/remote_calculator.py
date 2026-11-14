@@ -19,6 +19,8 @@ from queue import Queue
 import numpy as np
 import os
 import requests
+import threading
+from concurrent.futures import CancelledError
 from functools import partial
 from typing import List, Optional, Callable, Tuple
 
@@ -33,7 +35,15 @@ from cosmos_rl.reward.admission import (
     resolve_completion_admission,
     select_payload_completions,
 )
+from cosmos_rl.reward.callbacks import (
+    annotate_reward_result,
+    initialize_reward_callbacks,
+    reward_callbacks_for,
+    finish_reward_reads,
+    reward_read_scope,
+)
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.reward.rollout_only import prepare_scored_payload
 from cosmos_rl.utils.network_util import make_request_with_retry
 
 try:
@@ -52,6 +62,46 @@ class RemoteRewardCalculator:
     It also supports finding shared prefix among rollouts and ignore the prefix tokens during training.
     """
 
+    def __init__(self):
+        self._reader_lock = threading.RLock()
+        self._closed = False
+        self._close_error = None
+        self._readers_quiesced = False
+
+    def close(self, error=None):
+        """Cancel pending application reads after active reward readers finish."""
+        with self._reader_lock:
+            original_error = error
+            self._closed = True
+            self._readers_quiesced = True
+            pending = list(getattr(self, "uuid2payload", {}).items())
+            stages = dict(getattr(self, "uuid2stage", {}))
+            for name in (
+                "uuid2payload",
+                "uuid2replica",
+                "uuid2stage",
+                "uuid2step",
+                "uuid2completions_per_payload",
+            ):
+                getattr(self, name, {}).clear()
+            if error is None:
+                error = CancelledError("Remote reward evaluation stopped")
+            for uuid, payloads in pending:
+                validation = stages.get(uuid) == "validation"
+                cleanup_error = finish_reward_reads(
+                    getattr(
+                        self, "val_data_packer" if validation else "data_packer", None
+                    ),
+                    payloads,
+                    is_validation=validation,
+                    callbacks=reward_callbacks_for(self, validation),
+                    error=error,
+                )
+                if self._close_error is None:
+                    self._close_error = cleanup_error
+            if original_error is None and self._close_error is not None:
+                raise self._close_error
+
     def setup(
         self,
         config: Config,
@@ -60,6 +110,8 @@ class RemoteRewardCalculator:
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
+        hook_fns=None,
+        callback_context=None,
     ) -> None:
         """
         Setup the RemoteRewardCalculator with the given configuration and data packers.
@@ -77,13 +129,25 @@ class RemoteRewardCalculator:
             )
             return
         self.train_config = config.train.train_policy.remote_reward
+        initialize_reward_callbacks(self, hook_fns, callback_context)
+        self.data_packer = data_packer
+        self.val_data_packer = val_data_packer
         self.val_config = config.validation.remote_reward
-        self.rl_algo = REGISTERED_ALGOs[config.train.train_policy.algo](
-            reward_fn=None,
-            unbiased=config.train.train_policy.unbiased_advantage,
-            config=config,
+        self.rollout_only = (
+            getattr(getattr(config, "rollout", None), "rollout_only", False) is True
         )
-        self.minimum_trainable_completions = self.rl_algo.minimum_trainable_completions
+        self.rl_algo = (
+            None
+            if self.rollout_only
+            else REGISTERED_ALGOs[config.train.train_policy.algo](
+                reward_fn=None,
+                unbiased=config.train.train_policy.unbiased_advantage,
+                config=config,
+            )
+        )
+        self.minimum_trainable_completions = (
+            0 if self.rollout_only else self.rl_algo.minimum_trainable_completions
+        )
         # We use wan2pt1 VAE tokenizer to encode the images/videos into latents.
         try:
             self.tokenizer = Wan2pt1VAEInterface(
@@ -190,6 +254,30 @@ class RemoteRewardCalculator:
         return (uuid, replica_id)
 
     def compute_rewards(
+        self, payloads: List[RLPayload], is_validation: bool, step: int
+    ):
+        with self._reader_lock:
+            if self._closed:
+                raise RuntimeError("Remote reward calculator is closed")
+            return self._compute_rewards_locked(payloads, is_validation, step)
+
+    def _compute_rewards_locked(self, payloads, is_validation, step):
+        try:
+            return self._enqueue_rewards(payloads, is_validation, step)
+        except BaseException:
+            # A successful enqueue retains its reward readers until get_results.
+            # Failed submission has no later reader boundary to notify them.
+            with reward_read_scope(
+                getattr(
+                    self, "val_data_packer" if is_validation else "data_packer", None
+                ),
+                payloads,
+                is_validation=is_validation,
+                callbacks=reward_callbacks_for(self, is_validation),
+            ):
+                raise
+
+    def _enqueue_rewards(
         self,
         payloads: List[RLPayload],
         is_validation: bool,
@@ -371,46 +459,84 @@ class RemoteRewardCalculator:
                 is_validation: whether the payloads are from validation set (always False)
                 step: the weight step where the payloads are generated
         """
-        # Try to fetch results from the first uuid until failed.
-        # Each uuid maps to a list of payloads (batched) and their completion counts.
-        valid_results = []  # List of (rewards_tensor, completions_per_payload)
-        valid_payloads = []  # Flattened list of payloads
-        valid_stages = []
-        valid_steps = []
-        while not uuids.empty():
-            uuid = uuids.queue[0]
-            logger.debug(f"[RemoteRewardCalculator] Current queue: {list(uuids.queue)}")
-            try:
-                is_validation = self.uuid2stage[uuid] == "validation"
-                rewards = self.fetch_reward(uuid, is_validation)
-                uuids.get()  # remove the uuid from the queue
-                payloads_for_uuid = self.uuid2payload[uuid]
-                completions_per_payload = self.uuid2completions_per_payload[uuid]
+        with self._reader_lock:
+            if self._closed:
+                raise RuntimeError("Remote reward calculator is closed")
+            return self._get_results_locked(uuids)
 
-                # Split the batched rewards back to individual payloads
-                offset = 0
-                for payload, n_completions in zip(
-                    payloads_for_uuid, completions_per_payload
+    def _get_results_locked(self, uuids):
+        if uuids.empty():
+            return None, False, -1
+        uuid = uuids.queue[0]
+        payloads = self.uuid2payload[uuid]
+        is_validation = self.uuid2stage[uuid] == "validation"
+        try:
+            rewards = self.fetch_reward(uuid, is_validation)
+        except requests.RequestException as error:
+            # Invalid responses/authentication are terminal. Transport errors,
+            # rate limits and server unavailability retain readers for polling.
+            response = getattr(error, "response", None)
+            permanent = isinstance(error, ValueError) or (
+                response is not None
+                and 400 <= response.status_code < 500
+                and response.status_code not in (408, 425, 429)
+            )
+            if permanent or getattr(self, "rollout_only", False):
+                self.close(error)
+                raise
+            logger.info("[RemoteRewardCalculator] Reward fetch deferred: %s", error)
+            return None, False, -1
+        except BaseException as error:
+            self.close(error)
+            raise
+
+        try:
+            with reward_read_scope(
+                getattr(
+                    self, "val_data_packer" if is_validation else "data_packer", None
+                ),
+                payloads,
+                is_validation=is_validation,
+                callbacks=reward_callbacks_for(self, is_validation),
+            ):
+                counts = self.uuid2completions_per_payload[uuid]
+                if (
+                    len(counts) != len(payloads)
+                    or rewards.ndim != 1
+                    or len(rewards) != sum(counts)
                 ):
-                    payload_rewards = rewards[offset : offset + n_completions]
-                    offset += n_completions
-                    valid_results.append(payload_rewards)
-                    valid_payloads.append(payload)
-                    valid_stages.append(self.uuid2stage[uuid])
-                    valid_steps.append(self.uuid2step[uuid])
-
-                # Remove the payload from the dict to save memory
-                del self.uuid2payload[uuid]
-                del self.uuid2replica[uuid]
-                del self.uuid2stage[uuid]
-                del self.uuid2step[uuid]
-                del self.uuid2completions_per_payload[uuid]
-            except Exception as e:
-                logger.info(
-                    f"[RemoteRewardCalculator] Failed to fetch reward for UUID {uuid} with error: {e}, will retry later."
+                    raise ValueError(
+                        "Remote rewards must match every original completion slot"
+                    )
+                split_rewards = list(rewards.split(counts))
+                return self._finalize_results(
+                    payloads,
+                    split_rewards,
+                    [self.uuid2stage[uuid]] * len(payloads),
+                    [self.uuid2step[uuid]] * len(payloads),
                 )
-                break
+        except BaseException as error:
+            # This task's scope has already finished; close only other tasks.
+            self._forget(uuid)
+            self.close(error)
+            raise
+        finally:
+            self._forget(uuid)
+            uuids.get()
 
+    def _forget(self, uuid):
+        for name in (
+            "uuid2payload",
+            "uuid2replica",
+            "uuid2stage",
+            "uuid2step",
+            "uuid2completions_per_payload",
+        ):
+            getattr(self, name).pop(uuid, None)
+
+    def _finalize_results(
+        self, valid_payloads, valid_results, valid_stages, valid_steps
+    ):
         # Convert the rewards results to RLPayloads
         assert all(payload.prompt_idx >= 0 for payload in valid_payloads), (
             "[Reward] All payloads should have a valid prompt index"
@@ -423,16 +549,51 @@ class RemoteRewardCalculator:
         assert all(step == valid_steps[0] for step in valid_steps), (
             "[Reward] All steps should be the same"
         )
+        if getattr(self, "rollout_only", False) and not valid_payloads:
+            return None, False, -1
         is_validation = valid_stages[0] == "validation"
         step = valid_steps[0]
 
         payload_list: List[RLPayload] = []
         for i, payload in enumerate(valid_payloads):
             rewards = valid_results[i]
+            if getattr(self, "rollout_only", False):
+                payload_list.append(prepare_scored_payload(payload, rewards.tolist()))
+                continue
             admission = resolve_completion_admission(
                 payload,
                 self.minimum_trainable_completions,
                 enabled=not is_validation,
+            )
+            all_rewards = rewards.tolist()
+            if admission.group_excluded:
+                selected_rewards, advantages = [], []
+            elif admission.explicit:
+                selected_rewards = rewards[admission.eligible_indices].tolist()
+                advantages = self.rl_algo.compute_advantage(selected_rewards)
+                assert len(advantages) == len(selected_rewards), (
+                    "[RemoteRewardCalculator] The length of advantages should be "
+                    "the same as the number of admitted completions"
+                )
+            else:
+                selected_rewards = all_rewards
+                # Preserve the historical normalization for unmasked producers.
+                legacy_advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
+                if torch.isnan(legacy_advantages).any():
+                    legacy_advantages = torch.zeros_like(legacy_advantages)
+                advantages = legacy_advantages.tolist()
+            annotate_reward_result(
+                getattr(
+                    self, "val_data_packer" if is_validation else "data_packer", None
+                ),
+                payload,
+                admission,
+                all_rewards,
+                all_rewards,
+                advantages,
+                [{"reward": value} for value in all_rewards],
+                is_validation=is_validation,
+                callbacks=reward_callbacks_for(self, is_validation),
             )
             if admission.explicit or payload.completion_sequences is not None:
                 selected_payload = select_payload_completions(payload, admission)
@@ -463,6 +624,7 @@ class RemoteRewardCalculator:
                     training_rejected_slots=list(payload.training_rejected_slots),
                     completions=payload.completions,
                     extra_info=payload.extra_info,
+                    completion_diagnostics=payload.completion_diagnostics,
                 )
             if admission.excluded_indices:
                 logger.debug(
@@ -493,23 +655,8 @@ class RemoteRewardCalculator:
                 )
                 continue
 
-            if admission.explicit:
-                rewards = rewards[admission.eligible_indices]
-                advantages = self.rl_algo.compute_advantage(rewards.tolist())
-                assert len(advantages) == len(rewards), (
-                    "[RemoteRewardCalculator] The length of advantages should be "
-                    "the same as the number of admitted completions"
-                )
-            else:
-                # Preserve the historical remote-reward contract when a
-                # producer does not opt into admission (and during validation).
-                # Explicit admission uses the selected algorithm above.
-                legacy_advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
-                if torch.isnan(legacy_advantages).any():
-                    legacy_advantages = torch.zeros_like(legacy_advantages)
-                advantages = legacy_advantages.tolist()
             # Create a new RLPayload with the reward
-            selected_payload.rewards = rewards.tolist()
+            selected_payload.rewards = selected_rewards
             selected_payload.advantages = list(advantages)
             payload_list.append(selected_payload)
 

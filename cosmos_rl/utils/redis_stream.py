@@ -428,11 +428,11 @@ class RedisStreamHandler:
         *,
         stop_event=None,
     ) -> bytes:
-        """Replay-safe read; caller acknowledges only after owning the bytes."""
+        """Replay-safe read; acknowledge after consuming or cancelling the result."""
         return teacher_channel.read_result(self, uuid_value, timeout, stop_event)
 
-    def acknowledge_teacher_result(self, uuid_value: str) -> None:
-        teacher_channel.acknowledge_result(self, uuid_value)
+    def acknowledge_teacher_result(self, uuid_value: str, *, timeout=1.0) -> None:
+        teacher_channel.acknowledge_result(self, uuid_value, timeout=timeout)
 
     def requests_for_alternative_clients(self, op: RedisOpType, *args, **kwargs):
         """

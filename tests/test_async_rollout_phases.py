@@ -168,6 +168,7 @@ def phase_worker(scheduler, train_packer):
     worker.validation_round_id = "validation-test-round"
     worker.is_diffusers = False
     worker.config = SimpleNamespace(
+        policy=SimpleNamespace(model_name_or_path="test-policy", model_revision=None),
         validation=SimpleNamespace(n_generation=1),
         rollout=SimpleNamespace(
             n_generation=1, multi_turn_config=SimpleNamespace(enable=False)

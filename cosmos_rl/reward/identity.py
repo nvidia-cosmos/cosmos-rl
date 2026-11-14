@@ -62,6 +62,7 @@ class CompletionReporter:
 
     def report(self, payloads, packer):
         identities = []
+        diagnostics = []
         failures = []
         accepted = []
         for payload in payloads:
@@ -76,6 +77,13 @@ class CompletionReporter:
                     reservation=training_identity(payload, index),
                 )
                 for index, sequence in enumerate(payload.completion_sequences)
+            )
+            if payload.completion_diagnostics is not None and len(
+                payload.completion_diagnostics
+            ) != len(payload.completions):
+                raise ValueError("Reward processing lost completion diagnostics")
+            diagnostics.extend(
+                payload.completion_diagnostics or [None] * len(payload.completions)
             )
             for rejection in payload.completion_rejections:
                 # Use the same application serializer for rejected references.
@@ -102,6 +110,7 @@ class CompletionReporter:
                         ),
                         reason=rejection["reason"],
                         payload=rejected,
+                        diagnostics=rejection.get("diagnostics"),
                     )
                 )
             if payload.completions:
@@ -112,6 +121,7 @@ class CompletionReporter:
                 src_global_rank=self.global_rank,
                 payloads=accepted,
                 completion_identities=identities,
+                completion_diagnostics=diagnostics if any(diagnostics) else None,
                 completion_failures=failures,
             ),
             payloads,
