@@ -668,34 +668,40 @@ class RolloutGenerationMixin:
             except queue.Empty:
                 continue
             key, payload, future = item
-            # Claim execution before preparation. Otherwise a replacement can
-            # cancel this still-PENDING future while its callback is running;
-            # publishing either the result or error would kill the setup thread.
-            with self._setup_futures_lock:
-                if self._setup_shutdown.is_set():
-                    future.cancel()
-                    continue
-                if not future.set_running_or_notify_cancel():
-                    continue
-            # Use the bound method so subclasses see ``self``.
             try:
-                # The setup worker doesn't have access to the
-                # ``data_packer`` / ``data_fetcher`` / ``is_validation``
-                # context from the eventual ``rollout_generation`` call
-                # because prefetch fires before the consumer hits the
-                # template method.  We resolve them from instance
-                # attributes the consumer set up (e.g. via
-                # ``post_init_hook``); backends that need request-scoped
-                # context should pass a closure-bound payload instead.
-                result = self._prepare_sample(
-                    payload,
-                    data_packer=getattr(self, "_prefetch_data_packer", None),
-                    data_fetcher=getattr(self, "_prefetch_data_fetcher", None),
-                    is_validation=False,
-                )
-                future.set_result(result)
-            except BaseException as err:  # noqa: BLE001 - propagate to consumer
-                future.set_exception(err)
+                # Claim execution before preparation. Otherwise a replacement can
+                # cancel this still-PENDING future while its callback is running;
+                # publishing either the result or error would kill the setup thread.
+                with self._setup_futures_lock:
+                    if self._setup_shutdown.is_set():
+                        future.cancel()
+                        continue
+                    if not future.set_running_or_notify_cancel():
+                        continue
+                # Use the bound method so subclasses see ``self``.
+                try:
+                    # The setup worker doesn't have access to the
+                    # ``data_packer`` / ``data_fetcher`` / ``is_validation``
+                    # context from the eventual ``rollout_generation`` call
+                    # because prefetch fires before the consumer hits the
+                    # template method.  We resolve them from instance
+                    # attributes the consumer set up (e.g. via
+                    # ``post_init_hook``); backends that need request-scoped
+                    # context should pass a closure-bound payload instead.
+                    future.set_result(
+                        self._prepare_sample(
+                            payload,
+                            data_packer=getattr(self, "_prefetch_data_packer", None),
+                            data_fetcher=getattr(self, "_prefetch_data_fetcher", None),
+                            is_validation=False,
+                        )
+                    )
+                except BaseException as err:  # noqa: BLE001 - propagate to consumer
+                    future.set_exception(err)
+            finally:
+                # Do not retain a consumed sample/future while queue.get waits
+                # through a colocated learner update (or a long fetch gap).
+                del item, key, payload, future
 
     # ------------------------------------------------------------------
     # Prefetch context (set once, used by the bg worker)

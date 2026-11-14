@@ -277,3 +277,37 @@ def test_ragged_eof_does_not_start_unconsumable_preparation(
     assert fetched == [1]
     worker.rollout.submit_setup.assert_not_called()
     assert not worker.rollout._setup_futures
+
+
+def test_idle_setup_worker_releases_consumed_preparation(worker_factory, monkeypatch):
+    import gc
+    import weakref
+
+    worker, _, _ = worker_factory(counts=(1,))
+    prepared_refs = []
+
+    class Prepared:
+        pass
+
+    def prepare(payload, **kwargs):
+        sample = Prepared()
+        prepared_refs.append(weakref.ref(sample))
+        return sample
+
+    worker.rollout._prepare_sample = prepare
+    idle = threading.Event()
+    requests = worker.rollout._setup_request_queue
+    original_get = requests.get
+
+    def get(*args, **kwargs):
+        if prepared_refs:
+            idle.set()
+        return original_get(*args, **kwargs)
+
+    monkeypatch.setattr(requests, "get", get)
+    assert worker.rollout_for_one_minor_step(remaining_samples=1) == (True, 1)
+    assert idle.wait(5)
+    assert not worker.rollout._setup_futures
+    # Leave the setup worker alive and idle, as it is during learner training.
+    gc.collect()
+    assert prepared_refs[0]() is None, "idle setup thread retains the last sample"
