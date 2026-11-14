@@ -58,7 +58,7 @@ class Backend(RolloutGenerationMixin):
 
     def _postprocess(self, raw, payloads, **kwargs):
         self.generated.extend(index for index, _ in raw)
-        if self.reject_first and payloads[0].prompt_idx < dist.get_world_size():
+        if self.reject_first and payloads[0].prompt_idx == 0:
             return []
         return [NS(weight_version=payload.weight_version) for payload in payloads]
 

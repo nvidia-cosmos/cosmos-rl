@@ -254,3 +254,26 @@ def test_global_count_survives_uneven_scatter(worker_factory, monkeypatch):
     batch = worker._prompt_queue.get_nowait()
     assert len(batch) == 2 and batch.global_prompt_count == 3
     worker.rollout.rollout_generation(batch)
+
+
+def test_ragged_eof_does_not_start_unconsumable_preparation(
+    worker_factory, monkeypatch
+):
+    worker, fetched, _ = worker_factory(counts=(1,))
+    worker.rollout.supports_empty_dp_batches = True
+    worker.parallel_dims.mesh["dp"] = NS(
+        size=lambda: 2, get_local_rank=lambda: 0, get_group=lambda: None
+    )
+
+    def scatter(output, values, **kwargs):
+        output[0] = values[0]
+
+    monkeypatch.setattr("torch.distributed.scatter_object_list", scatter)
+    monkeypatch.setattr(
+        "cosmos_rl.rollout.worker.colocated.rollout_control.dist_util.all_gather_object_cpu",
+        lambda value: [value, (False, True)],
+    )
+    assert worker.rollout_for_one_minor_step(remaining_samples=2) == (True, 0)
+    assert fetched == [1]
+    worker.rollout.submit_setup.assert_not_called()
+    assert not worker.rollout._setup_futures

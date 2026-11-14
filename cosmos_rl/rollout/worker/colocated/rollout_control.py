@@ -173,7 +173,12 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             made_progress = self._prompt_queue.qsize() > before
             if made_progress:
                 batch = self._prompt_queue.queue[-1]
-                if required_weight_version(batch) <= self.current_weight_version:
+                # Colocated generation skips a cohort with an empty DP slice.
+                # Do not start expensive setup that no generation will consume.
+                if (
+                    batch.global_prompt_count >= self.parallel_dims.mesh["dp"].size()
+                    and required_weight_version(batch) <= self.current_weight_version
+                ):
                     self._submit_prefetch_setup(batch)
             if is_end:
                 self.state.set_prompt_fetch_end()
