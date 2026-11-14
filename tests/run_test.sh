@@ -205,6 +205,7 @@ run python tests/test_nccl_e2e.py
 # listing them is far below the cost of a silent gap this size.
 run python tests/test_comm_base_attach.py
 run python tests/test_logging_level.py
+run python -m pytest -q tests/test_report_aggregation.py
 run /bin/bash -c "python -m pip install --quiet 'pytest>=8,<9' && python -m pytest -q tests/test_wandb_identity.py"
 run /bin/bash -c "python -m pip install --quiet 'pytest>=8,<9' && python -m pytest -q tests/test_rollout_resource_ownership.py"
 run python tests/test_nccl_addressing.py
