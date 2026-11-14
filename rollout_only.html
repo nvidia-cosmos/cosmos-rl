@@ -1,0 +1,340 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rollout-only execution &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="vLLM" href="rollout/vllm.html" />
+    <link rel="prev" title="&lt;no title&gt;" href="rollout/overview.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Rollout-only execution</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#initialization-and-versions">Initialization and versions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#work-results-and-completion">Work, results and completion</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#generation-and-optional-scoring">Generation and optional scoring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#application-result-consumer">Application result consumer</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#stop-and-cleanup">Stop and cleanup</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#initial-supported-contract">Initial supported contract</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Rollout-only execution</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/rollout_only.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="rollout-only-execution">
+<h1>Rollout-only execution<a class="headerlink" href="#rollout-only-execution" title="Link to this heading"></a></h1>
+<p>Set <code class="docutils literal notranslate"><span class="pre">[rollout].rollout_only</span> <span class="pre">=</span> <span class="pre">true</span></code> and
+<code class="docutils literal notranslate"><span class="pre">[policy.parallelism].n_init_replicas</span> <span class="pre">=</span> <span class="pre">0</span></code> to run generation and reward
+calculation without a trainer. This is an explicit execution mode: an ordinary
+training job whose policy replicas disappear keeps its existing end-of-rollouts
+behavior. The controller rejects policy and reference registration in this mode.</p>
+<p>A complete example is <a class="reference external" href="../configs/rollout-only.toml"><code class="docutils literal notranslate"><span class="pre">configs/rollout-only.toml</span></code></a>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/rollout-only.toml
+</pre></div>
+</div>
+<p>The example loads Qwen2.5-0.5B-Instruct and evaluates up to 32 GSM8K test
+prompts on one GPU, with one completion per prompt. It needs the usual vLLM
+installation, model/dataset access and Redis executable. Set
+<code class="docutils literal notranslate"><span class="pre">policy.model_name_or_path</span></code> to a compatible local checkpoint to use local
+weights. Custom entry scripts can register their own backend, dataset, packer
+and reward functions through the normal <code class="docutils literal notranslate"><span class="pre">launch_worker</span></code> API; pass the script
+as the launcher’s positional script argument, for example
+<code class="docutils literal notranslate"><span class="pre">cosmos-rl</span> <span class="pre">--config</span> <span class="pre">my-rollout.toml</span> <span class="pre">my_entry.py</span></code>.</p>
+<section id="initialization-and-versions">
+<h2>Initialization and versions<a class="headerlink" href="#initialization-and-versions" title="Link to this heading"></a></h2>
+<p>Each worker constructs its backend normally, including <code class="docutils literal notranslate"><span class="pre">post_init_hook()</span></code>.
+Before starting its prompt producer or generation loop, it initializes the
+engine with <code class="docutils literal notranslate"><span class="pre">load_format=&quot;auto&quot;</span></code> and calls <code class="docutils literal notranslate"><span class="pre">post_init_engine_hook()</span></code> once through
+the existing lazy initialization path. Re-entering that path after successful
+initialization does not recreate the engine or repeat its hook. A custom backend
+must set <code class="docutils literal notranslate"><span class="pre">_engine_initialized</span></code> after its successful <code class="docutils literal notranslate"><span class="pre">init_engine()</span></code>, as required
+by the regular lazy initialization contract. Its <code class="docutils literal notranslate"><span class="pre">auto</span></code> load path must make its
+checkpoint or application-owned model ready for inference.</p>
+<p>No policy replica, initial weight transfer or rollout weight-sync communicator
+is needed. Prompts and generated results use model version <strong>0</strong>, which denotes
+the unchanged local model for this execution; there are no optimizer steps or
+policy versions. Both synchronous generation and vLLM asynchronous generation
+skip trainer version gates. Prompt preparation/prefetch continues to use the
+existing bounded worker queues.</p>
+</section>
+<section id="work-results-and-completion">
+<h2>Work, results and completion<a class="headerlink" href="#work-results-and-completion" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">rollout.max_inflight_prompts</span></code> (default <strong>128</strong>) bounds outstanding prompts
+across all workers, including generation, queued rewards and unacknowledged
+reports. Each prompt reserves <code class="docutils literal notranslate"><span class="pre">n_generation</span></code> completion slots. Workers use the
+normal controller-issued identities, ordered fetch/report receipts and failure
+settlement: a retried HTTP report releases capacity once. A full inflight budget
+returns an empty batch with <code class="docutils literal notranslate"><span class="pre">is_end=false</span></code> so producers retry after capacity is
+released. Dataloader batches larger than the requested amount are kept as an
+undispatched remainder and cannot overrun either admission limit.</p>
+<p>Execution ends when the dataset completes <code class="docutils literal notranslate"><span class="pre">train.epoch</span></code> passes, or the optional
+positive <code class="docutils literal notranslate"><span class="pre">rollout.max_prompts</span></code> limit is reached. The limit counts dispatched
+prompts, including prompts whose generation fails; it does not request
+replacements based on quality annotations. An empty dataset ends without any generation call.
+<code class="docutils literal notranslate"><span class="pre">train.max_num_steps</span></code> does not define a rollout-only horizon.</p>
+</section>
+<section id="generation-and-optional-scoring">
+<h2>Generation and optional scoring<a class="headerlink" href="#generation-and-optional-scoring" title="Link to this heading"></a></h2>
+<p>Rollout-only generation does not prepare a training objective: it never computes
+advantages, applies GRPO group minima, normalizes scores or selects shared-prefix
+training tokens. Every generated completion is retained, including an empty
+string and completions marked low quality. Producer <code class="docutils literal notranslate"><span class="pre">completion_trainable</span></code> masks
+and <code class="docutils literal notranslate"><span class="pre">completion_drop_reasons</span></code> remain annotations for the application result
+consumer; they do not remove rollout-only outputs. Missing reserved completions
+are separate generation-failure outcomes.</p>
+<p>Set <code class="docutils literal notranslate"><span class="pre">[train.train_policy].bypass_reward</span> <span class="pre">=</span> <span class="pre">true</span></code> for pure generation. This skips
+local reward construction, scorer tokenizer initialization, remote scoring setup
+and reward executors. Public result scores are <strong>None</strong>, even though the existing
+transport uses zero reward/advantage placeholders. No reward function needs to
+be configured in this mode; <code class="docutils literal notranslate"><span class="pre">reward_function</span> <span class="pre">=</span> <span class="pre">{}</span></code> is accepted with
+<code class="docutils literal notranslate"><span class="pre">bypass_reward</span> <span class="pre">=</span> <span class="pre">true</span></code>.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">bypass_reward</span> <span class="pre">=</span> <span class="pre">false</span></code>, the ordinary configured reward functions or
+<code class="docutils literal notranslate"><span class="pre">launch_worker(reward_fns=[...])</span></code> score every generated output, independently of
+its quality annotation. Scorers receive the existing <code class="docutils literal notranslate"><span class="pre">(completion,</span> <span class="pre">reference,</span> <span class="pre">**kwargs)</span></code> contract; <code class="docutils literal notranslate"><span class="pre">reference</span></code> may be <strong>None</strong>, so reference-free functions do
+not need a fabricated label. Group scoring remains available as a scoring API,
+without a training group minimum. Existing remote multimodal scoring is also
+supported. Scorer errors, malformed scores and exhausted remote request retries
+are strict failures that terminate the job; they never become zero scores or
+silently discarded completions.</p>
+</section>
+<section id="application-result-consumer">
+<h2>Application result consumer<a class="headerlink" href="#application-result-consumer" title="Link to this heading"></a></h2>
+<p>Pass <code class="docutils literal notranslate"><span class="pre">hook_fns={&quot;rollout_result&quot;:</span> <span class="pre">consumer}</span></code> through the existing launcher entry
+API to consume outputs. A plain callable is synchronous and required. A
+<code class="docutils literal notranslate"><span class="pre">CallbackFactory</span></code> can create a consumer once in the owning process/thread using
+<code class="docutils literal notranslate"><span class="pre">CallbackContext(role=&quot;rollout&quot;,</span> <span class="pre">replica_name=...,</span> <span class="pre">global_rank=...)</span></code>. A
+<code class="docutils literal notranslate"><span class="pre">CallbackRegistration</span></code> must use <code class="docutils literal notranslate"><span class="pre">policy=&quot;required&quot;</span></code> at this boundary; best-effort
+queues are rejected because results and payload references are borrowed.</p>
+<p>The consumer receives one frozen <code class="docutils literal notranslate"><span class="pre">RolloutResultEvent</span></code> per reserved prompt:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">execution_id</span></code>, native <code class="docutils literal notranslate"><span class="pre">work_id</span></code>, and per-outcome <code class="docutils literal notranslate"><span class="pre">slot</span></code> provide stable attempt
+and completion identities. The controller starts a fresh execution UUID for
+every rollout-only run; dataset indices can repeat between epochs.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">model_name_or_path</span></code>, <code class="docutils literal notranslate"><span class="pre">model_revision</span></code> and <code class="docutils literal notranslate"><span class="pre">weight_version=0</span></code> identify the
+configured checkpoint/model. A path/revision is an identity string, not a
+claim that local files have been content-hashed.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">prompt</span></code>, <code class="docutils literal notranslate"><span class="pre">conversation</span></code>, <code class="docutils literal notranslate"><span class="pre">extra_info</span></code>, and each outcome’s completion,
+conversation, token IDs, log probabilities and scorer metrics expose the
+original data or application references.</p></li>
+<li><p>Each <code class="docutils literal notranslate"><span class="pre">CompletionOutcome</span></code> has <code class="docutils literal notranslate"><span class="pre">status=&quot;generated&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;generation_failed&quot;</span></code>,
+an optional score, producer quality flag/reason, and a failure reason when
+generation did not produce the reserved slot. Quality flags are separate from
+generation status. An unscored generated output has <code class="docutils literal notranslate"><span class="pre">score=None</span></code>.</p></li>
+</ul>
+<p>The reporting rank invokes the consumer after optional scoring and before
+<code class="docutils literal notranslate"><span class="pre">data_packer.get_rollout_output()</span></code>, HTTP reporting and transport cleanup. Its
+borrowed lifetime ends when the call returns. The envelope is frozen, but nested
+objects/tensor storage remain borrowed and must be treated as read-only. Copy or
+persist the data synchronously before returning; never retain it in an
+application queue. Outputs retain their worker/packer ownership through the
+consumer call. Reward-reader cleanup hooks, when composed with application
+callbacks, release only temporary reward-reader ownership and must not release
+outputs still owned by the rollout worker. Rollout-only does not invoke the
+training/admission <code class="docutils literal notranslate"><span class="pre">reward_annotation</span></code> hook. When composed with application
+callbacks, both registered and packer <code class="docutils literal notranslate"><span class="pre">reward_read_complete</span></code> hooks still run
+once at the reward-reader boundary, including scoring failures and unscored
+bypass, before result publication. Scorer metrics and original quality masks
+are exposed through <code class="docutils literal notranslate"><span class="pre">rollout_result</span></code> instead of training diagnostics.</p>
+<p>Consumer exceptions fail the run before packing or settlement. Generation
+exceptions attempt a failure event for each affected prompt, preserving the
+original generation error if a consumer also fails. Async generation reports its
+normal terminal empty-result failures through the same consumer boundary.
+Native HTTP retries reuse their report receipt after consumption and do not
+repeat the consumer. There is no persistence guarantee across process death or
+an application consumer failure; applications that resume their own writes
+should deduplicate by <code class="docutils literal notranslate"><span class="pre">(execution_id,</span> <span class="pre">work_id,</span> <span class="pre">slot)</span></code>. Applications own result
+persistence and scoring semantics.</p>
+<p>The runnable JSONL entry script copies tensors/arrays with values, shape and
+dtype, retains structured artifact references, and rejects opaque objects rather
+than writing a lossy representation:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">COSMOS_ROLLOUT_RESULTS_DIR</span><span class="o">=</span>./results<span class="w"> </span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/rollout-only.toml<span class="w"> </span>examples/rollout_only_jsonl.py
+</pre></div>
+</div>
+<p>Each reporting rank owns a separate JSONL file. Its factory opens the file in the
+executing rollout process, and its <code class="docutils literal notranslate"><span class="pre">close()</span></code> flushes/releases application state
+during worker teardown. For large media, adapt the sink to write artifacts and
+persist durable references instead of inline arrays.</p>
+<p>Reports remain receipt-checked and counted, then transport payloads are released
+after consumption. Results never enter policy training buffers or consume a
+training sample budget. The controller logs counts and outstanding completion
+slots; the application consumer supplies the durable outputs.</p>
+</section>
+<section id="stop-and-cleanup">
+<h2>Stop and cleanup<a class="headerlink" href="#stop-and-cleanup" title="Link to this heading"></a></h2>
+<p>After all initial rollout replicas have registered, a controller-side
+<code class="docutils literal notranslate"><span class="pre">await</span> <span class="pre">controller.request_stop(&quot;reason&quot;)</span></code> closes new prompt admission, preserves
+the first stop reason, and lets admitted generation/scoring work drain. It does not request a training checkpoint. After every reporter of
+every registered initial rollout replica has acknowledged its final report and
+posted its end signal, the controller broadcasts the normal NCCL-free STOP.
+Workers remain command participants until that broadcast, preserving multi-rank
+shutdown ordering. The controller exits after workers unregister.</p>
+<p>Initialization, generation, asynchronous scheduler and transport failures use the
+existing worker failure and resource-ownership paths. Engine, reward workers,
+packer transports and packers are closed on success and failure, including
+partial initialization. Cleanup failures remain errors; dependent resources are
+retained when a producer cannot safely drain. The launcher fails and contains
+peer processes on any nonzero rollout-only worker exit, even if the controller
+has already exited after that worker unregistered. Normal training retains its
+existing controller-supervised recovery policy. See
+<a class="reference internal" href="rollout_worker_lifecycle.html"><span class="doc">rollout_worker_lifecycle.md</span></a> for ownership details.</p>
+</section>
+<section id="initial-supported-contract">
+<h2>Initial supported contract<a class="headerlink" href="#initial-supported-contract" title="Link to this heading"></a></h2>
+<p>The first contract supports disaggregated execution with a non-DAPO GRPO rollout
+configuration, one or more rollout replicas, synchronous or vLLM asynchronous
+generation, and custom backends using <code class="docutils literal notranslate"><span class="pre">DisaggregatedRolloutControlWorker</span></code>.
+Trainer-oriented validation rounds, distillation, checkpoint resume, completion
+admission, rank-affine dispatch, asynchronous R2R weight sync and the separate
+TRT-LLM worker are rejected. This avoids silently accepting options whose
+lifecycle still depends on trainers. Multi-DP backends must support empty DP
+batches to consume an uneven final batch, as in ordinary training.</p>
+<p>All controller and worker processes must run the same build. Model changes
+require a new execution. This mode does not add elastic replacement or checkpoint
+recovery for an already admitted prompt.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="rollout/overview.html" class="btn btn-neutral float-left" title="&lt;no title&gt;" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="rollout/vllm.html" class="btn btn-neutral float-right" title="vLLM" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

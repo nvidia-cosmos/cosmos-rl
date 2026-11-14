@@ -1,0 +1,182 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trainer sample and target alignment &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Trainer sample and target alignment</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/trainer_sample_alignment.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="trainer-sample-and-target-alignment">
+<h1>Trainer sample and target alignment<a class="headerlink" href="#trainer-sample-and-target-alignment" title="Link to this heading"></a></h1>
+<p>GRPO optimization chunks partition one collected batch without changing sample
+identity. Static and token-balanced partitioners return chunk-relative indices;
+the trainer converts these once to full-batch indices before caching the
+arrangement. Advantages, teacher/behavior log probabilities, completion metadata
+and positive-NLL flags consequently follow the same sample in every phase and
+mu iteration. Disabling optimization chunking keeps the existing path.</p>
+<p>DPO packers mark response <strong>target</strong> positions, as does the optional chosen
+response SFT term. The response log-probability sum shifts that mask left once
+before the shared next-token scoring utility, and normalizes it to boolean
+indexing. The last logit has no following target and must not contribute. The
+input batch/mask is not mutated. This corrects target alignment, not the choice
+of DPO/BCO algorithm or reference-model semantics.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/test_trainer_sample_alignment.py</span></code> calls the actual trainer entrypoints
+with a tiny model and distinct sample metadata. It covers static/reordered
+chunks, cached phases, teacher and rollout log probabilities, positive-NLL flags,
+two mu iterations, and the no-chunk control. DPO values and logits gradients are
+compared with a naive next-token gather, including padding and an empty response.</p>
+<p>Run on CPU with <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">pytest</span> <span class="pre">-q</span> <span class="pre">tests/test_trainer_sample_alignment.py</span></code>.
+For GPU numerical validation, set <code class="docutils literal notranslate"><span class="pre">COSMOS_ALIGNMENT_DEVICE=cuda</span></code>; CUDA absence
+then fails instead of skipping. Export the checkout root in <code class="docutils literal notranslate"><span class="pre">PYTHONPATH</span></code> when
+using a Python environment editable-installed to another checkout.</p>
+<p>No OpenVLA/PI05 trainer, objective formula, collective schedule, token-weighted
+feature, or checkpoint/transport interface changes are included. Sequence-packing
+boundaries and other numerical audit findings remain separate follow-up work.</p>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

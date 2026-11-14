@@ -1,0 +1,395 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Expanded samples and matching collective participation &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Expanded samples and matching collective participation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/trainer_batching.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="expanded-samples-and-matching-collective-participation">
+<h1>Expanded samples and matching collective participation<a class="headerlink" href="#expanded-samples-and-matching-collective-participation" title="Link to this heading"></a></h1>
+<p>Ordinary trainers retain <code class="docutils literal notranslate"><span class="pre">FixedRolloutBatching</span></code> and their minibatch rules.
+Custom GRPO trainers opt in with
+<code class="docutils literal notranslate"><span class="pre">batching_contract</span> <span class="pre">=</span> <span class="pre">ExpandedSampleBatching(partial_tail=&quot;include&quot;)</span></code>.
+Collection counts refer to completions/episodes; <code class="docutils literal notranslate"><span class="pre">mini_batch</span></code> refers to expanded
+training samples. Their counts need not divide each other.</p>
+<p>Collection still must shard evenly across the full data-parallel mesh, including
+replicated DP: <code class="docutils literal notranslate"><span class="pre">train_batch_per_replica</span> <span class="pre">%</span> <span class="pre">dp_world_size</span> <span class="pre">==</span> <span class="pre">0</span></code>. Startup checks
+retain that dispatch constraint; all RL dispatch paths also reject uneven command
+counts before dequeuing, rather than silently rounding down. For example six
+episodes over two ranks is valid even with sample minibatches of size two;
+three episodes over two ranks is not yet supported by collection dispatch.</p>
+<p>Fixed-rollout GRPO startup checks include both sharded and replicated DP, so
+<code class="docutils literal notranslate"><span class="pre">train_batch_per_replica</span></code> must be divisible by <code class="docutils literal notranslate"><span class="pre">dp_world_size</span> <span class="pre">*</span> <span class="pre">mini_batch</span></code>. A runtime
+command whose collection count is not divisible by the full DP size is rejected
+on every rank before consuming queues or entering scatter. The worker never
+rounds a command down and leaves its remainder behind. SFT’s per-DP-worker batch
+interpretation and valid OpenVLA/PI05 loss/minibatch behavior are unchanged.
+These checks reject unsupported collection counts; they do not turn empty or
+failed expanded preparation into a fatal error or add token weighting.</p>
+<p>Implement two methods:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">prepare_training_batch(rollouts)</span> <span class="pre">-&gt;</span> <span class="pre">ExpandedTrainingBatch</span></code>: return ordered
+local minibatches without training collectives or optimizer/scheduler changes.
+Convert known bad/unavailable data errors to <code class="docutils literal notranslate"><span class="pre">RecoverablePreparationError</span></code>.
+Prefer excluding individual bad episodes while retaining good ones. An exception
+makes the whole local preparation empty for this update.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">step_expanded_training(batch,</span> <span class="pre">**kwargs)</span></code>: execute <code class="docutils literal notranslate"><span class="pre">batch.mu_iterations</span></code>
+passes over every slot in <code class="docutils literal notranslate"><span class="pre">batch.minibatches</span></code>, including empty local slots.
+Each slot must use the same collective schedule on all coupled ranks.</p></li>
+</ul>
+<section id="schedule-agreement">
+<h2>Schedule agreement<a class="headerlink" href="#schedule-agreement" title="Link to this heading"></a></h2>
+<p>Expanded trainers seal their configuration once, before the first preparation.
+They may call <code class="docutils literal notranslate"><span class="pre">agree_batching_schedule(trainer)</span></code> earlier, after the replica’s
+process group is initialized. The worker otherwise does this lazily on the first
+update. The agreement includes scheduling mode, minibatch size, tail policy and
+<code class="docutils literal notranslate"><span class="pre">mu_iterations</span></code>. Configuration and process-group changes require a new trainer.</p>
+<p>Dynamic expanded updates gather metadata within each replica, then reconcile it
+across the existing inter-policy gradient communicator when replicas share
+gradients. This applies with or without objective weighting: a MAX header agrees
+width/errors/update identity and a SUM carries slot counts (plus objective counts
+when requested). Neither is a per-minibatch barrier. Independent trainers without
+a shared gradient communicator do not synchronize with one another.
+The variable data determines participation; fixed-rollout trainers retain their
+own existing schedule rather than entering expanded preflight.</p>
+<p>The schedule has enough slots for the longest local plan. Missing slots become
+empty contributions, not duplicated samples. Slots empty on every rank are
+removed consistently for the legacy per-slot interface. Objective-weighted
+windows retain their slot boundaries and skip globally empty optimizer windows.
+Configuration disagreement about <code class="docutils literal notranslate"><span class="pre">mu_iterations</span></code> remains
+an error, not an invitation to silently change the learning algorithm.</p>
+<p>Nonfinite values in supported numeric/tensor/list/mapping representations cause
+the affected sample to be excluded, not the job to fail. Applications with
+intentional missing-value markers must sanitize or encode them during preparation.
+Opaque objects require application validation. With <code class="docutils literal notranslate"><span class="pre">partial_tail=&quot;include&quot;</span></code>,
+remaining partial batches participate; with <code class="docutils literal notranslate"><span class="pre">&quot;reject&quot;</span></code>, undersized local
+batches contribute zero. Discarded samples and recoverable preparation failures
+are exposed as <code class="docutils literal notranslate"><span class="pre">batching/*</span></code> metrics.</p>
+</section>
+<section id="empty-contributions-and-weighting">
+<h2>Empty contributions and weighting<a class="headerlink" href="#empty-contributions-and-weighting" title="Link to this heading"></a></h2>
+<p>An empty rank must execute the same forward/backward/reduction operations as
+its peers. A real DDP/FSDP trainer may need a masked dummy forward/backward;
+simply skipping backward or assigning zero gradients is not generally sufficient.
+This is a trainer contract, not an automatic conversion of arbitrary trainers.</p>
+<p><code class="docutils literal notranslate"><span class="pre">batch.global_sample_counts[i]</span></code> counts actual contributing samples in slot i.
+For an equally weighted sample objective with <strong>averaged</strong> distributed gradients,
+multiply the local <strong>sum</strong> loss by
+<code class="docutils literal notranslate"><span class="pre">batch.mean_gradient_scale(i,</span> <span class="pre">world_size)</span></code> (world size / global sample count).
+For accumulation or episode weighting, use the objective-window interface below.
+Sum-reduction trainers must not apply an averaging-reduction compensation factor.
+All ranks step optimizers/schedulers identically for globally nonempty slots,
+including ranks with zero local contribution.</p>
+<p>If all ranks are empty, the schedule has zero slots. Scheduler setup is skipped;
+the trainer is still called for checkpoint/control work and must not advance the
+optimizer or scheduler. The worker may acknowledge a consumed-but-skipped update;
+this does not claim an optimization step occurred.</p>
+</section>
+<section id="optional-fixed-schedule">
+<h2>Optional fixed schedule<a class="headerlink" href="#optional-fixed-schedule" title="Link to this heading"></a></h2>
+<p>Declare, for example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">batching_contract</span> <span class="o">=</span> <span class="n">ExpandedSampleBatching</span><span class="p">(</span>
+    <span class="n">partial_tail</span><span class="o">=</span><span class="s2">"include"</span><span class="p">,</span> <span class="n">fixed_minibatches</span><span class="o">=</span><span class="mi">4</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Without objective weighting, once the initial agreement is sealed, every update
+executes exactly four slots for each configured mu iteration. There are
+<strong>no per-update schedule exchanges</strong>.
+The upfront agreement covers all coupled replicas, not just each replica’s DP
+group. Native membership is pinned for each entire update. Configuration or
+cohort changes require a new sealed schedule; they are not renegotiated locally.
+Short/empty preparations are padded with empty local contributions, including
+recoverable preparation failures. Excess minibatches are a contract error, never
+silently truncated: the trainer must bound preparation or manage its own carryover.
+Unexpected post-agreement failures use the normal worker/cohort failure path.</p>
+<p>This mode intentionally cannot discover globally empty slots or updates without
+additional communication. It never removes slots based on local emptiness, and
+scheduler setup is invoked even for locally empty data. With a fixed optimizer
+schedule, zero gradients can still change parameters via momentum/weight decay.
+Choose this mode only when those semantics are acceptable, or implement a
+consistent trainer-owned skip protocol using existing collectives.</p>
+<p>Without objective weighting, <code class="docutils literal notranslate"><span class="pre">global_sample_counts</span></code> is <code class="docutils literal notranslate"><span class="pre">None</span></code> in fixed mode, and <code class="docutils literal notranslate"><span class="pre">mean_gradient_scale()</span></code> rejects
+use rather than inventing actual sample counts. A trainer can use an explicit
+fixed nominal denominator (changing the objective when samples are missing), or
+obtain true counts through its own existing collective protocol. Use dynamic
+mode for automatic valid-sample counts and globally empty update skipping.</p>
+</section>
+<section id="sample-and-episode-weighted-optimizer-windows">
+<h2>Sample- and episode-weighted optimizer windows<a class="headerlink" href="#sample-and-episode-weighted-optimizer-windows" title="Link to this heading"></a></h2>
+<p>Opt in explicitly:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">batching_contract</span> <span class="o">=</span> <span class="n">ExpandedSampleBatching</span><span class="p">(</span>
+    <span class="n">partial_tail</span><span class="o">=</span><span class="s2">"include"</span><span class="p">,</span>
+    <span class="n">objective_weighting</span><span class="o">=</span><span class="s2">"episode"</span><span class="p">,</span>  <span class="c1"># or "sample"</span>
+    <span class="n">accumulation_steps</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Preparation supplies <code class="docutils literal notranslate"><span class="pre">ExpandedTrainingBatch(minibatches,</span> <span class="pre">episode_ids=ids)</span></code>.
+<code class="docutils literal notranslate"><span class="pre">ids</span></code> mirrors the minibatch/sample structure and contains integer or string
+episode identities local to this rank. Filtering removes the corresponding
+identity too. Sample weighting does not require identities. For episode weighting,
+an episode must be wholly owned by one rank and fit within one optimizer window;
+it may span that window’s microbatches. Reusing an identity across optimizer
+windows is rejected before training. Splitting one physical episode across ranks
+is not supported: rank-local IDs cannot establish shared episode ownership.</p>
+<p>The sample objective is the mean of retained scalar sample losses. The episode
+objective is the mean of nonempty episodes’ means of retained scalar sample
+losses. Empty episodes contribute no denominator; filtering renormalizes the
+retained data. These definitions intentionally differ for unequal episode lengths.
+Token weighting is not introduced.</p>
+<p><code class="docutils literal notranslate"><span class="pre">batch.objective_windows</span></code> describes each optimizer update. For each mu iteration,
+consume every window as follows:</p>
+<ol class="simple">
+<li><p>If <code class="docutils literal notranslate"><span class="pre">window.global_count</span> <span class="pre">==</span> <span class="pre">0</span></code>, all ranks skip optimizer and scheduler updates.</p></li>
+<li><p>Otherwise zero gradients once and execute every slot in <code class="docutils literal notranslate"><span class="pre">window.slots</span></code>,
+including empty local slots with the model’s required dummy participation.</p></li>
+<li><p>Produce one scalar loss per retained sample in preparation order. Backpropagate
+<code class="docutils literal notranslate"><span class="pre">window.loss(losses,</span> <span class="pre">start=offset)</span></code> for each slice.
+Advance <code class="docutils literal notranslate"><span class="pre">offset</span></code> by the local number of samples, not padded dummy rows.</p></li>
+<li><p>Step optimizer and scheduler once after all slots. Do <strong>not</strong> divide by the
+number of accumulation slots again.</p></li>
+</ol>
+<p>The default <code class="docutils literal notranslate"><span class="pre">gradient_divisor</span></code> compensates for averaging across the agreed DP
+group and policy-replica gradient cohort. Override it explicitly for sum or mixed
+reductions: use one for all-sum reductions, or the product of only the averaging
+stages’ sizes. It must match the actual gradient reductions, never an unrelated
+global world size. This interface rejects the old per-slot <code class="docutils literal notranslate"><span class="pre">mean_gradient_scale</span></code>.</p>
+<p>Dynamic mode adds counts to the existing preflight exchange: one integer per
+optimizer window, not per-sample identities or tensors. Fixed schedules retain
+their configured slot count but opting into exact weighting adds this per-update
+count exchange and permits globally empty optimizer windows to skip. Fixed mode
+without objective weighting remains exchange-free after startup.</p>
+<p>When gradients also average across policy replicas, pass the existing
+<code class="docutils literal notranslate"><span class="pre">inter_policy_nccl</span></code> gradient communicator to <code class="docutils literal notranslate"><span class="pre">run_training_step</span></code> (the worker
+already does this). A one-time agreement seals the cohort’s configuration and
+membership. Each update then agrees schedule width, preparation errors and step
+with a small MAX reduction, followed by a SUM of slot/window counts. The same
+agreement protects unweighted dynamic schedules; unweighted fixed schedules use
+only the upfront signature. A zero-width
+update omits the latter. All replicas therefore use the same slot schedule,
+denominator and empty-window decision; an entirely empty replica participates
+when another has data. There are no per-microbatch count collectives. This is
+independent of the payload transfer backend. Missing configured multi-replica
+communicators and observed membership/communicator changes are rejected; elastic
+cohort changes are not supported by the sealed schedule.</p>
+<p>The native HA mesh is held through count agreement, all training buckets and
+optimizer completion using a local reentrant lock, not another collective.
+Custom communicator adapters must provide an equivalent stable group lifetime.
+An uncertain native failure is terminal for that communicator and is not replayed
+with partially modified buffers. See <a class="reference internal" href="training_collectives.html"><span class="doc">training_collectives.md</span></a>.</p>
+<p>CPU preparation, identity filtering, and normalization semantics are the same
+with synchronous preparation and background payload prefetch. Count agreement,
+backward, clipping and optimizer updates stay on the training thread. Custom
+trainers must consume this interface; merely declaring an objective does not
+rewrite their loss loops. The fixed-rollout LLM trainers retain existing loss
+semantics. OpenVLA and PI05 integration is described in <a class="reference internal" href="objectives.html"><span class="doc">objectives.md</span></a>.</p>
+</section>
+<section id="background-preparation-with-payload-prefetch">
+<h2>Background preparation with payload prefetch<a class="headerlink" href="#background-preparation-with-payload-prefetch" title="Link to this heading"></a></h2>
+<p>Expanded trainers may call <code class="docutils literal notranslate"><span class="pre">trainer.prefetch_training_batch(next_rollouts)</span></code> on
+the training thread when the next owned batch becomes available. When the attached
+data packer has an active <code class="docutils literal notranslate"><span class="pre">PrefetchDataPackerMixin</span></code> prefetcher, this replaces
+the plain <code class="docutils literal notranslate"><span class="pre">start_prefetch</span></code> submission for that batch: the existing background
+worker fetches its payloads, calls <code class="docutils literal notranslate"><span class="pre">prepare_training_batch</span></code>, validates CPU output,
+and filters samples before publishing a prepared result.</p>
+<p>The same caller works with prefetch disabled or with a packer that has no
+prefetch capability: <code class="docutils literal notranslate"><span class="pre">prefetch_training_batch</span></code> returns <code class="docutils literal notranslate"><span class="pre">False</span></code> without doing
+preparation or allocating a pending batch. The normal training entrypoint then
+prepares/filters synchronously. It returns <code class="docutils literal notranslate"><span class="pre">True</span></code> when background submission
+succeeds. Both modes use the same preparation, filtering and schedule logic;
+callers must not skip training when the return value is <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
+<p>The regular worker’s <code class="docutils literal notranslate"><span class="pre">run_training_step</span></code> consumes that result when it receives
+the same rollout objects; without a submission it prepares synchronously.
+Submit the next batch while consuming/training the current batch to overlap CPU
+preparation with GPU work. This is opt-in custom-trainer/prefetch-scheduler
+integration, not an automatic change to existing fixed-rollout trainers.
+It does not fetch future controller commands, change ACK timing, shift update
+numbers, or replay the cold-start batch. The caller must supply the next batch
+in the original command order; this cannot create overlap if none is available.</p>
+<p>Only one unconsumed prepared batch is permitted. The submitted rollout objects
+and fetched storage remain owned until preparation/consumption completes; do not
+mutate them. Background resolution uses a thread-local cache, not the cache used
+by the currently training batch. Ordinary preparation exceptions surface at
+consumption, where the normal dynamic/fixed recovery policy applies.
+Both submission paths share the independent watchdog from PR #747. Its deadline
+covers queueing, fetch and CPU preparation, even if training never consumes the
+result. Completion disarms the watchdog before publishing the result, so delayed
+consumption of completed work is safe. Strategy-backed timeouts and terminal
+transport errors exit without native cleanup; they are not recoverable data
+errors. Strategy-less legacy packers become terminally unusable on timeout.
+Packer shutdown cancels queued work but does not disarm running work’s watchdog
+until the worker exits; it cannot forcibly interrupt a hung Python/native call.</p>
+<p>Preparation must be CPU-only, thread-safe and independent of mutable model,
+optimizer, scheduler and shared RNG state. Use batch-local RNG if needed. Move
+prepared CPU tensors to GPU on the training thread. Configuration agreement,
+per-update agreement, scheduler setup and all training collectives stay on that
+thread. Quality decisions affecting group advantages still belong before
+advantage computation (#752), not in this late sample-preparation stage.</p>
+</section>
+<section id="boundaries-and-validation">
+<h2>Boundaries and validation<a class="headerlink" href="#boundaries-and-validation" title="Link to this heading"></a></h2>
+<p>Initial integration remains pure-data-parallel GRPO, including colocated RL.
+TP/CP/PP and SFT require separate participation integration. Configuration errors,
+programming errors and CUDA/collective failures are not recoverable data errors.
+Preparation must return: schedule agreement cannot recover a hung rank.</p>
+<p>Tests cover uneven counts, partial tails, empty ranks, all-empty updates,
+nonfinite samples, recoverable preparation failure, and configuration disagreement.
+Run <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--standalone</span> <span class="pre">--nproc-per-node=2</span> <span class="pre">tests/trainer_batching_canary.py</span></code>
+for CUDA/NCCL, or add <code class="docutils literal notranslate"><span class="pre">--cpu</span></code> for Gloo. The canary compares parameters, SGD
+momentum and scheduler state with explicit global sample updates over two
+mu iterations, including zero-contribution ranks and globally empty slots.
+Fixed-mode tests additionally execute successive healthy, uneven, empty and
+failed-preparation updates with exactly one schedule agreement and verify
+numerical parity against an explicit fixed-denominator reference.
+It validates the protocol and test trainer, not arbitrary custom trainer loops.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

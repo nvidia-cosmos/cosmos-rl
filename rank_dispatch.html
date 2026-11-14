@@ -1,0 +1,239 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Optional rank-affine prompt dispatch &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Optional rank-affine prompt dispatch</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/rank_dispatch.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="optional-rank-affine-prompt-dispatch">
+<h1>Optional rank-affine prompt dispatch<a class="headerlink" href="#optional-rank-affine-prompt-dispatch" title="Link to this heading"></a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">train.train_policy.data_dispatch_as_rank_in_mesh</span></code> defaults to <code class="docutils literal notranslate"><span class="pre">false</span></code>. Normal
+shared-queue completion dispatch does not need it. When enabled, dataset indices
+select both the rollout replica and the destination policy replica by modulo
+their respective mesh sizes in disaggregated mode. A rollout replica can reach
+only policy replicas
+in its modulo-<code class="docutils literal notranslate"><span class="pre">gcd(rollout_replicas,</span> <span class="pre">policy_replicas)</span></code> class.</p>
+<section id="reservation-and-replacement-contract">
+<h2>Reservation and replacement contract<a class="headerlink" href="#reservation-and-replacement-contract" title="Link to this heading"></a></h2>
+<p>In disaggregated non-DAPO training, prompt capacity is per requested weight
+version <strong>and destination policy replica</strong>, not just a global prompt count.
+The controller records destination affinity with the issued producer reservation.
+A returned payload cannot change that destination. Its reported generation
+version is not used to reconstruct either its original quota or its destination.</p>
+<p>Terminal rejection reopens the affected destination’s prompt capacity. Partial
+losses accumulate per <code class="docutils literal notranslate"><span class="pre">(requested_version,</span> <span class="pre">policy_rank)</span></code> and are rounded up to
+whole <code class="docutils literal notranslate"><span class="pre">n_generation</span></code> groups there. Losses on two different policy queues must not
+share one replacement group: no prompt can replenish both queues. Report replay
+and producer retirement use the same original coordinates and cannot reopen a
+slot twice. Completed work releases its affinity metadata; trained versions
+release their fetch/refill bookkeeping.
+Retirement validates against the reserved mesh, not the number of still-live
+trainers: the last trainer can leave before rollout-owned slots are released.</p>
+<p>The lazy fetcher applies destination quotas before pulling the dataset and
+retains the existing bounded scans and separate validation iterator. Global
+version assignment must not relabel its already sealed rank-local reservation.</p>
+</section>
+<section id="admission-and-bounded-surplus">
+<h2>Admission and bounded surplus<a class="headerlink" href="#admission-and-bounded-surplus" title="Link to this heading"></a></h2>
+<p>Only complete, balanced sets of policy queues advance the estimated training
+version. Staleness admission instead estimates each completion’s actual position
+in <strong>its own destination queue</strong>, including already reserved lookahead. Surplus
+on another queue must not make a needed completion appear one training step
+older. The dispatch-time staleness check remains authoritative.</p>
+<p>Whole prompt groups may overfill a queue. For batch size <code class="docutils literal notranslate"><span class="pre">B</span></code>, group size <code class="docutils literal notranslate"><span class="pre">G</span></code>
+and <code class="docutils literal notranslate"><span class="pre">P</span></code> policy replicas, the ordinary group-rounded capacity is
+<code class="docutils literal notranslate"><span class="pre">P</span> <span class="pre">*</span> <span class="pre">ceil(B</span> <span class="pre">/</span> <span class="pre">G)</span> <span class="pre">*</span> <span class="pre">G</span></code>. Replenishment rounding adds fewer than <code class="docutils literal notranslate"><span class="pre">G</span></code> completions
+per destination per version. Rank-quota-controlled admission therefore adds
+<code class="docutils literal notranslate"><span class="pre">P</span> <span class="pre">*</span> <span class="pre">(G</span> <span class="pre">-</span> <span class="pre">1)</span></code> headroom to the existing soft/hard sample ceilings, so bounded
+surplus cannot starve a short peer. Destination quotas still constrain fetching;
+this does not disable admission limits or increase the permitted staleness.</p>
+<p>Colocated preparation owns its local usable-batch budget and can fetch
+replacement groups until ready or genuinely exhausted. Its rank-affine prompt
+fetches therefore retain the modulo shard mapping and bounded scans, but do not
+apply the disaggregated fixed prompt quota. A local rejection must not strand
+preparation at that quota. Colocated workers forward their rollout mesh rank
+just like disaggregated workers; paired policies consume that rollout shard
+locally rather than rerouting completions through global policy queues.</p>
+</section>
+<section id="end-of-data">
+<h2>End of data<a class="headerlink" href="#end-of-data" title="Link to this heading"></a></h2>
+<p>Foreign-rank spill rows do not suppress a source’s end-of-data receipt. Already
+buffered rows for another source remain available to that source. A known final
+iterator does not advance epochs repeatedly while sources drain those rows.</p>
+<p>After the final training iterator ends, the existing serialized controller
+status tick checks each policy queue’s maximum possible remaining capacity:
+accepted rows plus sealed lookahead plus producer-owned slots plus
+<code class="docutils literal notranslate"><span class="pre">n_generation</span> <span class="pre">*</span> <span class="pre">unissued</span> <span class="pre">prompts</span></code>. If even this optimistic bound cannot fill
+one policy batch, future prompt input closes for every producer. Issued work and
+reports still drain normally; ordinary end-of-data completion preserves final
+validation and checkpointing at the last completed update. It does not invent
+samples, optimizer updates, or successful recovery of a lost trainer cohort.</p>
+<p>Default shared-queue behavior and DAPO, SFT and validation fetch budgets retain
+their existing policies. This does not add elastic mesh recovery,
+change advantages or losses, or qualify any particular payload transport.</p>
+</section>
+<section id="regression-validation">
+<h2>Regression validation<a class="headerlink" href="#regression-validation" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/test_rank_dispatch_refill.py</span></code> covers rectangular meshes, rank-local
+partial-loss rounding, unchanged HTTP retry semantics, both identified and
+ordinary reports, reservation affinity, producer retirement and staleness
+admission, source-local EOF and conservative partial-tail input closure.
+<code class="docutils literal notranslate"><span class="pre">tests/rank_dispatch_canary.py</span></code> runs two real collective optimizer
+participants on batches admitted after injected partial failures:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>torchrun<span class="w"> </span>--standalone<span class="w"> </span>--nproc-per-node<span class="o">=</span><span class="m">2</span><span class="w"> </span>tests/rank_dispatch_canary.py<span class="w"> </span>--backend<span class="w"> </span>gloo
+torchrun<span class="w"> </span>--standalone<span class="w"> </span>--nproc-per-node<span class="o">=</span><span class="m">2</span><span class="w"> </span>tests/rank_dispatch_canary.py<span class="w"> </span>--backend<span class="w"> </span>nccl
+</pre></div>
+</div>
+<p>The canary uses synthetic generation and disables automatic command publication;
+it validates controller accounting plus collective progress, not end-to-end
+rollout payload transfer or production throughput.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

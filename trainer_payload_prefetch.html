@@ -1,0 +1,312 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trainer payload prefetch &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Trainer payload prefetch</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/trainer_payload_prefetch.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="trainer-payload-prefetch">
+<h1>Trainer payload prefetch<a class="headerlink" href="#trainer-payload-prefetch" title="Link to this heading"></a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">train.prefetch_payloads</span> <span class="pre">=</span> <span class="pre">true</span></code> opts a compatible policy worker into depth-one
+payload lookahead. It is disabled by default. It uses the selected payload
+transport and stock command handlers; it is separate from rollout prompt
+prefetch and does not change the training objective or optimizer schedule.</p>
+<section id="supported-execution">
+<h2>Supported execution<a class="headerlink" href="#supported-execution" title="Link to this heading"></a></h2>
+<p>Overlap requires disaggregated GRPO, centralized rollout metadata, pure data
+parallelism, NCCL or UCXX payload transport and permitted policy-version lag.
+Weight-sync intervals including one are supported. Distillation and strict on-policy
+execution use the synchronous path. Other unsupported modes/topologies also
+log a synchronous fallback. Enabling the setting without an attached
+prefetch-capable packer in a supported mode is an error.</p>
+<p>The controller reserves an eligible complete next batch when available,
+including after the current command has been dispatched. It publishes an
+independent <code class="docutils literal notranslate"><span class="pre">PayloadPrefetchCommand</span></code>; the existing background control reader
+delivers it to every rank through the separate TCPStore control channel. It
+does not enter training collectives or wait behind the executing training
+command. Current training never waits for future production to fill the pipeline.</p>
+<p>Staleness is checked against the intended next pre-update step. Input receive
+can cross a checkpoint or weight-publication boundary: it neither changes the
+model nor counts as completed training. The ordinary command sequence still
+publishes weights N before optimizer update N+1. A checkpoint records only
+committed progress; speculative input is not serialized into it. No new
+reservation is made during active validation, after requested stop, or beyond
+the final horizon. Already-admitted work retains its ordinary owner.</p>
+</section>
+<section id="progress-and-completion">
+<h2>Progress and completion<a class="headerlink" href="#progress-and-completion" title="Link to this heading"></a></h2>
+<p>A train ACK still means that the corresponding command completed. Reserving B
+while training A does not advance the optimizer, scheduler, training step or
+completed-sample accounting. B is consumed by its own ordinary command, with
+its original rollout metadata and an explicit reservation identity. Admission
+does not repurpose A’s step number for B or require an early ACK.</p>
+<p>Warmup fetches and trains the first batch once. Exhaustion and requested stop
+drain admitted work using ordinary training commands. Unissued incomplete
+inputs are not fabricated into updates. Terminal completion always checks for
+an empty pipeline, including when checkpoint saving is disabled; it refuses
+to ACK pending or failed work. Teardown never performs training.</p>
+<p>The final <code class="docutils literal notranslate"><span class="pre">DataFetchCommand</span></code> closes notification admission and checks for
+pending work before sending its success ACK. Managed received batches retain
+their storage until the worker’s bounded final-reader drain succeeds; a
+reader timeout cannot release the storage or send a success ACK. Returned
+metrics must not alias received storage. Standalone training releases a
+successfully consumed received batch even when no receive-byte budget is set.</p>
+<p>A checkpoint records completed training, not the reserved future batch.
+Resume starts with an empty pipeline; uncommitted work may be fetched or
+generated again. This is checkpoint continuation, not exact asynchronous
+replay or durable controller-queue recovery.</p>
+</section>
+<section id="notification-delivery">
+<h2>Notification delivery<a class="headerlink" href="#notification-delivery" title="Link to this heading"></a></h2>
+<p>Notifications contain original rollout metadata, a stable batch identity,
+intended step and fixed process incarnations. Each pure-DP rank selects its
+original shard locally. The controller removes the batch into an explicit
+reservation; it cannot be independently redistributed or removed again.
+Publication uses the existing immutable Redis receipt protocol. A partial or
+uncertain multi-replica publication is terminal, not permission to issue a
+replacement reservation.</p>
+<p>The ordinary training command carries the same metadata as a fallback: missed
+lookahead may lose overlap, never samples. Exact duplicate notifications are
+idempotent; changed content, unknown stale identities and incarnation mismatch
+fail closed. The receiver retains only one future payload slot and a bounded
+duplicate-receipt window. A reader ahead of the training loop waits with a
+finite deadline for the preceding slot to be consumed. Only the training
+thread installs a result in the current cache.</p>
+<p>Background control delivery uses bounded I/O and recipient agreement separate
+from training collectives. It does not retry uncertain delivery under another
+sequence number. Notification errors are surfaced at training readiness or
+completion agreement; no success ACK is sent after a known failure. Admission
+is closed and the owned reader is stopped before transport teardown. Controller
+restart or changed membership is not elastic recovery; resume starts a fresh
+empty pipeline from the committed checkpoint.</p>
+</section>
+<section id="custom-trainer-contract">
+<h2>Custom trainer contract<a class="headerlink" href="#custom-trainer-contract" title="Link to this heading"></a></h2>
+<p>Keep the ordinary training method: train the rollout batch it receives and
+return after enqueueing its final payload readers. A synchronous
+<code class="docutils literal notranslate"><span class="pre">start_prefetch(rollouts)</span></code> / <code class="docutils literal notranslate"><span class="pre">wait_prefetch()</span></code> pair may remain; inside managed
+training it reuses the worker’s current cache and cannot consume the future
+batch by mistake. Use the same rollout objects passed by the worker.</p>
+<p>Remove downstream command/deferred-buffer orchestration before enabling the
+managed lifecycle. <code class="docutils literal notranslate"><span class="pre">collect_prefetch()</span></code> and <code class="docutils literal notranslate"><span class="pre">defer_prefetch()</span></code> deliberately
+reject use inside managed training. Do not independently submit another
+prepared/payload future: there is one shared outstanding slot. CPU sample
+expansion remains the trainer’s existing batching contract; this setting does
+not automatically move arbitrary trainer preparation into a background thread.</p>
+<p>The current and future caches have separate owners. The worker owns a dedicated
+CUDA fetch stream for next-batch allocation, copy and decode. A background
+Python thread alone does not select a different CUDA stream. The fetch future
+becomes ready only after that stream finishes, under the existing independent
+prefetch watchdog; training never reads a partially decoded payload.
+A rejected reference is
+not synchronously re-fetched during managed training. Existing trainer
+empty-data/batching rules still determine the training contribution; this
+feature does not invent zero-loss samples or convert a fixed-batch trainer into
+an expanded/weighted trainer.</p>
+<p>Before returning, drop aliases that must not outlive the command. Override
+<code class="docutils literal notranslate"><span class="pre">training_payload_streams()</span></code> to declare additional CUDA readers beyond the
+worker training/current streams. The worker fences final readers and releases
+the current lease before the next command consumes its future. Insufficient
+receive-memory credit can serialize the next fetch rather than increase the
+configured memory bound. Producer capacity/backpressure remains transport-owned.
+Final-reader fencing uses the training collective timeout budget, not the
+short process-teardown timeout. Configure the existing collective deadlines
+for the largest legitimate asynchronous training step.</p>
+<p>Optimizer metrics count actual <code class="docutils literal notranslate"><span class="pre">step()</span></code> calls when the optimizer layout is
+recognized. Override <code class="docutils literal notranslate"><span class="pre">payload_prefetch_optimizers()</span></code> for a custom layout.
+Unrecognized/replaced optimizers report the counter as unavailable, not zero.</p>
+</section>
+<section id="failures-and-observability">
+<h2>Failures and observability<a class="headerlink" href="#failures-and-observability" title="Link to this heading"></a></h2>
+<p>Readiness checks cover metadata, identity and fetch failures before training.
+All ranks must follow the same collective schedule. Mesh membership is held
+stable for each operation and cannot change under an admitted reservation.
+Uncertain native completion remains terminal under the existing transport
+deadline/watchdog contract; this feature does not recover a failed transport,
+partially completed optimizer update or lost policy participant. A failed
+command sends no successful train ACK. It does not add launcher-level failure
+propagation; use finite job time limits.</p>
+<p>Reports include <code class="docutils literal notranslate"><span class="pre">prefetch/trained_step</span></code>, <code class="docutils literal notranslate"><span class="pre">prefetch/delivered_step</span></code>,
+<code class="docutils literal notranslate"><span class="pre">prefetch/outstanding_batches</span></code>, <code class="docutils literal notranslate"><span class="pre">prefetch/fetch_latency_s</span></code>,
+<code class="docutils literal notranslate"><span class="pre">prefetch/exposed_receive_wait_s</span></code>, lookahead hit/miss counters and per-optimizer
+step counters. Logs include
+current and next reservation IDs. A completed command may contain multiple
+optimizer calls, or none under an existing agreed skip policy. Do not equate
+admissions or command count with useful optimizer work.</p>
+<p>NCCL and UCXX periodic and final transport totals account for each successful
+background fetch, including managed prepared batches. Payload counts and bytes
+describe the native receive results, not the number of distinct cache keys or
+optimizer updates. Fetch latency excludes subsequent CPU batch preparation.
+The legacy completion hook remains available, but cache promotion does not
+count the same transfer again. Failed fetches are not counted as completed
+batches; successful receives still count if later preparation fails.</p>
+<p>On checkpoint resume, the initial policy-to-rollout transfer carries the
+controller’s restored weight version, regardless of registration order. The
+rollout must adopt that version along with the weights before serving resumed
+prompts; a singleton asynchronous rollout cannot rely on a later native R2R
+broadcast to correct an unversioned bootstrap transfer.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/trainer_prefetch_payload_canary.py</span></code> runs matched OFF/ON/barrier controls
+through the stock controller, background readers and worker with real NCCL or
+UCXX payloads and SGD. The next batch is released only after current training
+starts. A separate native NCCL channel publishes GPU snapshots at
+<code class="docutils literal notranslate"><span class="pre">--sync-interval</span></code> boundaries, checking that snapshot N excludes update N+1.
+This synthetic weight channel is not production P2R/VLA qualification. It emits
+fetch/compute intervals, useful update counts, end-to-end throughput and CUDA
+memory samples, including warmup and final consumption. Its producer and
+consumer are fixture ranks, not a training mesh. The separate four-rank
+<code class="docutils literal notranslate"><span class="pre">tests/trainer_prefetch_cohort_canary.py</span></code> exercises two policy replicas. Run
+both controls; a positive overlap span alone is not proof of a throughput win.</p>
+<p>For device-level evidence, run the payload canary with <code class="docutils literal notranslate"><span class="pre">--trace-dir</span> <span class="pre">DIRECTORY</span></code>
+and inspect transfer/copy activity against the annotated OFF/ON/barrier training
+kernels. Profiling is optional and changes timing; keep throughput controls
+unprofiled. For example, use <code class="docutils literal notranslate"><span class="pre">--steps</span> <span class="pre">32</span> <span class="pre">--compute</span> <span class="pre">256</span></code> with the trace option.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

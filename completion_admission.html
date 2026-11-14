@@ -1,0 +1,474 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Completion selection and accounting &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Completion selection and accounting</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/completion_admission.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="completion-selection-and-accounting">
+<h1>Completion selection and accounting<a class="headerlink" href="#completion-selection-and-accounting" title="Link to this heading"></a></h1>
+<section id="quality-selection-identical-in-colocated-and-disaggregated-modes">
+<h2>Quality selection: identical in colocated and disaggregated modes<a class="headerlink" href="#quality-selection-identical-in-colocated-and-disaggregated-modes" title="Link to this heading"></a></h2>
+<p>Applications return <code class="docutils literal notranslate"><span class="pre">RolloutResult.completion_trainable</span></code> and optional aligned
+<code class="docutils literal notranslate"><span class="pre">completion_drop_reasons</span></code> from their rollout producer. This existing interface
+is independent of deployment mode and uses the selected algorithm’s
+<code class="docutils literal notranslate"><span class="pre">minimum_trainable_completions</span></code>, not a hard-coded GRPO rule.</p>
+<p>The shared worker/reward path performs these steps:</p>
+<ol class="simple">
+<li><p>Compute reward telemetry (including excluded completions where supported).</p></li>
+<li><p>Resolve the producer’s quality mask for each original prompt group.</p></li>
+<li><p>Exclude the entire group if too few eligible completions remain.</p></li>
+<li><p>Compute advantages using <strong>only eligible rewards</strong>.</p></li>
+<li><p>Select all completion-aligned fields consistently and report outcomes.</p></li>
+</ol>
+<p>For example, rejecting reward <code class="docutils literal notranslate"><span class="pre">100</span></code> from <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1,</span> <span class="pre">100]</span></code> must normalize <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code>,
+not retain the first two advantages computed from all three rewards. Rejected
+members of one prompt must not be replaced with members of another prompt to
+satisfy the minimum. Local and remote rewards honor this ordering; bypassed
+rewards select the same members with zero rewards/advantages. Validation ignores
+training masks and continues evaluating every completion.</p>
+<p>There is deliberately <strong>no controller quality callback</strong>: received training
+payloads already carry group-derived advantages. Controller extraction rejects
+an unconsumed mask instead of silently training it or filtering too late.
+Late staleness and terminal-job cleanup remain separate lifecycle decisions.</p>
+<p>For step-bounded runs with validation, sampler exhaustion is not a prerequisite
+for terminal cleanup. The controller closes admission and releases buffered tail
+payloads after the final dispatch’s sealed ACK set and final validation round
+are complete, with no outstanding dispatch, active validation iterator or
+payload lookahead. A missing training ACK cannot be replaced by live READY
+status or a completed validation receipt. No extra synthetic training step is
+issued to finish this path.</p>
+<p>Colocated workers inherit the same producer and reward implementation. Their
+controller queues only selected completions, aggregates numeric telemetry, and
+does not sum routing IDs or originating weight versions. Both centralized and
+uncentralized colocated ingestion follow this contract; existing queue-based
+collection continues until enough accepted samples are available.</p>
+<section id="colocated-terminal-sample-accounting">
+<h3>Colocated terminal-sample accounting<a class="headerlink" href="#colocated-terminal-sample-accounting" title="Link to this heading"></a></h3>
+<p>Fetching a prompt charges its requested generations even in colocated mode.
+Accepted payloads stay on the existing local queue path. Quality exclusions and
+structurally failed/empty generations instead send an accounting-only report
+through the registered producer’s ordered HTTP receipt stream. No accepted
+tensors, rewards or advantages cross that reporting path; healthy reports add
+no HTTP request or training collective.</p>
+<p>The controller validates the source incarnation, rank, sequence and current
+preparing dispatch before retiring the count. It decrements both the global
+in-flight charge and that dispatch’s outstanding fetched balance. This makes
+lost-ACK retries idempotent and prevents an exhaustion cancellation from
+retiring the same dropped samples again. Training ACKs still settle only the
+actual training batch; any accepted queue surplus remains charged. A fresh
+discard cannot retire a batch whose preparation agreement is already sealed.</p>
+<p>Each new dispatch records the charged local input carried from earlier updates.
+Existing strict on-policy purges report <code class="docutils literal notranslate"><span class="pre">discarded_queued_samples</span></code> against that
+carried balance, without changing which samples are trained or their ordering.
+Dataset exhaustion cancels both remaining carried input and current fetched
+input; acknowledged drops cannot be counted again. Once preparation is sealed,
+a queue-only discard can retire only surplus outside the optimizer reservation.</p>
+<p>On clean exit, each rank retires its own unused local queues before one final
+CPU completion fence permits source unregistration. Empty ranks participate too:
+rank zero must not unregister while a peer’s queued-input receipt is pending.
+Failure to confirm any purge prevents clean completion. This adds no per-update
+training collective and leaves accepted completion reporting on its local path.</p>
+<p>For example, six fetched samples with two exclusions leave four charged for
+training, then zero after the training ACK. Six healthy samples with a batch of
+four leave two queued samples charged until reused, purged or retired at clean
+exit. Delivery failure stops the source rather than admitting healthy work after
+uncertain accounting.</p>
+</section>
+</section>
+<section id="optional-identified-reporting">
+<h2>Optional identified reporting<a class="headerlink" href="#optional-identified-reporting" title="Link to this heading"></a></h2>
+<p>Set <code class="docutils literal notranslate"><span class="pre">[rollout].completion_admission</span> <span class="pre">=</span> <span class="pre">true</span></code> to enable the standard worker’s
+pre-generation reservations and the controller’s replay-protected settlement.
+Synchronous generation and the asynchronous task scheduler preserve identities
+through failures, reward processing, selection, serialization and HTTP retries.
+Exhausted report delivery raises rather than silently losing reservations.
+Custom producers may instead enable <code class="docutils literal notranslate"><span class="pre">completion_admission=True</span></code> on controller
+<code class="docutils literal notranslate"><span class="pre">main</span></code> / <code class="docutils literal notranslate"><span class="pre">Controller.setup</span></code> and implement the same contract.</p>
+<p>This does not install quality policy or force a quality mask onto legacy
+unmasked groups. The ordinary producer mask path does <strong>not</strong> require identified
+reporting and retains report-level discard accounting. Identified settlement
+supports disaggregated, non-DAPO RL; this accounting limitation does not restrict
+quality selection in either mode. Unsupported configurations fail at startup.</p>
+<p><code class="docutils literal notranslate"><span class="pre">RolloutRequest.completion_identities</span></code> contains one <code class="docutils literal notranslate"><span class="pre">CompletionIdentity</span></code> per
+accepted completion in payload/group order. Allocate monotonically increasing
+sequences <strong>before generation</strong>, scoped to source replica incarnation and global
+rank; retain the originating <code class="docutils literal notranslate"><span class="pre">weight_version</span></code>. A restart uses a fresh replica
+name. Retries reuse both identity and payload reference.</p>
+<p>Report generation failures, quality exclusions and all members of insufficient
+groups through <code class="docutils literal notranslate"><span class="pre">completion_failures</span></code>. Their identities come from the same
+allocation, not from renumbering the surviving group. An optional <code class="docutils literal notranslate"><span class="pre">payload</span></code>
+carries the rejected completion’s transport reference for controller cleanup;
+it never enters the training buffer. Without it, resources remain producer-owned.
+Do not attach an accepted consumer’s reference to a rejected identity or share
+one disposable reference across distinct completion identities.</p>
+<p>The controller settles and refills each rejected identity once using existing
+versioned accounting and cleanup. A failure followed by a late payload settles
+once and releases the late payload once. Replays of accepted completions never
+release buffers a consumer may still own. Legacy discard/admission metric reports
+must not be mixed with identified settlement.</p>
+<p>Duplicate identities within a report, mismatched/future versions, invalid source
+ranks and reports from departed replicas fail before accounting mutation. Malformed
+or expired reports do not transfer new ownership. Replay state retains at most
+4096 sequences per live source rank; sequences below the window are rejected,
+never considered new. Producers must bound reordering. This is not a durable
+controller-restart journal.</p>
+<p>Replacement prompts do not consume still-unissued normal prompt quota. This is
+essential when a producer reports a failure before other producers finish
+fetching their initial batch, especially with zero allowed staleness.</p>
+<p>Every disaggregated non-DAPO RL run reopens same-version prompt capacity after
+terminal sample loss, including runs with positive allowed staleness. Losing all
+usable groups must leave replacement work that can run without a training update.</p>
+<p>In shared-queue dispatch, each fetch is bounded before reading dataset rows or
+charging samples. Capacity is the unused normal quota plus replacement credits
+from the native admission-derived starting version through
+<code class="docutils literal notranslate"><span class="pre">reachable_weight_version</span> <span class="pre">+</span> <span class="pre">allowed_outdated_steps</span></code>. Reachable weights include
+versions already reported by rollouts or staged for transfer, bounded by the
+controller step. This prevents a sync interval or coalesced sync from issuing
+work that needs a version unavailable until another training update. Before
+the initial sync, the startup protocol delivers the restored controller version.
+With zero allowed staleness, a request
+for four prompts with one replacement credit and no ordinary capacity returns
+that one replacement, leaving the next version’s quota untouched. In-flight
+limits apply to the whole fetch, rounded up to a complete generation group so
+the final missing completion can be supplied. Empty capacity gives a temporary
+empty response; the existing training-completion signal remains authoritative.
+Validation, DAPO, colocated and scaling paths retain their existing behavior;
+rank-affine dispatch uses its destination quotas.</p>
+<p>The existing <code class="docutils literal notranslate"><span class="pre">max_retry_for_on_policy</span></code> setting also bounds asynchronous
+disaggregated attempts despite its name. A positive value limits attempted
+prompt batches per weight version, counting replacements and every version in
+a fetch. Exhaustion is terminal: the HTTP receipt marks controller failure, the
+controller monitor exits with code 86, and the launcher fails the run and kills
+its worker processes. A nonpositive value permits unbounded replacements.</p>
+<p>Admission and replica changes share the controller lifecycle lock. Closed
+admission discards without reopening prompt capacity. An infrastructure error
+after settlement starts terminates the controller process with exit code 86.
+It cannot be converted into a retryable HTTP error or leave a poisoned controller
+alive. Atomic validation errors remain ordinary errors before mutation. Process
+restart and cross-node scheduler cancellation remain deployment responsibilities.</p>
+</section>
+<section id="application-callbacks-and-admission-commit-observations">
+<h2>Application callbacks and admission commit observations<a class="headerlink" href="#application-callbacks-and-admission-commit-observations" title="Link to this heading"></a></h2>
+<p>Register application behavior through the existing <code class="docutils literal notranslate"><span class="pre">hook_fns</span></code> argument on
+<code class="docutils literal notranslate"><span class="pre">worker_entry.main</span></code> / role entrypoints. A custom data packer is optional:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.application_callbacks</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">CallbackFactory</span><span class="p">,</span> <span class="n">CallbackRegistration</span><span class="p">,</span>
+<span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">annotate</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="n">result</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="p">{</span><span class="s2">"sample"</span><span class="p">:</span> <span class="n">payload</span><span class="o">.</span><span class="n">prompt_idx</span><span class="p">,</span> <span class="s2">"slot"</span><span class="p">:</span> <span class="n">slot</span><span class="p">,</span>
+         <span class="s2">"admitted"</span><span class="p">:</span> <span class="n">slot</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">selected_indices</span><span class="p">}</span>
+        <span class="k">for</span> <span class="n">slot</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">rewards</span><span class="p">))</span>
+    <span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">finish_reads</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">is_validation</span><span class="p">,</span> <span class="n">error</span><span class="p">):</span>
+    <span class="c1"># Finish application readers and release only their reward-owned views.</span>
+    <span class="c1"># Worker/packer outputs remain live for later result/policy consumers.</span>
+    <span class="k">pass</span>
+
+
+<span class="n">hook_fns</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"reward_annotation"</span><span class="p">:</span> <span class="n">annotate</span><span class="p">,</span>
+    <span class="s2">"reward_read_complete"</span><span class="p">:</span> <span class="n">finish_reads</span><span class="p">,</span>
+    <span class="s2">"admission_committed"</span><span class="p">:</span> <span class="n">CallbackRegistration</span><span class="p">(</span>
+        <span class="n">handler</span><span class="o">=</span><span class="n">log_admission_events</span><span class="p">,</span> <span class="n">policy</span><span class="o">=</span><span class="s2">"best_effort"</span><span class="p">,</span> <span class="n">queue_capacity</span><span class="o">=</span><span class="mi">64</span>
+    <span class="p">),</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">reward_annotation(payload,</span> <span class="pre">result)</span></code> runs after native rewards, admission and
+advantages have been computed. <code class="docutils literal notranslate"><span class="pre">RewardResult</span></code> contains tuples in original
+completion order: rewards, filter rewards, advantages (<code class="docutils literal notranslate"><span class="pre">None</span></code> for rejected
+members), and borrowed native report metrics. <code class="docutils literal notranslate"><span class="pre">selected_indices</span></code> identifies
+native admitted members, or an empty tuple when the group is insufficient.
+Native admission precedes whole-group dynamic sampling, buffering, outdated
+filtering, training and ACKs. <strong>Accepted does not mean trained or consumed.</strong>
+Treat the payload and result as borrowed read-only views valid until return.
+The callback may return detached annotations; it cannot change rewards,
+advantages, eligibility, reservations, replacement capacity or counters.
+Application quality policy still belongs in the producer’s completion mask.</p>
+<p>Return <code class="docutils literal notranslate"><span class="pre">None</span></code> or one dictionary per original slot. Each dictionary supports only
+finite JSON primitives and string keys, with at most 4096 encoded bytes, eight
+nesting levels and 1024 nodes. The group’s complete diagnostic envelope is
+limited to 65536 UTF-8 bytes. Values are copied without invoking arbitrary
+serializers; tensors, arrays, object handles and transport leases are rejected.
+Native producer-owned reports are unchanged. Selected payloads carry
+<code class="docutils literal notranslate"><span class="pre">completion_diagnostics</span></code>; <code class="docutils literal notranslate"><span class="pre">original_index</span></code> survives selection, and
+<code class="docutils literal notranslate"><span class="pre">rejected_completion_diagnostics</span></code> retains excluded slots. Identified reports align
+accepted diagnostics with identities and include rejected diagnostics in each
+<code class="docutils literal notranslate"><span class="pre">CompletionFailure</span></code>, even when native reporting removes the rejected payload.</p>
+<p><code class="docutils literal notranslate"><span class="pre">admission_committed(events)</span></code> observes <code class="docutils literal notranslate"><span class="pre">AdmissionCommitted</span></code> events whose explicit
+<code class="docutils literal notranslate"><span class="pre">stage</span></code> is <code class="docutils literal notranslate"><span class="pre">&quot;admission_committed&quot;</span></code>. Each event contains source replica/rank,
+stable identity, native disposition and detached diagnostics, with no payload or
+accounting operation. Native rejection accounting, cleanup and replay-window
+commit precede this observation. It reports admission only: later buffering,
+outdated filtering, training, ACKs and eventual policy consumption keep their
+existing native owners. Duplicate identities and late cleanup-only payloads
+produce no second event, including reordered and all-rejected reports.</p>
+<p>A plain observer callable or <code class="docutils literal notranslate"><span class="pre">CallbackRegistration(...,</span> <span class="pre">policy=&quot;required&quot;)</span></code>
+runs synchronously under the controller lifecycle lock; failures poison admission
+and retain the existing fatal controller behavior (exit 86). Accounting is
+already committed and cannot be repeated to repair an observer failure. Use this
+policy only for application observations that must succeed for the role to
+continue. <code class="docutils literal notranslate"><span class="pre">completion_settled</span></code> and <code class="docutils literal notranslate"><span class="pre">CompletionSettlement</span></code> remain deprecated draft
+aliases; use <code class="docutils literal notranslate"><span class="pre">admission_committed</span></code> and <code class="docutils literal notranslate"><span class="pre">AdmissionCommitted</span></code> in new code. Registering
+both observer names is rejected.</p>
+<p>An explicit <code class="docutils literal notranslate"><span class="pre">policy=&quot;best_effort&quot;</span></code> observer receives a deep detached snapshot on
+a separate daemon worker through a bounded nonblocking queue. Factory creation
+and observer execution run off the controller thread. A full queue drops/logs the
+event; ordinary factory/handler errors are logged and dropped. These diagnostics
+cannot block the controller lifecycle lock or poison admission. They may be lost
+on process failure or bounded shutdown and must not own mandatory persistence,
+capacity, counters or payload cleanup. This API is not an exactly-once journal
+across controller restart. Best-effort mode is forbidden for borrowed reward
+annotations, final-reader cleanup and required result consumers.</p>
+<p>For worker-local state, register <code class="docutils literal notranslate"><span class="pre">CallbackFactory(create)</span></code> in place of a plain
+callable, or wrap it in <code class="docutils literal notranslate"><span class="pre">CallbackRegistration</span></code>. <code class="docutils literal notranslate"><span class="pre">create(context)</span></code> returns the
+callback for that hook. <code class="docutils literal notranslate"><span class="pre">CallbackContext</span></code> supplies role, replica name, global rank,
+validation flag, PID and a lifetime-unique executing worker ID. Factories bind
+once per hook/process/thread, including after fork; annotation and cleanup
+registrations are separate bindings. Plain callables can be invoked concurrently
+by reward threads and must be thread-safe. Factories are the preferred boundary
+for clients/caches that cannot be shared between workers. Registrations/factories
+must be serializable when a launcher uses process workers. Factory creation and
+callbacks must finish synchronously at required borrowed boundaries; applications
+must synchronize any asynchronous readers before returning.</p>
+<p>Role shutdown quiesces reward workers before closing its callback registries.
+An optional required callback object’s <code class="docutils literal notranslate"><span class="pre">close()</span></code> runs once on its owner shutdown
+thread; best-effort instance close runs on its telemetry worker. Process workers
+register their own finalizers on first use, so a parent-initialized singleton
+still binds and closes child-owned instances. Process-finalizer errors are
+reported by multiprocessing after tasks finish; mandatory per-task payload
+cleanup must use the strict <code class="docutils literal notranslate"><span class="pre">reward_read_complete</span></code> boundary rather than defer to
+process-exit finalization. Bounded telemetry close can abandon a stalled daemon
+with only detached metadata, leaving payload and transport ownership independent.</p>
+<p><code class="docutils literal notranslate"><span class="pre">reward_read_complete(payload,</span> <span class="pre">*,</span> <span class="pre">is_validation,</span> <span class="pre">error)</span></code> always runs synchronously
+and strictly after reward evaluation and annotation, including failures. Registered
+application cleanup runs first, followed by <code class="docutils literal notranslate"><span class="pre">packer.on_reward_read_complete</span></code> for
+packer-owned readers; both boundaries and every submitted group are attempted.
+Each releases only its own reward-reader references. Native evaluation errors
+remain primary; otherwise the first cleanup error fails the task and secondary
+errors are logged. <code class="docutils literal notranslate"><span class="pre">BaseDataPacker.annotate_reward_result</span></code> remains a compatibility
+fallback when no annotation hook is registered. Packer-owned cleanup remains a
+supported independent ownership boundary and is never suppressed by registration.</p>
+<p>Cleanup receives each submitted group’s original payload, including groups not
+evaluated because an earlier group failed, and must tolerate repetition. It must
+retain worker/packer output references needed by later result consumers,
+trainable colocated views, policy leases and transport readers. Tasks canceled
+before starting notify their submitting role with <code class="docutils literal notranslate"><span class="pre">CancelledError</span></code>; submission
+failures finish all not-yet-submitted groups. Failed cancellation cleanup fails
+shutdown and retains its resource owners. Cleanup does not grant permission to
+release outputs that are still consumed by a required <code class="docutils literal notranslate"><span class="pre">rollout_result</span></code> callback.</p>
+<p>Annotation and final-reader cleanup work for local, remote and bypassed rewards
+in colocated and disaggregated training execution. With rollout-only execution,
+the training/admission-oriented <code class="docutils literal notranslate"><span class="pre">reward_annotation</span></code> callback is deliberately
+skipped; <code class="docutils literal notranslate"><span class="pre">reward_read_complete</span></code> still runs before the required <code class="docutils literal notranslate"><span class="pre">rollout_result</span></code>
+consumer, retaining output ownership. Use that result consumer for optional
+scores, producer masks/reasons and scorer metrics. Transient remote transport/server errors
+retain readers for polling. Invalid responses, slot-count mismatches, nonretryable
+HTTP errors and annotation failures finish pending readers with the original
+error. Remote shutdown serializes against active readers and notifies pending
+groups with <code class="docutils literal notranslate"><span class="pre">CancelledError</span></code>. Callback registries still close after quiescence if
+another shutdown step fails, while the original/first error remains primary.</p>
+<p>Identified admission observations retain the native disaggregated non-DAPO
+restriction. Colocated callbacks expose native admission and detached diagnostics;
+they do not promise per-identity controller events. A colocated consumer captures
+fully rejected diagnostics during annotation before native reporting removes the
+payload. Validation ignores training masks, exposes every original slot, uses its
+own callback context/packer, and has no training identities, refill capacity or
+<code class="docutils literal notranslate"><span class="pre">admission_committed</span></code> events.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/test_application_callbacks.py</span></code> checks required/best-effort policies,
+nonblocking bounded telemetry, thread lifetimes and actual fork worker creation
+and close. <code class="docutils literal notranslate"><span class="pre">tests/test_reward_callbacks.py</span></code> checks registration without custom
+packers, both cleanup owners and first errors, detached snapshots, replay
+suppression, original slots and local/remote/bypass failure/shutdown behavior.
+<code class="docutils literal notranslate"><span class="pre">tests/test_completion_admission_modes.py</span></code> exercises both colocated queue modes
+and disaggregated reporting/ingestion. These CPU regressions do not certify
+application-specific CUDA streams or distributed transport readers.</p>
+</section>
+<section id="downstream-adoption">
+<h2>Downstream adoption<a class="headerlink" href="#downstream-adoption" title="Link to this heading"></a></h2>
+<p>Applications should decide quality while producing the completion group and
+populate the mask before submitting it to rewards. They must not discard
+individual members in controller ingest or trainer preprocessing after advantage
+normalization. Existing whole-group pre-save gates can emit an all-false mask;
+partial gates emit the appropriate member mask. Keep driving-specific policy
+and diagnostic retention in the application. Quality-policy errors must not
+silently admit an unchecked group.</p>
+</section>
+<section id="validation-scope">
+<h2>Validation scope<a class="headerlink" href="#validation-scope" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/test_completion_admission_modes.py</span></code> drives real worker generation-result
+processing, local rewards, reporting and ingestion for disaggregated and both
+colocated queue modes. It checks partial/all rejection, insufficient groups,
+algorithm-specific minima, aligned advantages, and rejection accounting.
+Existing tests cover remote/bypassed rewards and validation behavior.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/test_completion_reporting.py</span></code> checks pre-generation reservations, reward
+pickling, stable identities, asynchronous failures, delivery exhaustion and real
+subprocess exit after settlement/filter/buffering faults. These suites run in CI.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/completion_admission_canary.py</span></code> requires the RL-Gym companion modules.
+Run it as the launcher role entrypoint from the companion directory using
+<code class="docutils literal notranslate"><span class="pre">tests/configs/completion_admission_disaggregated.toml</span></code> (two policy/two rollout
+replicas) and <code class="docutils literal notranslate"><span class="pre">tests/configs/completion_admission_colocated.toml</span></code> (one policy
+replica). Set <code class="docutils literal notranslate"><span class="pre">ADMISSION_CANARY_MODE</span></code> accordingly so the fixture selects the
+appropriate packer. It uses standard identity reporting, injects a generation
+failure and pre-reward quality rejection, then replays reports. Both configurations
+run 20 steps. The test algorithm explicitly supports the companion’s single-member
+groups; GRPO’s minimum is not weakened.</p>
+<p>A separate disaggregated run with <code class="docutils literal notranslate"><span class="pre">ADMISSION_CANARY_SETTLEMENT_FAULT=1</span></code> must exit
+nonzero after logging <code class="docutils literal notranslate"><span class="pre">Completion</span> <span class="pre">settlement</span> <span class="pre">failed;</span> <span class="pre">terminating</span> <span class="pre">controller</span></code>.
+Use a finite outer timeout and distinguish a timeout from the expected failure.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

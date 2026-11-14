@@ -1,0 +1,210 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Payload transport ownership and close &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Payload transport ownership and close</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/payload_transport/lifecycle.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="payload-transport-ownership-and-close">
+<h1>Payload transport ownership and close<a class="headerlink" href="#payload-transport-ownership-and-close" title="Link to this heading"></a></h1>
+<p>Registry backends are shared descriptors, not per-worker resource owners.
+<code class="docutils literal notranslate"><span class="pre">PayloadTransport.close_data_packer(packer,</span> <span class="pre">timeout=5)</span></code> and
+<code class="docutils literal notranslate"><span class="pre">close_producer(producer,</span> <span class="pre">timeout=5)</span></code> close the corresponding owned instance.
+The default backend is inert; stateful extensions should implement these hooks.
+Composed packers expose <code class="docutils literal notranslate"><span class="pre">close_transport(timeout=5)</span></code> directly.</p>
+<p>Worker attachment records distinct training/validation packers. If attachment
+fails, the partially initialized packer and earlier packers are closed in reverse
+order. Explicitly selected backends propagate attachment errors, including errors
+other than ImportError/RuntimeError. Failed cleanup remains owned and visible.
+Policy execution closes its packers before distributed teardown; rollout control
+closes the configured producer backend rather than checking for a UCXX method.</p>
+<p>NCCL producer setup rolls back partial registry, communicator, executor and
+listener acquisitions. Listener subscription happens before setup can report
+success. Both NCCL and UCXX composition install strategy ownership before setup
+and roll back strategy/prefetch startup failures. Setup and reattachment are
+worker-owner operations, not concurrent with another setup operation.</p>
+<p>Close stops admission, invokes backend cancellation, waits for owned work, and
+only then releases storage. The NCCL producer joins senders before clearing
+buffers. Entries with live leases or incomplete/unqueryable GPU events stay
+owned rather than being freed merely because a timeout expired. Both ordinary
+eviction and final cleanup follow this rule.</p>
+<section id="bounds-and-failure-semantics">
+<h2>Bounds and failure semantics<a class="headerlink" href="#bounds-and-failure-semantics" title="Link to this heading"></a></h2>
+<p>A close operation runs once, including blocking native teardown. The caller’s
+deadline covers its wait for the entire operation, not just Python thread joins.
+On timeout the operation and resources remain owned; another close waits for
+that same operation. It never starts competing cleanup or frees a live buffer.
+Repeated successful close is inert. Reattachment requires successful completion;
+a timed-out or failed close is not permission to reuse the transport.</p>
+<p>This is not native fault recovery. A stuck CUDA/NCCL call cannot be cancelled by
+a Python timeout. A worker whose close fails must fail the job and must not resume
+training; process-level containment remains the launcher’s responsibility. This
+change does not incorporate the independent watchdog/launcher PR.</p>
+<p>Healthy explicit close joins owned work without depending on interpreter exit.
+Borrowed Redis clients and shared stream pools are not destroyed by producer
+close. The NCCL registry adapter closes its own consumer control-plane client.
+The deprecated arbitrary <code class="docutils literal notranslate"><span class="pre">post_redis_injection</span></code> path retains its compatibility
+behavior; custom resources created by that hook require an application lifecycle
+implementation and are not covered by in-tree strategy rollback guarantees.</p>
+</section>
+<section id="validation-scope">
+<h2>Validation scope<a class="headerlink" href="#validation-scope" title="Link to this heading"></a></h2>
+<p>CPU tests cover individual acquisition failures, repeated/concurrent close,
+timeout ownership, worker two-packer rollback, pending senders, and incomplete GPU
+events represented by controlled test doubles. The two-node NCCL canary completed
+three exact-payload transfer/close/reattach cycles on both ranks with clean process
+exits. The native UCXX canary passed the same three cross-node cycles with four
+server listeners over TCP. UCXX initialization, reads and endpoint close use one
+owned event loop; a failed endpoint close retains the client and endpoint.
+These tests do not establish recovery from a hung native operation or coverage
+of every UCX network transport.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

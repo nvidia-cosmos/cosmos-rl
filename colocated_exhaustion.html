@@ -1,0 +1,202 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Colocated batch preparation and exhaustion &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Colocated batch preparation and exhaustion</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/colocated_exhaustion.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="colocated-batch-preparation-and-exhaustion">
+<h1>Colocated batch preparation and exhaustion<a class="headerlink" href="#colocated-batch-preparation-and-exhaustion" title="Link to this heading"></a></h1>
+<p>Colocated workers prepare their batches after the dispatcher issues DataFetch.
+Dispatch is not permission to optimize: every original policy replica must
+report a complete local batch before any replica starts the update.</p>
+<p>The initial dispatch can reserve zero samples before local prompt fetches occur.
+Track actual fetched prompts per dispatch and bind the reservation when every
+participant has prepared. Successful training ACKs settle the bound count once;
+an unstarted exhausted batch settles only its fetched prompts, without consuming
+reservations belonging to other work. Progress rollback still restores the full
+unstarted batch debit, not merely the fetched count.</p>
+<p>Within a replica, ranks refill together using the minimum available capacity.
+Prompt/generation decisions also agree before entering backend collectives.
+Centralized reward reports are gathered at the explicit reporting boundary,
+preserving callback-major/rank-major ordering without assuming every rank emits
+the same number of callbacks. Filtering and training objectives are unchanged.</p>
+<p>When the dataset genuinely ends before a complete batch exists, all replicas
+discard that unstarted batch. The controller restores its progress debit,
+cancels only that unstarted dispatch, and sends the existing terminal checkpoint
+command for the last completed optimizer update. The configured training horizon
+is retained. Logs identify dataset exhaustion as the successful early-stop
+reason; it must not be confused with reaching the configured target step.</p>
+<p>Preparation reports are tied to registered process sessions and the sealed
+dispatch step, horizon, and participant set. Exact retries are idempotent;
+conflicting reports, membership changes, and uncertain execution are rejected.
+No partial optimizer update is rolled back. A missing/dead participant is not
+silently removed from the cohort. The finite preparation deadline and existing
+job timeout contain failure; this is not elastic recovery.</p>
+<p>This adds a control-plane preparation rendezvous per colocated batch and small
+rank-local-group readiness exchanges during refill. It does not change the
+disaggregated or colocated-separated loop, loss normalization, or native cache
+cleanup policy. Deploy controller and workers from the same revision; old
+workers cannot bypass preparation by sending a successful training ACK.</p>
+<p>Regression entry points:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">tests/test_colocated_batch_capacity.py</span></code>: negative control on the old code.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tests/test_colocated_exhaustion.py</span></code>: cancellation, progress, retry, identity,
+validation and ordering contracts.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tests/colocated_exhaustion_canary.py</span> <span class="pre">--backend</span> <span class="pre">gloo|nccl</span> <span class="pre">--case</span> <span class="pre">healthy|exhausted|refill|empty</span> <span class="pre">[--centralized]</span></code>: two replicas with two ranks each,
+real HTTP agreement and gradient collectives; generation/training are narrow
+test doubles, not a model-quality or end-to-end simulator qualification.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tests/test_colocated.py</span></code>: real colocated training, final-step rejection/refill,
+and genuine exhaustion after two of three configured updates. The exhaustion
+control checks both replicas stop at update two and verifies the saved model,
+optimizer and committed checkpoint metadata retain the configured horizon.</p></li>
+</ul>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

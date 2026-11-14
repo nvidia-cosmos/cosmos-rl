@@ -1,0 +1,707 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Execution workflows &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Customization" href="quickstart/customization.html" />
+    <link rel="prev" title="Dataset &amp; Process" href="quickstart/dataflow.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Execution workflows</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#infrastructure-scope">Infrastructure scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#select-a-path">Select a path</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#records-and-preparation">Records and preparation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#durable-corpus">Durable corpus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#explicit-recorded-objectives">Explicit recorded objectives</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#application-defined-temporal-batches">Application-defined temporal batches</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#generation-and-restart">Generation and restart</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#application-owned-durable-payloads">Application owned durable payloads</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#independent-actor-and-teacher">Independent actor and teacher</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#validation">Validation</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Execution workflows</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/execution_workflows.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="execution-workflows">
+<h1>Execution workflows<a class="headerlink" href="#execution-workflows" title="Link to this heading"></a></h1>
+<p>Three explicit execution paths reuse the native controller, SFT/GRPO trainers, rollout backends, packers,
+reward functions and teacher channel. Existing recipes keep their defaults.</p>
+<section id="infrastructure-scope">
+<h2>Infrastructure scope<a class="headerlink" href="#infrastructure-scope" title="Link to this heading"></a></h2>
+<p>Batch size, SFT microbatch size, rollout/learner allocation, generation count,
+policy freshness and weight-sync cadence are user-owned workload settings.
+Execution infrastructure consumes those settings; it does not tune them.
+Zero counts for absent roles express the selected execution path, not a
+rollout/learner capacity optimization.</p>
+<p>Evaluate infrastructure optimizations with the workload fixed: source bytes,
+sample order, preparation, model, precision, objectives, batch geometry,
+topology and freshness rules. Removing redundant reads, copies or serialization,
+and reducing scheduling or communication overhead within those contracts, are
+in scope. Application models, image resizing, augmentation, reward/loss choices
+and payload encodings belong in application adapters. Example recipes and
+qualification fixtures demonstrate the interfaces; their configuration changes
+are not generic Cosmos-RL speedups.</p>
+<p>Storage retains synchronous immutable publication and the exclusive metadata
+publication/finalization lock. Initialization durably establishes the corpus
+directory layout, including newly created ancestors. Every metadata publication
+fences its directory, including duplicate retries after a previous fsync failure.
+Loader/preparation exceptions fail the whole learner cohort even when their
+exception message is empty.</p>
+<p>No speedup is claimed from the rejected reporting or storage experiments.
+The design Page retains their measurements and historical qualification evidence.
+PR qualification uses the exact final source and installed wheel.</p>
+</section>
+<section id="select-a-path">
+<h2>Select a path<a class="headerlink" href="#select-a-path" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">[execution].path</span></code> selects a data source and worker relationship. It does not
+turn a logged reward into a training objective.</p>
+<table border="1" class="docutils">
+<thead>
+<tr>
+<th>Path</th>
+<th>Roles</th>
+<th>Objectives</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>train_from_data</code></td>
+<td>Learner; no rollout worker</td>
+<td>Native SFT/PT, or declared recorded objectives</td>
+</tr>
+<tr>
+<td><code>train_from_generation</code></td>
+<td>Learner and rollout workers; optional teacher</td>
+<td>Existing GRPO and OPD settings</td>
+</tr>
+<tr>
+<td><code>generate</code></td>
+<td>Rollout workers; no learner or teacher</td>
+<td>No optimizer; optional scoring and a required result sink</td>
+</tr>
+</tbody>
+</table><p>New execution fields reject unknown keys. Absent unused role counts become
+zero; contradictory explicit counts, including launcher overrides, fail.
+The launcher validates the configuration before allocating GPUs. Legacy SFT,
+GRPO and OPD configurations need no execution section.
+Placement accepts any positive local GPU count, so learner, actor and teacher
+can occupy three distinct GPUs. A replica spanning nodes must divide exactly
+across their GPU allocations; unsupported partial-node splits fail at startup.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Direct local dataset; the example supplies four illustrative paragraphs.</span>
+cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/execution/pretrain.toml<span class="w"> </span>examples/pretrain_local_text.py
+
+<span class="c1"># Commit generated records, then use the resulting dataset for student SFT.</span>
+cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/execution/generate.toml
+cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/execution/train-corpus.toml
+
+<span class="c1"># A frozen checkpoint actor supplies original behavior likelihoods.</span>
+cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/execution/independent-actor.toml
+</pre></div>
+</div>
+<p>The examples use Qwen2.5-0.5B. Choose a model, dataset, output directory and
+resource sizes appropriate for the application. Independent generation and
+corpus SFT can use different model architectures when the durable boundary is
+text or another representation that the student packer understands.</p>
+</section>
+<section id="records-and-preparation">
+<h2>Records and preparation<a class="headerlink" href="#records-and-preparation" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">cosmos_rl.execution.records.SampleRecord</span></code> is a versioned envelope around
+application data:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">sample_id</span></code>, <code class="docutils literal notranslate"><span class="pre">occurrence_id</span></code>, and optional original group identity, size and
+slot identify content independently of controller reservations.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rollout</span></code> holds the existing <code class="docutils literal notranslate"><span class="pre">Rollout</span></code> content: prompt, completion, token IDs,
+behavior/teacher probabilities, reward and advantages. <code class="docutils literal notranslate"><span class="pre">masks</span></code> and
+<code class="docutils literal notranslate"><span class="pre">annotations</span></code> retain per-objective and dataset metadata.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">producer</span></code> records the actor/checkpoint, optional artifact and representation
+revision, and its actual behavior version when known. A learner step never
+replaces a recorded behavior identity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sampling</span></code> and <code class="docutils literal notranslate"><span class="pre">attempt_id</span></code> distinguish the logical output from the attempt
+that produced it. Unknown revisions remain explicit for one-off generation.
+Resumable output requires an immutable producer identity as described below.</p></li>
+</ul>
+<p>Records use composition: <code class="docutils literal notranslate"><span class="pre">SampleRecord(rollout=Rollout(prompt=...,</span> <span class="pre">completion=...),</span> <span class="pre">sample_id=...,</span> <span class="pre">occurrence_id=...)</span></code>. The v2 storage serializer defines a stable
+subset of Rollout content. It excludes prompt indices, stream markers, runtime
+telemetry and transient teacher handles; resolve teacher targets before saving.
+Native Rollout defaults remain unchanged. At the durable boundary, absent
+rewards/advantages stay <code class="docutils literal notranslate"><span class="pre">None</span></code>, distinct from explicit zero. Tensor and
+<code class="docutils literal notranslate"><span class="pre">DataReference</span></code> values pass through the envelope without copying payloads.
+Pre-release flat v1 corpora must be regenerated; their revisions/checkpoints
+cannot be treated as the same dataset after this format change.</p>
+<p>The native SFT packer handles generated text targets. A preprocessed mapping
+contains the packer’s usual fields: for the decoder packer these are
+<code class="docutils literal notranslate"><span class="pre">token_ids</span></code> and <code class="docutils literal notranslate"><span class="pre">label_ids</span></code>. Application packers may implement
+<code class="docutils literal notranslate"><span class="pre">prepare_record(record)</span></code> to return their trainer input mapping. For example,
+an observation/action adapter can put camera tensors from <code class="docutils literal notranslate"><span class="pre">record.rollout.prompt</span></code>
+alongside action targets from <code class="docutils literal notranslate"><span class="pre">record.rollout.completion</span></code>. The attached
+<code class="docutils literal notranslate"><span class="pre">_execution_record</span></code> retains provenance and objective views.</p>
+<p>For continuous actions and other application losses, select an existing
+registered trainer with <code class="docutils literal notranslate"><span class="pre">train.train_policy.trainer_type</span></code>. It opts in by
+declaring <code class="docutils literal notranslate"><span class="pre">recorded_objectives</span></code>, a set containing the objective names it
+implements. The worker checks enabled terms before source or model setup.
+Each registered class declares this support explicitly, including subclasses.
+The trainer implements the native SFT worker’s step/checkpoint interface and
+owns model-specific mathematics, normalization units, masks and collective
+participation. It can reuse <code class="docutils literal notranslate"><span class="pre">execution.objectives.ObjectiveWindow</span></code> for shared
+window counts and scaling. There is no requirement to manufacture token labels.</p>
+<p>A custom <code class="docutils literal notranslate"><span class="pre">prepare_record</span></code> must honor
+<code class="docutils literal notranslate"><span class="pre">record.annotations[&quot;empty_contribution&quot;]</span></code>: preserve a valid model input while
+giving every objective zero contributing mass. That flag also remains in the
+attached record. The built-in token adapter masks <code class="docutils literal notranslate"><span class="pre">label_ids</span></code> automatically.
+Checkpoint compatibility includes the selected trainer and packer identities.</p>
+<p>Application packers may also implement <code class="docutils literal notranslate"><span class="pre">export_record(record)</span></code> for generation.
+It must return a <code class="docutils literal notranslate"><span class="pre">SampleRecord</span></code> with the same sample/group identities and
+producer. Resolve transient application handles into owned tensors or durable
+values there. Serialization and persistence finish before the result callback
+returns and before the borrowed generation buffers are released.</p>
+</section>
+<section id="durable-corpus">
+<h2>Durable corpus<a class="headerlink" href="#durable-corpus" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">CorpusWriter</span></code> publishes immutable manifests and content-addressed tensor
+artifacts on a shared filesystem. Each manifest is a one-record shard. Artifact
+writes finish before an atomic, no-replace manifest publication; temporary
+files do not enter the dataset. Readers check lengths and checksums and load
+owned CPU data. Arbitrary Python objects and object arrays require an application
+adapter; the codec does not serialize them with pickle.</p>
+<p>After all writers drain, call <code class="docutils literal notranslate"><span class="pre">writer.finalize(expected_records=N)</span></code> to publish
+<code class="docutils literal notranslate"><span class="pre">complete.json</span></code>: the exact manifest membership, hashes, count and corpus revision.
+Manifest publication and finalization share a filesystem lock; payload IO stays
+outside that lock. Completed corpora reject new records. <code class="docutils literal notranslate"><span class="pre">close()</span></code> only closes
+owned writes and never claims that a multi-writer dataset is complete.</p>
+<p><code class="docutils literal notranslate"><span class="pre">execution.source.kind</span> <span class="pre">=</span> <span class="pre">&quot;corpus&quot;</span></code> reads committed records from <code class="docutils literal notranslate"><span class="pre">source.path</span></code>.
+Training requires a completed snapshot by default. Its revision covers dataset
+metadata and manifest contents; <code class="docutils literal notranslate"><span class="pre">source.revision</span></code> can pin that snapshot.
+For intentional partial training, set <code class="docutils literal notranslate"><span class="pre">source.allow_partial=true</span></code> and pin
+<code class="docutils literal notranslate"><span class="pre">source.revision</span></code>; use <code class="docutils literal notranslate"><span class="pre">CorpusDataset(path,</span> <span class="pre">allow_partial=True)</span></code> to inspect an
+unfinished run. All learner ranks agree the selected revision and source-opening
+failures before model setup. Compact metadata read at snapshot creation supplies
+filtering, group validation and byte admission without repeated manifest scans.
+Each record read verifies and decodes the same manifest buffer against the
+snapshot’s dataset identity; it does not reopen the manifest or dataset metadata.
+Unavailable artifacts, changed manifests and checksum failures are errors.
+The supervised view excludes generation failures while retaining quality
+annotations and successful targets that an RL quality gate rejected.</p>
+<p>The initial native corpus path supports one learner replica with pure data
+parallelism. Its exact sampler pads schedules with fully masked occurrences,
+without duplicating contributing examples. A global optimizer window may have
+empty local contributions. Native checkpoint metadata pins corpus revision,
+objectives, topology, optimizer batch and microbatch sizes, shuffle seed, model
+and preparation length.
+Resume uses the native optimizer-boundary step and deterministic sampler
+progress; changing that compatibility state is rejected.
+Relocating the same corpus or changing <code class="docutils literal notranslate"><span class="pre">max_prefetch_bytes</span></code> preserves that
+identity. Prepared-batch limits remain pinned because they can affect grouping.
+Older location-sensitive fingerprints can migrate with their original settings
+when the checkpoint also declares its microbatch size; a new checkpoint then
+carries the portable identity. Recorded checkpoints created before microbatch
+pinning are rejected for exact resume because the missing value cannot be
+verified. Use their weights to start a new training run instead. Exact continuation assumes
+deterministic preparation and repeatable model/optimizer kernels. To use
+reproducible stochastic preparation, opt into
+<code class="docutils literal notranslate"><span class="pre">execution.source.preparation_seed</span></code> and implement
+<code class="docutils literal notranslate"><span class="pre">prepare_record(record,</span> <span class="pre">*,</span> <span class="pre">context)</span></code>. The frozen <code class="docutils literal notranslate"><span class="pre">RecordPreparationContext</span></code>
+from <code class="docutils literal notranslate"><span class="pre">cosmos_rl.execution.source</span></code> supplies <code class="docutils literal notranslate"><span class="pre">seed</span></code> and <code class="docutils literal notranslate"><span class="pre">epoch</span></code>. The v1 seed
+includes the configured seed, pinned corpus revision, durable sample/occurrence
+IDs and training epoch; it excludes rank, loader worker, path and prefetch
+timing. Changing the seed rejects checkpoint continuation.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">prepare_record</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">context</span><span class="p">):</span>
+    <span class="n">generator</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">()</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="n">context</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+    <span class="c1"># Use this local generator for crop/noise/sampling operations.</span>
+    <span class="c1"># NumPy default_rng(context.seed) and random.Random(context.seed) work too.</span>
+    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">prepare_with_generator</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="n">generator</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Do not reseed process-wide randomness inside the adapter: with zero loader
+workers, it shares the learner process. On this opt-in path, native train and
+validation DataLoaders use an independent generator so iterator construction
+does not advance the model’s checkpointed RNG. The existing epoch lifecycle
+updates preparation before native nonpersistent workers start. Preparation and
+collation must otherwise be reproducible; random record scoring or external
+state still requires an application contract. Pin augmentation settings through
+<code class="docutils literal notranslate"><span class="pre">record_preparation_state()</span></code>. Existing adapters retain <code class="docutils literal notranslate"><span class="pre">prepare_record(record)</span></code>
+and their checkpoint identity when the seed is unset.</p>
+<p>For the native text replay recipe, set <code class="docutils literal notranslate"><span class="pre">train.deterministic=true</span></code> and export
+<code class="docutils literal notranslate"><span class="pre">CUBLAS_WORKSPACE_CONFIG=:4096:8</span></code> before launching workers. Attention now
+auto-selects FA2 in this opt-in mode; ordinary training retains hardware-based
+selection. An explicit <code class="docutils literal notranslate"><span class="pre">train.fa_version=3</span></code> is still honored (subject to existing
+compile compatibility) and warns that replay is unqualified. Startup logs the
+resolved version, request, deterministic flag and compile setting. The pinned
+H100/FA3 environment failed repeated native updates even with the deterministic
+flag; this does not establish a limitation for every FA3 build. PyTorch’s
+deterministic mode currently uses warnings for unsupported operations. Neither
+that flag nor the preparation seed guarantees bitwise replay across arbitrary
+models, kernels, hardware, batch geometry or library versions. Retain the same
+qualified environment when comparing checkpoints.</p>
+<p><code class="docutils literal notranslate"><span class="pre">train.train_policy.mini_batch</span></code> and <code class="docutils literal notranslate"><span class="pre">train.train_batch_per_replica</span></code> remain
+user-owned settings. The historical microbatch comparison changes workload
+configuration and does not establish a generic infrastructure speedup. BF16
+batch geometry can change numerical updates. Recorded checkpoint metadata pins
+microbatch size separately from the optimizer batch; a microbatch-only change
+is rejected on resume. Preserve the original full training configuration for
+continuation.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/microbatch_numerics_probe.py</span></code> compares native BF16 GPT/FSDP2 loss,
+gradients and AdamW updates against an independent functional FP64 reference
+at several microbatch sizes. It checks declared numerical bounds, including a
+wrong-gradient scaling control; it does not require bitwise BF16 equivalence.
+The sibling RL-Gym <code class="docutils literal notranslate"><span class="pre">scripts/qualify_microbatch_quality.py</span></code> uses disjoint cached
+ShareGPT examples and fixed evaluation geometry to compare convergence and
+held-out loss separately from per-update numerical agreement.</p>
+<p>The standalone tokenized-text recipe is
+<code class="docutils literal notranslate"><span class="pre">configs/execution/train-text-throughput.toml</span></code>, with the public entry point
+<code class="docutils literal notranslate"><span class="pre">examples/train_recorded_text.py</span></code>. Set <code class="docutils literal notranslate"><span class="pre">execution.source.path</span></code> to a completed
+corpus and <code class="docutils literal notranslate"><span class="pre">policy.model_name_or_path</span></code> to the desired checkpoint, then run from
+the Cosmos-RL checkout:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">CUBLAS_WORKSPACE_CONFIG</span><span class="o">=</span>:4096:8<span class="w"> </span><span class="nv">OMP_NUM_THREADS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/execution/train-text-throughput.toml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>examples/train_recorded_text.py
+</pre></div>
+</div>
+<p>This recipe consumes <code class="docutils literal notranslate"><span class="pre">token_ids</span></code> and optional <code class="docutils literal notranslate"><span class="pre">label_ids</span></code> in inline record
+targets or filesystem <code class="docutils literal notranslate"><span class="pre">DataReference</span></code> targets. Explicit labels retain SFT
+prompt masks; omitted labels supervise every token for PT. Raw generated text
+can use the existing <code class="docutils literal notranslate"><span class="pre">train-corpus.toml</span></code> recipe instead. The example recipe uses
+optimizer batch two, microbatch two, two loader workers and prefetch factor one.
+It initializes no rollout workers. Its settings are explicit example choices;
+generic defaults are unchanged. The historical microbatch throughput difference
+does not measure a Cosmos-RL code optimization or prescribe a user’s batch size.</p>
+<p><code class="docutils literal notranslate"><span class="pre">source.max_prefetch_bytes</span></code> bounds serialized records admitted to native loader
+batches. The worker divides it across the active batch and configured prefetch
+slots and checks the batch before loading tensors. Oversized records fail;
+the implementation does not spill them implicitly. The legacy dataset cache is
+unsupported for corpus sources because it lacks their revision identity.</p>
+</section>
+<section id="explicit-recorded-objectives">
+<h2>Explicit recorded objectives<a class="headerlink" href="#explicit-recorded-objectives" title="Link to this heading"></a></h2>
+<p>The token adapter uses the native SFT training loop with fixed-schedule batches
+and materialized logits. Set <code class="docutils literal notranslate"><span class="pre">train.sequence_packing</span> <span class="pre">=</span> <span class="pre">true</span></code> to reuse native
+packing within each microbatch on a compatible model. Attention segments and
+positions remain separate; the last logit of one record never predicts the next
+record’s first token. Behavior probabilities, teacher targets, reward weights
+and objective masks retain their original next-token positions. Denominators
+still cover the entire distributed optimizer window. Packing metadata is
+reconstructed from the same deterministic source batch after resume.</p>
+<p>TP/PP/CP/EP, multiple learner replicas, dynamic load balancing and fused cross
+entropy remain rejected for this adapter. Native legacy trainers retain their
+own support. <code class="docutils literal notranslate"><span class="pre">train/packing_active</span></code>, <code class="docutils literal notranslate"><span class="pre">train/useful_input_tokens</span></code> and
+<code class="docutils literal notranslate"><span class="pre">train/model_input_tokens</span></code> report actual packing and padding work, including a
+model’s existing fallback when packing is unsupported.</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[execution]</span>
+<span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"train_from_data"</span>
+
+<span class="k">[execution.source]</span>
+<span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"corpus"</span>
+<span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/shared/recorded-trajectories"</span>
+<span class="n">advantages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"group_standardized"</span>
+
+<span class="k">[execution.objectives]</span>
+<span class="n">supervised</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
+<span class="n">policy_gradient</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
+<span class="n">policy_clip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.2</span>
+</pre></div>
+</div>
+<p>Each coefficient defaults to zero. Disabled terms require no otherwise-unused
+behavior probabilities or teacher targets. Each enabled term has its own
+boolean mask over next-token positions and its own denominator over the whole
+distributed optimizer window. Microbatch partitioning does not change those
+denominators. All-empty windows skip optimizer and scheduler updates; locally
+empty ranks participate when their peers contribute.</p>
+<p>Supervised loss is next-token cross entropy. Optional
+<code class="docutils literal notranslate"><span class="pre">source.reward_weighting</span> <span class="pre">=</span> <span class="pre">&quot;nonnegative&quot;</span></code> weights it by finite nonnegative
+record scores and normalizes by contributing weighted token mass. Scores alone
+do not enable this rule or an RL objective.</p>
+<p>Recorded policy loss uses the clipped importance ratio against <strong>original</strong>
+behavior log probabilities. It requires producer identity, an explicit aligned
+<code class="docutils literal notranslate"><span class="pre">masks.policy_gradient</span></code>, and aligned <code class="docutils literal notranslate"><span class="pre">annotations.advantages</span></code>, or the explicit
+group-standardization option above. This is an opt-in clipped off-policy token
+objective; it does not claim to reproduce on-policy GRPO from old trajectories.
+The application adapter owns token/representation alignment.</p>
+<p>Supplied aligned advantages do not require groups or a minimum group size.
+Generation failures and RL-quality-rejected completions remain ineligible.
+For group standardization, groups must declare all original slots. It
+uses finite committed scores from the original eligible group. Generation
+failures and quality-rejected completions contribute no RL mass; standardization
+groups with fewer than two eligible completions contribute no RL mass. Their valid
+supervised targets remain eligible. Complete group statistics are prepared
+before distributing individual records to training ranks.</p>
+<p>Recorded distillation requires teacher identity in <code class="docutils literal notranslate"><span class="pre">annotations.teacher</span></code> and
+finite normalized dense <code class="docutils literal notranslate"><span class="pre">annotations.teacher_logprobs</span></code> aligned with the student
+next-token vocabulary. It uses forward KL from teacher to student, normalized
+by contributing tokens. Missing or incompatible contributing targets fail;
+arbitrary tokenizer mappings and sparse target codecs need an explicit adapter.
+Mixed token losses share one vocabulary normalization; the CE-only path retains
+its native cross entropy implementation. This changes no objective coefficients,
+masks, normalization units or optimizer boundaries.</p>
+<p>For scalar record scoring, set <code class="docutils literal notranslate"><span class="pre">source.score_records</span> <span class="pre">=</span> <span class="pre">true</span></code> and provide
+<code class="docutils literal notranslate"><span class="pre">source.reward_function</span></code> or application <code class="docutils literal notranslate"><span class="pre">reward_fns</span></code>. This reuses the native
+reward implementation over owned records without constructing an inference
+backend. Initially this runs in the learner process with
+<code class="docutils literal notranslate"><span class="pre">dataloader_num_workers</span> <span class="pre">=</span> <span class="pre">0</span></code>. A scorer revision can be recorded in the
+annotations. Group standardization uses committed scores, so rescore and commit
+a new corpus before requesting it; transient per-record rescoring and group
+standardization cannot be combined.</p>
+<section id="application-defined-temporal-batches">
+<h3>Application-defined temporal batches<a class="headerlink" href="#application-defined-temporal-batches" title="Link to this heading"></a></h3>
+<p>Observation/action trainers may use the optional helpers in
+<code class="docutils literal notranslate"><span class="pre">cosmos_rl.execution.sequences</span></code>. A <code class="docutils literal notranslate"><span class="pre">SequenceSample</span></code> holds application-owned,
+time-aligned tensor fields, named boolean loss masks and optional episode ends.
+The application decides how observations, actions and targets align; no token
+representation or temporal-policy implementation is imposed.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.execution.sequences</span><span class="w"> </span><span class="kn">import</span> <span class="n">SequenceSample</span><span class="p">,</span> <span class="n">iter_sequence_batches</span>
+
+<span class="n">sample</span> <span class="o">=</span> <span class="n">SequenceSample</span><span class="p">(</span>
+    <span class="n">record</span><span class="o">.</span><span class="n">sample_id</span><span class="p">,</span>
+    <span class="n">fields</span><span class="o">=</span><span class="p">{</span><span class="s2">"observations"</span><span class="p">:</span> <span class="n">observations</span><span class="p">,</span> <span class="s2">"actions"</span><span class="p">:</span> <span class="n">actions</span><span class="p">},</span>
+    <span class="n">loss_masks</span><span class="o">=</span><span class="p">{</span><span class="s2">"supervised"</span><span class="p">:</span> <span class="n">valid_actions</span><span class="p">},</span>
+    <span class="n">episode_ends</span><span class="o">=</span><span class="n">terminated</span> <span class="o">|</span> <span class="n">truncated</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="k">for</span> <span class="n">batch</span> <span class="ow">in</span> <span class="n">iter_sequence_batches</span><span class="p">(</span>
+    <span class="p">[</span><span class="n">sample</span><span class="p">],</span> <span class="n">window_steps</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">context_steps</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">max_bytes</span><span class="o">=</span><span class="mi">256</span> <span class="o">*</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">2</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">learner_device</span><span class="p">,</span>
+<span class="p">):</span>
+    <span class="c1"># batch.fields, valid_mask, loss_masks, reset_mask and windows are available.</span>
+    <span class="c1"># The trainer owns forward/backward, global normalization and optimizer step.</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+<p>Windows never cross episode ends. Each step belongs to one contributing window;
+overlapping context has no loss mass. Every window starts fresh model state,
+with context serving as warmup. A recurrent application that carries state
+between windows needs its own explicit state contract. Chunking changes temporal
+context relative to a full episode; compare gradients against a reference using
+the same declared windows, rather than claiming full-episode equivalence.</p>
+<p>The iterator checks exact padded tensor bytes before allocating a batch and
+flushes at its count or byte limit. A single oversized window fails. Compatible
+field shapes/dtypes and objective names are required within a batch; applications
+own bucketing for heterogeneous representations. Source tensors stay immutable.
+The budget covers one prepared batch, excluding loaded source records, model,
+optimizer and application workspace. <code class="docutils literal notranslate"><span class="pre">source.max_prefetch_bytes</span></code> continues to
+bound admitted records; optional <code class="docutils literal notranslate"><span class="pre">source.max_prepared_bytes</span></code> is available for an
+application trainer’s staging budget. A custom reader may implement efficient
+chunked or mapped reads; the filesystem baseline loads a whole admitted record.</p>
+<p>Packers may override <code class="docutils literal notranslate"><span class="pre">record_preparation_state()</span></code> with JSON-serializable
+windowing, mask and weighting settings. These are pinned in corpus checkpoints;
+changing them on resume fails. Preparation finishes within an optimizer window,
+so an unfinished window never advances committed source progress.</p>
+<p>The bundled RL-Gym packer supplies <code class="docutils literal notranslate"><span class="pre">prepare_sequence</span></code>; its pointwise MLP trainer
+accumulates all window gradients before one optimizer step. Application options
+<code class="docutils literal notranslate"><span class="pre">recorded_window_steps</span></code>, <code class="docutils literal notranslate"><span class="pre">recorded_context_steps</span></code> and
+<code class="docutils literal notranslate"><span class="pre">recorded_window_batch_size</span></code> select its temporal preparation. Its loss remains
+supervised MSE, optionally weighted by per-episode discounted returns.</p>
+</section>
+</section>
+<section id="generation-and-restart">
+<h2>Generation and restart<a class="headerlink" href="#generation-and-restart" title="Link to this heading"></a></h2>
+<section id="application-owned-durable-payloads">
+<h3>Application owned durable payloads<a class="headerlink" href="#application-owned-durable-payloads" title="Link to this heading"></a></h3>
+<p>Heavy observation/action applications can implement
+<code class="docutils literal notranslate"><span class="pre">execution.storage.DataSaver.save(value,</span> <span class="pre">max_bytes=...)</span> <span class="pre">-&gt;</span> <span class="pre">DataReference</span></code> and
+the matching <code class="docutils literal notranslate"><span class="pre">DataReader.load(reference,</span> <span class="pre">max_bytes=...)</span></code>. Applications supply
+these objects through their registered backend or packer; there is no storage
+registry or new launcher. The reference contains a URI, format, conservative
+stored/decoded <code class="docutils literal notranslate"><span class="pre">size_bytes</span></code>, and at most 64 KiB of JSON metadata. Use metadata
+references for large inputs as well as outputs.</p>
+<p><code class="docutils literal notranslate"><span class="pre">FileSystemDataStore</span></code> supplies the baseline on local/shared storage:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.execution.storage</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileSystemDataStore</span><span class="p">,</span> <span class="n">save_data</span>
+
+<span class="n">store</span> <span class="o">=</span> <span class="n">FileSystemDataStore</span><span class="p">(</span><span class="s2">"/shared/corpus"</span><span class="p">)</span>
+<span class="c1"># Run in the producer, while it owns the trajectory and its buffers.</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">save_data</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">,</span> <span class="n">max_bytes</span><span class="o">=</span><span class="mi">2</span> <span class="o">*</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">3</span><span class="p">)</span>
+<span class="c1"># The packer attaches the reference as SampleRecord.rollout.completion. The required</span>
+<span class="c1"># result consumer commits its small manifest before report settlement.</span>
+<span class="n">owned_trajectory</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">reference</span><span class="p">,</span> <span class="n">max_bytes</span><span class="o">=</span><span class="mi">2</span> <span class="o">*</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">3</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The baseline checks aggregate tensor/array bytes before serialization, writes
+through temporary files, fsyncs, and publishes immutable content-addressed
+artifacts without replacement. It compacts tensor views that would otherwise
+serialize a larger backing storage. Checksums stream through bounded buffers;
+no full serialized byte buffer is built. A saver returns only when the payload
+is durable and all reads of borrowed buffers have finished. Internal writer
+concurrency must be bounded and joined before returning. <code class="docutils literal notranslate"><span class="pre">save_data</span></code> raises
+<code class="docutils literal notranslate"><span class="pre">DataSaveError</span></code> on a storage or contract failure; callers must propagate it.
+The standard generation mixin treats it as fatal rather than discarding an
+episode. Slow storage directly backpressures the producer.</p>
+<p>Corpus manifests preserve references without resolving them. Corpus byte
+admission counts declared payload bytes, not just small pointers; compressed
+formats must account conservatively for decoded memory too. Application packers
+resolve references through their reader, which validates integrity and returns
+owned training data. Controller restart reconciles identity and reference
+metadata without loading, hashing or serializing payloads. Tensor checksums are
+verified by readers; full integrity scrubbing belongs outside controller startup.
+The baseline filesystem reader can remap the reference URI to a configured root
+on another machine, while checking the same relative content-addressed artifacts.</p>
+<p>The RL-Gym application example uses its modular simulator, rewards, MLP and
+optimizer with these interfaces. <code class="docutils literal notranslate"><span class="pre">scripts/qualify_execution_workflows.py</span></code> in
+the sibling RL-Gym checkout qualifies the public launcher, generation restart,
+supervised and return-weighted updates, checkpoint continuation and optional
+500 MB/1 GB payload cases. The toy return-weighted MSE objective is application
+supervision; it is not advertised as likelihood-based policy gradient.</p>
+<p><code class="docutils literal notranslate"><span class="pre">execution.output</span></code> specifies <code class="docutils literal notranslate"><span class="pre">path</span></code>, a stable logical <code class="docutils literal notranslate"><span class="pre">run_id</span></code>, and optional
+<code class="docutils literal notranslate"><span class="pre">max_record_bytes</span></code>. It installs a required synchronous consumer. Applications
+can instead register their own required result consumer, following its ownership
+and failure contract.</p>
+<p>Output is resumable by default. Supply a full immutable model commit revision
+or <code class="docutils literal notranslate"><span class="pre">execution.actor.artifact_digest</span></code>, plus
+<code class="docutils literal notranslate"><span class="pre">execution.output.generation_fingerprint</span></code>. The application owns that fingerprint:
+change it when simulator/environment, scorer, representation or export semantics
+change. Include semantic versions/settings, rather than operational settings
+such as log verbosity, profiling or artificial sink delays. The controller
+compares these small declarations; it never loads or hashes model weights.
+An artifact digest is a caller/backend assertion of immutable content, not
+automatic detection of edits to a local checkpoint under a stale declaration.
+Moving branches/tags and a bare model path are insufficient for resumable output.
+For a one-off run, set <code class="docutils literal notranslate"><span class="pre">execution.output.resume=false</span></code>; unknown model provenance
+is allowed, but reopening journaled or committed work is rejected. Use a fresh
+output path and logical run ID for the next one-off run. Existing corpora without
+these identity fields cannot be resumed under the new contract.</p>
+<p>Before dispatch, the controller journals the input occurrence. Output IDs
+combine logical run ID, source occurrence and original completion slot. The
+first committed output wins; duplicate attempts cannot replace it with another
+sample or different provenance. All completion outcomes, including generation
+failures, scores and quality decisions, remain visible in the corpus.</p>
+<p>On restart, committed manifest metadata is validated and complete occurrences are
+skipped. Partially committed prompts may generate again, filling missing slots
+while retaining earlier commits. Logical prompt limits include already-seen
+source occurrences. Changed input at an existing occurrence or changed run
+metadata is rejected. This supports replayable finite datasets; it is not a
+checkpoint protocol for a mutable external stream.
+After input admission closes and every completion settles, the controller
+finalizes the exact dataset snapshot before normal shutdown. A required
+completion-publication failure fails execution. Early requested stops leave
+an unfinished corpus for explicit inspection or partial training; it is
+resumable only when <code class="docutils literal notranslate"><span class="pre">execution.output.resume=true</span></code> and its identity is pinned.</p>
+<p>The controller bounds outstanding prompts globally across rollout workers.
+Writing the required sink blocks report settlement and therefore admission of
+more work. A slow sink cannot silently drop data. Source exhaustion ends the
+job only after outstanding results are settled. Tensor and manifest byte limits
+apply to each committed record; failed partial writes can leave unreferenced
+artifacts for a future offline cleanup tool.</p>
+<p>The baseline reference format is <code class="docutils literal notranslate"><span class="pre">cosmos.artifacts.v2</span></code>. Its declared size includes
+both serialized artifacts and inline values, keys and encoding metadata. Save
+and load enforce the same budget before returning data. Pre-release v1 references
+underreported inline bytes and are rejected by this reader; regenerate those
+local qualification datasets. Custom saver/reader formats remain application-owned.</p>
+</section>
+</section>
+<section id="independent-actor-and-teacher">
+<h2>Independent actor and teacher<a class="headerlink" href="#independent-actor-and-teacher" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">execution.actor.weight_source</span> <span class="pre">=</span> <span class="pre">&quot;checkpoint&quot;</span></code> initializes the rollout engine
+from its own model and disables P2R/R2R weight synchronization and learner-version
+staleness filtering. Dispatch remains bounded by outstanding work. The actor’s
+immutable behavior version stays zero as the learner advances.</p>
+<p>The initial independent-actor training path is disaggregated shared-queue GRPO,
+with original rollout likelihoods enabled, off-policy operation, and no validation
+or retry budget tied to learner versions. Different checkpoints require identical
+fast-tokenizer pipelines, special-token semantics and chat templates. Broader
+alignment requires an application/algorithm adapter.
+Using original rollout likelihoods also preserves the sampled token IDs;
+decoding and retokenizing them can change the sequence those probabilities describe.</p>
+<p>Student-actor OPD uses its existing trainer and synchronization path. Teacher
+configuration is copied before projection, and the teacher retains the student
+tokenizer identity independently. Explicit execution recipes have bounded
+teacher request count, aggregate pending request bytes, individual request
+bytes and individual result bytes. <code class="docutils literal notranslate"><span class="pre">distillation.max_completed_bytes</span></code> adds an
+aggregate retained-result limit (256 MiB by default for explicit execution).
+The same limit bounds packed bytes in each learner inbox. Fetching a result
+keeps its Redis capacity charged until training consumes or cancels it. A
+waiting update takes priority over prefetched replies; local future copies may
+be dropped and reread from Redis. If the update itself exceeds the inbox budget,
+all ranks use the existing coordinated skip before model or optimizer work.
+Retirement retries failed acknowledgments without recreating local entries.
+These limits bound logical packed targets, not decoded Python objects, model
+memory or total process RSS; Redis and the inbox can hold copies of the same
+charged result, and one read may be in flight.
+The pending-request count limit also bounds retained-result count. Publication
+checks both limits atomically before changing request ownership. Capacity
+exhaustion fails clearly; configure enough capacity for the application’s cohort.
+Acknowledgment/cancellation removes retained bodies and accounting once; expiry
+pruning removes both together. Late completion cannot resurrect a cancelled or
+consumed result. Small deduplication markers retain their TTL lifecycle.
+Legacy settings remain compatible. Existing
+teacher deadlines and cohort agreement decide an update together when targets
+are delayed, missing or malformed. Completed results retain their existing TTL
+and acknowledgment lifecycle.
+After the last learner and rollout depart, the controller terminates the
+teacher replicas independently of the final weight synchronization path.</p>
+<p>EMA/external teacher updates, streaming between independently scaled jobs,
+checkpointed mixtures of separate datasets and additional objective topologies
+remain conditional extensions from phase 4 of the design.</p>
+</section>
+<section id="validation">
+<h2>Validation<a class="headerlink" href="#validation" title="Link to this heading"></a></h2>
+<p>CPU qualification exercises the actual SFT loop with camera observations and
+token targets, mixed gradients, zero-weight dependencies, all-empty windows,
+checkpoint source compatibility and optimizer/scheduler resume equivalence.
+Two real Gloo/DDP processes compare gradients and momentum with an independent
+reference and check preparation/configuration failure agreement.</p>
+<p>The application-trainer test feeds variable-length continuous observation/action
+trajectories through the actual corpus dataloader, without token labels. Its
+application-owned MSE and Gaussian policy losses match an independent gradient
+and optimizer reference. The same qualification helper also passed using the
+local RL-Gym checkout’s actual <code class="docutils literal notranslate"><span class="pre">MLP</span></code> and <code class="docutils literal notranslate"><span class="pre">SimpleRLDataPacker</span></code>; this is an adapter
+and model check, not a full RL-Gym simulator run.</p>
+<p>Corpus tests cover atomic publication, concurrent attempts, interrupted writes,
+partial-prompt restart, changed sources, corrupt artifacts, byte admission and
+preservation of diagnostic outcomes. Actor/teacher tests cover independent model
+projection, original versions, synchronization suppression and bounded teacher
+traffic.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tests/execution_workflow_canary.py</span></code> runs nine real GPU scenarios through the
+public launcher and installed package: direct PT, generation, restart, generated
+corpus SFT, mixed recorded losses, an independent actor, and OPD. It uses a tiny
+random Qwen2 model with a cached production tokenizer to qualify infrastructure;
+it is not a model-quality or live-throughput benchmark. The full Slurm CI runs
+this canary alongside the existing suite.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="quickstart/dataflow.html" class="btn btn-neutral float-left" title="Dataset &amp; Process" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="quickstart/customization.html" class="btn btn-neutral float-right" title="Customization" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

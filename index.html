@@ -47,12 +47,14 @@
 <li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
 <li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
 <li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
 </ul>
@@ -240,6 +242,23 @@ For Rollout Model, only Tensor Parallelism and Pipeline Parallelism are supporte
 </li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#infrastructure-scope">Infrastructure scope</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#select-a-path">Select a path</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#records-and-preparation">Records and preparation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#durable-corpus">Durable corpus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#explicit-recorded-objectives">Explicit recorded objectives</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="execution_workflows.html#application-defined-temporal-batches">Application-defined temporal batches</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#generation-and-restart">Generation and restart</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="execution_workflows.html#application-owned-durable-payloads">Application owned durable payloads</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#independent-actor-and-teacher">Independent actor and teacher</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution_workflows.html#validation">Validation</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="quickstart/customization.html#customized-dataset">Customized dataset</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="quickstart/customization.html#how-to-tell-the-launcher-to-use-your-customized-dataset">How to tell the launcher to use your customized dataset?</a></li>
@@ -301,6 +320,15 @@ For Rollout Model, only Tensor Parallelism and Pipeline Parallelism are supporte
 <div class="toctree-wrapper compound">
 <p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#initialization-and-versions">Initialization and versions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#work-results-and-completion">Work, results and completion</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#generation-and-optional-scoring">Generation and optional scoring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#application-result-consumer">Application result consumer</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#stop-and-cleanup">Stop and cleanup</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rollout_only.html#initial-supported-contract">Initial supported contract</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="rollout/vllm.html#enable-vllm">Enable vLLM</a></li>
 </ul>

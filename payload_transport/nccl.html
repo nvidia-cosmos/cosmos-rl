@@ -1,0 +1,393 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>In-tree NCCL Payload Transport &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">In-tree NCCL Payload Transport</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/payload_transport/nccl.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="in-tree-nccl-payload-transport">
+<h1>In-tree NCCL Payload Transport<a class="headerlink" href="#in-tree-nccl-payload-transport" title="Link to this heading"></a></h1>
+<p>For the shared aligned-layout, direct-publication, reusable receive-buffer, and
+lease model, see <a class="reference internal" href="efficient_tensor_transport.html"><span class="doc">Efficient tensor payload transport</span></a>.</p>
+<p>By default Cosmos-RL ships rollout completion payloads (token IDs,
+log-probs, reward/action tensors, …) from rollout workers to the
+controller over <strong>Redis streams</strong>. For large payloads — e.g. VLA policies
+that emit high-dimensional action tensors — the Redis data path is a
+bottleneck.</p>
+<p><strong>NCCL payload transfer</strong> is an opt-in backend that moves the payload
+tensors <strong>GPU→GPU with NCCL point-to-point</strong> while Redis stays the
+<em>control plane</em>: receivers publish per-transfer requests, senders
+acknowledge them, per-pair NCCL unique-IDs are exchanged, and cleanup
+messages retire producer buffers after their native readers finish.</p>
+<p>Enable it with:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[custom]</span>
+<span class="n">payload_transfer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"nccl"</span><span class="w">     </span><span class="c1"># one of "redis", "nccl", "ucxx"</span>
+<span class="c1"># optional tunables (defaults shown):</span>
+<span class="n">nccl_prefetch_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30.0</span><span class="w">      </span><span class="c1"># requested outer prefetch budget (s)</span>
+<span class="n">nccl_read_max_attempts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w">        </span><span class="c1"># pre-acceptance attempts; not accepted-send replay</span>
+<span class="n">nccl_recv_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5.0</span><span class="w">          </span><span class="c1"># warm operation budget (s)</span>
+<span class="n">nccl_first_transfer_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30.0</span><span class="w"> </span><span class="c1"># cold operation budget (s)</span>
+<span class="n">nccl_prefetch_batch_hint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">       </span><span class="c1"># used to size the outer budget floor</span>
+</pre></div>
+</div>
+<p>The legacy boolean <code class="docutils literal notranslate"><span class="pre">[custom].nccl_payload_transfer</span> <span class="pre">=</span> <span class="pre">true</span></code> still resolves
+to <code class="docutils literal notranslate"><span class="pre">&quot;nccl&quot;</span></code> (deprecated alias).</p>
+<p>The effective prefetch budget is at least <code class="docutils literal notranslate"><span class="pre">nccl_prefetch_batch_hint</span> <span class="pre">*</span> <span class="pre">nccl_read_max_attempts</span> <span class="pre">*</span> <span class="pre">nccl_first_transfer_timeout</span></code>: 480 seconds with these
+defaults, not 30. This outer budget does not extend an individual accepted
+operation’s deadline or permit unsafe retries. The independent watchdog and
+completion-time check preserve terminal failure even if the consumer never
+collects its result. See <a class="reference internal" href="../prefetch_completion_deadline.html"><span class="doc">completion deadlines</span></a>.</p>
+<section id="components">
+<h2>Components<a class="headerlink" href="#components" title="Link to this heading"></a></h2>
+<table border="1" class="docutils">
+<thead>
+<tr>
+<th>Module</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nccl/protocol.py</code></td>
+<td>Redis key / channel builders, transfer-id parsing (pure strings).</td>
+</tr>
+<tr>
+<td><code>nccl/transport.py</code></td>
+<td><code>NcclPayloadTransport</code> backend: registration, <code>attach_data_packer</code>, controller-side discard cleanup.</td>
+</tr>
+<tr>
+<td><code>nccl/rendezvous.py</code></td>
+<td>Per-transfer request/ack handshake + per-pair unique-ID exchange over Redis.</td>
+</tr>
+<tr>
+<td><code>nccl/comm_cache.py</code></td>
+<td>Lazy 2-rank communicator cache: LRU cap, bounded concurrent init, health quarantine.</td>
+</tr>
+<tr>
+<td><code>nccl/buffer_registry.py</code></td>
+<td>Producer GPU send-buffer registry with bounded backpressure + idempotent free.</td>
+</tr>
+<tr>
+<td><code>nccl/streams.py</code></td>
+<td>Per-process transfer-stream pool + CUDA event helpers.</td>
+</tr>
+<tr>
+<td><code>nccl/header.py</code></td>
+<td>Self-describing payload header stamped on every transfer, and the receiver's check of it.</td>
+</tr>
+<tr>
+<td><code>utils/trajectory.py</code></td>
+<td>Flat trajectory schema (<code>TensorSpec</code>) shared by sender + receiver.</td>
+</tr>
+<tr>
+<td><code>context.py</code>, <code>nccl/producer.py</code></td>
+<td><code>PayloadContext</code> composition and the owned NCCL producer.</td>
+</tr>
+<tr>
+<td><code>nccl/strategy.py</code></td>
+<td><code>NCCLTransportStrategy</code> — the consumer's rendezvous + recv engine.</td>
+</tr>
+<tr>
+<td><code>nccl/data_packer_mixin.py</code></td>
+<td><code>NCCLDataPackerMixin</code> — trainer-side consumer (subclass of <code>PrefetchDataPackerMixin</code>).</td>
+</tr>
+</tbody>
+</table></section>
+<section id="per-transfer-flow">
+<h2>Per-transfer flow<a class="headerlink" href="#per-transfer-flow" title="Link to this heading"></a></h2>
+<ol class="simple">
+<li><p>The producer packs the payload, records its compute-stream ready event and
+registers the backing buffer.</p></li>
+<li><p>The receiver creates a unique operation identity and deadline. Redis
+compare-and-set seals acceptance against cancellation and duplicate delivery.</p></li>
+<li><p>Acceptance retains the actual UID value and producer payload lease through
+queueing, communicator initialization, enqueue and device completion.</p></li>
+<li><p>Accepted sends leave a per-pair FIFO. The producer waits for the ready event,
+enqueues a standalone send and proves device completion before releasing its
+lease/pin. The receiver proves completion and checks the header before decode.</p></li>
+<li><p>Explicit pre-acceptance rejection can skip unavailable data. Accepted failure,
+late acceptance, corrupt identity or uncertain native completion is terminal;
+it cannot become an ordinary missing episode or a new send attempt.</p></li>
+</ol>
+<p><code class="docutils literal notranslate"><span class="pre">TensorSpec</span></code> describes the flat schema. <code class="docutils literal notranslate"><span class="pre">TensorLayout</span></code> compiles it into aligned,
+cached offsets shared by packing and received tensor views. See
+<a class="reference internal" href="efficient_tensor_transport.html"><span class="doc">efficient tensor transport</span></a>.</p>
+</section>
+<section id="payload-framing-and-per-pair-ordering">
+<h2>Payload framing and per-pair ordering<a class="headerlink" href="#payload-framing-and-per-pair-ordering" title="Link to this heading"></a></h2>
+<p>A payload on the wire is a header followed by the schema region:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span> <span class="mi">64</span><span class="o">-</span><span class="n">byte</span> <span class="n">header</span> <span class="p">][</span> <span class="n">aligned</span> <span class="n">payload</span> <span class="nb">bytes</span> <span class="p">]</span>
+  <span class="n">magic</span> <span class="o">|</span> <span class="n">version</span> <span class="o">|</span> <span class="n">payload_nbytes</span> <span class="o">|</span> <span class="n">transfer_key</span>
+  <span class="n">layout_key</span> <span class="o">|</span> <span class="n">sender_incarnation_key</span> <span class="o">|</span> <span class="n">reserved</span>
+</pre></div>
+</div>
+<p>The receiver checks transfer, layout, sender incarnation, and payload size before
+exposing cached typed views. A disagreement after acceptance is terminal
+(<code class="docutils literal notranslate"><span class="pre">nccl/header.py</span></code>), even if the receive event completed: completed bytes alone do
+not prove the ordered stream is reusable.</p>
+<p>The check exists because a cached 2-rank communicator is an <strong>ordered stream
+with no tags</strong>: its k-th <code class="docutils literal notranslate"><span class="pre">nccl_send</span></code> is taken by the k-th <code class="docutils literal notranslate"><span class="pre">nccl_recv</span></code>, and
+nothing in the data plane says which transfer a buffer holds.  If the two ends
+ever disagree about how many transfers have crossed a pair, every payload after
+that point lands in the previous one’s buffer.  With one fixed schema that is
+invisible; with a per-payload schema the receiver slices a foreign buffer at
+its own offsets and returns decoded garbage.</p>
+<p>Two rules keep the two ends in step, and the header catches anything that
+still slips through:</p>
+<ul class="simple">
+<li><p><strong>Sends leave in accept order.</strong> The producer accepts on its single pub/sub
+listener thread and queues each accepted send on a <em>per-pair</em> FIFO drained by
+at most one pool task, so pool workers can never launch two of a pair’s sends
+out of order.  Pool width still bounds how many <em>pairs</em> transfer at once.</p></li>
+<li><p><strong>Accepted work is not replayed after failure.</strong> Failure to honor an accepted
+send/receive or a late acceptance is terminal. Abort/cache invalidation alone
+does not prove native work stopped touching buffers or that the stream can
+safely restart. Fresh-UID negotiation is a pre-acceptance operation, not
+recovery of an uncertain accepted transfer.</p></li>
+</ul>
+</section>
+<section id="rendezvous-state-machine">
+<h2>Rendezvous state machine<a class="headerlink" href="#rendezvous-state-machine" title="Link to this heading"></a></h2>
+<p>Every invocation has its own operation ID. Redis atomic state transitions make
+acceptance, cancellation and duplicate/lost-reply handling refer to that same
+operation, not an uncorrelated response key.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">REQUESTED</span> <span class="o">-&gt;</span> <span class="n">ACCEPTED</span> <span class="o">-&gt;</span> <span class="n">COMPLETE</span> <span class="o">/</span> <span class="n">FAILED</span>
+          <span class="o">-&gt;</span> <span class="n">MISSING</span> <span class="o">/</span> <span class="n">NEED_UID</span> <span class="o">/</span> <span class="n">CANCELLED</span>  <span class="p">(</span><span class="n">before</span> <span class="n">acceptance</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">ACCEPTED</span></code> is not success. Lost replies are resolved against the same operation;
+late acceptance cannot be silently discarded and retried. Bounded peer-outcome
+observers run independently of blocked native callers, and hard deadlines do not
+depend on Redis making progress. See the
+<a class="reference internal" href="../transfer_operation_contract.html"><span class="doc">operation contract</span></a>.</p>
+</section>
+<section id="failure-and-ownership-boundaries">
+<h2>Failure and ownership boundaries<a class="headerlink" href="#failure-and-ownership-boundaries" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Bounded failure, not recovery:</strong> enqueue return is not device completion.
+Unknown completion retains buffers, streams and communicator pins until
+terminal process exit. Strategy-backed terminal failure exits with status 86;
+cross-node job failure propagation is not guaranteed. Use a finite job limit.</p></li>
+<li><p><strong>Explicit safe rejection:</strong> MISSING/no-schema outcomes survive prefetch
+without an uncapped synchronous refetch. Unknown absence is not equivalent to
+a known pre-acceptance rejection. See <a class="reference internal" href="bounded_receive.html"><span class="doc">receive leases</span></a>.</p></li>
+<li><p><strong>Quarantine is not proof of recovery:</strong> consumers consult endpoint health.
+Producer setup-failure diagnostics and invalidation use the actual
+<code class="docutils literal notranslate"><span class="pre">(sender_rank,</span> <span class="pre">receiver_replica,</span> <span class="pre">receiver_rank)</span></code> cache key. The producer does
+not use that cooldown as an admission gate; accepted-operation ownership and
+deadlines govern its sends.</p></li>
+<li><p><strong>Registry capacity is not a hard GPU-memory limit:</strong> reusable send and receive
+pools are bounded across layouts, but retired entries with
+pending native readers retain their storage. Uncertain work cannot be freed
+merely to meet an entry-count or memory target.</p></li>
+</ul>
+<p>When the producer registry is full, send bookkeeping changes wake blocked
+publishers so they can recheck for safely reclaimable entries. A blocked
+publisher also rechecks completion at 50 ms intervals because a CUDA event can
+fire without another Python registry call. This adds no background thread and
+does not poll when registration has capacity. Rechecks retain the original
+capacity-wait deadline; they never treat elapsed time as proof that native
+readers finished. All recorded send events must be complete and all sender
+leases balanced before completion-based reclamation.</p>
+</section>
+<section id="communicator-scaling">
+<h2>Communicator scaling<a class="headerlink" href="#communicator-scaling" title="Link to this heading"></a></h2>
+<p>Comm count is <code class="docutils literal notranslate"><span class="pre">O(rollout_ranks</span> <span class="pre">×</span> <span class="pre">trainer_ranks)</span></code>; each 2-rank comm costs
+tens of MB + a QP. Controls:</p>
+<ul class="simple">
+<li><p><strong>Consumer-driven pair set</strong> — only pairs that actually transfer get a comm.</p></li>
+<li><p><strong>Live-comm cap + LRU eviction</strong> — bounded live comms; LRU aborted beyond.</p></li>
+<li><p><strong>Bounded concurrent init</strong> — a semaphore caps simultaneous <code class="docutils literal notranslate"><span class="pre">create_nccl_comm</span></code>.</p></li>
+<li><p><strong>Pair-scoped communicators</strong> — identities and FIFO order are per pair, but
+this is not dead-peer failure isolation. Shared streams, GPU resources and
+process-fatal outcomes can affect other pairs.</p></li>
+</ul>
+</section>
+<section id="dedicated-transfer-stream">
+<h2>Dedicated transfer stream<a class="headerlink" href="#dedicated-transfer-stream" title="Link to this heading"></a></h2>
+<p>Payload NCCL runs on its own <strong>low-priority</strong> CUDA stream(s), separate from
+both the compute stream and the weight-sync stream. This permits overlap but
+does not guarantee independence from shared-device contention. Correctness is
+event-based (mirroring <code class="docutils literal notranslate"><span class="pre">activation_offloading</span></code>’s s0/s1 hand-off):</p>
+<ul class="simple">
+<li><p><strong>Sender</strong> records a ready-event on the compute stream after the
+trajectory tensor is produced; the transfer stream <code class="docutils literal notranslate"><span class="pre">wait_event</span></code>s it
+before <code class="docutils literal notranslate"><span class="pre">nccl_send</span></code>, and the buffer is held until a send-complete event.</p></li>
+<li><p><strong>Receiver</strong> records a recv-complete event after <code class="docutils literal notranslate"><span class="pre">nccl_recv</span></code>; the training
+consumer waits on it before reading.</p></li>
+</ul>
+<p>The default producer pool has one transfer stream shared by pairs. A stalled
+native operation can block later work on it; separate host tasks do not remove
+that dependency. Independent operation deadlines contain uncertain failure by
+terminating the worker, not by promising other pairs continue safely.</p>
+</section>
+<section id="cleanup-semantics">
+<h2>Cleanup semantics<a class="headerlink" href="#cleanup-semantics" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">NcclPayloadTransport.completion_prefix</span> <span class="pre">=</span> <span class="pre">&quot;nccl:&quot;</span></code> stays active. When the
+controller discards outdated rollouts whose <code class="docutils literal notranslate"><span class="pre">completion</span></code> is a
+<code class="docutils literal notranslate"><span class="pre">&quot;nccl:&lt;transfer_id&gt;&quot;</span></code> string, <code class="docutils literal notranslate"><span class="pre">PayloadTransportRegistry.handle_discarded</span></code>
+dispatches to <code class="docutils literal notranslate"><span class="pre">publish_cleanup_for_discarded</span></code>, which publishes on the
+producer’s <code class="docutils literal notranslate"><span class="pre">:nccl_cleanup</span></code> channel to retire the buffer. Cleanup and eviction are
+idempotent bookkeeping operations, not proof of native completion. A buffer is
+reclaimable only after its outstanding readers finish; uncertain readers keep
+their storage owned until terminal process exit.</p>
+</section>
+<section id="deprecated-the-redis-client-post-redis-injection-packer-contract">
+<h2>Deprecated: the <code class="docutils literal notranslate"><span class="pre">redis_client</span></code> / <code class="docutils literal notranslate"><span class="pre">post_redis_injection</span></code> packer contract<a class="headerlink" href="#deprecated-the-redis-client-post-redis-injection-packer-contract" title="Link to this heading"></a></h2>
+<p>NCCL-aware data packers historically exposed a
+<code class="docutils literal notranslate"><span class="pre">redis_client</span></code> attribute and an optional <code class="docutils literal notranslate"><span class="pre">post_redis_injection()</span></code> hook
+(PR #670). <code class="docutils literal notranslate"><span class="pre">attach_data_packer</span></code> still honors that path as a <strong>deprecated
+fallback</strong> for AlpaGym’s independent cleanup lifecycle. New producer code owns a
+<code class="docutils literal notranslate"><span class="pre">PayloadContext</span></code>; trainer-side consumers may continue to subclass
+<code class="docutils literal notranslate"><span class="pre">NCCLDataPackerMixin</span></code>. The lifecycle hook is retained and is not a wire-format
+compatibility path.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

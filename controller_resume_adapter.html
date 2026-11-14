@@ -1,0 +1,374 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Application checkpoint metadata and sampling restoration &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Application checkpoint metadata and sampling restoration</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/controller_resume_adapter.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="application-checkpoint-metadata-and-sampling-restoration">
+<h1>Application checkpoint metadata and sampling restoration<a class="headerlink" href="#application-checkpoint-metadata-and-sampling-restoration" title="Link to this heading"></a></h1>
+<section id="consistent-checkpoint-recovery">
+<h2>Consistent checkpoint recovery<a class="headerlink" href="#consistent-checkpoint-recovery" title="Link to this heading"></a></h2>
+<p>The adapter restores metadata and a sampling stream. Application-owned trainer
+formats remain application-owned. The optional <code class="docutils literal notranslate"><span class="pre">SamplingReplayLedger</span></code> and
+<code class="docutils literal notranslate"><span class="pre">CheckpointManifest</span></code> helpers implement conservative sampling progress and
+publish-last, verified local-file checkpoints without serializing rollout queues.</p>
+<p>The contract is <strong>consistent resumption, not exact replay</strong>. Restore training
+state and a safe sampling position associated with the same committed checkpoint.
+Discard old in-flight work and regenerate unfinished rollouts after restart.
+Some repeated work is acceptable; work must not be skipped merely because it
+was issued before the checkpoint.</p>
+<p>Required properties:</p>
+<ol class="simple">
+<li><p>All required trainer shards restore the same completed-update boundary,
+including model, optimizer, scheduler, trainer RNG and any mutable
+reference-model/application state needed by the training algorithm.</p></li>
+<li><p>The saved sampling state represents a safe replay position, not simply the
+latest fetched cursor. It includes the epoch and effective sampler state
+(permutation, cursor and private RNG where relevant). Out-of-order completion
+may require a conservative rewind so no uncommitted work is skipped. Repeated
+prompts after that rewind are allowed; progress counters must reflect the
+chosen replay policy rather than treating issued work as committed.</p></li>
+<li><p>Controller state and trainer artifacts share a verified checkpoint identity.
+Publish the checkpoint only after all required artifacts are durable; reject
+incomplete or mixed saves and incompatible dataset/configuration state.</p></li>
+<li><p>Restart with fresh transient rollout/transport state and reject results from
+the old execution. Require worker/controller metadata agreement before
+resumed training proceeds.</p></li>
+</ol>
+<p>There is no requirement to persist rollout payload queues or partially generated
+rollouts, drain all outstanding rollouts, reproduce generation outputs, or impose
+deterministic asynchronous scheduling. Future completion order, batch composition
+and numerical trajectory may differ from an uninterrupted run.</p>
+<p>Acceptance requires fresh-process restoration of the committed training state
+and safe sampling progress, followed by successful new updates. Exercise
+outstanding/out-of-order work, conservative replay, partial tails, filtering,
+and interrupted saves. Verify that uncommitted work is not skipped, repeated
+work is allowed, and stale results cannot be admitted after restart. Negative
+tests must reject incompatible dataset/configuration, mixed checkpoint artifacts
+and missing required state. Exact future output or parameter parity is not an
+acceptance requirement.</p>
+<p>These are explicit application integration contracts, not automatic conversion
+of native Cosmos checkpoints. The application connects issuance and completed
+training to its sampling state and saves the custom trainer’s artifacts. Cosmos
+owns restoration ordering, initializes its counters from the chosen replay
+boundary, and fences old rollout reports when an adapter is configured.</p>
+</section>
+<section id="restoration-interface">
+<h2>Restoration interface<a class="headerlink" href="#restoration-interface" title="Link to this heading"></a></h2>
+<p>Pass an instance implementing <code class="docutils literal notranslate"><span class="pre">ControllerResumeAdapter</span></code> to controller <code class="docutils literal notranslate"><span class="pre">main</span></code>,
+<code class="docutils literal notranslate"><span class="pre">Controller.setup</span></code>, or <code class="docutils literal notranslate"><span class="pre">ControllerDataFetcher</span></code>. No registry or module-global
+callback is required. Without an adapter the existing Cosmos checkpoint loader
+and legacy metadata behavior are unchanged.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.data.resume</span><span class="w"> </span><span class="kn">import</span> <span class="n">ControllerResumeMetadata</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.run_web_panel</span><span class="w"> </span><span class="kn">import</span> <span class="n">main</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">ApplicationResume</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">load_metadata</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">):</span>
+        <span class="c1"># Read and validate the application's checkpoint, not its live sampler.</span>
+        <span class="c1"># A string config.train.resume is an explicit path and wins over discovery.</span>
+        <span class="n">saved</span> <span class="o">=</span> <span class="n">read_application_metadata</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">resume</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">output_dir</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">saved</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>  <span class="c1"># legal only for an automatic discovery miss</span>
+        <span class="k">return</span> <span class="n">ControllerResumeMetadata</span><span class="p">(</span>
+            <span class="n">checkpoint_path</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">checkpoint_id</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">checkpoint_id</span><span class="p">,</span>
+            <span class="n">completed_training_steps</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">cosmos_steps</span><span class="p">,</span>
+            <span class="n">completed_optimizer_updates</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">optimizer_updates</span><span class="p">,</span>
+            <span class="n">remaining_completions</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">remaining_completions</span><span class="p">,</span>
+            <span class="n">epoch</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">epoch</span><span class="p">,</span>
+            <span class="n">sampling_owner</span><span class="o">=</span><span class="s2">"sampler"</span><span class="p">,</span>
+            <span class="n">sampler_state</span><span class="o">=</span><span class="n">saved</span><span class="o">.</span><span class="n">cursor_state</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">restore_sampler</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sampler</span><span class="p">,</span> <span class="n">metadata</span><span class="p">):</span>
+        <span class="n">sampler</span><span class="o">.</span><span class="n">load_state_dict</span><span class="p">(</span><span class="n">metadata</span><span class="o">.</span><span class="n">sampler_state</span><span class="p">)</span>
+
+<span class="n">main</span><span class="p">(</span><span class="n">dataset</span><span class="o">=</span><span class="n">my_dataset</span><span class="p">,</span> <span class="n">sampler</span><span class="o">=</span><span class="n">my_sampler_factory</span><span class="p">,</span> <span class="n">resume_adapter</span><span class="o">=</span><span class="n">ApplicationResume</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>The example’s checkpoint decoder, sampler, and dataset are application-owned.
+The existing Trainer methods still restore model, optimizer, scheduler and RNG
+state; this adapter does not replace them or prescribe an on-disk format.
+The custom trainer’s existing <code class="docutils literal notranslate"><span class="pre">weight_resume()</span></code> method must return
+<code class="docutils literal notranslate"><span class="pre">metadata.to_checkpoint_extra_info()</span></code> for the checkpoint it actually loaded.
+The existing worker/controller resume agreement compares that dictionary
+exactly; an adapter does not disable this check. Decode the same metadata in
+both processes and do not report controller counters for different model state.</p>
+</section>
+<section id="metadata-contract-schema-version-1">
+<h2>Metadata contract (schema version 1)<a class="headerlink" href="#metadata-contract-schema-version-1" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">completed_training_steps</span></code>: completed Cosmos training commands; initializes
+the controller step. Do not equate this with optimizer updates when a trainer
+performs multiple updates per command.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">completed_optimizer_updates</span></code>: actual optimizer-update count, retained as
+<code class="docutils literal notranslate"><span class="pre">optimizer_updates</span></code> in controller checkpoint extra information.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">remaining_completions</span></code>: remaining training work in generated completions,
+including the <code class="docutils literal notranslate"><span class="pre">rollout.n_generation</span></code> multiplier, not prompts or minibatches.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">epoch</span></code>: one-based current sampling epoch.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">checkpoint_path</span></code>: the selected checkpoint, propagated into <code class="docutils literal notranslate"><span class="pre">train.resume</span></code>
+in controller configuration so custom trainers can load the same selection.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">checkpoint_id</span></code>: immutable shared save identity, returned in worker/controller
+agreement. Reusing a directory or step number is not a sufficient identity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sampling_owner</span></code>: <code class="docutils literal notranslate"><span class="pre">sampler</span></code>, or <code class="docutils literal notranslate"><span class="pre">batch_sampler</span></code> when a batch sampler exists.
+The latter owns its entire stream, including any nested sampler. Cosmos calls
+restoration once on that owner, never separately on two inconsistent cursors.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sampler_state</span></code>: opaque application dictionary. Cosmos does not inspect it.</p></li>
+</ul>
+<p>Counters are strict nonnegative integers, epoch must be positive, and unknown
+schema versions/fields are rejected. Step zero is a valid checkpoint, not a
+discovery miss. Legacy checkpoint formats remain supported by the default loader;
+an adapter must explicitly migrate its application’s legacy metadata into v1.</p>
+</section>
+<section id="safe-sampling-progress-without-saved-rollout-payloads">
+<h2>Safe sampling progress without saved rollout payloads<a class="headerlink" href="#safe-sampling-progress-without-saved-rollout-payloads" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">SamplingReplayLedger</span></code> accepts application-owned <code class="docutils literal notranslate"><span class="pre">SamplingBoundary</span></code> snapshots:
+one-based epoch, effective sampler state, and remaining generated completions
+from that position. Initialize it from the starting/restored boundary. After
+issuing a prompt or batch, call <code class="docutils literal notranslate"><span class="pre">issue(after,</span> <span class="pre">completions=...)</span></code>; retain its token
+alongside the transient work. Each generated completion has an index within
+that token. Call <code class="docutils literal notranslate"><span class="pre">settle(token,</span> <span class="pre">index)</span></code> only when the corresponding optimizer
+update is complete, or when it is terminally discarded under the application’s
+sampling policy. Receipt, admission, and dispatch alone are not settlement.</p>
+<p>The ledger advances only across a contiguous fully settled prefix. For example,
+if batches A and C have trained while B remains outstanding, the snapshot is
+before B. Restart regenerates B and may repeat C. Remaining work includes that
+repeated suffix; it is not the number of outstanding requests. This keeps replay
+from consuming a smaller budget that would otherwise omit later dataset items.
+Configured hard training-step limits still apply, as in ordinary training.</p>
+<p>Capture <code class="docutils literal notranslate"><span class="pre">snapshot()</span></code> under the application’s sampling/checkpoint synchronization
+boundary, with trainer counters from the same completed update. A copied snapshot
+does not advance the live sampler and cannot be overwritten by subsequent cursor
+changes. Never acknowledge an update that is absent from the saved trainer state.
+Construct a fresh ledger on restart; old tokens and duplicate settlements do not
+advance it. It retains metadata for issued work after the earliest unresolved
+request, so callers must bound issuance rather than indefinitely running past a
+stalled gap. No rollout outputs or transport handles enter the snapshot.</p>
+<p>For stateful data loaders, the boundary must cover prefetched work as well. Use
+zero loader workers as in the reference canary, or supply an application snapshot
+that includes that prefetched input state. The ledger cannot infer opaque loader
+or sampler semantics; neither it nor the adapter probes them.</p>
+</section>
+<section id="complete-checkpoint-publication">
+<h2>Complete checkpoint publication<a class="headerlink" href="#complete-checkpoint-publication" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">CheckpointManifest.publish(root,</span> <span class="pre">metadata,</span> <span class="pre">required_artifacts=...,</span> <span class="pre">compatibility=...)</span></code>
+is an optional POSIX local/shared-filesystem helper, not a trainer serializer:</p>
+<ol class="simple">
+<li><p>Save and close every required trainer shard at the selected completed-update
+boundary, including optimizer/scheduler/RNG and application state. Save the
+shared <code class="docutils literal notranslate"><span class="pre">checkpoint_id</span></code> and completed counters inside those artifacts too.</p></li>
+<li><p>Wait for all required shard writes to succeed. The designated coordinator
+passes their expected names and the matching safe sampling metadata to
+<code class="docutils literal notranslate"><span class="pre">publish</span></code>. Files are flushed and hashed before an atomic no-replace manifest
+publication; a directory without <code class="docutils literal notranslate"><span class="pre">manifest.json</span></code> is not resumable.</p></li>
+<li><p>Both the controller adapter and trainer call <code class="docutils literal notranslate"><span class="pre">CheckpointManifest.load</span></code> with
+the <strong>current application’s</strong> required artifact set and compatibility values
+(dataset/preprocessing identity, relevant settings and topology). Load rejects
+missing/mixed/corrupt artifacts and incompatible metadata before restoration.</p></li>
+<li><p>The trainer verifies the checkpoint ID and completed counters in its decoded
+state against the manifest, restores training state, then returns
+<code class="docutils literal notranslate"><span class="pre">metadata.to_checkpoint_extra_info()</span></code> through the existing resume agreement.</p></li>
+</ol>
+<p>Use immutable directories/files: publication does not permit replacing an
+existing manifest. Hash validation cannot certify the semantic contents of an
+arbitrary trainer file, so the application must serialize and check all required
+state. Metadata in this optional helper must be JSON-serializable; other physical
+formats and object stores may implement the adapter’s commit/validation contract
+directly. This does not add automatic migration or change native checkpointing.</p>
+</section>
+<section id="new-execution-not-recovered-worker-processes">
+<h2>New execution, not recovered worker processes<a class="headerlink" href="#new-execution-not-recovered-worker-processes" title="Link to this heading"></a></h2>
+<p>Start fresh controller, workers and transport resources on resume. With an
+adapter configured, <code class="docutils literal notranslate"><span class="pre">Controller.setup</span></code> generates a new <code class="docutils literal notranslate"><span class="pre">controller_execution_id</span></code>
+even when a saved configuration contains an old one. Built-in network worker
+clients copy this ID from their startup configuration into rollout reports.
+Old/missing IDs receive non-retryable HTTP 410 before payload extraction, metrics,
+end-of-stream handling or transport cleanup can modify the new attempt.</p>
+<p>Custom network producers must construct <code class="docutils literal notranslate"><span class="pre">APIClient</span></code> with
+<code class="docutils literal notranslate"><span class="pre">controller_execution_id=config.controller_execution_id</span></code>. Do not refresh that
+ID in a running old worker. It is an attempt fence, not an authentication secret.
+The direct colocated client lives inside the fresh controller/worker process and
+does not have cross-attempt network reports. Without an adapter, the fence is
+disabled and legacy reporting behavior remains unchanged.</p>
+</section>
+<section id="reproducible-validation">
+<h2>Reproducible validation<a class="headerlink" href="#reproducible-validation" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/controller_resume_replay_canary.py</span></code> provides save and resume phases in
+fresh two-rank process groups (<code class="docutils literal notranslate"><span class="pre">--device</span> <span class="pre">cpu</span></code> for Gloo, <code class="docutils literal notranslate"><span class="pre">--device</span> <span class="pre">cuda</span></code> for NCCL).
+It deliberately trains batches A and C while B remains outstanding, publishes
+all trainer shards plus a conservative sampling boundary, restores parameters,
+optimizer momentum, scheduler and RNG, then trains B and repeats C. It verifies
+the saved state and successful new updates, not identical future trajectories.
+The fixture demonstrates application-owned sharding/serialization; it is not a
+full launcher or large-model sharded-checkpoint test.</p>
+</section>
+<section id="ordering-and-errors">
+<h2>Ordering and errors<a class="headerlink" href="#ordering-and-errors" title="Link to this heading"></a></h2>
+<p>With <code class="docutils literal notranslate"><span class="pre">train.resume=false</span></code>, the adapter is not called. With resume enabled,
+metadata is loaded once after samplers have been constructed. Returning <code class="docutils literal notranslate"><span class="pre">None</span></code>
+for automatic discovery bootstraps fresh training and sets <code class="docutils literal notranslate"><span class="pre">train.resume=false</span></code>;
+returning <code class="docutils literal notranslate"><span class="pre">None</span></code> for an explicit path raises <code class="docutils literal notranslate"><span class="pre">FileNotFoundError</span></code>. Corrupt metadata
+and provider/restoration exceptions propagate rather than silently restarting.
+The provider must validate completed/atomic saves and honor explicit-path
+precedence; remote storage and checkpoint discovery remain its responsibility.</p>
+<p>Cosmos sets the epoch, then invokes <code class="docutils literal notranslate"><span class="pre">restore_sampler</span></code>, then constructs the
+DataLoader and its first iterator. No live sampler is probed for batch shape,
+length or skip arithmetic on the adapter path. Restored state is not overwritten
+by another initial <code class="docutils literal notranslate"><span class="pre">set_epoch</span></code>. Normal subsequent epoch transitions still call
+the sampler’s <code class="docutils literal notranslate"><span class="pre">set_epoch</span></code>; custom samplers own those semantics. Use zero loader
+workers when application state must not be advanced by PyTorch prefetch.</p>
+<p>The adapter requires controller-owned sampling (<code class="docutils literal notranslate"><span class="pre">is_rl=True</span></code>, including the
+existing multi-replica SFT controller path). Worker-owned SFT sampling must use
+its trainer’s existing restoration contract. Application-sharded cursors can
+live in the effective sampler but are not inferred from remaining counts.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

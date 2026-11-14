@@ -1,0 +1,639 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Efficient tensor payload transport &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Efficient tensor payload transport</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/payload_transport/efficient_tensor_transport.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="efficient-tensor-payload-transport">
+<h1>Efficient tensor payload transport<a class="headerlink" href="#efficient-tensor-payload-transport" title="Link to this heading"></a></h1>
+<p>Cosmos-RL compiles a tensor schema into one immutable aligned layout, transfers
+one contiguous payload per rollout, and exposes received fields as views of
+reusable backing storage. The transport—not the application—owns allocation,
+publication, native-operation lifetime, and final buffer reuse.</p>
+<p>This path is shared by NCCL and UCXX. The backends use different memory routes,
+but they use the same <code class="docutils literal notranslate"><span class="pre">TensorLayout</span></code>, compact-reference, and ownership rules.</p>
+<section id="data-flow">
+<h2>Data flow<a class="headerlink" href="#data-flow" title="Link to this heading"></a></h2>
+<div class="highlight-mermaid notranslate"><div class="highlight"><pre><span></span>flowchart LR
+    S[TensorSpec schema] --&gt; L[Compile aligned TensorLayout]
+    L --&gt; C[Register descriptor once]
+    C --&gt; A{Producer path}
+    A --&gt;|Direct| W[Write into transport-owned views]
+    A --&gt;|Borrowed NCCL allocation| W
+    A --&gt;|Adapter| P[Normalize and pack ordinary tensors]
+    W --&gt; R[Publish compact PayloadRef]
+    P --&gt; R
+    R --&gt; X[Resolve layout ID and reserve receive storage]
+    X --&gt; N[One native payload transfer]
+    N --&gt; V[Validate wire identity]
+    V --&gt; T[Cached typed views]
+    T --&gt; F[Forward / backward / preparation]
+    F --&gt; E[Final-reader events]
+    E --&gt; Q[Return storage to bounded pool]
+</pre></div>
+</div>
+<p>The network path was already contiguous. The important change is at the receive
+boundary: fields no longer need one clone each merely to obtain aligned typed
+storage.</p>
+</section>
+<section id="physical-layout">
+<h2>Physical layout<a class="headerlink" href="#physical-layout" title="Link to this heading"></a></h2>
+<p>Logical schema order and physical byte order are separate. Fields remain
+addressable by their schema names, while the compiler groups compatible dtype
+alignments and adds explicit padding.</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Logical fields                 One aligned payload allocation
+
+flag:   bool[3]       ───────▶  [ flag 3B ][ pad ]
+scalar: int64[]       ───────▶  [ scalar 8B          ]
+empty:  float32[0,7]  ───────▶  [ zero-byte view      ]
+values: float32[2,3]  ───────▶  [ values 24B          ][ tail padding ]
+                                  ▲ every typed offset is dtype-aligned
+                                  └ payload extent is 64-byte aligned
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">TensorLayout</span></code> caches shapes, dtypes, byte counts, offsets, padding ranges, and a
+content-derived layout ID. Descriptors are canonical JSON with bounded size;
+malformed, noncanonical, oversized, or identity-mismatched descriptors are
+rejected before payload allocation. The layout alignment may not exceed the
+64-byte transport framing boundary, which also aligns every UCXX ring slot.
+Scalars and empty tensors are supported.</p>
+<p>Only padding bytes are initialized on slot reuse. Payload fields must be fully
+written by the direct producer or by the ordinary-tensor adapter. Because
+in-place PyTorch writes cannot be observed through the mapping, the direct API
+requires the caller to attest completed fields before publication; an omitted
+attestation fails before the transport accepts the slot.</p>
+</section>
+<section id="producer-api">
+<h2>Producer API<a class="headerlink" href="#producer-api" title="Link to this heading"></a></h2>
+<p>Applications compose a <code class="docutils literal notranslate"><span class="pre">PayloadContext</span></code>; they do not inherit a backend producer
+mixin. Backend setup arguments are the same values previously supplied to the
+rollout transport setup.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.payload_transport</span><span class="w"> </span><span class="kn">import</span> <span class="n">PayloadContext</span>
+
+<span class="n">payloads</span> <span class="o">=</span> <span class="n">PayloadContext</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+    <span class="s2">"nccl"</span><span class="p">,</span>
+    <span class="n">replica_id</span><span class="o">=</span><span class="n">replica_id</span><span class="p">,</span>
+    <span class="n">rollout_idx</span><span class="o">=</span><span class="n">rollout_idx</span><span class="p">,</span>
+    <span class="n">redis_client</span><span class="o">=</span><span class="n">redis_client</span><span class="p">,</span>
+    <span class="n">schema</span><span class="o">=</span><span class="n">tensor_specs</span><span class="p">,</span>
+    <span class="n">max_steps</span><span class="o">=</span><span class="n">max_steps</span><span class="p">,</span>
+    <span class="n">obs_dim</span><span class="o">=</span><span class="n">obs_dim</span><span class="p">,</span>
+    <span class="n">action_dim</span><span class="o">=</span><span class="n">action_dim</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Adapter path for already-produced tensors. This uses bounded foreach batches</span>
+<span class="c1"># and can fall back to field copies when a tensor combination is unsupported.</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">publish_tensors</span><span class="p">(</span><span class="n">tensors</span><span class="p">)</span>
+<span class="n">publish_to_controller</span><span class="p">(</span><span class="n">reference</span><span class="o">.</span><span class="n">to_dict</span><span class="p">())</span>
+
+<span class="c1"># Reject an unsupported batched gather instead of silently falling back.</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">publish_tensors</span><span class="p">(</span><span class="n">tensors</span><span class="p">,</span> <span class="n">copy_policy</span><span class="o">=</span><span class="s2">"strict_batched"</span><span class="p">)</span>
+
+<span class="c1"># Direct path. No second full-payload staging allocation is introduced.</span>
+<span class="n">slot</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span>
+<span class="n">produce_into</span><span class="p">(</span><span class="n">slot</span><span class="o">.</span><span class="n">tensors</span><span class="p">)</span>
+<span class="n">slot</span><span class="o">.</span><span class="n">mark_all_written</span><span class="p">()</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">publish</span><span class="p">(</span><span class="n">slot</span><span class="p">,</span> <span class="n">ready_event</span><span class="o">=</span><span class="n">producer_ready_event</span><span class="p">)</span>
+<span class="n">publish_to_controller</span><span class="p">(</span><span class="n">reference</span><span class="o">.</span><span class="n">to_dict</span><span class="p">())</span>
+
+<span class="c1"># NCCL can also borrow one compatible application allocation. The requirement</span>
+<span class="c1"># object accounts for framing without exposing backend constants.</span>
+<span class="n">requirements</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">storage_requirements</span><span class="p">()</span>
+<span class="n">wire</span> <span class="o">=</span> <span class="n">allocate_application_tensor</span><span class="p">(</span>
+    <span class="n">requirements</span><span class="o">.</span><span class="n">total_nbytes</span><span class="p">,</span>
+    <span class="n">dtype</span><span class="o">=</span><span class="n">requirements</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>
+    <span class="n">device</span><span class="o">=</span><span class="n">requirements</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">borrowed</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">borrow</span><span class="p">(</span>
+    <span class="n">wire</span><span class="p">,</span>
+    <span class="n">owner</span><span class="o">=</span><span class="n">application_lease</span><span class="p">,</span>
+    <span class="n">on_release</span><span class="o">=</span><span class="n">application_lease</span><span class="o">.</span><span class="n">release</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">produce_into</span><span class="p">(</span><span class="n">borrowed</span><span class="o">.</span><span class="n">tensors</span><span class="p">)</span>
+<span class="n">borrowed</span><span class="o">.</span><span class="n">mark_all_written</span><span class="p">()</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">publish</span><span class="p">(</span><span class="n">borrowed</span><span class="p">,</span> <span class="n">ready_event</span><span class="o">=</span><span class="n">producer_ready_event</span><span class="p">)</span>
+
+<span class="n">payloads</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+</div>
+<section id="construction-arguments">
+<h3>Construction arguments<a class="headerlink" href="#construction-arguments" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">PayloadContext.create()</span></code> forwards backend setup values without exposing the
+backend producer object. The application still owns control-plane discovery and
+selects the schema; the context owns everything after attachment.</p>
+<table border="1" class="docutils">
+<thead>
+<tr>
+<th>Argument</th>
+<th style="text-align: center;">NCCL</th>
+<th style="text-align: center;">UCXX</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>replica_id</code></td>
+<td style="text-align: center;">required</td>
+<td style="text-align: center;">required</td>
+<td>Globally unique producer identity for this process</td>
+</tr>
+<tr>
+<td><code>schema</code></td>
+<td style="text-align: center;">optional</td>
+<td style="text-align: center;">optional</td>
+<td>Sequence of <code>TensorSpec</code>; the default trajectory schema is used when omitted</td>
+</tr>
+<tr>
+<td><code>max_steps</code>, <code>obs_dim</code>, <code>action_dim</code></td>
+<td style="text-align: center;">required</td>
+<td style="text-align: center;">required</td>
+<td>Inputs for the default trajectory schema</td>
+</tr>
+<tr>
+<td><code>rollout_idx</code></td>
+<td style="text-align: center;">required</td>
+<td style="text-align: center;">—</td>
+<td>Cleanup-routing index encoded in NCCL transfer IDs</td>
+</tr>
+<tr>
+<td><code>redis_client</code>, <code>config</code></td>
+<td style="text-align: center;">required</td>
+<td style="text-align: center;">—</td>
+<td>NCCL control plane and transport tuning</td>
+</tr>
+<tr>
+<td><code>device</code></td>
+<td style="text-align: center;">optional</td>
+<td style="text-align: center;">—</td>
+<td>Device holding NCCL publication storage</td>
+</tr>
+<tr>
+<td><code>sender_rank</code></td>
+<td style="text-align: center;">optional</td>
+<td style="text-align: center;">—</td>
+<td>Rank used inside the producer/consumer communicator</td>
+</tr>
+<tr>
+<td><code>port</code>, <code>config</code></td>
+<td style="text-align: center;">—</td>
+<td style="text-align: center;">optional</td>
+<td>UCXX listener selection and <code>UCXXBufferConfig</code></td>
+</tr>
+<tr>
+<td><code>layout_cache_capacity</code></td>
+<td style="text-align: center;">optional</td>
+<td style="text-align: center;">optional</td>
+<td>Maximum number of producer layouts retained by the public context</td>
+</tr>
+</tbody>
+</table><p>NCCL can register more than one layout up to the configured capacity. A UCXX
+shared-memory ring has one physical slot layout, so its context accepts only the
+layout created at setup. <code class="docutils literal notranslate"><span class="pre">PayloadContext.close()</span></code> stops new publication first,
+abandons every unpublished acquired slot, and then performs backend teardown. A
+teardown still running at the caller deadline remains owned and can be waited on
+by another <code class="docutils literal notranslate"><span class="pre">close()</span></code> call. A teardown that actually fails remains failed; it is
+never reported as a successful close or silently re-run against uncertain
+native state.</p>
+<p>Register a non-default schema before using it:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">layout</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">register_layout</span><span class="p">(</span><span class="n">other_tensor_specs</span><span class="p">)</span>
+<span class="n">reference</span> <span class="o">=</span> <span class="n">payloads</span><span class="o">.</span><span class="n">publish_tensors</span><span class="p">(</span><span class="n">other_tensors</span><span class="p">,</span> <span class="n">layout</span><span class="o">=</span><span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Registration is explicit. Passing an unregistered layout fails instead of
+embedding an untrusted descriptor in every reference. UCXX shared-memory rings
+have one layout fixed at creation and reject a different registration. NCCL can
+publish multiple registered layouts through its control-plane registry.</p>
+<p><code class="docutils literal notranslate"><span class="pre">PayloadRef</span></code> is immutable and contains transfer identity, layout identity, wire
+version, sender incarnation, backend addressing, and bounded application
+metadata. The full field list is resolved separately on a cache miss.</p>
+<p>Borrowing is capability-based. NCCL accepts a contiguous <code class="docutils literal notranslate"><span class="pre">uint8</span></code> allocation
+matching <code class="docutils literal notranslate"><span class="pre">storage_requirements()</span></code> and retains the supplied owner until all
+accepted sends are proven complete. The callback runs once after safe retirement
+or abandonment. If native completion is uncertain, the owner is quarantined and
+the callback does not run. UCXX rejects arbitrary borrowed allocations: its
+publishable storage is the shared-ring slot returned by <code class="docutils literal notranslate"><span class="pre">acquire()</span></code>, because an
+external allocation cannot become remotely addressable without a copy or a new
+registration protocol.</p>
+</section>
+</section>
+<section id="ownership-state-machine">
+<h2>Ownership state machine<a class="headerlink" href="#ownership-state-machine" title="Link to this heading"></a></h2>
+<div class="highlight-mermaid notranslate"><div class="highlight"><pre><span></span>flowchart TD
+    A[Acquired: context.acquire] --&gt;|context.publish| P[Published]
+    A --&gt;|close without publish| F[Free]
+    P --&gt; X[Receiver accepted]
+    P --&gt; R[Publication retired: no new readers]
+    X --&gt; N[Native send and receive complete]
+    N --&gt; C[Validated consumer-owned views]
+    C --&gt; E[Final-reader events recorded]
+    E --&gt;|every event complete| F
+    X --&gt;|completion uncertain| Q[Quarantined until process exit]
+    R --&gt; J{All accepted readers complete?}
+    J --&gt;|yes| F
+    F --&gt;|new generation| A
+</pre></div>
+</div>
+<p>Publishing transfers ownership away from the producer. A caller must not mutate
+captured tensor aliases after publication. Received tensors remain valid until
+the consumer releases the batch after every CPU reader and every GPU stream has
+finished. <code class="docutils literal notranslate"><span class="pre">release_prefetch(streams=...)</span></code> records and waits for final-reader
+events before a slot can re-enter the pool.</p>
+<section id="ucxx-connection-admission">
+<h3>UCXX connection admission<a class="headerlink" href="#ucxx-connection-admission" title="Link to this heading"></a></h3>
+<p>UCXX keeps two reusable connections per producer listener. Reads share a
+per-listener admission limit of the same size: a large batch queues excess
+requests instead of opening connections that would immediately exceed the
+idle pool and be closed. Independent listeners retain independent concurrency.
+This optimizes connection reuse, not the wire format or host staging route.</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>queued read (destination owned, deadline running)
+  -&gt; listener permit
+  -&gt; reuse/connect endpoint -&gt; request/status/payload
+  -&gt; return healthy endpoint to pool -&gt; complete operation -&gt; release permit
+</pre></div>
+</div>
+<p>The existing operation deadline includes admission wait. Cancellation or an
+uncertain completion retains the operation, its destination and waiter and
+makes the client terminal; it is never permission to recycle storage or retry
+an accepted transfer. A queued read also prevents client teardown. Clean stale
+slot rejection and safely completed transport errors retain their existing
+handling. Idle endpoint expiry and healthy-port rotation are unchanged.</p>
+<p>This bounds active payload connections <strong>per listener</strong>, not total host memory
+or the number of producer listeners. The existing batch may still own queued
+receive destinations. GPU placement remains one bulk H2D copy followed by
+aligned views; direct GPU UCXX receive and CPU sidecars are not implemented.</p>
+</section>
+<section id="custom-trainer-adoption">
+<h3>Custom trainer adoption<a class="headerlink" href="#custom-trainer-adoption" title="Link to this heading"></a></h3>
+<p>Every training invocation must consume the rollout identities admitted for that
+invocation. Do not rotate a previous invocation’s rollout list locally and then
+acknowledge the current invocation: that trains the wrong batch and can leave
+the final batch unconsumed. Cross-step lookahead requires controller/worker
+scheduling support; the transport adapter alone does not provide that support.</p>
+<p>For a trainer using the consumer adapter, the ordinary current-batch pattern is:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">step_training</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rollouts</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_train_current_batch</span><span class="p">(</span><span class="n">rollouts</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="c1"># The inner frame must not retain received aliases on the trainer.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data_packer</span><span class="o">.</span><span class="n">release_prefetch</span><span class="p">(</span><span class="n">streams</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">train_stream</span><span class="p">,))</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_train_current_batch</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rollouts</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">data_packer</span><span class="o">.</span><span class="n">start_prefetch</span><span class="p">(</span><span class="n">rollouts</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">data_packer</span><span class="o">.</span><span class="n">wait_prefetch</span><span class="p">()</span>
+    <span class="c1"># Resolve these same rollouts, then prepare model inputs on this stream.</span>
+    <span class="n">batch</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">prepare_inputs</span><span class="p">(</span><span class="n">rollouts</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">train_stream</span><span class="o">.</span><span class="n">wait_stream</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">current_stream</span><span class="p">())</span>
+    <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">train_stream</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">train_inputs</span><span class="p">(</span><span class="n">batch</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">prepare_inputs</span></code> and <code class="docutils literal notranslate"><span class="pre">train_inputs</span></code> above are application methods, not new
+Cosmos-RL APIs. The returned metrics must not retain received tensor views.
+Declare every additional reader stream, and release only after any CPU readers
+have finished too. Persistent replay/history must own independent storage.
+Use the same final-reader discipline on exceptions. The pool’s event fence
+protects reuse; it does not replace the preparation-to-training stream
+dependency. A controller-managed prefetch scope can reuse its already-admitted
+batch through the adapter, but the trainer must not replace that batch or start
+an independent previous-batch rotation.</p>
+<p>The cached view mapping tracks keys a consumer replaces, removes, or adds. On
+reuse it repairs only those dirty keys (plus variable-length fields), preventing
+one batch’s dictionary mutations from poisoning the next batch without
+reconstructing every view in the common case.</p>
+<p><code class="docutils literal notranslate"><span class="pre">mark_written(*names)</span></code> supports producers that populate fields in stages;
+<code class="docutils literal notranslate"><span class="pre">mark_all_written()</span></code> is the concise form when one operation overwrites the full
+layout. These methods attest complete writes, not merely valid prefixes. A
+variable-length producer must initialize the unused capacity required by its
+layout (normally with the same deterministic padding semantics as the adapter)
+before marking that field written.</p>
+</section>
+<section id="producer-observability">
+<h3>Producer observability<a class="headerlink" href="#producer-observability" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">PayloadContext.metrics()</span></code> returns a detached read-only snapshot. Adapter
+counters describe work attempted even if later publication falls back; direct
+and borrowed counters advance only after the backend accepts publication.
+Convert the snapshot with <code class="docutils literal notranslate"><span class="pre">dict(context.metrics())</span></code> before JSON serialization.</p>
+<table border="1" class="docutils">
+<thead>
+<tr>
+<th>Counter</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>adapter_payloads</code></td>
+<td>Ordinary tensor mappings packed into contiguous storage</td>
+</tr>
+<tr>
+<td><code>adapter_fields</code></td>
+<td>Schema fields processed by the adapter</td>
+</tr>
+<tr>
+<td><code>adapter_bytes</code></td>
+<td>Field bytes copied, excluding alignment padding</td>
+</tr>
+<tr>
+<td><code>adapter_copy_batches</code></td>
+<td>Successful <code>torch._foreach_copy_</code> groups</td>
+</tr>
+<tr>
+<td><code>adapter_fallback_fields</code></td>
+<td>Fields copied individually after an unsupported group</td>
+</tr>
+<tr>
+<td><code>direct_payloads</code></td>
+<td>Transport-owned slots accepted for publication</td>
+</tr>
+<tr>
+<td><code>borrowed_payloads</code></td>
+<td>Application-owned NCCL allocations accepted for publication</td>
+</tr>
+</tbody>
+</table><p>UCXX snapshots also include ring writes, reads, drops, ready slots, and total
+slots. A nonzero <code class="docutils literal notranslate"><span class="pre">adapter_fallback_fields</span></code> value is the signal to inspect source
+layout/device combinations or enable <code class="docutils literal notranslate"><span class="pre">strict_batched</span></code> during qualification.</p>
+</section>
+</section>
+<section id="backend-memory-routes">
+<h2>Backend memory routes<a class="headerlink" href="#backend-memory-routes" title="Link to this heading"></a></h2>
+<table border="1" class="docutils">
+<thead>
+<tr>
+<th>Backend and destination</th>
+<th>Storage route</th>
+<th style="text-align: right;">Post-receive field copies</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NCCL to GPU</td>
+<td>Reusable CUDA send buffer → NCCL → reusable CUDA receive buffer</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>UCXX to CPU</td>
+<td>Shared-memory slot → reusable pinned host receive buffer</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>UCXX to GPU</td>
+<td>Shared-memory slot → reusable pinned host buffer → one bulk H2D copy into reusable CUDA storage</td>
+<td style="text-align: right;">0 per field; one payload placement copy</td>
+</tr>
+</tbody>
+</table><p>UCXX direct GPU receive is not implied by selecting UCXX or by an RDMA-capable
+network. The implemented GPU route is explicit host staging plus one bulk copy.
+NCCL CPU destinations and mixed CPU/GPU payload segments are not exposed by this
+API; callers must use a supported route rather than assuming silent placement.</p>
+</section>
+<section id="receive-sequence">
+<h2>Receive sequence<a class="headerlink" href="#receive-sequence" title="Link to this heading"></a></h2>
+<div class="highlight-mermaid notranslate"><div class="highlight"><pre><span></span>sequenceDiagram
+    participant P as Producer
+    participant C as Control plane
+    participant R as Receive worker
+    participant B as Reusable pool
+    participant T as Trainer
+    P-&gt;&gt;C: compact reference (layout ID, incarnation, generation)
+    R-&gt;&gt;C: resolve descriptor on cache miss
+    R-&gt;&gt;B: reserve exact-layout storage
+    R-&gt;&gt;P: backend rendezvous/read request
+    P--&gt;&gt;R: contiguous payload
+    R-&gt;&gt;R: verify transfer, layout, sender and generation
+    R--&gt;&gt;T: cached tensor views + batch lease
+    T-&gt;&gt;T: preparation, forward, backward
+    T-&gt;&gt;B: release after all final readers
+    B-&gt;&gt;B: reuse only after reader events complete
+</pre></div>
+</div>
+<p>For NCCL, layout descriptors are stored under the producer replica and sender
+incarnation in Redis. For UCXX, the client queries the producer server on a cache
+miss. A restarted producer has a new incarnation, so an old reference cannot
+resolve or consume storage from the new process. UCXX slot generations prevent a
+reused ring position from satisfying an older reference.</p>
+</section>
+<section id="bounds-and-backpressure">
+<h2>Bounds and backpressure<a class="headerlink" href="#bounds-and-backpressure" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Layout caches have a fixed entry capacity.</p></li>
+<li><p>Receive admission reserves the complete returned batch while its zero-copy
+views are leased. A batch larger than <code class="docutils literal notranslate"><span class="pre">nccl_receive_budget_bytes</span></code> is rejected
+before native receive.</p></li>
+<li><p>Reusable pools are bounded both per layout and across layouts. When a new
+layout would exceed the configured byte bound, idle storage from older layouts
+is evicted before allocating the new buffer.</p></li>
+<li><p>A consumer-owned batch can apply backpressure to the next prefetch. The
+training step is not treated as a transport timeout, but callers must release
+the previous batch before collecting another one that needs its capacity.</p></li>
+<li><p>Uncertain native work is quarantined, not recycled to satisfy a bound.</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">payload_receive_pool_cached_slots</span></code> limits cached NCCL receive slots. When
+<code class="docutils literal notranslate"><span class="pre">nccl_receive_budget_bytes</span></code> is configured, it also bounds idle pooled receive
+bytes. Producer registry capacity bounds admitted send payloads; a native
+operation with uncertain completion remains owned even if that temporarily
+exceeds the normal reusable-cache target.</p>
+</section>
+<section id="failure-contract">
+<h2>Failure contract<a class="headerlink" href="#failure-contract" title="Link to this heading"></a></h2>
+<p>These conditions fail before training consumes the payload:</p>
+<ul class="simple">
+<li><p>unsupported wire version;</p></li>
+<li><p>missing, malformed, or noncanonical layout descriptor;</p></li>
+<li><p>layout ID or payload-size disagreement;</p></li>
+<li><p>wrong transfer identity or sender incarnation;</p></li>
+<li><p>stale UCXX slot generation;</p></li>
+<li><p>receive-budget rejection;</p></li>
+<li><p>accepted native operation whose completion becomes uncertain.</p></li>
+</ul>
+<p>An accepted operation is never converted into an ordinary missing sample. A
+timeout or Python cancellation is not proof that NCCL, UCXX, or CUDA stopped
+using a buffer. Such storage remains owned and the transport becomes unusable;
+process-level restart is the recovery boundary.</p>
+</section>
+<section id="compatibility">
+<h2>Compatibility<a class="headerlink" href="#compatibility" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">NCCLRolloutMixin</span></code> and <code class="docutils literal notranslate"><span class="pre">UCXXRolloutMixin</span></code> were removed. Producer applications
+must own <code class="docutils literal notranslate"><span class="pre">PayloadContext</span></code> directly. <code class="docutils literal notranslate"><span class="pre">NCCLDataPackerMixin</span></code> and
+<code class="docutils literal notranslate"><span class="pre">UCXXDataPackerMixin</span></code> remain as consumer integration adapters because existing
+trainers use their prefetch lifecycle.</p>
+<p>The deprecated <code class="docutils literal notranslate"><span class="pre">redis_client</span></code> assignment followed by
+<code class="docutils literal notranslate"><span class="pre">post_redis_injection()</span></code> remains supported for AlpaGym’s independent cleanup
+lifecycle. It is not a producer wire-format adapter.</p>
+<p>Every producer and consumer in a job must launch from the same Cosmos-RL build.
+There is no rolling mixed-wire upgrade. Wire-version and sender-incarnation
+checks exist to reject stale references from an earlier process or job.</p>
+</section>
+<section id="current-optimization-boundary">
+<h2>Current optimization boundary<a class="headerlink" href="#current-optimization-boundary" title="Link to this heading"></a></h2>
+<p>The owned-view receive path removes per-field receive clones and reuses layouts,
+allocations, and view objects. The direct producer path avoids a full-payload
+gather when the application can write into transport-owned views. NCCL also
+accepts a compatible application-owned allocation through an explicit lease.</p>
+<p>The ordinary-tensor adapter still validates and copies separately allocated
+source tensors into the contiguous send payload. It submits bounded
+<code class="docutils literal notranslate"><span class="pre">torch._foreach_copy_</span></code> groups instead of one Python-dispatched copy per field;
+the default policy records and permits a per-field fallback, while
+<code class="docutils literal notranslate"><span class="pre">strict_batched</span></code> rejects an unsupported group. Placement-aware CPU sidecars and
+direct UCXX CUDA receive require separate capability and performance work. They
+must report their copies rather than being described as zero-copy behavior.</p>
+<p>The UCXX ordinary GPU adapter reuses one serialized GPU staging allocation per
+producer device and one pinned-host staging allocation. It still performs a
+field gather, one payload D2H copy, and one shared-memory copy. Applications
+with ordinary CPU tensors are batched directly into a reserved shared-memory
+slot, without a normalized dictionary or a second per-field ring copy.
+Applications that need a no-gather UCXX path can produce into the CPU views
+returned by <code class="docutils literal notranslate"><span class="pre">acquire()</span></code>; applications that need direct GPU publication should
+select NCCL.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

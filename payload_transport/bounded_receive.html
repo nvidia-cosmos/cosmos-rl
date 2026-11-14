@@ -1,0 +1,407 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bounded NCCL payload reception &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../execution_workflows.html">Execution workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/load_balanced_batching.html">Load-Balanced Dynamic Batching</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout_only.html">Rollout-only execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Distillation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../distillation/on_policy_distillation.html">On-Policy Distillation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Profiler</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../profiler/overview.html">Profiler</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Vision-Language-Action Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../vla/overview.html">Overview</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Bounded NCCL payload reception</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/payload_transport/bounded_receive.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="bounded-nccl-payload-reception">
+<h1>Bounded NCCL payload reception<a class="headerlink" href="#bounded-nccl-payload-reception" title="Link to this heading"></a></h1>
+<p>This opt-in mode limits <strong>receiver-device payload storage</strong>, not total device
+memory. Configuration names and defaults are provisional pending maintainer
+agreement. UCXX and Redis do not implement this budget.</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[custom]</span>
+<span class="n">nccl_receive_budget_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8589934592</span><span class="w">  </span><span class="c1"># example: 8 GiB, not a workload recommendation</span>
+<span class="n">nccl_receive_admission_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">30.0</span><span class="w">  </span><span class="c1"># seconds; excludes an active consumer's final use</span>
+</pre></div>
+</div>
+<p>Omitting <code class="docutils literal notranslate"><span class="pre">nccl_receive_budget_bytes</span></code>, or setting it to <code class="docutils literal notranslate"><span class="pre">0</span></code>, preserves the
+existing concurrent NCCL receive path. A positive integer enables bounded
+reception. No disk or host-payload spill is performed.</p>
+<section id="admission-and-accounting">
+<h2>Admission and accounting<a class="headerlink" href="#admission-and-accounting" title="Link to this heading"></a></h2>
+<p>The batch API must return the whole decoded batch. For each payload in input
+order, let D be its decoded storage bytes and R its wire bytes (including the
+32-byte device header). Before contacting any sender, reserve:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="nb">sum</span><span class="p">(</span><span class="n">D</span><span class="p">)</span> <span class="o">+</span> <span class="nb">max</span><span class="p">(</span><span class="n">R</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Reservations for other batches, including unreleased consumer leases, also
+count against the same per-strategy budget. This admission rule prevents a
+partially received batch from occupying all capacity while waiting for space
+that can only be released after handing the complete batch to its consumer.
+A batch that cannot fit fails immediately with the required bytes and suggested
+remedies. Waiting solely for an already handed-off consumer is safe backpressure,
+not a native transport failure: it has no receive deadline and shutdown wakes it
+immediately. An uncollected/queued reservation does not qualify for that exemption;
+its admission timeout remains finite and actionable.</p>
+<p>After admission, grow the wire workspace using currently available capacity,
+up to <code class="docutils literal notranslate"><span class="pre">sum(R)</span></code>, without waiting while holding a reservation. Receive as many
+consecutive payloads concurrently as fit that workspace. Each sender rendezvous
+is immediately followed by its matching receive enqueue; independent NCCL
+communicators are not grouped. Receive and decode completion are observed before
+advancing to the next window. The existing alignment clones remain; raw-buffer
+aliases disappear when the window’s receive helper returns.
+Reservations shrink to actual unique decoded storage at handoff. Truncated views
+are charged for their <strong>full backing storage</strong>, and aliases of the same storage
+are counted once. Peak reservations are conservative admission figures, distinct
+from peak charged tensor bytes.</p>
+<p>Compute on the prior batch and reception of the next still overlap when both
+fit. A minimal budget yields single-payload windows; additional available bytes
+allow concurrent receives. Workspace stays reserved until batch handoff. This
+avoids an admission cycle but can temporarily reduce capacity available to other
+requests. Measure throughput before selecting a production budget.</p>
+<p>The cap excludes model/optimizer tensors, autograd state, consumer-created
+copies/minibatch caches, CPU control-plane/header copies, NCCL internal memory,
+and CUDA allocator reserved memory/rounding. Allocations can still OOM because
+of those excluded users or fragmentation. Multiple strategies/devices have
+independent budgets; this is not a process-wide cap.</p>
+</section>
+<section id="consumer-release-contract">
+<h2>Consumer release contract<a class="headerlink" href="#consumer-release-contract" title="Link to this heading"></a></h2>
+<p>Bounded reception requires the prefetch API. A synchronous cache miss fails
+explicitly instead of creating an untracked second receive. Repeated cache reads
+are supported until final release. Call the following from the consumer thread:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">packer</span><span class="o">.</span><span class="n">start_prefetch</span><span class="p">(</span><span class="n">rollouts</span><span class="p">)</span>
+<span class="n">packer</span><span class="o">.</span><span class="n">wait_prefetch</span><span class="p">()</span>
+<span class="c1"># Resolve/read the batch as many times as required.</span>
+<span class="c1"># Training, reward and visualization readers may use additional CUDA streams.</span>
+<span class="c1"># Drop every external payload/tensor/view alias when its final use is enqueued.</span>
+<span class="n">packer</span><span class="o">.</span><span class="n">release_prefetch</span><span class="p">(</span><span class="n">streams</span><span class="o">=</span><span class="p">(</span><span class="n">training_stream</span><span class="p">,</span> <span class="n">reward_stream</span><span class="p">,</span> <span class="n">visualization_stream</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>Explicit producer <code class="docutils literal notranslate"><span class="pre">MISSING</span></code> replies and references rejected before rendezvous
+are recorded as safe outcomes in that same batch lease. Resolving them returns the existing packer’s
+missing-sample outcome without trying an unleased synchronous receive. This also
+works during background preparation and for an entirely rejected batch. Outcome
+metadata expires at release, so it cannot suppress a later batch’s unknown miss.
+Absence from the cache alone is not proof of rejection: unknown misses, closed
+admission, accepted payload identity mismatch, and uncertain native completion
+remain errors. A completed receive with the wrong header does not prove that the
+accepted stream can be reused. No broad exception is converted into a dropped sample.</p>
+<p><code class="docutils literal notranslate"><span class="pre">release_prefetch</span></code> records completion events on all supplied reader streams and
+the current stream on each payload device, then waits before clearing the cache
+and returning its budget. Event failure leaves the lease and its charge intact.
+The lease independently retains its original backing storages even if a
+consumer removes or replaces payload-dictionary entries. Those storages remain
+charged until release. Consumer-created views do not extend the contract automatically: <strong>every reader
+must be finished or represented by a supplied stream, and no external alias may
+be used or retained after release</strong>. An external alias retained after release
+violates the budget contract. Calls to release/collect must be serialized on the
+consumer thread.</p>
+<section id="prepared-batches-753">
+<h3>Prepared batches (#753)<a class="headerlink" href="#prepared-batches-753" title="Link to this heading"></a></h3>
+<p>This builds on merged #753 and its #747 watchdog dependency. Prepared prefetch
+retains the received lease independently of its thread-local cache. Consuming
+the preparation future transfers that lease to the ordinary consumer cache;
+it does not return capacity. The handoff waits until the background worker has
+dropped its own prepared aliases. After final training readers and after dropping
+prepared aliases, standalone consumers call <code class="docutils literal notranslate"><span class="pre">release_prefetch(streams=...)</span></code>. This also
+applies when preparation raises: discard the failed prepared state and release
+the handed-off lease, or shut down the packer before consumption.</p>
+<p>Both <code class="docutils literal notranslate"><span class="pre">shutdown_prefetch()</span></code> and the owned <code class="docutils literal notranslate"><span class="pre">close_transport()</span></code> path release
+unconsumed queued/prepared leases only after the worker exits. A close timeout
+retains those leases, and a release failure keeps the affected lease owned.
+Already-consumed leases remain the consumer’s responsibility. Do not retain
+prepared futures/results across shutdown. CPU preparation completing is not
+proof that all payload aliases have finished. No automatic early release is
+inferred for independent CPU copies. Memory created by preparation remains
+outside the transport budget.</p>
+</section>
+<section id="generic-expanded-training-integration">
+<h3>Generic expanded-training integration<a class="headerlink" href="#generic-expanded-training-integration" title="Link to this heading"></a></h3>
+<p>The policy worker’s <code class="docutils literal notranslate"><span class="pre">run_training_step</span></code> integrates final release for
+<code class="docutils literal notranslate"><span class="pre">ExpandedSampleBatching</span></code>: inline preparation starts/collects a batch-owned receive,
+and prepared prefetch transfers the same lease. After the complete update returns,
+the entrypoint drops its preparation/minibatch/future aliases and releases the
+consumer cache. Both dynamic and fixed schedules are supported, with or without
+background preparation. The default/current CUDA streams and <code class="docutils literal notranslate"><span class="pre">trainer.train_stream</span></code>
+are included; override <code class="docutils literal notranslate"><span class="pre">trainer.training_payload_streams()</span></code> for additional reward,
+visualization, or other readers.</p>
+<p>An expanded trainer must not retain samples or views past its step return, and
+its report must not retain autograd state or alias received storage. Invalid
+tensor reports are rejected without returning capacity. Unexpected preparation,
+training, or release errors retain the lease; they do not prove final use.
+The default/unbounded path is unchanged. A fixed/legacy trainer using this worker
+entrypoint is rejected before rendezvous when the budget is enabled: it needs an
+explicit consumer integration, not an inferred release boundary.</p>
+<p>Closing the backend does not release a consumer-owned batch. Its cache lease
+remains available for <code class="docutils literal notranslate"><span class="pre">release_prefetch(streams=...)</span></code> after final use; supply the
+reader streams just as during normal operation.</p>
+<p>The next prefetch may be started before release to overlap communication and
+compute. Release the old batch before <code class="docutils literal notranslate"><span class="pre">wait_prefetch</span></code>/<code class="docutils literal notranslate"><span class="pre">collect_prefetch</span></code> for the
+next one; attempting to replace an unreleased cache raises an actionable error.
+<code class="docutils literal notranslate"><span class="pre">release_prefetch</span></code> preserves the rollout double-buffer scheduling state.</p>
+</section>
+<section id="interrupted-receive-ownership">
+<h3>Interrupted receive ownership<a class="headerlink" href="#interrupted-receive-ownership" title="Link to this heading"></a></h3>
+<p>An allocation failure after an earlier receive was posted is not an ordinary
+missing episode. Until receive completion has been observed, bounded reception
+retains raw storage, communicator pins, transfer streams and the entire admitted
+reservation. Enqueue/event/completion failures have the same terminal contract.
+The worker exits through the backend-neutral fatal transport path; no native
+cleanup or retry is attempted there. Quarantined ownership persists to process
+exit even if an intermediate caller catches the exception. An abort or a sync
+of an unrelated compute stream is not proof that a transfer stopped using memory.</p>
+<p>A decode failure after proven receive completion can release storage only after
+decode copies complete too. Failure to establish that completion retains the
+allocated decode storage and charge, not just its accounting counter.</p>
+<p>The background worker drops its result reference immediately after queue
+handoff. Shutdown closes admission and uses the existing communicator abort/join
+lifecycle. It releases unconsumed queued batches after the worker stops. It does
+<strong>not</strong> infer final use of a batch already handed to a consumer: the consumer
+must still release that batch. Memory/prefetch errors are fatal to the attempted
+collection and never silently turn into empty episodes. The shared independent
+watchdog covers queueing, receive and preparation even without consumption.
+Only a pre-receive wait whose entire reservation belongs to a handed-off consumer
+is exempt. Native work has not started in that phase; releasing capacity starts a
+fresh transport/preparation deadline, independently observed even when the consumer
+never waits for the result. Native hangs are not exempt, and strategy-backed
+expiry exits without native cleanup. Do not retry a timed-out
+packer. Existing per-transfer recovery/fallback behavior remains in the receive
+helper. Failure to prove CUDA completion closes admission and retains the
+reservation; restart that receiver rather than reusing its capacity.</p>
+<p>Downstream custom loops must honor the expanded final-reader contract or wire
+their standalone release boundary explicitly, and manage their own caches.
+No application-specific reader lifetime is inferred by this Cosmos-only change.</p>
+</section>
+</section>
+<section id="telemetry">
+<h2>Telemetry<a class="headerlink" href="#telemetry" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">NCCLTransportStrategy.receive_memory_stats()</span></code> returns:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">budget_bytes</span></code>, <code class="docutils literal notranslate"><span class="pre">reserved_bytes</span></code>, <code class="docutils literal notranslate"><span class="pre">peak_reserved_bytes</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">raw_receive_bytes</span></code>, <code class="docutils literal notranslate"><span class="pre">decoded_leased_bytes</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">current_tensor_bytes</span></code>, <code class="docutils literal notranslate"><span class="pre">peak_tensor_bytes</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">admission_waits</span></code> (number of admissions that had to wait).</p></li>
+</ul>
+<p>Tensor charges remain conservative until completion is observed. Each completed
+bounded batch logs its snapshot. Allocation/decode failures log transfer ID,
+schema, and budget attribution; receive-buffer allocation failures also preserve
+the existing communicator resynchronization behavior.</p>
+</section>
+<section id="standalone-pr-acceptance">
+<h2>Standalone PR acceptance<a class="headerlink" href="#standalone-pr-acceptance" title="Link to this heading"></a></h2>
+<p>Local CPU tests use real tensor allocation and unpacking with faked NCCL traffic.
+They cover variable sizes, odd field alignment, backing-storage accounting,
+repeated reads/batches, admission pressure/timeouts, shutdown, decode OOM cleanup,
+worker reference release, stream-event ordering and lease retention on errors.
+A CUDA test covers views and multiple reader streams when hardware is available.
+These CPU tests alone are not evidence of a GPU remedy or workload-level
+loss equivalence.</p>
+<p>The PR can be validated without NDAS. Run the following on two GPUs, and
+require zero skipped acceptance tests:</p>
+<div class="highlight-sh notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_receive_memory.py<span class="w"> </span>tests/test_receive_memory_cuda.py<span class="w"> </span>tests/test_nccl_e2e.py<span class="w"> </span>-v
+python<span class="w"> </span>tests/receive_memory_cluster_probe.py<span class="w"> </span>--steps<span class="w"> </span><span class="m">20</span><span class="w"> </span>--output<span class="w"> </span>results.json
+torchrun<span class="w"> </span>--standalone<span class="w"> </span>--nproc-per-node<span class="o">=</span><span class="m">2</span><span class="w"> </span>tests/receive_outcome_canary.py
+</pre></div>
+</div>
+<p>The outcome canary also supports a two-node torchrun launch. It uses actual Redis
+rendezvous and GPU NCCL transfers, injects missing buffers and pre-rendezvous
+schema rejection, and
+checks both entirely rejected and mixed batches with preparation on/off. Each
+case must release its lease, avoid fallback receives, and complete the next
+healthy batch. A separate real-receive header injection must close admission and
+raise a terminal error, without trying to reuse the pair. Test-only Gloo barriers coordinate cases; this does not claim
+peer-failure propagation or recovery from uncertain GPU completion.</p>
+<p><code class="docutils literal notranslate"><span class="pre">test_receive_memory_cuda.py</span></code> uses real Redis/NCCL, three producer endpoints with
+variable and unaligned schemas, and a standalone consumer. It compares 20 SGD
+steps against direct-input data, loss and gradients, both with the budget disabled
+and enabled. It also asserts next-batch completion during a pending CUDA reader,
+backpressure until a slow reader releases capacity, cancellation during admission,
+oversized rejection before contacting a sender, real CUDA allocation cleanup
+after an injected decode error, missing-payload recovery, and storage retention
+when a consumer mutates its payload dictionary. The injected error is not a
+physical device OOM. All batch leases and charges must be released at final use.</p>
+<p>The repeated-transfer probe compares peak allocated memory and mean fetch time
+at batch sizes 16/32/64 for 20 iterations per mode. It checks each process exit,
+payload values, repeated reads, stream completion, budget usage, and lower
+steady-state receiver peaks. It has no NDAS dependency.</p>
+</section>
+<section id="downstream-workload-evaluation-outside-the-pr-gate">
+<h2>Downstream workload evaluation (outside the PR gate)<a class="headerlink" href="#downstream-workload-evaluation-outside-the-pr-gate" title="Link to this heading"></a></h2>
+<p>A deployment may separately evaluate its pinned model/data/image with budget
+disabled and enabled. That evaluates the application’s final-reader integration
+and workload-specific memory savings; it does not block the standalone Cosmos
+PR. For such an evaluation, record separately for <strong>every trainer</strong>:</p>
+<ul class="simple">
+<li><p>progress through all iterations and matching data/loss within existing tolerance;</p></li>
+<li><p>raw, decoded/leased, reservation and charged-tensor peaks;</p></li>
+<li><p>CUDA allocated/reserved peaks and device-wide memory, independently of payload accounting;</p></li>
+<li><p>OOM count and allocation context, admission waits, step time and throughput;</p></li>
+<li><p>recovery under slow readers, producer failure, cancellation and repeated restart.</p></li>
+</ul>
+<p>Include all final NDAS readers in the release contract. Compare sustained receive
+peaks and throughput with the motivating workload, without per-wave cache flushes.
+Keep source/image hashes, job configuration, and per-trainer logs with results.</p>
+</section>
+<section id="previous-serial-window-validation-not-evidence-for-the-concurrent-revision">
+<h2>Previous serial-window validation (not evidence for the concurrent revision)<a class="headerlink" href="#previous-serial-window-validation-not-evidence-for-the-concurrent-revision" title="Link to this heading"></a></h2>
+<p>The previous serial implementation completed successfully on two H100 80GB GPUs.
+All <strong>41 contract/acceptance/round-trip tests passed with zero skips</strong>,
+including standalone data/loss/gradient equivalence, real prefetch overlap,
+backpressure, admission cancellation, injected decode-error cleanup, and dictionary
+mutation while a CUDA reader remained pending. The lease now holds unique backing
+storage independently of the mutable payload dictionaries.</p>
+<p>The real Redis/NCCL synthetic producer/consumer completed 20 batches per
+baseline/bounded case at 16/32/64. Steady-state receiver allocated peaks (MiB)
+were 768.7/272.2, 1537.4/528.5, and 3074.7/1040.9 respectively. Mean bounded
+fetch-time increases were 3.6%, 4.0%, and 3.9%. This measures the combined incremental
+receive and explicit-release change with roughly 16 MiB payloads. Peak memory
+is PyTorch receiver allocation, and fetch time is not application throughput.
+Separate standalone SGD tests establish exact data/loss/gradient equivalence;
+separate delayed-reader tests establish actual prefetch overlap and backpressure.</p>
+<p>The original NDAS workload and its final-reader integration were not exercised;
+they are outside the standalone PR gate, and no NDAS OOM-remedy claim is made.
+The validation report accompanying the change contains source hashes, commands,
+job accounting, per-iteration metrics, and test XML.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
