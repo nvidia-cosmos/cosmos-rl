@@ -173,6 +173,14 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             made_progress = self._prompt_queue.qsize() > before
             if made_progress:
                 batch = self._prompt_queue.queue[-1]
+                if (
+                    batch.global_prompt_count < self.parallel_dims.mesh["dp"].size()
+                    and not is_end
+                ):
+                    raise ValueError(
+                        "Colocated rollout requires nonempty DP slices before "
+                        "dataset EOF; refusing to advance ranks to different batches"
+                    )
                 # Colocated generation skips a cohort with an empty DP slice.
                 # Do not start expensive setup that no generation will consume.
                 if (

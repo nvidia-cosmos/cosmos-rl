@@ -311,3 +311,22 @@ def test_idle_setup_worker_releases_consumed_preparation(worker_factory, monkeyp
     # Leave the setup worker alive and idle, as it is during learner training.
     gc.collect()
     assert prepared_refs[0]() is None, "idle setup thread retains the last sample"
+
+
+def test_nonterminal_ragged_batch_fails_before_rank_queue_divergence(
+    worker_factory, monkeypatch
+):
+    worker, _, generated = worker_factory(counts=(1, 2), eof=False)
+    worker.rollout.supports_empty_dp_batches = True
+    worker.parallel_dims.mesh["dp"] = NS(
+        size=lambda: 2, get_local_rank=lambda: 0, get_group=lambda: None
+    )
+
+    def scatter(output, values, **kwargs):
+        output[0] = values[0]
+
+    monkeypatch.setattr("torch.distributed.scatter_object_list", scatter)
+    with pytest.raises(ValueError, match="nonempty DP slices before dataset EOF"):
+        worker.rollout_for_one_minor_step(remaining_samples=4)
+    worker.rollout.submit_setup.assert_not_called()
+    assert generated == []
