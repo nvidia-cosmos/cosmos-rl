@@ -4,17 +4,39 @@
 
 from cosmos_rl.dispatcher.data.admission import (
     CompletionDisposition,
+    AdmissionCommitted,
     SourceWindow,
 )
 from cosmos_rl.reward.admission import COMPLETION_ADMISSION_METRIC_PREFIX
+from cosmos_rl.utils.application_callbacks import CallbackContext, CallbackRegistry
+from cosmos_rl.utils.logging import logger
 
 
 class CompletionAdmissionState:
-    def __init__(self, *, window_size=4096):
+    def __init__(self, *, window_size=4096, hook_fns=None):
         self.window_size = window_size
         self.sources = {}
         self.failed = False
         self.reason_labels = set()
+        self.callbacks = None
+        if hook_fns is not None:
+            self._configure_callbacks(hook_fns)
+
+    def _configure_callbacks(self, hook_fns):
+        hooks = dict(hook_fns or {})
+        if hooks.get("completion_settled") is not None:
+            if hooks.get("admission_committed") is not None:
+                raise ValueError(
+                    "Use admission_committed without deprecated completion_settled"
+                )
+            logger.warning("completion_settled is deprecated; use admission_committed")
+            hooks["admission_committed"] = hooks.pop("completion_settled")
+        self.callbacks = CallbackRegistry(hooks, CallbackContext(role="controller"))
+        self.callbacks.validate("admission_committed", borrowed=False)
+
+    def close(self):
+        if self.callbacks is not None:
+            self.callbacks.close()
 
     def prepare(self, controller, request, rollouts):
         """Validate and evaluate everything before the first accounting mutation.
@@ -45,6 +67,12 @@ class CompletionAdmissionState:
         identities = request.completion_identities
         if identities is None or len(identities) != len(rollouts):
             raise ValueError("Admission requires one identity per completion")
+        if request.completion_diagnostics is not None and len(
+            request.completion_diagnostics
+        ) != len(identities):
+            raise ValueError(
+                "Admission requires diagnostics to match completion identities"
+            )
         if "discarded_samples" in request.metrics or any(
             key.startswith(COMPLETION_ADMISSION_METRIC_PREFIX)
             for key in request.metrics
@@ -188,6 +216,41 @@ class CompletionAdmissionState:
                 metric = f"application_rejected/{reason}"
                 status.filter_records[metric] = status.filter_records.get(metric, 0) + 1
             window.commit(identities)
+            if self.callbacks is None:
+                self._configure_callbacks(getattr(status, "hook_fns", {}))
+            if self.callbacks.has("admission_committed") and decisions:
+                diagnostics = {
+                    identity.sequence: diagnostic
+                    for identity, diagnostic in zip(
+                        request.completion_identities,
+                        request.completion_diagnostics
+                        or [None] * len(request.completion_identities),
+                    )
+                }
+                diagnostics.update(
+                    (failure.identity.sequence, failure.diagnostics)
+                    for failure in request.completion_failures
+                )
+                self.callbacks.invoke(
+                    "admission_committed",
+                    tuple(
+                        AdmissionCommitted(
+                            source_replica=request.src_replica_name,
+                            source_rank=request.src_global_rank,
+                            identity=identity,
+                            disposition=disposition,
+                            # Telemetry workers can retain only detached small
+                            # metadata, independent of this request and payload.
+                            diagnostics=(
+                                diagnostics[identity.sequence].model_copy(deep=True)
+                                if diagnostics.get(identity.sequence) is not None
+                                else None
+                            ),
+                        )
+                        for identity, _, disposition in decisions
+                    ),
+                    borrowed=False,
+                )
             return accepted
         except BaseException:
             self.failed = True

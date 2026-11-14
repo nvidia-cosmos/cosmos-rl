@@ -39,6 +39,7 @@ _COMPLETION_ALIGNED_FIELDS = (
     "report_metrics",
     "teacher_result_uuids",
     "completion_sequences",
+    "completion_diagnostics",
     "training_completion_slots",
 )
 
@@ -351,6 +352,18 @@ def select_payload_completions(
 
     selected = payload.model_copy(deep=False)
     selected_indices = [] if admission.group_excluded else admission.eligible_indices
+    if payload.completion_diagnostics is not None:
+        if len(payload.completion_diagnostics) != admission.original_size:
+            raise ValueError("Completion diagnostics must be completion-aligned")
+        selected_set = set(selected_indices)
+        selected.rejected_completion_diagnostics = [
+            *payload.rejected_completion_diagnostics,
+            *(
+                item
+                for index, item in enumerate(payload.completion_diagnostics)
+                if index not in selected_set
+            ),
+        ]
     selected.training_rejected_slots = list(payload.training_rejected_slots)
     if payload.training_completion_slots is not None:
         if len(payload.training_completion_slots) != admission.original_size:
@@ -383,6 +396,11 @@ def select_payload_completions(
                             or "quality"
                         ),
                         "completion": payload.completions[index],
+                        "diagnostics": (
+                            payload.completion_diagnostics[index]
+                            if payload.completion_diagnostics is not None
+                            else None
+                        ),
                         **{
                             name: getattr(payload, name)[index]
                             if getattr(payload, name) is not None

@@ -15,6 +15,7 @@
 
 from typing import List, Any, Dict, Optional, Tuple, Union
 from pydantic import BaseModel, Field, StrictInt
+from cosmos_rl.dispatcher.data.diagnostics import CompletionDiagnostics
 
 
 class ChatMessage(BaseModel):
@@ -123,6 +124,10 @@ class RLPayload(BaseModel):
     completion_sequences: Optional[List[int]] = Field(default=None, exclude=True)
     completion_rejections: List[Dict[str, Any]] = Field(
         default_factory=list, exclude=True
+    )
+    completion_diagnostics: Optional[List[CompletionDiagnostics]] = None
+    rejected_completion_diagnostics: List[CompletionDiagnostics] = Field(
+        default_factory=list
     )
 
     n_ignore_prefix_tokens: Optional[List[int]] = Field(

@@ -385,6 +385,10 @@ def test_scoring_errors_are_strict_in_local_and_remote_paths(monkeypatch):
     remote = RemoteRewardCalculator()
     remote.rollout_only = True
     remote.uuid2stage = {"request": "training"}
+    remote.uuid2payload = {"request": [RLPayload(prompt_idx=0, completions=["x"])]}
+    remote.uuid2step = {"request": 0}
+    remote.uuid2replica = {"request": "replica"}
+    remote.uuid2completions_per_payload = {"request": [1]}
     remote.fetch_reward = lambda *_: (_ for _ in ()).throw(
         ValueError("remote score failed")
     )
@@ -453,7 +457,7 @@ def test_remote_malformed_score_cardinality_or_values_is_strict(monkeypatch, sco
     calculator.fetch_reward = lambda *_: torch.tensor(scores)
     queue = Queue()
     queue.put("request")
-    with pytest.raises(ValueError, match="every generated|finite"):
+    with pytest.raises(ValueError, match="every.*completion|finite"):
         calculator.get_results(queue)
 
 
