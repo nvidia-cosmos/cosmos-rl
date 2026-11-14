@@ -1619,8 +1619,12 @@ class RolloutConfig(BaseModel):
     prefetch_rollout: bool = Field(
         default=False,
         description=(
-            "Enable background prompt prefetch.  A daemon thread fetches the next "
-            "prompt batch into _prompt_queue while rollout_generation() is running. "
+            "Enable bounded prompt lookahead and background preparation. "
+            "Single-rank disaggregated workers fetch on a background thread; "
+            "multi-rank and colocated workers fetch on the control thread so "
+            "distributed collectives stay coordinated. Colocated lookahead is "
+            "limited to the current update's missing samples and drains before "
+            "the learner changes the shared model. "
             "Backends that compose cosmos_rl.rollout.generation_mixin."
             "RolloutGenerationMixin (e.g. the gym example) additionally have their "
             "_prepare_sample hook dispatched on a background setup thread for each "

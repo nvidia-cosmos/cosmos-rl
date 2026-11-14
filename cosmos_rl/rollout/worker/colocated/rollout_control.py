@@ -143,8 +143,46 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
 
+    def _prefetch_colocated_prompts(self, remaining_samples: int) -> bool:
+        """Stage only work still needed by this update, on every rank together.
+
+        Queued prompts can produce at most n_generation results each. Stop
+        leasing when that covers the missing samples, even if the queue has
+        space. Rejections are refilled after reporting, just as without prefetch.
+        This keeps prepared inputs within one shared-model weight version.
+        """
+        self._bind_prefetch_context_once()
+        target_depth = self._prompt_fetch_target_depth(prep_overlap=True)
+        while (
+            not self.state.prompt_fetch_end()
+            and self._prompt_queue.qsize() < target_depth
+        ):
+            queued_samples = sum(
+                batch.global_prompt_count * self.config.rollout.n_generation
+                for batch in self._prompt_queue.queue
+            )
+            if queued_samples >= remaining_samples:
+                break
+            before = self._prompt_queue.qsize()
+            is_end = self.request_new_prompts(
+                self.batch_size,
+                self._prompt_queue,
+                rank_in_mesh=self.rank_in_rollout_repicas,
+                max_pending_batches=target_depth,
+            )
+            made_progress = self._prompt_queue.qsize() > before
+            if made_progress:
+                batch = self._prompt_queue.queue[-1]
+                if required_weight_version(batch) <= self.current_weight_version:
+                    self._submit_prefetch_setup(batch)
+            if is_end:
+                self.state.set_prompt_fetch_end()
+            if not made_progress:
+                break
+        return self.state.prompt_fetch_end()
+
     @torch.no_grad()
-    def rollout_for_one_minor_step(self):
+    def rollout_for_one_minor_step(self, remaining_samples=None):
         """
         Rollout for one minor step given a batch of prompts.
         Returns:
@@ -152,11 +190,17 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             num_valid_results (int): Number of valid results generated in this step.
         """
 
-        no_more_prompts = self.request_new_prompts(
-            self.batch_size,
-            self._prompt_queue,
-            rank_in_mesh=getattr(self, "rank_in_rollout_repicas", None),
+        prep_overlap = remaining_samples is not None and (
+            self.config.rollout.prefetch_rollout
         )
+        if prep_overlap:
+            no_more_prompts = self._prefetch_colocated_prompts(remaining_samples)
+        else:
+            no_more_prompts = self.request_new_prompts(
+                self.batch_size,
+                self._prompt_queue,
+                rank_in_mesh=getattr(self, "rank_in_rollout_repicas", None),
+            )
         # A final ragged scatter can leave a DP rank with no prompts. Never
         # invoke the backend on only part of its collective cohort (or enqueue
         # an empty list as a real generation batch).
@@ -179,7 +223,9 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         if not all(valid for valid, _ in states):
             return no_more_prompts, 0
         _, valid_results = self.one_step_generation()
-        return no_more_prompts, len(valid_results)
+        # Fetch EOF may arrive while earlier batches are still queued. Let the
+        # caller drain them before deciding whether the update is complete.
+        return no_more_prompts and self._prompt_queue.empty(), len(valid_results)
 
     def subscribe_remote_commands(self):
         """

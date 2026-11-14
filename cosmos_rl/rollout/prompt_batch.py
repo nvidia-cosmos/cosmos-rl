@@ -2,9 +2,11 @@
 
 
 class PromptBatch(list):
-    def __init__(self, payloads, required_weight_version):
+    def __init__(self, payloads, required_weight_version, *, global_prompt_count=None):
         super().__init__(payloads)
         self.required_weight_version = required_weight_version
+        # Keep the count before DP scatter: local slices can be ragged or empty.
+        self.global_prompt_count = global_prompt_count
 
 
 def required_weight_version(payloads):

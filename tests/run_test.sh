@@ -303,6 +303,8 @@ for reservation_case in healthy departure lost-fetch lost-report strict-refill; 
 done
 run python -m pytest -q tests/test_rollout_report_receipts.py
 run python -m pytest -q tests/test_training_fetch_receipts.py
+run python -m pytest -q tests/test_colocated_prompt_prefetch.py
+run torchrun --standalone --nproc-per-node=2 tests/colocated_prompt_prefetch_canary.py --benchmark
 run python -m pytest -q tests/test_colocated_final_step_refill.py
 run python -m pytest -q tests/test_colocated_exhaustion.py
 run python -m pytest -q tests/test_colocated_discard_settlement.py tests/test_colocated_on_policy_queue.py tests/test_colocated_resume_version.py

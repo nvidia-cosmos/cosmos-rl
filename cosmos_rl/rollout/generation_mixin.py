@@ -36,7 +36,7 @@ and exposes four override hooks for the per-backend bits.
 The same seam doubles as a place to overlap step (2)'s per-prompt
 work with step (4)'s in-flight engine call on the previous batch.
 When ``config.rollout.prefetch_rollout`` is ``True``, the rollout
-worker's ``_prefetch_loop`` calls :meth:`submit_setup` as soon as it
+worker calls :meth:`submit_setup` as soon as it
 hands a new prompt batch to the prompt queue; the mixin runs
 :meth:`_prepare_sample` for each payload on a background thread keyed
 by payload-object identity plus :meth:`_payload_key` so by the time the consumer hits
@@ -105,6 +105,13 @@ a sim env per prompt) own the synchronization.  The mixin itself
 holds no shared mutable state beyond the future map and uses an
 atomic dict swap so concurrent ``submit_setup`` and
 :meth:`_gather_prepared_samples` are safe.
+
+Colocated workers coordinate prompt fetches on the control thread, using the
+same bounded queue and setup worker as disaggregated workers. Lookahead stops
+when queued prompts can cover the current update's missing samples. Prepared
+inputs are consumed before the learner changes the shared model; preparation
+callbacks must not leave untracked work using that model after they return.
+The first batch of each rollout phase is therefore a cold pipeline start.
 
 Edge cases
 ----------
@@ -425,8 +432,8 @@ class RolloutGenerationMixin:
     def submit_setup(self, payloads: Sequence[Any]) -> None:
         """Schedule training :meth:`_prepare_sample` for each payload.
 
-        Called from the rollout worker's ``_prefetch_loop`` thread after
-        it puts a batch on the prompt queue.  No-op when prefetch is
+        Called by the rollout worker's prompt producer when a batch is
+        admitted to the prompt queue.  No-op when prefetch is
         disabled or :meth:`setup_generation` was never called.
 
         This queue uses the training preparation context. Validation prepares
@@ -612,25 +619,39 @@ class RolloutGenerationMixin:
                     key = self._setup_key(payload)
                     futures[index] = self._setup_futures.pop(key, None)
                     self._setup_payloads.pop(key, None)
-        for payload, future in zip(payloads, futures, strict=True):
-            if future is not None:
-                t0 = time.perf_counter()
-                # Future.result re-raises whatever the hook raised.
-                results.append(future.result())
-                wait_ms_total += (time.perf_counter() - t0) * 1000.0
-                wait_count += 1
-            else:
-                t0 = time.perf_counter()
-                results.append(
-                    self._prepare_sample(
-                        payload,
-                        data_packer=data_packer,
-                        data_fetcher=data_fetcher,
-                        is_validation=is_validation,
+        try:
+            for payload, future in zip(payloads, futures, strict=True):
+                if future is not None:
+                    t0 = time.perf_counter()
+                    # Future.result re-raises whatever the hook raised.
+                    results.append(future.result())
+                    wait_ms_total += (time.perf_counter() - t0) * 1000.0
+                    wait_count += 1
+                else:
+                    t0 = time.perf_counter()
+                    results.append(
+                        self._prepare_sample(
+                            payload,
+                            data_packer=data_packer,
+                            data_fetcher=data_fetcher,
+                            is_validation=is_validation,
+                        )
                     )
-                )
-                inline_ms_total += (time.perf_counter() - t0) * 1000.0
-                inline_count += 1
+                    inline_ms_total += (time.perf_counter() - t0) * 1000.0
+                    inline_count += 1
+        except BaseException:
+            # Even a failed batch must finish any callback already using the
+            # shared model before colocated training can change its weights.
+            for future in futures:
+                if future is not None:
+                    future.cancel()
+            for future in futures:
+                if future is not None:
+                    try:
+                        future.result()
+                    except BaseException:
+                        pass
+            raise
         self._last_gather_timing = {
             "inline_ms_total": inline_ms_total,
             "inline_count": inline_count,
