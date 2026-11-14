@@ -68,7 +68,9 @@ def trainer_for(rank, scenario, device):
             ),
         ),
         parallel_dims=SimpleNamespace(pp_cp_tp_coord=(0, 1)),
-        teacher_results=TeacherResultInbox(),
+        teacher_results=TeacherResultInbox(
+            max_bytes=1 if scenario == "inbox_overflow" and rank == 3 else None
+        ),
         fetched_teacher_uuids=set(),
         device=device,
         steps=0,
@@ -214,6 +216,7 @@ def cohort_worker(rank, path, backend):
             "length_mismatch",
             "teacher_token_width",
             "teacher_token_empty",
+            "inbox_overflow",
             "healthy_after",
         ):
             trainer, rollouts = trainer_for(rank, scenario, device)

@@ -20,10 +20,12 @@ The bug this guards against: the policy trainer HUNG at exit after a full
 NCCL disaggregated run, because ``shutdown_nccl_data_packer`` (which aborts
 the mixin's 2-rank payload comms) was never called -- the leftover comms
 wedged the NCCL / process-group teardown.  ``handle_shutdown`` now calls
-``_shutdown_payload_data_packers`` first.
+``_shutdown_payload_data_packers`` after stopping its producers.
 """
 
 import unittest
+from unittest.mock import patch
+import threading
 
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 
@@ -94,10 +96,7 @@ class TestShutdownPayloadDataPackers(unittest.TestCase):
         w.val_data_packer = None
         w._shutdown_payload_data_packers()  # best-effort: must not raise
 
-    def test_handle_shutdown_invokes_packer_teardown_first(self):
-        # handle_shutdown must call the packer teardown; we stop it right
-        # after by making the next step (shutdown_signal) raise, and assert
-        # the packer was already torn down.
+    def test_handle_shutdown_stops_producers_before_packer_teardown(self):
         w = _worker()
         p = _StubNCCLPacker()
         w.data_packer = p
@@ -106,13 +105,21 @@ class TestShutdownPayloadDataPackers(unittest.TestCase):
         class _Boom(Exception):
             pass
 
-        class _Sig:
-            def set(self_):
-                raise _Boom
+        w.shutdown_signal = threading.Event()
+        w.shutdown_mp_signal = threading.Event()
+        teardown = w._shutdown_payload_data_packers
 
-        w.shutdown_signal = _Sig()
-        with self.assertRaises(_Boom):
-            w.handle_shutdown()
+        def stop_after_teardown():
+            self.assertTrue(w.shutdown_signal.is_set())
+            self.assertTrue(w.shutdown_mp_signal.is_set())
+            stopped.assert_called_once_with(w)
+            teardown()
+            raise _Boom
+
+        with patch("cosmos_rl.policy.worker.rl_worker.stop_worker_threads") as stopped:
+            with patch.object(w, "_shutdown_payload_data_packers", stop_after_teardown):
+                with self.assertRaises(_Boom):
+                    w.handle_shutdown()
         self.assertEqual(p.shutdown_calls, 1)
 
 

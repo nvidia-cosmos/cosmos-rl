@@ -597,7 +597,9 @@ class ModelRegistry:
     def build_hf_model(cls, config: CosmosConfig, hf_config_args=None):
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        hf_config_args = hf_config_args if hf_config_args is not None else {}
+        hf_config_args = dict(hf_config_args or {})
+        if config.policy.model_revision is not None:
+            hf_config_args.setdefault("revision", config.policy.model_revision)
         for k, v in hf_config_args.items():
             logger.info(f"Set hf config args {k} to {v}")
 

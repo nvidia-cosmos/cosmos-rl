@@ -45,6 +45,7 @@ def setup(monkeypatch):
         workers,
     )
     controller.completion_admission = None
+    controller.teacher_result_manager = set()
     controller.life_cycle_lock = asyncio.Lock()
     controller.stat_n_samples = controller.stat_completion_tokens_count = 0
     controller.begin_time = None

@@ -934,7 +934,9 @@ class TestFinalValidationCompletion(unittest.TestCase):
 
         psm = NoPolicyStatus()
         psm.stop_reason = None
-        controller = SimpleNamespace(policy_status_manager=psm)
+        controller = SimpleNamespace(
+            policy_status_manager=psm, config=SimpleNamespace()
+        )
         method = Controller._get_batched_prompt_impl.__get__(controller)
         payloads, is_end = asyncio.run(method(8))
         self.assertEqual(payloads, [])

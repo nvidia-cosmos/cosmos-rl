@@ -41,3 +41,4 @@ class RolloutResultEvent:
     conversation: Any
     outcomes: tuple[CompletionOutcome, ...]
     extra_info: Any = None
+    occurrence_id: int | None = None

@@ -46,6 +46,7 @@ from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.execution.models import checkpoint_actor
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.dispatcher.data.resume import ControllerResumeAdapter
 from cosmos_rl.dispatcher.data.admission_state import CompletionAdmissionState
@@ -482,6 +483,7 @@ maxmemory-policy noeviction
             or getattr(train_policy, "type", None) == "sft"
             or train_policy.variant == "dapo"
             or self.config.mode == "colocated"
+            or checkpoint_actor(self.config)
         ):
             return 0
         if type(weight_version) is not int or weight_version < 0:
@@ -771,7 +773,7 @@ maxmemory-policy noeviction
             state.input_ended = True
             return [], True
         limit = self.config.rollout.max_prompts
-        remaining = None if limit is None else limit - state.prompts_issued
+        remaining = None if limit is None else limit - state.source_occurrences_seen
         if remaining is not None and remaining <= 0:
             return [], True
         generation = self.config.rollout.n_generation
@@ -785,20 +787,98 @@ maxmemory-policy noeviction
         n = min(n, capacity, remaining if remaining is not None else n)
         if n <= 0:
             return [], state.input_ended and not pending
-        if not pending and not state.input_ended:
-            fetched, state.input_ended = self.data_fetcher.get_batched_prompt(n)
-            # Dataloader batches may exceed n. Retain the remainder so neither
-            # the global prompt limit nor the inflight cap can be overrun.
-            pending.extend(fetched)
-        payloads, pending[:] = pending[:n], pending[n:]
-        for payload in payloads:
+        output = getattr(getattr(self.config, "execution", None), "output", None)
+        ledger = getattr(self, "_generation_ledger", None)
+        if output is not None and ledger is None:
+            from cosmos_rl.execution.sink import GenerationLedger
+
+            ledger = self._generation_ledger = GenerationLedger(self.config)
+        payloads = []
+        scanned = 0
+        while len(payloads) < n and scanned < max(n, 128):
+            if limit is not None and state.source_occurrences_seen >= limit:
+                break
+            if not pending and not state.input_ended:
+                fetched, state.input_ended = self.data_fetcher.get_batched_prompt(
+                    n - len(payloads)
+                )
+                pending.extend(fetched)
+            if not pending:
+                break
+            payload = pending.pop(0)
+            occurrence = state.source_occurrences_seen
+            state.source_occurrences_seen += 1
+            scanned += 1
+            if ledger is not None and ledger.reserve(payload, occurrence):
+                continue
             payload.weight_version = 0
+            payload.generation_occurrence = occurrence
+            payloads.append(payload)
         state.prompts_issued += len(payloads)
         state.outstanding_completions += len(payloads) * generation
         ended = (state.input_ended and not pending) or (
-            limit is not None and state.prompts_issued >= limit
+            limit is not None and state.source_occurrences_seen >= limit
         )
         return payloads, ended
+
+    def finalize_generation(self):
+        """Seal the corpus only after all admitted completion slots settle."""
+        if self.config.execution.output is None:
+            return
+        if self.policy_status_manager.stop_reason is not None:
+            return
+        if getattr(self, "_generation_finalized", False):
+            return
+        if self.rollout_only_state.outstanding_completions:
+            raise ValueError("Cannot finalize generation with unsettled outputs")
+        state = self.rollout_only_state
+        limit = self.config.rollout.max_prompts
+        if not (
+            state.input_ended
+            and not state.pending_prompts
+            or limit is not None
+            and state.source_occurrences_seen >= limit
+        ):
+            raise ValueError("Cannot finalize generation before input admission closes")
+        ledger = getattr(self, "_generation_ledger", None)
+        if ledger is None:
+            from cosmos_rl.execution.sink import GenerationLedger
+
+            ledger = self._generation_ledger = GenerationLedger(self.config)
+        ledger.finalize(self.rollout_only_state.source_occurrences_seen)
+        self._generation_finalized = True
+
+    def _get_checkpoint_actor_prompts(self, n):
+        status = self.policy_status_manager
+        if len(status) == 0:
+            return [], bool(getattr(status, "_first_policy_replica_arrived", False))
+        if status.training_finished():
+            return [], True
+        policy = self.config.train.train_policy
+        inflight = policy.max_inflight_steps or (policy.allowed_outdated_steps + 1)
+        remaining = max(
+            0,
+            inflight * self.config.train.train_batch_per_replica * len(status)
+            - status.samples_on_the_fly,
+        )
+        n = min(n, math.ceil(remaining / self.config.rollout.n_generation))
+        if n <= 0:
+            return [], False
+        pending = getattr(self, "_checkpoint_actor_pending", None)
+        if pending is None:
+            pending = self._checkpoint_actor_pending = []
+            self._checkpoint_actor_input_ended = False
+        if not pending and not self._checkpoint_actor_input_ended:
+            fetched, self._checkpoint_actor_input_ended = (
+                self.data_fetcher.get_batched_prompt(n)
+            )
+            pending.extend(fetched)
+        payloads, pending[:] = pending[:n], pending[n:]
+        for payload in payloads:
+            # This is the actor's own immutable lineage, never a learner step.
+            payload.weight_version = 0
+        status.samples_on_the_fly += len(payloads) * self.config.rollout.n_generation
+        return payloads, self._checkpoint_actor_input_ended and not pending
 
     async def _get_batched_prompt_impl(
         self,
@@ -826,6 +906,9 @@ maxmemory-policy noeviction
             and self.config.mode != "colocated"
         ):
             return [], True
+
+        if not is_validation and checkpoint_actor(self.config):
+            return self._get_checkpoint_actor_prompts(n)
 
         # Short-circuit when all policy replicas have unregistered during
         # teardown.  Without this guard, global_batch_size becomes 0 and
@@ -1335,6 +1418,7 @@ maxmemory-policy noeviction
     async def unregister(self, replica_name: str):
         logger.info(f"[Controller] Unregistering replica {replica_name}")
         async with self.life_cycle_lock:
+            teacher_departed = replica_name in self.teacher_result_manager
             if replica_name in self.policy_status_manager:
                 self.policy_status_manager.unregister(replica_name)
             elif replica_name in self.rollout_status_manager:
@@ -1343,10 +1427,17 @@ maxmemory-policy noeviction
                 )
             elif replica_name in self.teacher_result_manager:
                 self.teacher_result_manager.remove(replica_name)
-                if len(self.teacher_result_manager) > 0:
-                    await self.end_reference_replica()
             else:
                 raise Exception(f"[Controller] Replica {replica_name} not found")
+            if self.teacher_result_manager and (
+                teacher_departed
+                or (not self.policy_status_manager and not self.rollout_status_manager)
+            ):
+                # No producer can submit another teacher request after both
+                # learner and rollout departure. STOP does not require a final
+                # weight sync, so that sync cannot own teacher termination.
+                # Each departing teacher passes the marker to the next one.
+                await self.end_reference_replica()
 
     async def end_reference_replica(self):
         self.redis_controller.publish_teacher_request(

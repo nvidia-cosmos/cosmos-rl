@@ -183,6 +183,10 @@ def _maybe_finalize(reason: str) -> bool:
         )
 
     if ready:
+        if _is_rollout_only() and reason.startswith("clean unregister"):
+            finalize = getattr(controller, "finalize_generation", None)
+            if finalize is not None:
+                finalize()
         global server
         if server is not None and not server.should_exit:
             data_fetcher = getattr(
@@ -361,6 +365,11 @@ async def lifespan(app: FastAPI):
                 rollout_replicas = list(
                     controller.rollout_status_manager.rollout_replicas.values()
                 )
+                if rollout_only_drained:
+                    # Completion publication is required durability, not a
+                    # retryable best-effort STOP notification. Failure aborts
+                    # the monitor and therefore the execution.
+                    controller.finalize_generation()
                 # Guard the publish: this monitor thread also drives
                 # ``maintain_life_status`` (rollout reaping) and the
                 # no-policy SIGTERM escalation below.  An unguarded redis

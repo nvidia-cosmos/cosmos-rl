@@ -21,6 +21,11 @@ from typing import Any, Dict, Union, Optional, List, Literal
 import os
 import json
 import hashlib
+from cosmos_rl.execution.config import (
+    ExecutionConfig,
+    normalize_execution,
+    resolve_execution,
+)
 
 # For building sphinx documentation, the doc-build environment does not have cosmos_rl installed
 # so we need to import the utils.modelscope and utils.logging from the cosmos_rl package.
@@ -697,8 +702,11 @@ class GrpoConfig(BaseModel):
             )
         if self.use_rollout_logprobs_for_loss:
             self.collect_rollout_logprobs = True
+            # Decoding and retokenizing a completion can merge tokens or drop
+            # special tokens. Original likelihoods belong to the sampled IDs.
+            self.rollout_as_token_ids = True
             logger.warning(
-                "use_rollout_logprobs_for_loss is enabled, so collect_rollout_logprobs is set to True."
+                "use_rollout_logprobs_for_loss requires collected logprobs and original rollout token IDs."
             )
         assert not (self.use_rollout_logprobs_for_loss and self.use_decoupled_loss), (
             "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
@@ -951,7 +959,7 @@ class TrainingConfig(BaseModel):
     )
     deterministic: bool = Field(
         default=False,
-        description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
+        description="Request reproducible training kernels (potentially slower). Native attention auto-selects FA2; explicit fa_version overrides it. Other non-repeatable operations emit PyTorch warnings, so validate exact replay for the model and environment.",
     )
     activation_offload: bool = Field(
         default=False,
@@ -959,7 +967,7 @@ class TrainingConfig(BaseModel):
     )
     fa_version: Optional[int] = Field(
         default=None,
-        description="FlashAttention version to use. If None, will use the default version.",
+        description="FlashAttention version. None selects FA2 for deterministic training, otherwise the hardware default. Explicit FA3 with deterministic training warns about unqualified replay; compile compatibility may still fall back to FA2.",
         choices=[2, 3],
     )
 
@@ -1802,6 +1810,15 @@ class VLAConfig(BaseModel):
 
 
 class DistillationConfig(BaseModel):
+    max_completed_bytes: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Maximum logical packed teacher-result bytes retained in Redis and in each learner inbox; ownership retires after consumption or cancellation.",
+    )
+    max_pending_requests: Optional[int] = Field(default=None, gt=0)
+    max_pending_bytes: Optional[int] = Field(default=None, gt=0)
+    max_request_bytes: Optional[int] = Field(default=None, gt=0)
+    max_result_bytes: Optional[int] = Field(default=None, gt=0)
     enable: bool = Field(default=False, description="Whether to enable distillation.")
 
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
@@ -1936,6 +1953,7 @@ class DistillationConfig(BaseModel):
 
 
 class Config(BaseModel):
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     controller_execution_id: Optional[str] = Field(
         default=None,
         description="Controller-owned attempt fence for application checkpoint recovery.",
@@ -1993,14 +2011,19 @@ class Config(BaseModel):
         configure_logging(config.logging.level)
         return config
 
+    @property
+    def execution_plan(self):
+        return resolve_execution(self)
+
     @model_validator(mode="before")
     def preprocess(cls, data: dict) -> dict:
+        data = normalize_execution(data)
         # Handle for train_policy type
         if len(data) == 0:
             # empty data, all fields set to default values.
             return data
 
-        if "train_policy" in data["train"]:
+        if "train_policy" in data.get("train", {}):
             train_policy_data = data["train"]["train_policy"]
 
             # Honor an explicit ``type`` declaration (the discriminator
@@ -2033,6 +2056,17 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def check_params_value(self):
+        resolve_execution(self)
+        if self.execution.path is not None and self.distillation.enable:
+            for name, default in (
+                ("max_pending_requests", 1024),
+                ("max_pending_bytes", 256 * 1024**2),
+                ("max_request_bytes", 16 * 1024**2),
+                ("max_result_bytes", 64 * 1024**2),
+                ("max_completed_bytes", 256 * 1024**2),
+            ):
+                if getattr(self.distillation, name) is None:
+                    setattr(self.distillation, name, default)
         if self.rollout.rollout_only:
             if (
                 self.mode != "disaggregated"

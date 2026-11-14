@@ -172,12 +172,16 @@ class vLLMRollout(RolloutBase):
 
         model_path = policy_config.model_name_or_path
 
-        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        revision = getattr(policy_config, "model_revision", None)
+        model_kwargs = {"revision": revision} if revision is not None else {}
+        self.model_config = util.retry(AutoConfig.from_pretrained)(
+            model_path, **model_kwargs
+        )
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
             generation_config = util.retry(GenerationConfig.from_pretrained)(
-                hf_config_path
+                hf_config_path, **model_kwargs
             )
             self.eos_token_ids = generation_config.eos_token_id
             if isinstance(self.eos_token_ids, int):
@@ -294,6 +298,11 @@ class vLLMRollout(RolloutBase):
             self.quantization = quantization
 
             policy_config = self.config.policy
+            if getattr(policy_config, "model_revision", None) is not None:
+                extra_kwargs.update(
+                    revision=policy_config.model_revision,
+                    tokenizer_revision=policy_config.model_revision,
+                )
 
             self.rollout_engine = LLM(
                 model=model_path,

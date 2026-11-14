@@ -44,6 +44,7 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.rollout_base import RolloutRegistry, RolloutBase
 from cosmos_rl.rollout.prompt_batch import PromptBatch, required_weight_version
 from cosmos_rl.rollout.results import CompletionOutcome, RolloutResultEvent
+from cosmos_rl.execution.models import local_actor_weights
 from cosmos_rl.utils.application_callbacks import CallbackContext, CallbackRegistry
 from cosmos_rl.dispatcher.protocol import RolloutRequest
 from cosmos_rl.rollout.validation import ValidationSession, validation_round_for_command
@@ -177,6 +178,19 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             raise
 
     def _initialize(self, config, parallel_dims, **kwargs):
+        output = getattr(getattr(config, "execution", None), "output", None)
+        if output is not None:
+            from cosmos_rl.execution.sink import corpus_result_factory
+
+            hooks = dict(kwargs.get("hook_fns") or {})
+            if "rollout_result" in hooks:
+                raise ValueError(
+                    "Configure execution.output or a custom rollout_result consumer, not both"
+                )
+            hooks["rollout_result"] = corpus_result_factory(
+                config, packer=lambda: self.data_packer
+            )
+            kwargs["hook_fns"] = hooks
         if (
             config.rollout.async_r2r_sync != "disabled"
             and parallel_dims.world_size != 1
@@ -268,8 +282,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
             model_type = "diffusers"
         else:
+            revision = getattr(self.config.policy, "model_revision", None)
+            model_kwargs = {"revision": revision} if revision is not None else {}
             self.eos_token = util.setup_tokenizer(
-                self.config.policy.model_name_or_path
+                self.config.policy.model_name_or_path, **model_kwargs
             ).eos_token
 
             # Routes through ``register_local_model_config`` so non-HF
@@ -277,7 +293,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # Gymnasium MLP) resolve before falling back to
             # ``AutoConfig.from_pretrained``. Default HF flow is unchanged.
             hf_config = util.retry(load_model_config)(
-                self.config.policy.model_name_or_path, trust_remote_code=True
+                self.config.policy.model_name_or_path,
+                trust_remote_code=True,
+                **model_kwargs,
             )
 
             model_type = hf_config.model_type
@@ -1480,7 +1498,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.report_rollouts,
                     self.validation_flag,
                 )
-            if not _is_rollout_only(self.config):
+            if not local_actor_weights(self.config):
                 self.prepare_shard_infos_for_weight_sync_insts()
 
             async_mode = get_async_r2r_sync_mode(self)
@@ -2303,6 +2321,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if is_validation:
                     break
 
+                from cosmos_rl.execution.records import ModelIdentity
+
+                actor = getattr(getattr(self.config, "execution", None), "actor", None)
+                for payload in payloads:
+                    payload.producer_model = ModelIdentity(
+                        role="actor",
+                        name=self.config.policy.model_name_or_path,
+                        revision=self.config.policy.model_revision,
+                        artifact_digest=getattr(actor, "artifact_digest", None),
+                        behavior_version=payload.weight_version,
+                    ).model_dump()
+
                 reservation_payloads = list(payloads)
                 identified_payloads = (
                     list(payloads)
@@ -2709,7 +2739,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 allowed = self.config.train.train_policy.allowed_outdated_steps
                 ceiling = self.current_weight_version + allowed
                 is_valid_prompt_for_current_weight_version = (
-                    _is_rollout_only(self.config) or batch_version <= ceiling
+                    local_actor_weights(self.config) or batch_version <= ceiling
                 )
 
                 if not is_valid_prompt_for_current_weight_version:
@@ -3016,6 +3046,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 conversation=payload.conversation,
                 outcomes=tuple(sorted(outcomes, key=lambda outcome: outcome.slot)),
                 extra_info=payload.extra_info,
+                occurrence_id=payload.generation_occurrence,
             ),
             borrowed=True,
             required=True,
@@ -3286,7 +3317,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         if not is_validation and not self._prompt_queue.empty():
             batch_version = required_weight_version(self._prompt_queue.queue[0])
             is_valid_prompt_for_current_weight_version = (
-                _is_rollout_only(self.config)
+                local_actor_weights(self.config)
                 or batch_version
                 <= self.current_weight_version
                 + self.config.train.train_policy.allowed_outdated_steps
@@ -3652,7 +3683,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.state.set_prompt_fetch_end()
 
     def _work_impl(self):
-        if _is_rollout_only(self.config):
+        if local_actor_weights(self.config):
             # There is no trainer to send the first weight command. Load the
             # configured checkpoint/application model before admitting work.
             self.lazy_initialize_rollout_engine(load_format="auto")

@@ -303,6 +303,10 @@ class RolloutGenerationMixin:
         rollout worker's ``main_loop`` skips this batch and continues.
         Backends that want to retry or report partial results override.
         """
+        from cosmos_rl.execution.storage import DataSaveError
+
+        if isinstance(err, DataSaveError):
+            raise err
         n = len(payloads) if payloads is not None else 0
         self._gen_logger.error(
             "[RolloutGenerationMixin] generation failed for batch of %d (%s: %s); "

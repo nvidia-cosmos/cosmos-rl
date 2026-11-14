@@ -72,7 +72,10 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
     ):
         # FA3 is not compatible with torch.compile
         # The support is in WIP: https://github.com/Dao-AILab/flash-attention/pull/1769
-        self.fa_version = decide_fa_version()
+        # Prefer the qualified repeatable path when deterministic training is
+        # requested. Some FA3 builds produce different backward gradients even
+        # with deterministic=True; normal training keeps hardware auto-selection.
+        self.fa_version = 2 if deterministic else decide_fa_version()
         if user_specified_fa_version is not None:
             # Respect the user's specified version
             self.fa_version = user_specified_fa_version
@@ -113,7 +116,18 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
             )
 
             apply_rotary_emb = ori_apply_rotary_emb
-            logger.info(f"[Cosmos-RL] Using FlashAttention-{self.fa_version}.")
+            logger.info(
+                f"[Cosmos-RL] Using FlashAttention-{self.fa_version}. "
+                f"requested={user_specified_fa_version or 'auto'}, "
+                f"deterministic={deterministic}, compile={torch_compile}."
+            )
+            if deterministic and self.fa_version == 3:
+                logger.warning(
+                    "Explicit FlashAttention-3 overrides deterministic backend "
+                    "auto-selection. Some builds have non-repeatable backward "
+                    "gradients; use train.fa_version=2 for the qualified replay "
+                    "recipe and validate your model/hardware separately."
+                )
 
         else:
 

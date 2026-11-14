@@ -91,10 +91,14 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_update.py -k two_replicas
+run python tests/execution_workflow_canary.py
 
 # run tests
 run python -m pytest -q -s tests/test_nccl_payload_schedule.py
 run python tests/test_video_decode.py
+run python -m pytest -q tests/test_deterministic_attention.py
+run python tests/microbatch_numerics_probe.py --output "${TEST_LOG_DIR}/microbatch-numerics"
 run python -m pytest -q tests/test_slurm_ci_job.py
 run python -m pytest -q tests/test_high_availability_nccl_harness.py
 run python -m pytest -q tests/test_distributed_kv_store.py
@@ -278,6 +282,8 @@ run /bin/bash -c "python -m pip install --quiet pytest && python -m pytest -q te
 run python -m pytest -q tests/test_dispatch_fetch_bounds.py
 run python -m pytest -q tests/test_strict_refill_batch_versions.py
 run python -m pytest -q tests/test_prompt_dispatch_liveness.py
+run python -m pytest -q tests/test_execution_plan.py tests/test_execution_corpus.py tests/test_execution_storage.py tests/test_execution_objectives.py tests/test_execution_models.py tests/test_execution_native_sft.py tests/test_execution_distributed.py tests/test_execution_generation_resume.py
+run python -m pytest -q tests/test_execution_application_trainer.py tests/test_execution_packing.py tests/test_execution_sequences.py tests/test_execution_record_content.py
 run python -m pytest -q tests/test_rank_dispatch_refill.py
 run torchrun --standalone --nproc-per-node=2 tests/rank_dispatch_canary.py --backend gloo
 run python -m pytest -q tests/test_dispatch_failure_reporting.py

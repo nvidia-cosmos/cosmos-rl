@@ -47,6 +47,7 @@ def system(
     status, replica = terminal_fixture.TestTerminalMatrix._manager(0)
     config = status.config
     config.mode = "colocated"
+    config.policy = NS(model_name_or_path="test-policy", model_revision=None)
     config.rollout = NS(n_generation=width, multi_turn_config=NS(enable=False))
     config.train.non_text, config.train.local_dataset = True, False
     config.train.train_batch_per_replica = 4

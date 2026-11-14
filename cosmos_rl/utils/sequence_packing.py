@@ -80,6 +80,7 @@ def pack_sequences_info_collect(
     ignore_label_id: int = -100,
     seq_len_multiple: int = 1,
     logprob_masks: Optional[torch.Tensor] = None,
+    min_input_len: int = 0,
 ):
     """
     Collect valid length at each batch information used for sequence packing.
@@ -116,7 +117,9 @@ def pack_sequences_info_collect(
             valid_label_len = compute_valid_lengths(label_ids, ignore_label_id)
             # Ensure label length does not exceed input length
             valid_input_len = torch.max(valid_label_len, valid_input_len)
-        valid_input_len = valid_input_len.tolist()
+        if not 0 <= min_input_len <= input_ids.size(1):
+            raise ValueError("Minimum packed input length exceeds the input width")
+        valid_input_len = valid_input_len.clamp_min(min_input_len).tolist()
         total_valid_input_len = sum(valid_input_len)
         origin_seq_len = input_ids.size(1)
         pad_needed = (
@@ -180,23 +183,24 @@ def pack_sequences_for_inputs(
     """
 
     args_dict = {}
+    device = inputs_embeds.device
+    valid_input_mask = generate_mask(
+        valid_input_len, inputs_embeds, inputs_seq_dim, inputs_batch_dim
+    )
+    # This gather is part of the model, not packing metadata: preserve its
+    # autograd edge back to token/observation embeddings.
+    packed_inputs_embeds = recover_dims(
+        inputs_embeds[valid_input_mask],
+        inputs_embeds,
+        inputs_seq_dim,
+        inputs_batch_dim,
+    )
+    if cp_mesh is not None:
+        packed_inputs_embeds = slice_input_tensor(
+            packed_inputs_embeds, inputs_seq_dim, cp_mesh
+        )
+    args_dict["inputs"] = packed_inputs_embeds
     with torch.no_grad():
-        device = inputs_embeds.device
-        valid_input_mask = generate_mask(
-            valid_input_len, inputs_embeds, inputs_seq_dim, inputs_batch_dim
-        )
-        packed_inputs_embeds = recover_dims(
-            inputs_embeds[valid_input_mask],
-            inputs_embeds,
-            inputs_seq_dim,
-            inputs_batch_dim,
-        )
-        if cp_mesh is not None:
-            packed_inputs_embeds = slice_input_tensor(
-                packed_inputs_embeds, inputs_seq_dim, cp_mesh
-            )
-        args_dict["inputs"] = packed_inputs_embeds
-
         if interested_tokens is not None:
             assert interested_tokens.ndim == 2, "ndim of interested_tokens must be 2"
             interested_tokens = recover_dims(

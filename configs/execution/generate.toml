@@ -1,0 +1,50 @@
+# cosmos-rl --config configs/execution/generate.toml
+mode = "disaggregated"
+
+[execution]
+path = "generate"
+
+[execution.output]
+path = "./generated-corpus"
+run_id = "qwen-gsm8k-example-v1"
+max_record_bytes = 16777216
+# This example uses the model's current default revision and cannot resume.
+# For resume=true, pin a full model commit (or actor.artifact_digest) and set
+# generation_fingerprint for the application's generation semantics.
+resume = false
+
+[train]
+output_dir = "./outputs/generate-corpus"
+epoch = 1
+local_dataset = false
+
+[train.train_policy]
+type = "grpo"
+dataset.name = "openai/gsm8k"
+dataset.subset = "main"
+dataset.split = "test"
+prompt_column_name = "question"
+response_column_name = "answer"
+bypass_reward = true
+dataloader_shuffle = false
+
+[policy]
+model_name_or_path = "Qwen/Qwen2.5-0.5B-Instruct"
+model_max_length = 1024
+
+[rollout]
+backend = "vllm"
+max_prompts = 16
+max_inflight_prompts = 4
+batch_size = 1
+n_generation = 1
+max_response_length = 256
+
+[logging]
+logger = []
+
+[policy.parallelism]
+tp_size = 1
+
+[rollout.parallelism]
+tp_size = 1

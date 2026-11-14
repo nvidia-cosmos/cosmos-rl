@@ -49,6 +49,7 @@ class RecordingGRPO(GRPO):
 @pytest.mark.parametrize("minimum", [1, 2])
 def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     config = SimpleNamespace(
+        policy=SimpleNamespace(model_name_or_path="test-policy", model_revision=None),
         mode="disaggregated"
         if mode in ("disaggregated", "identified")
         else "colocated",

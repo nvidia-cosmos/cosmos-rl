@@ -203,6 +203,14 @@ class BaseDataPacker(ABC):
             "This method should be implemented by the subclass for SFT training"
         )
 
+    def record_preparation_state(self) -> Any:
+        """JSON-serializable preparation identity for corpus checkpoint checks.
+
+        Override when application settings change temporal windows, masks or
+        weighting. The default adds no application-specific compatibility state.
+        """
+        return None
+
     def sft_collate_fn(
         self,
         sub_batch: List[Dict[str, Any]],
@@ -258,7 +266,11 @@ class DataPacker(BaseDataPacker, ABC):
 
     def setup(self, config: Config, *args, **kwargs):
         super().setup(config, *args, **kwargs)
-        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
+        revision = getattr(config.policy, "model_revision", None)
+        self.tokenizer = util.setup_tokenizer(
+            config.policy.model_name_or_path,
+            **({"revision": revision} if revision is not None else {}),
+        )
 
         if not self.config.rollout.multi_turn_config.enable:
             self.tool_agent = None
