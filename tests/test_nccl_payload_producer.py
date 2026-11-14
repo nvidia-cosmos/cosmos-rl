@@ -269,6 +269,24 @@ class TestWriteToBuffer(unittest.TestCase):
 
         self.assertEqual(p.storage_requirements().device, torch.device("cuda:0"))
 
+    def test_borrow_contract_preserves_configured_devices(self):
+        for device, expected in (
+            (1, "cuda:1"),
+            (7, "cuda:7"),
+            (None, "cpu"),
+            ("cpu", "cpu"),
+            (torch.device("cpu"), "cpu"),
+            ("cuda:2", "cuda:2"),
+            (torch.device("cuda:3"), "cuda:3"),
+        ):
+            with self.subTest(device=device):
+                p = _make_producer()
+                p._nccl_device = device
+
+                self.assertEqual(
+                    p.storage_requirements().device, torch.device(expected)
+                )
+
     def test_borrow_rejects_noncallable_release_callback(self):
         p = _make_producer()
         context = PayloadContext("nccl", p, p._nccl_layout)
