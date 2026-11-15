@@ -98,7 +98,8 @@ Threading model
 ---------------
 The bg setup worker is a single daemon thread.  ``_prepare_sample``
 must therefore be re-entrant w.r.t. the main thread that drives
-``rollout_generation``.  The default implementation
+``rollout_generation``. It selects the creating worker's CUDA device and
+runs without autograd, matching rollout inference. The default implementation
 (``data_packer.get_rollout_input``) is pure data shaping and is
 trivially safe; backends that do stateful preparation (e.g. building
 a sim env per prompt) own the synchronization.  The mixin itself
@@ -155,6 +156,8 @@ import threading
 import time
 from concurrent.futures import Future
 from typing import Any, Dict, Hashable, List, Optional, Sequence, final
+
+import torch
 
 from cosmos_rl.utils.logging import logger as _default_logger
 
@@ -371,6 +374,12 @@ class RolloutGenerationMixin:
         self._prefetch_enabled = bool(getattr(rollout_cfg, "prefetch_rollout", False))
 
         if self._prefetch_enabled:
+            # CUDA's current device and autograd state are thread-local. The
+            # worker process has already selected its rank-local device; do
+            # not let a new setup thread silently fall back to CUDA device 0.
+            self._setup_cuda_device = (
+                torch.cuda.current_device() if torch.cuda.is_initialized() else None
+            )
             self._setup_thread = threading.Thread(
                 target=self._setup_worker_loop,
                 name=thread_name,
@@ -660,8 +669,11 @@ class RolloutGenerationMixin:
         }
         return results
 
+    @torch.no_grad()
     def _setup_worker_loop(self) -> None:
         """Background thread body: pull (key, payload, future) and run the hook."""
+        if self._setup_cuda_device is not None:
+            torch.cuda.set_device(self._setup_cuda_device)
         while not self._setup_shutdown.is_set():
             try:
                 item = self._setup_request_queue.get(timeout=0.5)

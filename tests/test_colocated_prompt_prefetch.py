@@ -8,6 +8,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 from cosmos_rl.rollout import State
@@ -194,6 +195,23 @@ def test_real_worker_overlaps_next_preparation_with_current_generation(worker_fa
     assert worker.rollout_for_one_minor_step(remaining_samples=2) == (False, 1)
     assert next_prepared.is_set() and len(fetched) == 2
     assert worker.rollout_for_one_minor_step(remaining_samples=1) == (True, 1)
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_model_preparation_keeps_rollout_no_grad_context(worker_factory, prefetch):
+    worker, _, _ = worker_factory(prefetch=prefetch, counts=(1,))
+    weight = torch.nn.Parameter(torch.ones(1))
+    prepared = []
+    original_prepare = worker.rollout._prepare_sample
+
+    def prepare(payload, **kwargs):
+        prepared.append(weight.square())
+        return original_prepare(payload, **kwargs)
+
+    worker.rollout._prepare_sample = prepare
+    assert worker.rollout_for_one_minor_step(remaining_samples=1) == (True, 1)
+    assert len(prepared) == 1
+    assert not prepared[0].requires_grad, "rollout setup retained an autograd graph"
 
 
 def test_failed_preparation_waits_for_already_running_batch_callbacks():

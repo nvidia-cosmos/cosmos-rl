@@ -91,6 +91,8 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run python -m pytest -q tests/test_colocated_prompt_prefetch.py
+run torchrun --standalone --nproc-per-node=2 tests/colocated_prompt_prefetch_canary.py --benchmark
 run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_update.py -k two_replicas
 run python tests/execution_workflow_canary.py
 
@@ -303,8 +305,6 @@ for reservation_case in healthy departure lost-fetch lost-report strict-refill; 
 done
 run python -m pytest -q tests/test_rollout_report_receipts.py
 run python -m pytest -q tests/test_training_fetch_receipts.py
-run python -m pytest -q tests/test_colocated_prompt_prefetch.py
-run torchrun --standalone --nproc-per-node=2 tests/colocated_prompt_prefetch_canary.py --benchmark
 run python -m pytest -q tests/test_colocated_final_step_refill.py
 run python -m pytest -q tests/test_colocated_exhaustion.py
 run python -m pytest -q tests/test_colocated_discard_settlement.py tests/test_colocated_on_policy_queue.py tests/test_colocated_resume_version.py

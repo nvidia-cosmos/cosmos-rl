@@ -44,6 +44,12 @@ class Backend(RolloutGenerationMixin):
         self.setup_generation()
 
     def _prepare_sample(self, payload, **kwargs):
+        # The setup thread must retain the rank's CUDA device and the rollout
+        # no-grad semantics, just like inline preparation on the control thread.
+        if self.weight.is_cuda:
+            assert torch.cuda.current_device() == self.weight.device.index
+            assert torch.empty(1, device="cuda").device == self.weight.device
+        assert not self.weight.square().requires_grad
         version = self.weight.detach().item()
         time.sleep(self.delay)
         assert self.weight.detach().item() == version, "weights changed during setup"

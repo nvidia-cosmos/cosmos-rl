@@ -43,6 +43,9 @@ class TestColocated(unittest.TestCase):
     def test_genuine_exhaustion_checkpoints_last_completed_update(self):
         self.run_colocated("exhaust-final-group")
 
+    def test_prefetch_exhaustion_checkpoints_last_completed_update(self):
+        self.run_colocated("exhaust-final-group", prefetch=True)
+
     def run_colocated(self, refill_case=None, *, prefetch=False):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 1 if refill_case else 4
