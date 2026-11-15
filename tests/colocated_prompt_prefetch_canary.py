@@ -19,10 +19,12 @@ from types import SimpleNamespace as NS
 
 import torch
 import torch.distributed as dist
+from torch.utils.data import Dataset
 
 from cosmos_rl.colocated.controller import ColocatedController
 from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 from cosmos_rl.dispatcher.command import DataFetchCommand
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.rollout import State
 from cosmos_rl.rollout.generation_mixin import RolloutGenerationMixin
 from cosmos_rl.rollout.worker.colocated.rollout_control import (
@@ -63,22 +65,61 @@ class Backend(RolloutGenerationMixin):
         return [NS(weight_version=payload.weight_version) for payload in payloads]
 
 
-def run_case(device, *, prefetch, depth, centralized, reject_first, delay, batches=4):
+class Prompts(Dataset):
+    def __init__(self, count):
+        self.count = count
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        return str(index)
+
+
+def run_case(
+    device,
+    *,
+    prefetch,
+    depth,
+    centralized,
+    reject_first,
+    delay,
+    batches=4,
+    global_batch_sizes=None,
+    expected_update_fetches=None,
+):
     rank, world = dist.get_rank(), dist.get_world_size()
     target = batches * world
+    uneven = global_batch_sizes is not None
+    if global_batch_sizes is None:
+        global_batch_sizes = [world] * (2 * batches + int(reject_first))
+    total = sum(global_batch_sizes)
     config = NS(
         rollout=NS(
-            prefetch_rollout=prefetch, prefetch_queue_maxsize=depth, n_generation=1
+            prefetch_rollout=prefetch,
+            prefetch_queue_maxsize=depth,
+            n_generation=1,
+            batch_size=1,
+            multi_turn_config=NS(enable=False),
         ),
         train=NS(
             train_batch_per_replica=target,
             local_dataset=False,
+            epoch=1,
+            resume=False,
             train_policy=NS(
+                type="grpo",
                 on_policy=True,
                 uncentralized_training=not centralized,
                 data_dispatch_as_rank_in_mesh=False,
+                dataloader_batch_size=max(global_batch_sizes),
+                dataloader_shuffle=False,
+                dataloader_seed=42,
+                dataloader_num_workers=0,
+                dataloader_prefetch_factor=None,
             ),
         ),
+        validation=NS(enable=False),
     )
     weight = torch.nn.Parameter(torch.ones(1, device=device))
     optimizer = torch.optim.SGD([weight], lr=0.1)
@@ -102,18 +143,21 @@ def run_case(device, *, prefetch, depth, centralized, reject_first, delay, batch
     )
     rollout.parallel_dims = NS(world_size=world, mesh={"dp": mesh}, cp_coord=(0, 1))
     fetched = 0
-    total = 2 * target + (world if reject_first else 0)
+    prompt_batches = []
+    for count in global_batch_sizes:
+        start = sum(map(len, prompt_batches))
+        prompt_batches.append(list(range(start, start + count)))
+    fetcher = ControllerDataFetcher(
+        config, dataset=Prompts(total), batch_sampler=prompt_batches
+    )
 
     def fetch(n, **kwargs):
         nonlocal fetched
         assert threading.current_thread() is threading.main_thread()
         assert fetched < total, "fetched into another update or past EOF"
-        batch = [
-            dict(prompt_idx=i, prompt=str(i), weight_version=0)
-            for i in range(fetched, min(fetched + n, total))
-        ]
+        batch, is_end = fetcher.get_batched_prompt(n)
         fetched += len(batch)
-        return batch, fetched == total
+        return [payload.model_dump() for payload in batch], is_end
 
     rollout.api_client = NS(
         get_next_prompt=fetch, post_queued_rollout_discard=lambda n: True
@@ -150,6 +194,8 @@ def run_case(device, *, prefetch, depth, centralized, reject_first, delay, batch
         assert rollout._prompt_queue.empty(), "raw prompts crossed the weight boundary"
         assert not backend._setup_futures and not backend._setup_payloads
         assert len(backend.prepared) == len(backend.generated)
+        if rank == 0 and expected_update_fetches is not None:
+            assert fetched == expected_update_fetches[controller.current_step - 1]
         return ready
 
     controller.agree_prepared_batch = agree
@@ -201,6 +247,7 @@ def run_case(device, *, prefetch, depth, centralized, reject_first, delay, batch
                         depth=depth,
                         centralized=centralized,
                         reject_first=reject_first,
+                        uneven=uneven,
                         updates=2,
                         prompts=fetched,
                         seconds=elapsed,
@@ -238,6 +285,23 @@ def main():
                         centralized=centralized,
                         reject_first=reject_first,
                         delay=0.001,
+                    )
+        # Rank 0 rejects its first sample, leaving local backlogs [0, 1].
+        # The next three-prompt batch supplies [2, 1] and completes the update.
+        # Fetching another batch early would cross the optimizer boundary.
+        for prefetch in (False, True):
+            for centralized in (False, True):
+                for depth in (1, 2, 4):
+                    run_case(
+                        device,
+                        prefetch=prefetch,
+                        depth=depth,
+                        centralized=centralized,
+                        reject_first=True,
+                        delay=0.001,
+                        batches=2,
+                        global_batch_sizes=(2, 3, 2, 2),
+                        expected_update_fetches=(5, 9),
                     )
         if args.benchmark:
             times = {False: [], True: []}

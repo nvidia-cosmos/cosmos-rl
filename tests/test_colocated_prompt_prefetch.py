@@ -41,7 +41,9 @@ def worker_factory(monkeypatch):
         worker.config = NS(
             train=NS(
                 local_dataset=False,
-                train_policy=NS(data_dispatch_as_rank_in_mesh=False),
+                train_policy=NS(
+                    data_dispatch_as_rank_in_mesh=False, uncentralized_training=False
+                ),
             ),
             rollout=NS(
                 prefetch_rollout=prefetch, prefetch_queue_maxsize=depth, n_generation=1
@@ -131,6 +133,32 @@ def test_rejection_refills_only_after_consumed_work_is_reported(worker_factory):
     assert worker.rollout_for_one_minor_step(remaining_samples=1) == (False, 1)
     assert len(fetched) == 3
     assert worker._prompt_queue.empty()
+
+
+@pytest.mark.parametrize("depth", [2, 4])
+@pytest.mark.parametrize("n_generation", [1, 4])
+def test_decentralized_uneven_queue_bounds_per_rank_capacity(
+    worker_factory, monkeypatch, depth, n_generation
+):
+    worker, fetched, _ = worker_factory(counts=(3, 2), depth=depth, eof=False)
+    worker.config.train.train_policy.uncentralized_training = True
+    worker.config.rollout.n_generation = n_generation
+    worker.parallel_dims.world_size = 2
+    worker.parallel_dims.mesh["dp"] = NS(
+        size=lambda: 2, get_local_rank=lambda: 0, get_group=lambda: None
+    )
+
+    def scatter(output, values, **kwargs):
+        output[0] = values[0]
+
+    monkeypatch.setattr("torch.distributed.scatter_object_list", scatter)
+    # After an asymmetric rejection the backlogs can be [0, n_generation].
+    # A three-prompt batch can supply [2, 1] * n_generation and finish this
+    # update. Its global count of three must not admit another queued batch.
+    worker.rollout_for_one_minor_step(remaining_samples=4 * n_generation)
+    assert fetched == [3]
+    assert worker._prompt_queue.empty()
+    assert not worker.rollout._setup_futures
 
 
 def test_transient_empty_fetch_does_not_spin_or_claim_eof(worker_factory):

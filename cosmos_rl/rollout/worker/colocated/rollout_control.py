@@ -153,13 +153,27 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         """
         self._bind_prefetch_context_once()
         target_depth = self._prompt_fetch_target_depth(prep_overlap=True)
+        dp_size = self.parallel_dims.mesh["dp"].size()
+
+        def sample_capacity(batch):
+            prompts = batch.global_prompt_count
+            if self.config.train.train_policy.uncentralized_training:
+                # Readiness is min(rank backlogs) * world_size. An uneven
+                # batch can make previously unmatched samples usable, so its
+                # global count can understate the increase in readiness.
+                # The largest DP slice bounds the increase on every rank,
+                # without another collective or tracking per-rank backlogs.
+                prompts = (
+                    (prompts + dp_size - 1) // dp_size * self.parallel_dims.world_size
+                )
+            return prompts * self.config.rollout.n_generation
+
         while (
             not self.state.prompt_fetch_end()
             and self._prompt_queue.qsize() < target_depth
         ):
             queued_samples = sum(
-                batch.global_prompt_count * self.config.rollout.n_generation
-                for batch in self._prompt_queue.queue
+                sample_capacity(batch) for batch in self._prompt_queue.queue
             )
             if queued_samples >= remaining_samples:
                 break
@@ -173,10 +187,7 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             made_progress = self._prompt_queue.qsize() > before
             if made_progress:
                 batch = self._prompt_queue.queue[-1]
-                if (
-                    batch.global_prompt_count < self.parallel_dims.mesh["dp"].size()
-                    and not is_end
-                ):
+                if batch.global_prompt_count < dp_size and not is_end:
                     raise ValueError(
                         "Colocated rollout requires nonempty DP slices before "
                         "dataset EOF; refusing to advance ranks to different batches"
@@ -184,7 +195,7 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
                 # Colocated generation skips a cohort with an empty DP slice.
                 # Do not start expensive setup that no generation will consume.
                 if (
-                    batch.global_prompt_count >= self.parallel_dims.mesh["dp"].size()
+                    batch.global_prompt_count >= dp_size
                     and required_weight_version(batch) <= self.current_weight_version
                 ):
                     self._submit_prefetch_setup(batch)
