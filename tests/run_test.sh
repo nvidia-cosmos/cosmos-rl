@@ -236,7 +236,7 @@ run python -m pytest -q tests/test_transport_terminal_contract.py
 run python -m pytest -q tests/test_nccl_operation_contract.py
 run python tests/test_nccl_data_packer_mixin.py
 run python tests/test_nccl_payload_pairing.py
-run python tests/test_nccl_rendezvous.py
+run python -m pytest -q tests/test_nccl_rendezvous.py
 run python tests/test_nccl_payload_producer.py
 run python -m pytest -q tests/test_payload_layout.py tests/test_payload_context.py
 run python tests/test_nccl_streams.py
@@ -341,7 +341,7 @@ run python tests/test_vllm_rollout_async.py
 run python tests/test_custom_args.py
 run python tests/test_colocated_separated.py
 run python tests/test_load_balanced_dataset.py
-run python tests/test_resume_data_index.py
+run python -m pytest -q tests/test_resume_data_index.py
 run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
 # run python tests/test_diffusion_rl_e2e.py
 # run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_cosmos3_trajectory_equivalence.py"
