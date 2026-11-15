@@ -225,12 +225,15 @@ class RedisStreamHandler:
                 self._publication_failure = error
                 raise
 
-    def subscribe_command(self, stream_name: str) -> List[Dict]:
+    def subscribe_command(
+        self, stream_name: str, *, blocking: bool = True
+    ) -> List[Dict]:
         """
         Read data from the Redis stream.
 
         Args:
             stream_name (str): The name of the Redis stream to read from.
+            blocking (bool): Wait for commands, or return currently available ones.
 
         Returns:
             list: A list of stream entries.
@@ -242,7 +245,12 @@ class RedisStreamHandler:
                     RedisOpType.XREAD,
                     {stream_name + "_command": self.latest_id_command},
                     count=RedisStreamConstant.CMD_FETCH_SIZE,
-                    block=RedisStreamConstant.CMD_READING_TIMEOUT_MS,
+                    # Omit BLOCK for a poll: Redis BLOCK 0 waits forever.
+                    **(
+                        {"block": RedisStreamConstant.CMD_READING_TIMEOUT_MS}
+                        if blocking
+                        else {}
+                    ),
                 ),
                 response_parser=None,
                 # Polling read: the caller loops on shutdown_signal, so fail fast

@@ -140,7 +140,8 @@ run python -m pytest -q tests/test_resume_selection_contract.py
 run python -m pytest -q tests/test_resume_execution_fence.py
 run python -m pytest -q tests/test_checkpoint_snapshot.py
 run python -m pytest -q tests/test_checkpoint_replay.py tests/test_controller_resume_adapter.py tests/test_resume_metadata_fail_fast.py
-run python -m pytest -q tests/test_requested_stop.py tests/test_generic_requested_stop.py tests/test_rl_worker_shutdown.py
+run python -m pytest -q tests/test_requested_stop.py tests/test_generic_requested_stop.py tests/test_rl_worker_shutdown.py tests/test_colocated_command_poll.py
+run torchrun --standalone --nproc-per-node=2 tests/test_colocated_command_poll.py
 run python -m pytest -q tests/test_sft_membership.py
 run python -m pytest -q tests/test_dispatch_staleness.py
 run python -m pytest -q tests/test_running_dispatch_barrier.py

@@ -220,7 +220,7 @@ class ColocatedController(Controller):
                 # another R2R weight sync. Observe both streams to avoid waiting
                 # forever for a sync that will never be sent.
                 commands = (
-                    self.policy.subscribe_remote_commands()
+                    self.policy.subscribe_remote_commands(blocking=False)
                     if self.policy.global_rank == 0
                     else []
                 )
