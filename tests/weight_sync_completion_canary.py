@@ -30,6 +30,8 @@ def main():
     dist.init_process_group("gloo", timeout=timedelta(seconds=45))
     device = torch.device("cuda", local_rank)
     worker, model = make_worker(device)
+    # The tiny model is already constructed; no backend engine setup remains.
+    worker.lazy_initialize_rollout_engine = lambda load_format: None
     worker.replica_name = f"rollout-{rank}"
     worker.replica_name_to_rank = {"rollout-0": 0, "rollout-1": 1}
     worker.rank_in_rollout_repicas = rank
@@ -47,8 +49,10 @@ def main():
     ws.do_nccl_broadcast_grouped(worker, "rollout-0", wst._stream)
     wst._stream.synchronize()
     dist.barrier()
-    if rank == 1:
-        print("R2R_PEER_STALLED_AFTER_READINESS", flush=True)
+    if rank == 0:
+        print("R2R_SOURCE_STALLED_AFTER_READINESS", flush=True)
+    dist.barrier()
+    if rank == 0:
         time.sleep(30)
         os._exit(3)
 
@@ -74,9 +78,9 @@ def main():
         worker.trainable_params = set(model.state_dict())
         worker.broadcast_to_all_rollout_replica(command)
     print("UNEXPECTED_WEIGHT_COMPLETION", flush=True)
-    torch.cuda.current_stream().wait_event(wst._last_event)
-    torch.cuda.synchronize()
-    raise AssertionError("An unmatched broadcast cannot complete")
+    # An implementation missing its fence must fail this canary immediately,
+    # without letting native process cleanup hide that early return.
+    os._exit(99)
 
 
 if __name__ == "__main__":

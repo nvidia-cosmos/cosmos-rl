@@ -247,11 +247,12 @@ def test_native_weight_peer_stall_exits_with_terminal_status(mode):
     output = result.stdout + result.stderr
     assert result.returncode == 86, output
     context = (
-        "weight buffer rollout-0 step 1"
+        "weight buffer rollout-1 step 1"
         if mode == "buffer"
-        else "live weight update rollout-0"
+        else "live weight update rollout-1"
     )
     assert context in output
+    assert "R2R_SOURCE_STALLED_AFTER_READINESS" in output
     assert "UNEXPECTED_WEIGHT_COMPLETION" not in output
 
 
