@@ -102,10 +102,9 @@ must therefore be re-entrant w.r.t. the main thread that drives
 runs without autograd, matching rollout inference. The default implementation
 (``data_packer.get_rollout_input``) is pure data shaping and is
 trivially safe; backends that do stateful preparation (e.g. building
-a sim env per prompt) own the synchronization.  The mixin itself
-holds no shared mutable state beyond the future map and uses an
-atomic dict swap so concurrent ``submit_setup`` and
-:meth:`_gather_prepared_samples` are safe.
+a sim env per prompt) own the synchronization. The mixin protects future
+registration, consumption and active callback ownership with a lock so
+concurrent ``submit_setup`` and :meth:`_gather_prepared_samples` are safe.
 
 Colocated workers coordinate prompt fetches on the control thread, using the
 same bounded queue and setup worker as disaggregated workers. Lookahead stops
@@ -125,7 +124,9 @@ Edge cases
   :meth:`_on_generation_error` (default: log + return ``[]``).
 * Resubmitting the same payload object replaces its previous future. Different
   objects remain distinct occurrences even when their dataset indices or custom
-  keys match. Payloads must remain unchanged until their preparation is consumed.
+  keys match. A running callback remains owned until it finishes, even if its
+  replacement is canceled after a batch failure. Payloads must remain unchanged
+  until their preparation is consumed.
 * Cold-start (a payload arrives at ``rollout_generation`` without a
   matching ``submit_setup`` call): falls back to inline preparation
   for that payload only.  This handles the very first batch of a run
@@ -365,6 +366,8 @@ class RolloutGenerationMixin:
         # Retain owners until consumption/close so object IDs cannot be reused.
         self._setup_payloads: Dict[Hashable, Any] = {}
         self._setup_futures_lock = threading.Lock()
+        # Replacing a future cannot retire a callback that is already running.
+        self._setup_running: Optional[tuple[Any, Future]] = None
         self._setup_shutdown = threading.Event()
         self._setup_request_queue: "queue.Queue[Any]" = queue.Queue()
         self._setup_thread: Optional[threading.Thread] = None
@@ -654,6 +657,16 @@ class RolloutGenerationMixin:
             for future in futures:
                 if future is not None:
                     future.cancel()
+            with self._setup_futures_lock:
+                running = self._setup_running
+                if (
+                    running is not None
+                    and any(payload is running[0] for payload in payloads)
+                    and running[1] not in futures
+                ):
+                    # Resubmission replaces the lookup entry, but cannot
+                    # cancel a callback already using this batch's model.
+                    futures.append(running[1])
             for future in futures:
                 if future is not None:
                     try:
@@ -690,6 +703,7 @@ class RolloutGenerationMixin:
                         continue
                     if not future.set_running_or_notify_cancel():
                         continue
+                    self._setup_running = (payload, future)
                 # Use the bound method so subclasses see ``self``.
                 try:
                     # The setup worker doesn't have access to the
@@ -711,6 +725,8 @@ class RolloutGenerationMixin:
                 except BaseException as err:  # noqa: BLE001 - propagate to consumer
                     future.set_exception(err)
             finally:
+                with self._setup_futures_lock:
+                    self._setup_running = None
                 # Do not retain a consumed sample/future while queue.get waits
                 # through a colocated learner update (or a long fetch gap).
                 del item, key, payload, future

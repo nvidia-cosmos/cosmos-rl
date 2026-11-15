@@ -214,12 +214,19 @@ def test_model_preparation_keeps_rollout_no_grad_context(worker_factory, prefetc
     assert not prepared[0].requires_grad, "rollout setup retained an autograd graph"
 
 
-def test_failed_preparation_waits_for_already_running_batch_callbacks():
+@pytest.mark.parametrize("replace_running", [False, True])
+@pytest.mark.parametrize("same_batch", [False, True])
+def test_failed_preparation_fences_own_running_callbacks(replace_running, same_batch):
     backend = _FakeBackend(prefetch=True)
     running = threading.Event()
     release = threading.Event()
     returned = threading.Event()
     errors = []
+    # A backend may recover with usable fallback results, letting the learner
+    # train immediately after this call. The failed batch still owns its setup.
+    backend._on_generation_error = lambda err, payloads: [
+        ("fallback", payload.prompt_idx) for payload in payloads
+    ]
 
     def prepare(payload, **kwargs):
         if payload.prompt_idx == 0:
@@ -232,20 +239,36 @@ def test_failed_preparation_waits_for_already_running_batch_callbacks():
     payloads = [_FakePayload(i) for i in range(2)]
     backend.submit_setup(payloads)
     assert running.wait(5)
+    if replace_running:
+        backend.submit_setup([payloads[1]])
 
     def consume():
         try:
-            errors.append(backend.rollout_generation(payloads))
+            errors.append(
+                backend.rollout_generation(payloads if same_batch else payloads[:1])
+            )
         finally:
             returned.set()
 
     consumer = threading.Thread(target=consume)
     consumer.start()
     try:
-        assert not returned.wait(0.1), "failed batch escaped with setup still running"
+        if same_batch:
+            assert not returned.wait(0.1), (
+                "failed batch escaped with setup still running"
+            )
+        else:
+            assert returned.wait(1), "failed batch waited for another batch's setup"
         release.set()
         consumer.join(5)
-        assert returned.is_set() and errors == [[]]
+        assert returned.is_set() and errors == [
+            [
+                ("fallback", p.prompt_idx)
+                for p in (payloads if same_batch else payloads[:1])
+            ]
+        ]
+        if not same_batch:
+            assert backend.rollout_generation(payloads[1:]) == [("result", 1)]
         assert not backend._setup_futures
     finally:
         release.set()
