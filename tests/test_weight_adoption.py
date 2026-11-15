@@ -719,7 +719,13 @@ def test_one_member_startup_publishes_ready_after_staged_transfer(device, monkey
     wst.enqueue_p2r(command)
     worker._execute_rollout_broadcast(command)
     assert not worker.state.weight_synced()
-    wst._run()
+    wst.start()
+    try:
+        wst._thread.join(timeout=3)
+        assert not wst._thread.is_alive(), "One-member R2R did not publish readiness"
+    finally:
+        wst._stop.set()
+        wst._thread.join(timeout=2)
     assert worker.state.weight_synced() and not wst._task_failed
     assert worker._buffer_weight_version == 7 and worker._buffer_version == 2
     assert wst._queue.unfinished_tasks == 0

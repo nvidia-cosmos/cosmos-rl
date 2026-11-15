@@ -135,6 +135,11 @@ def compute_loss(
     ] = None,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
     **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Logprob collection can use low precision, but exp(20) already exceeds
+    # float16's range. Keep objective arithmetic in at least float32 while
+    # preserving the gradient back to the collected/current logprob dtype.
+    if current_token_logps.dtype in (torch.float16, torch.bfloat16):
+        current_token_logps = current_token_logps.float()
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     if current_advantages.shape == logprob_masks.shape:
         current_advantages = torch.masked_select(current_advantages, logprob_masks)
@@ -292,8 +297,14 @@ def compute_loss(
         kl_ratio = ref_per_token_logps - current_token_logps
         # For numerical stability
         kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
-        # exp(k) - k - 1 loses the small positive divergence to cancellation.
-        kl_divergence = torch.expm1(kl_ratio) - kl_ratio
+        # Near zero even expm1(k) - k cancels in float32. The fourth-order
+        # expansion has relative error below 2e-11 within this small interval.
+        squared_ratio = kl_ratio.square()
+        kl_divergence = torch.where(
+            kl_ratio.abs() < 1e-3,
+            squared_ratio * (0.5 + kl_ratio / 6 + squared_ratio / 24),
+            torch.expm1(kl_ratio) - kl_ratio,
+        )
         if config.train.train_policy.unbiased_kl_estimate:
             # Keep the operands finite before the final KL clip. Otherwise
             # exp overflow gives 0 * inf in backward even for a clipped loss,
