@@ -66,10 +66,12 @@ from torch.distributed.tensor import DTensor
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.pynccl import (
     bounded_drain_or_abort,
+    get_nccl_timeout_ms,
     nccl_abort_all,
     nccl_broadcast,
     nccl_group,
 )
+from cosmos_rl.utils.transport_failure import TransportDeadline
 from cosmos_rl.utils.tensor_packing import (
     iter_tensor_byte_buckets,
     pack_tensors_into_buffer,
@@ -488,7 +490,9 @@ def process_wst_deferred_actions(worker) -> None:
 class WeightSyncThread:
     """Background thread executing P2R and R2R on a dedicated CUDA stream.
 
-    P2R commands have higher priority (0) than R2R commands (1).
+    Commands execute in controller publication order. Each P2R stages the
+    source buffer for its following R2R; a later P2R must not overtake that
+    broadcast and overwrite the accepted round's weights.
     The thread writes into ``_buffer_state_dict``; the live model is
     never touched.
 
@@ -498,7 +502,7 @@ class WeightSyncThread:
 
     def __init__(self, worker):
         self._worker = worker
-        self._queue: queue.PriorityQueue = queue.PriorityQueue()
+        self._queue: queue.Queue = queue.Queue()
         self._seq = 0
         self._stream = torch.cuda.Stream()
         self._stop = threading.Event()
@@ -531,10 +535,10 @@ class WeightSyncThread:
         logger.info("[WeightSyncThread] Started background thread")
 
     def enqueue_p2r(self, command) -> None:
-        """Enqueue a P2R command with highest priority."""
+        """Enqueue a P2R without overtaking earlier accepted broadcasts."""
         self._seq += 1
         self._idle.clear()
-        self._queue.put((0, self._seq, ("p2r", command)))
+        self._queue.put((self._seq, ("p2r", command)))
         qdepth = self._queue.qsize()
         if qdepth > self._max_qdepth:
             self._max_qdepth = qdepth
@@ -549,10 +553,10 @@ class WeightSyncThread:
         )
 
     def enqueue_r2r(self, command) -> None:
-        """Enqueue an R2R command with lower priority."""
+        """Enqueue the broadcast after its corresponding source transfer."""
         self._seq += 1
         self._idle.clear()
-        self._queue.put((1, self._seq, ("r2r", command)))
+        self._queue.put((self._seq, ("r2r", command)))
         qdepth = self._queue.qsize()
         if qdepth > self._max_qdepth:
             self._max_qdepth = qdepth
@@ -701,14 +705,20 @@ class WeightSyncThread:
         return fenced and post_stop_drained
 
     def _run(self) -> None:
-        torch.cuda.set_device(self._worker.device)
+        try:
+            torch.cuda.set_device(self._worker.device)
+        except BaseException:
+            self._task_failed = True
+            _fail_the_job(self._worker)
+            logger.exception("[WeightSyncThread] Device initialization failed")
+            return
         logger.info(
             "[WeightSyncThread] Thread started on device %s",
             self._worker.device,
         )
         while not self._stop.is_set():
             try:
-                _, seq, (cmd_type, command) = self._queue.get(timeout=0.1)
+                seq, (cmd_type, command) = self._queue.get(timeout=0.1)
             except queue.Empty:
                 self._idle.set()
                 continue
@@ -724,13 +734,18 @@ class WeightSyncThread:
                 # the trainer never reaches the next sync boundary -- so the
                 # job stalls silently while holding its allocation.  Fail here
                 # instead, naming the source and the reason.
+                self._task_failed = True
+                _fail_the_job(self._worker)
                 logger.error(
                     "[WeightSyncThread] R2R round cancelled, failing the job: %s",
                     exc,
                 )
-                _fail_the_job(self._worker)
-            except Exception:
+            except BaseException:
                 self._task_failed = True
+                # Failures before _buffer_write (for example a payload flush)
+                # must also close generation. Logging alone leaves the main
+                # loop waiting for a weight version that can never arrive.
+                _fail_the_job(self._worker)
                 logger.exception(
                     "[WeightSyncThread] Error executing %s command",
                     cmd_type,
@@ -771,12 +786,24 @@ class WeightSyncThread:
                 raise RuntimeError("Weight buffer is unavailable for transfer")
             worker._buffer_writing = True
             adopted = worker._buffer_adopt_event
+        operation = None
         try:
+            operation = TransportDeadline(
+                get_nccl_timeout_ms() / 1000.0,
+                f"weight buffer {worker.replica_name} step {weight_step}",
+            )
             if adopted is not None:
                 self._stream.wait_event(adopted)
             yield
             ready = torch.cuda.Event()
             ready.record(self._stream)
+            # Native enqueue success does not prove device completion. Fence
+            # on this background thread before exposing the version, while
+            # inference keeps using the last adopted live weights. The hard
+            # deadline also contains a CUDA call that never returns.
+            operation.wait_event(ready, synchronize=True)
+            operation.close()
+            operation = None
             with worker._buffer_lock:
                 self._last_event = ready
                 if weight_step is not None:
@@ -784,6 +811,11 @@ class WeightSyncThread:
                 worker._buffer_version += 1
                 worker._buffer_writing = False
         except BaseException:
+            if operation is not None:
+                try:
+                    operation.close()
+                except BaseException:
+                    pass  # Preserve the original transfer failure.
             with worker._buffer_lock:
                 # Native writes may still be outstanding. Do not publish or
                 # reuse this partially written buffer after any uncertain failure.
@@ -852,9 +884,9 @@ class WeightSyncThread:
         # The controller picks the R2R source from
         # ``weights_loaded_in_view_of_command``, which is set when the P2R is
         # *published* and never cleared on failure, so a source whose P2R threw
-        # is still chosen.  ``_run`` turns that exception into a log line and a
-        # flag and then runs the next queued command -- the R2R -- so without
-        # this check the source broadcasts an unseeded buffer.  Every
+        # can still be chosen. Keep this guard even though ``_run`` now stops
+        # the owner on failure: direct calls must not broadcast an unseeded
+        # buffer either. Every
         # destination would accept it, set the sticky ``weight_synced`` bit, and
         # start generating against base weights while reporting them as the
         # current version.  Nothing raises; the wrong weights simply train.

@@ -695,11 +695,10 @@ class SharedRingBuffer:
         ``READY -> READING`` transition finalises with
         :meth:`mark_consumed` only after native send completion is proven.
 
-        Re-entry from ``READING`` remains available to low-level callers that
-        can prove the previous reader retired. The transport server does not
-        use it to recover an uncertain accepted send: that case retains the
-        slot and fails the process because Python timeout or cancellation is
-        not a native completion fence.
+        A second reader is rejected while the slot is ``READING``. Otherwise
+        the first completed send could free the slot while another native
+        send still reads it. A caller that has retired its prior reader can
+        explicitly release the slot back to ``READY`` before reading again.
         """
         with self._lock:
             size, current_generation, state = self._read_entry_meta(index)
@@ -710,12 +709,11 @@ class SharedRingBuffer:
                     f"requested generation {generation}"
                 )
 
-            if state == SlotState.READY:
-                if not self.schema:
-                    raise SlotError("read_raw() requires schema-based buffer")
-                self._write_entry_meta(index, size, SlotState.READING)
-            elif state != SlotState.READING:
+            if state != SlotState.READY:
                 raise SlotError(f"Entry {index} not ready (state={state.name})")
+            if not self.schema:
+                raise SlotError("read_raw() requires schema-based buffer")
+            self._write_entry_meta(index, size, SlotState.READING)
 
         data_offset = self._entry_data_offset(index)
         self._metrics.reads_total += 1

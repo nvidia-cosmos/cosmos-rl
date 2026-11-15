@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual receive closures queue only submitted copies, never unrecorded events."""
 
+from contextlib import nullcontext
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -154,3 +155,28 @@ def test_failed_copy_does_not_publish_false_completion(monkeypatch):
     assert worker.temp_recv_tensor_queue.empty()
     tensor = worker.p2r_collective_manager.recv.call_args.args[1]
     tensor.record_stream.assert_called_once_with("copy-stream")
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+def test_buffer_receive_does_not_publish_live_weight_readiness(monkeypatch, buffered):
+    worker = make_worker(monkeypatch)
+    worker.p2r_collective_manager.setup_manager = Mock()
+    worker.p2r_collective_manager.query_nccl_comm_index = Mock(return_value=7)
+    worker.rl_mode = "disaggregated"
+    worker.policy_to_rollout_recv_insts = []
+    worker.prepare_trainable_params = Mock()
+    worker.recv_param_key_n_rank_list = []
+    worker.non_trainable_params_received = True
+    worker._buffer_writing = buffered
+    worker.state = SimpleNamespace(set_weight_synced=Mock())
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.cuda, "Stream", Mock)
+    stream = Mock()
+    command = SimpleNamespace(
+        src_replica_name="policy",
+        dst_replica_name="rollout",
+        trainable_only=True,
+        weight_step=0,
+    )
+    worker._execute_p2r_recv(command, stream)
+    assert worker.state.set_weight_synced.call_count == int(not buffered)

@@ -6,6 +6,8 @@
 import threading
 import time
 import unittest
+import subprocess
+import sys
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
@@ -126,6 +128,32 @@ class TestRawCallTimeout(unittest.TestCase):
 
         abort.assert_not_called()
         self.assertFalse(task.timed_out.is_set())
+
+
+class TestCommunicatorCreationDeadline(unittest.TestCase):
+    def test_blocked_native_initialization_exits_without_a_handle_to_abort(self):
+        script = """
+import threading
+from types import SimpleNamespace
+from cosmos_rl.utils import pynccl
+pynccl._worker_started = True
+pynccl._start_worker = lambda device: None
+pynccl.torch.cuda.current_device = lambda: 0
+pynccl._nccl = SimpleNamespace(
+    ncclCommInitRankConfig=lambda *args: threading.Event().wait(30)
+)
+print("NCCL_INIT_ENTER", flush=True)
+pynccl.create_nccl_comm([0] * 128, 0, 2, timeout_ms=50)
+raise AssertionError('Blocked communicator initialization returned')
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 86, result.stdout + result.stderr)
+        self.assertIn("communicator initialization", result.stderr)
 
 
 class TestGroupTimeoutForwarding(unittest.TestCase):

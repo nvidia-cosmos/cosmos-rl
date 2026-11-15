@@ -108,6 +108,17 @@ def test_changed_source_is_rejected_before_reusing_a_logical_occurrence(tmp_path
         resumed._get_rollout_only_prompts(1)
 
 
+def test_changed_reference_answer_cannot_reuse_a_committed_score(tmp_path):
+    initial = generation(tmp_path, count=1)
+    initial.data_fetcher.get_batched_prompt.return_value[0][0].reference_answer = "A"
+    work, _ = initial._get_rollout_only_prompts(1)
+    sink(initial)(event(initial, work[0]))
+    resumed = generation(tmp_path, count=1)
+    resumed.data_fetcher.get_batched_prompt.return_value[0][0].reference_answer = "B"
+    with pytest.raises(ValueError, match="source changed"):
+        resumed._get_rollout_only_prompts(1)
+
+
 def test_partial_prompt_publication_replays_only_missing_commit(tmp_path, monkeypatch):
     initial = generation(tmp_path, generation=2, count=1)
     work, _ = initial._get_rollout_only_prompts(1)

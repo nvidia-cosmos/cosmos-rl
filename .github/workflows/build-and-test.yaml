@@ -86,7 +86,9 @@ jobs:
             ${{ steps.vars.outputs.image_tag }} /bin/bash)
 
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
-          DOCKER_RUN="timeout 2h docker exec ${container_id}"
+          # Keep the outer budget aligned with full Slurm qualification.
+          # Per-suite deadlines in run_test.sh still identify individual hangs.
+          DOCKER_RUN="timeout 3h docker exec ${container_id}"
           # Install test-only dependencies into the interpreter running the suite.
           ${DOCKER_RUN} python -m pip install 'pytest>=8,<9'
           # run test script

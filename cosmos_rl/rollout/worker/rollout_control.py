@@ -1729,7 +1729,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
                 )
 
-            self.state.set_weight_synced()
+            # Buffered P2R writes are not live-model readiness. The WST first
+            # proves device completion and then publishes its R2R readiness.
+            if not getattr(self, "_buffer_writing", False):
+                self.state.set_weight_synced()
         if not command.trainable_only:
             self.non_trainable_params_received = True
 

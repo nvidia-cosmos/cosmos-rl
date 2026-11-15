@@ -409,7 +409,7 @@ class TestACancelledRoundFailsTheJob(unittest.TestCase):
         worker.shutdown_signal = threading.Event()
         worker.shutdown_mp_signal = threading.Event()
         thread = make_thread(worker)
-        thread._queue = queue_mod.PriorityQueue()
+        thread._queue = queue_mod.Queue()
         thread._stop = threading.Event()
         thread._idle = threading.Event()
         thread._seq = 0
@@ -420,7 +420,7 @@ class TestACancelledRoundFailsTheJob(unittest.TestCase):
             raise exc
 
         thread._execute_r2r = explode
-        thread._queue.put((1, 1, ("r2r", FakeCommand())))
+        thread._queue.put((1, ("r2r", FakeCommand())))
         with mock.patch("torch.cuda.set_device"):
             ws.WeightSyncThread._run(thread)
         return thread, worker
@@ -430,16 +430,17 @@ class TestACancelledRoundFailsTheJob(unittest.TestCase):
         self.assertTrue(worker.shutdown_signal.is_set())
         self.assertTrue(worker.shutdown_mp_signal.is_set())
 
-    def test_cancellation_does_not_latch_a_failure(self):
-        """The latch would cost the next mesh rebuild a spurious discard."""
+    def test_cancellation_latches_failure_for_teardown(self):
+        """A canceled accepted round cannot be reported as a clean drain."""
         thread, _ = self._run_once_raising(ws.R2RAborted("cancelled"))
-        self.assertFalse(thread._task_failed)
+        self.assertTrue(thread._task_failed)
 
-    def test_an_ordinary_error_latches_and_does_not_fail_the_job(self):
-        """Only a cancelled round is terminal; other failures stay recoverable."""
+    def test_an_ordinary_error_latches_and_stops_the_job(self):
+        """A failed accepted sync must not strand generation on a missing version."""
         thread, worker = self._run_once_raising(RuntimeError("nccl exploded"))
         self.assertTrue(thread._task_failed)
-        self.assertFalse(worker.shutdown_signal.is_set())
+        self.assertTrue(worker.shutdown_signal.is_set())
+        self.assertTrue(worker.shutdown_mp_signal.is_set())
 
     def test_a_worker_without_shutdown_signals_does_not_raise(self):
         worker = FakeWorker()

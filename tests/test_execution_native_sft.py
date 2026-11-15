@@ -143,6 +143,30 @@ def test_seeded_preparation_requires_context_adapter_before_model_setup(tmp_path
             worker.build_runner()
 
 
+def test_empty_source_error_is_not_an_absent_error(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from cosmos_rl.execution import corpus
+    from cosmos_rl.policy.config import Config
+    from test_resume_data_index import _WorkerHarness
+
+    config = Config.model_validate(
+        {
+            "execution": {
+                "path": "train_from_data",
+                "source": {"kind": "corpus", "path": str(tmp_path)},
+            },
+            "train": {"train_policy": {"type": "sft"}},
+            "policy": {"parallelism": {"tp_size": 1}},
+        }
+    )
+    monkeypatch.setattr(corpus, "CorpusDataset", Mock(side_effect=EOFError()))
+    worker = _WorkerHarness(config)
+    worker.setup = Mock(side_effect=AssertionError("Source error reached model setup"))
+    with pytest.raises(ValueError, match="Corpus source initialization failed"):
+        worker.build_runner()
+    worker.setup.assert_not_called()
+
+
 def samples(root):
     writer = CorpusWriter(root, run_id="observations")
     for i, tokens in enumerate(([0, 1, 2], [1, 0], [2, 0, 1, 2])):
@@ -298,7 +322,23 @@ def test_random_preparation_and_dropout_resume_across_loader_workers(
     )
 
 
-def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1):
+@pytest.mark.parametrize("saved_step", [1, 4])
+@pytest.mark.parametrize("workers", [(0, 0), (0, 2), (2, 0)])
+def test_dropout_resume_with_deterministic_preparation(
+    tmp_path, cpu_runtime, saved_step, workers
+):
+    qualify_corpus_resume(
+        tmp_path,
+        stochastic=True,
+        workers=workers,
+        saved_step=saved_step,
+        random_preparation=False,
+    )
+
+
+def qualify_corpus_resume(
+    tmp_path, *, stochastic, workers, saved_step, batch=1, random_preparation=None
+):
     import copy
     from unittest.mock import patch
     from cosmos_rl.policy.config import Config
@@ -306,6 +346,8 @@ def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1)
     from cosmos_rl.utils.checkpoint import CheckpointMananger
     from test_resume_data_index import _WorkerHarness
 
+    if random_preparation is None:
+        random_preparation = stochastic
     corpus_path = tmp_path / "corpus"
     samples(corpus_path)
     config = Config.model_validate(
@@ -315,7 +357,7 @@ def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1)
                 "source": {
                     "kind": "corpus",
                     "path": str(corpus_path),
-                    "preparation_seed": 71 if stochastic else None,
+                    "preparation_seed": 71 if random_preparation else None,
                 },
                 "objectives": {"supervised": 1},
             },
@@ -367,7 +409,7 @@ def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1)
 
     def build(configuration):
         worker = _WorkerHarness(configuration)
-        worker._packer = RandomPreparationPacker() if stochastic else Packer()
+        worker._packer = RandomPreparationPacker() if random_preparation else Packer()
         group = NS(get_group=lambda: None)
         worker.parallel_dims.mesh = {"dp": group}
         worker.build_runner()
@@ -457,7 +499,7 @@ def qualify_corpus_resume(tmp_path, *, stochastic, workers, saved_step, batch=1)
         resumed_config.execution.source.reward_weighting = "nonnegative"
         with pytest.raises(ValueError, match="configuration changed"):
             build(resumed_config)
-        if stochastic:
+        if random_preparation:
             resumed_config.execution.source.reward_weighting = "none"
             resumed_config.execution.source.preparation_seed += 1
             with pytest.raises(ValueError, match="configuration changed"):

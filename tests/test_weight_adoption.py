@@ -3,6 +3,9 @@
 """Actual buffer/writer/adoption entrypoints; CPU ordering and CUDA data checks."""
 
 import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -29,6 +32,9 @@ class _CPUStream:
 class _CPUEvent:
     def record(self, stream=None):
         self.stream = stream
+
+    def synchronize(self):
+        pass
 
 
 @pytest.fixture
@@ -91,6 +97,154 @@ def _write(worker, value, stream):
 def _drain(device):
     if device.type == "cuda":
         torch.cuda.synchronize()
+
+
+def test_queued_rounds_preserve_source_weights_and_version(device, monkeypatch):
+    """A later P2R must not overwrite the source of an already accepted R2R."""
+    worker, _ = make_worker(device, tied=False)
+    worker.replica_name_to_rank = {worker.replica_name: 0, "peer": 1}
+    worker.rank_in_rollout_repicas = 0
+    wst = worker._weight_sync_thread
+    broadcasts = []
+    if device.type == "cpu":
+        monkeypatch.setattr(torch.cuda, "set_device", lambda _: None)
+    monkeypatch.setattr(ws, "r2r_barrier", lambda *args, **kwargs: True)
+
+    def broadcast(worker, source, stream):
+        with torch.cuda.stream(stream):
+            broadcasts.append(
+                (
+                    worker._buffer_weight_version,
+                    worker._buffer_state_dict["embedding"].detach().clone(),
+                )
+            )
+        if len(broadcasts) == 2:
+            wst._stop.set()
+        return 1, worker._buffer_state_dict["embedding"].numel() * 4
+
+    monkeypatch.setattr(ws, "do_nccl_broadcast_grouped", broadcast)
+    for step in (1, 2):
+        command = SimpleNamespace(
+            weight_step=step,
+            total_steps=3,
+            src_replica_name=worker.replica_name,
+            dst_replica_names=list(worker.replica_name_to_rank),
+            replica_should_stop=lambda: False,
+        )
+        wst.enqueue_p2r(command)
+        wst.enqueue_r2r(command)
+    wst._run()
+    _drain(device)
+    assert not wst._task_failed
+    assert [version for version, _ in broadcasts] == [1, 2]
+    for step, (_, value) in enumerate(broadcasts, start=1):
+        torch.testing.assert_close(value, torch.full_like(value, step))
+    assert worker._buffer_weight_version == 2
+    assert wst._queue.unfinished_tasks == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("payload flush failed"), SystemExit(86), ws.R2RAborted("canceled")],
+)
+def test_weight_sync_failure_before_buffer_write_stops_worker(
+    device, monkeypatch, failure
+):
+    worker, _ = make_worker(device, tied=False)
+    wst = worker._weight_sync_thread
+    wst._execute_p2r(SimpleNamespace(weight_step=1))
+    worker.data_packer = SimpleNamespace(flush_pending_sends=Mock(side_effect=failure))
+    if device.type == "cpu":
+        monkeypatch.setattr(torch.cuda, "set_device", lambda _: None)
+    wst.enqueue_r2r(SimpleNamespace(weight_step=1))
+    wst.start()
+    try:
+        assert worker.shutdown_signal.wait(timeout=1), (
+            "A failed accepted weight-sync command must not leave generation "
+            "waiting for a version that will never arrive"
+        )
+        assert worker.shutdown_mp_signal.is_set()
+        assert wst._task_failed
+    finally:
+        wst._stop.set()
+        wst._thread.join(timeout=2)
+    assert not wst._thread.is_alive()
+    assert wst._queue.unfinished_tasks == 0
+
+
+def test_accepted_weight_write_has_a_device_completion_deadline():
+    script = f"""
+import os, sys, threading, time
+from contextlib import nullcontext
+from types import SimpleNamespace
+import torch
+sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+from test_weight_adoption import make_worker, _CPUStream, _CPUEvent
+from cosmos_rl.rollout.worker import weight_sync as ws
+torch.cuda.Stream = _CPUStream
+torch.cuda.Event = _CPUEvent
+torch.cuda.stream = lambda stream: nullcontext()
+worker, _ = make_worker(torch.device('cpu'), tied=False)
+class StuckEvent(_CPUEvent):
+    def query(self):
+        return False
+    def synchronize(self):
+        threading.Event().wait(30)
+torch.cuda.Event = StuckEvent
+worker._weight_sync_thread._execute_p2r(SimpleNamespace(weight_step=1))
+print('RETURNED_WITH_UNFINISHED_WEIGHT_WRITE', flush=True)
+time.sleep(0.5)
+os._exit(99)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "COSMOS_NCCL_TIMEOUT_MS": "50"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 86, result.stdout + result.stderr
+    assert "RETURNED_WITH_UNFINISHED_WEIGHT_WRITE" not in result.stdout
+    assert "[Transport FATAL]" in result.stderr
+
+
+def test_weight_sync_device_initialization_failure_stops_owner(device, monkeypatch):
+    worker, _ = make_worker(device, tied=False)
+    monkeypatch.setattr(
+        torch.cuda, "set_device", Mock(side_effect=RuntimeError("device unavailable"))
+    )
+    wst = worker._weight_sync_thread
+    wst.start()
+    try:
+        assert worker.shutdown_signal.wait(timeout=1)
+        assert worker.shutdown_mp_signal.is_set()
+        assert wst._task_failed
+    finally:
+        wst._stop.set()
+        wst._thread.join(timeout=2)
+    assert not wst._thread.is_alive()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA GPUs")
+def test_native_weight_peer_stall_exits_with_terminal_status():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "cosmos_rl.launcher.torchrun",
+            "--standalone",
+            "--nproc-per-node=2",
+            str(Path(__file__).with_name("weight_sync_completion_canary.py")),
+        ],
+        env={**os.environ, "OMP_NUM_THREADS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 86, output
+    assert "weight buffer rollout-0 step 1" in output
+    assert "UNEXPECTED_WEIGHT_COMPLETION" not in output
 
 
 def test_storage_aliases_offsets_and_strides_survive_adoption(device):

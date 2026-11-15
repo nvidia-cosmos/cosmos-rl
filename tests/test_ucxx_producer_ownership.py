@@ -253,3 +253,90 @@ def test_observed_header_timeout_retains_native_waiter(monkeypatch):
             await asyncio.gather(*tasks)
 
     asyncio.run(run())
+
+
+def test_duplicate_slot_request_does_not_borrow_an_active_send(monkeypatch):
+    """Duplicate requests must not create two owners of one reusable slot."""
+    from cosmos_rl.utils.payload_transport.ucxx.shared_buffer import (
+        BufferConfig,
+        SharedRingBuffer,
+        SlotError,
+        SlotState,
+    )
+    from cosmos_rl.utils.trajectory import TensorSpec
+
+    monkeypatch.setattr(ucxx_buffer, "_header_available", lambda ep: not ep.closed)
+
+    async def run():
+        owner = object.__new__(ucxx_buffer.UCXXBuffer)
+        owner.config = SimpleNamespace(send_timeout=3)
+        owner._shutdown_flag = threading.Event()
+        owner._endpoints_lock = threading.Lock()
+        owner._active_endpoints = []
+        owner._thread_metrics_lock = threading.Lock()
+        owner._thread_metrics = {}
+        owner._sender_incarnation_key = 0
+        ring = SharedRingBuffer(
+            BufferConfig(
+                max_entries=1,
+                schema=[
+                    TensorSpec(name="data", shape=(32,), dtype=np.uint8),
+                ],
+            ),
+            create=True,
+        )
+        owner._buffer = ring
+        slot = ring.write({"data": np.ones(32, dtype=np.uint8)})
+        generation = ring.get_slot_generation(slot)
+
+        class Endpoint:
+            _ep = SimpleNamespace(raise_on_error=Mock())
+
+            def __init__(self):
+                self.closed = False
+                self.status = None
+                self.status_sent = asyncio.Event()
+                self.payload_entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def recv(self, array):
+                array[:] = (slot, generation, 0)
+
+            async def send(self, array):
+                if array.size == 1:
+                    self.status = int(array[0])
+                    self.status_sent.set()
+                    if self.status:
+                        self.closed = True
+                else:
+                    self.payload_entered.set()
+                    await self.release.wait()
+                    self.closed = True
+
+            async def close(self):
+                self.closed = True
+
+        first, duplicate = Endpoint(), Endpoint()
+        tasks = []
+        try:
+            tasks.append(asyncio.create_task(owner._handle_connection(first)))
+            await asyncio.wait_for(first.payload_entered.wait(), 1)
+            tasks.append(asyncio.create_task(owner._handle_connection(duplicate)))
+            await asyncio.wait_for(duplicate.status_sent.wait(), 1)
+            assert duplicate.status == 1, "same slot borrowed by two native sends"
+            await asyncio.wait_for(tasks[1], 1)
+            assert ring.get_slot_state(slot) == SlotState.READING
+            with pytest.raises(SlotError, match="being read"):
+                ring.acquire_write_slot()
+            first.release.set()
+            await asyncio.wait_for(tasks[0], 1)
+            assert ring.get_slot_state(slot) == SlotState.FREE
+        finally:
+            owner._shutdown_flag.set()
+            first.release.set()
+            duplicate.release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            ring.unlink()
+            ring.close()
+
+    asyncio.run(run())

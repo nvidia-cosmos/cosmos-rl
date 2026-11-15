@@ -507,7 +507,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                         "Corpus sources own their exact distributed sampler"
                     )
             except Exception as error:
-                source_error = str(error)
+                source_error = f"{type(error).__name__}: {error}"
             reports = [(source_error, dataset.corpus.revision if dataset else None)]
             if dist.is_initialized():
                 group = self.parallel_dims.mesh["dp"].get_group()
@@ -517,8 +517,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     (source_error, dataset.corpus.revision if dataset else None),
                     group=group,
                 )
-            failure = next((error for error, _ in reports if error), None)
-            if failure:
+            failure = next((error for error, _ in reports if error is not None), None)
+            if failure is not None:
                 raise ValueError(f"Corpus source initialization failed: {failure}")
             if len({revision for _, revision in reports}) != 1:
                 raise ValueError("Corpus ranks disagree on the source revision")
@@ -728,11 +728,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.train_batch_sampler = batch_sampler
 
         loader_kwargs = {}
-        if source is not None and source.preparation_seed is not None:
-            # Iterator creation must not consume the model's checkpointed RNG.
-            # Preparation uses explicit occurrence seeds, not worker base seeds.
+        if source is not None and source.kind == "corpus":
+            # Iterator creation must not consume the model's checkpointed RNG,
+            # including deterministic text preparation without preparation_seed.
+            # Otherwise resuming within an epoch changes subsequent dropout.
             loader_kwargs["generator"] = torch.Generator().manual_seed(
                 source.preparation_seed
+                if source.preparation_seed is not None
+                else self.config.train.train_policy.dataloader_seed
             )
 
         def get_train_data_loader(
