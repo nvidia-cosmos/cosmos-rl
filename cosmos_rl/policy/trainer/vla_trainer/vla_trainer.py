@@ -158,7 +158,13 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
 
                     epsilon_low = self.config.train.train_policy.epsilon_low
                     epsilon_high = self.config.train.train_policy.epsilon_high
-                    negative_approx_kl = log_probs - chunk_data["old_log_probs"]
+                    # Mask before exp: a later zero loss mask cannot undo
+                    # NaN/Inf in exp's backward for unused padded scores.
+                    negative_approx_kl = torch.where(
+                        chunk_response_mask.bool(),
+                        log_probs - chunk_data["old_log_probs"],
+                        torch.zeros_like(log_probs),
+                    )
                     ratio = torch.exp(negative_approx_kl)
 
                     pg_losses = -advantage * ratio

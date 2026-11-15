@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import math
 import torch
 import types
 from functools import partial
@@ -291,15 +292,19 @@ def compute_loss(
         kl_ratio = ref_per_token_logps - current_token_logps
         # For numerical stability
         kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        # exp(k) - k - 1 loses the small positive divergence to cancellation.
+        kl_divergence = torch.expm1(kl_ratio) - kl_ratio
         if config.train.train_policy.unbiased_kl_estimate:
+            # Keep the operands finite before the final KL clip. Otherwise
+            # exp overflow gives 0 * inf in backward even for a clipped loss,
+            # or inf * 0 when the policy exactly matches its reference.
+            max_log_weight = math.log(torch.finfo(current_token_logps.dtype).max) - 2
             importance_sampling_ratio = torch.exp(
-                current_token_logps - old_per_token_logps
+                (current_token_logps - old_per_token_logps).clamp(max=max_log_weight)
             )
-            kl_loss = (
-                importance_sampling_ratio * (torch.exp(kl_ratio) - kl_ratio - 1)
-            ).clamp(min=-10, max=10)
+            kl_loss = (importance_sampling_ratio * kl_divergence).clamp(min=-10, max=10)
         else:
-            kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+            kl_loss = kl_divergence.clamp(min=-10, max=10)
 
     else:
         kl_loss = torch.zeros_like(per_token_loss)

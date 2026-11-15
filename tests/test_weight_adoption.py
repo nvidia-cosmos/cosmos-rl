@@ -226,7 +226,8 @@ def test_weight_sync_device_initialization_failure_stops_owner(device, monkeypat
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA GPUs")
-def test_native_weight_peer_stall_exits_with_terminal_status():
+@pytest.mark.parametrize("mode", ["buffer", "sync-full", "sync-trainable"])
+def test_native_weight_peer_stall_exits_with_terminal_status(mode):
     result = subprocess.run(
         [
             sys.executable,
@@ -235,6 +236,8 @@ def test_native_weight_peer_stall_exits_with_terminal_status():
             "--standalone",
             "--nproc-per-node=2",
             str(Path(__file__).with_name("weight_sync_completion_canary.py")),
+            "--mode",
+            mode,
         ],
         env={**os.environ, "OMP_NUM_THREADS": "1"},
         capture_output=True,
@@ -243,7 +246,12 @@ def test_native_weight_peer_stall_exits_with_terminal_status():
     )
     output = result.stdout + result.stderr
     assert result.returncode == 86, output
-    assert "weight buffer rollout-0 step 1" in output
+    context = (
+        "weight buffer rollout-0 step 1"
+        if mode == "buffer"
+        else "live weight update rollout-0"
+    )
+    assert context in output
     assert "UNEXPECTED_WEIGHT_COMPLETION" not in output
 
 
@@ -507,3 +515,215 @@ def test_canary_separates_global_communicator_rank_from_local_device(
     assert canary.initialize_transport() == (rank, torch.device("cuda", local_rank), 17)
     select_device.assert_called_once_with(local_rank)
     create.assert_called_once_with([7], rank, 2, timeout_ms=60_000)
+
+
+def test_trt_wrapper_readiness_follows_native_weight_completion():
+    """Execute the real handler without importing TensorRT-LLM/model engines."""
+    import ast
+    from contextlib import contextmanager, nullcontext
+    import cosmos_rl
+
+    path = Path(cosmos_rl.__file__).parent / "rollout/trtllm_rollout/trtllm_worker.py"
+    tree = ast.parse(path.read_text())
+    cls = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "CosmosTRTLLMWorker"
+    )
+    handler = next(
+        node
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "broadcast_to_all_rollout_replica"
+    )
+    handler.decorator_list = []
+    calls = []
+
+    @contextmanager
+    def complete(stream, context):
+        calls.append("accepted")
+        yield
+        calls.append("device-complete")
+
+    namespace = dict(
+        torch=SimpleNamespace(
+            cuda=SimpleNamespace(stream=lambda stream: nullcontext())
+        ),
+        completed_weight_transfer=complete,
+        nccl_broadcast=lambda *args: calls.append("enqueue"),
+        RolloutToRolloutBroadcastCommand=object,
+        RolloutWrapperInstruction=lambda: "ready",
+        List=list,
+    )
+    exec(
+        compile(ast.Module(body=[handler], type_ignores=[]), str(path), "exec"),
+        namespace,
+    )
+    worker = SimpleNamespace(
+        _engine_initialized=True,
+        replica_name="rollout-0",
+        inference_stream=object(),
+        rank_in_rollout_repicas=0,
+        replica_name_to_rank={"rollout-0": 0, "rollout-1": 1},
+        global_commnicator_idex=7,
+        get_underlying_model=lambda: SimpleNamespace(
+            state_dict=lambda: {"weight": torch.ones(1)}
+        ),
+        cosmos_state=SimpleNamespace(
+            weight_synced=lambda: False,
+            set_weight_synced=lambda: calls.append("ready-state"),
+        ),
+        cosmos_weight_sync_queue=SimpleNamespace(put=lambda value: calls.append(value)),
+    )
+    command = SimpleNamespace(
+        src_replica_name="rollout-0",
+        dst_replica_names=list(worker.replica_name_to_rank),
+        weight_step=-1,
+        replica_should_stop=lambda: False,
+    )
+    namespace[handler.name](worker, command)
+    assert calls == ["accepted", "enqueue", "device-complete", "ready-state", "ready"]
+
+
+def test_startup_router_cannot_overtake_commands_waiting_for_model_setup(monkeypatch):
+    from queue import Queue
+    from cosmos_rl.dispatcher.command import (
+        PolicyToRolloutUnicastCommand,
+        RolloutToRolloutBroadcastCommand,
+        StopCommand,
+    )
+    from cosmos_rl.rollout.worker import rollout_control as control
+
+    worker = object.__new__(DisaggregatedRolloutControlWorker)
+    worker.replica_name = "rollout-0"
+    worker.config = SimpleNamespace(
+        rollout=SimpleNamespace(async_r2r_sync="generation", broadcast_all_params=False)
+    )
+    worker._command_queue = Queue()
+    worker.global_rank = 0
+    worker.shutdown_signal = threading.Event()
+    first_queued, model_started, reader_done = (threading.Event() for _ in range(3))
+    accepted, errors = [], []
+    commands = []
+    for version in (1, 2):
+        commands.extend(
+            [
+                PolicyToRolloutUnicastCommand(
+                    "policy",
+                    "rollout-0",
+                    1,
+                    1,
+                    weight_step=version,
+                    total_steps=3,
+                    trainable_only=False,
+                ),
+                RolloutToRolloutBroadcastCommand(
+                    "rollout-0", ["rollout-0"], version, 3, False
+                ),
+            ]
+        )
+    commands.append(StopCommand("rollout-0"))
+
+    def incoming():
+        yield commands[0].pack()
+        first_queued.set()
+        assert model_started.wait(2)
+        for command in commands[1:]:
+            yield command.pack()
+
+    worker.redis_controller = SimpleNamespace(
+        subscribe_command=lambda replica: incoming()
+    )
+
+    def initialize(load_format):
+        worker._weight_sync_thread = SimpleNamespace(
+            enqueue_p2r=lambda cmd: accepted.append(("p2r", cmd.weight_step)),
+            enqueue_r2r=lambda cmd: accepted.append(("r2r", cmd.weight_step)),
+        )
+        model_started.set()
+        assert reader_done.wait(2)
+
+    worker.lazy_initialize_rollout_engine = initialize
+    worker._paused_async_live_weights = nullcontext
+    worker.get_rollout_command_handler = lambda cls: {
+        PolicyToRolloutUnicastCommand: DisaggregatedRolloutControlWorker.policy_to_rollout_unicast,
+        RolloutToRolloutBroadcastCommand: DisaggregatedRolloutControlWorker.broadcast_to_all_rollout_replica,
+        StopCommand: lambda owner, cmd: owner.shutdown_signal.set(),
+    }[cls]
+    monkeypatch.setattr(control.dist_utils, "broadcast_object_cpu", lambda value: value)
+    monkeypatch.setattr(control.constant, "COSMOS_ROLLOUT_CMD_WAIT_TIMES", 1)
+    monkeypatch.setattr(control.constant, "COSMOS_ROLLOUT_CMD_WAIT_INTERVAL", 0)
+
+    def read():
+        try:
+            worker.query_command_from_controller()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            reader_done.set()
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        assert first_queued.wait(2)
+        worker.consume_command(timeout=3)
+    finally:
+        worker.shutdown_signal.set()
+        model_started.set()
+        reader.join(3)
+    assert not reader.is_alive() and not errors
+    assert accepted == [("p2r", 1), ("r2r", 1), ("p2r", 2), ("r2r", 2)]
+    assert worker._wst_direct_routing_ready
+    worker.shutdown_signal.clear()
+    later = [
+        PolicyToRolloutUnicastCommand(
+            "policy", "rollout-0", 1, 1, weight_step=3, total_steps=4
+        ),
+        RolloutToRolloutBroadcastCommand("rollout-0", ["rollout-0"], 3, 4, False),
+        StopCommand("rollout-0"),
+    ]
+    worker.redis_controller.subscribe_command = lambda replica: [
+        cmd.pack() for cmd in later
+    ]
+    worker.query_command_from_controller()
+    assert accepted[-2:] == [("p2r", 3), ("r2r", 3)]
+    assert worker._command_queue.qsize() == 1
+    assert isinstance(worker._command_queue.get_nowait(), StopCommand)
+
+
+def test_one_member_startup_publishes_ready_after_staged_transfer(device, monkeypatch):
+    from cosmos_rl.rollout import State
+
+    worker, model = make_worker(device, tied=False)
+    worker.state = State()
+    worker.config.rollout.broadcast_all_params = False
+    worker.replica_name_to_rank = {worker.replica_name: 0}
+    wst = worker._weight_sync_thread
+    if device.type == "cpu":
+        monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    mark_ready = worker.state.set_weight_synced
+
+    def ready():
+        mark_ready()
+        wst._stop.set()
+
+    worker.state.set_weight_synced = ready
+    command = SimpleNamespace(
+        weight_step=7,
+        total_steps=8,
+        src_replica_name=worker.replica_name,
+        dst_replica_names=[worker.replica_name],
+        trainable_only=False,
+        replica_should_stop=lambda: False,
+    )
+    wst.enqueue_p2r(command)
+    worker._execute_rollout_broadcast(command)
+    assert not worker.state.weight_synced()
+    wst._run()
+    assert worker.state.weight_synced() and not wst._task_failed
+    assert worker._buffer_weight_version == 7 and worker._buffer_version == 2
+    assert wst._queue.unfinished_tasks == 0
+    with torch.no_grad():
+        ws.sync_buffer_to_live(worker)
+    _drain(device)
+    torch.testing.assert_close(model.embedding, torch.full_like(model.embedding, 7))

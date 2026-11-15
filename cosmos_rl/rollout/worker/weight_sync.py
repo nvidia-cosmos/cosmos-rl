@@ -487,6 +487,22 @@ def process_wst_deferred_actions(worker) -> None:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def completed_weight_transfer(stream, context, *, timeout_s=None):
+    """Finish live weight writes, or terminate without uncertain native cleanup."""
+    operation = TransportDeadline(
+        get_nccl_timeout_ms() / 1000.0 if timeout_s is None else timeout_s,
+        context,
+    )
+    try:
+        yield
+        ready = torch.cuda.Event()
+        ready.record(stream)
+        operation.wait_event(ready, synchronize=True)
+    finally:
+        operation.close()
+
+
 class WeightSyncThread:
     """Background thread executing P2R and R2R on a dedicated CUDA stream.
 

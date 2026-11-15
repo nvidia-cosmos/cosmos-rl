@@ -249,6 +249,7 @@ def test_command_router_does_not_overtake_mesh_rebuild():
         ),
         _command_queue=command_queue,
         _weight_sync_thread=wst,
+        _wst_direct_routing_ready=True,
     )
 
     with patch.object(Command, "depack", side_effect=[mesh, r2r]):

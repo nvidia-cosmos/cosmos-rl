@@ -105,6 +105,7 @@ from cosmos_rl.rollout.worker.weight_sync import (
     do_nccl_broadcast_grouped,
     do_nccl_broadcast_tensors,
     install_inference_sync,
+    completed_weight_transfer,
 )
 
 
@@ -221,6 +222,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
+        self._weight_route_lock = threading.Lock()
+        self._wst_direct_routing_ready = False
 
         # ``_single_producer_mode`` is a *live* property
         # (see below) -- intentionally not snapshotted here.  Backends
@@ -1553,7 +1556,17 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         """
         scheduler = getattr(self, "scheduler", None)
         if scheduler is None:
-            yield
+            stream = getattr(self, "inference_stream", None)
+            scope = (
+                completed_weight_transfer(
+                    stream, f"live weight update {self.replica_name}"
+                )
+                if stream is not None
+                and get_async_r2r_sync_mode(self) == AsyncR2RSyncMode.DISABLED
+                else nullcontext()
+            )
+            with scope:
+                yield
             return
         if getattr(self, "_async_weight_write_failed", False):
             raise RuntimeError("Async live-weight state is unusable after a failure")
@@ -1561,17 +1574,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         with scheduler.paused(wait_for_active_tasks=True, timeout=timeout):
             try:
                 self.rollout.synchronize_generation(timeout=timeout)
-                yield
                 # P2R joins its copy-back stream onto inference_stream; R2R
-                # writes there directly. Polling bounds the host wait without
-                # pretending that a timeout cancelled the underlying work.
-                finished = torch.cuda.Event()
-                finished.record(self.inference_stream)
-                deadline = time.monotonic() + timeout
-                while not finished.query():
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("Async live-weight write did not complete")
-                    time.sleep(0.001)
+                # writes there directly. The independent deadline also covers
+                # native synchronization inside the transfer body.
+                with completed_weight_transfer(
+                    self.inference_stream,
+                    f"live weight update {self.replica_name}",
+                    timeout_s=timeout,
+                ):
+                    yield
             except BaseException:
                 self._async_weight_write_failed = True
                 scheduler.pause()
@@ -1779,17 +1790,18 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         async_mode = get_async_r2r_sync_mode(self)
         broadcast_all = get_broadcast_all_params(self)
 
-        if len(dst_replica_names) > 1:
-            if async_mode != AsyncR2RSyncMode.DISABLED:
-                # Enqueue to the WeightSyncThread.
-                wst = self._weight_sync_thread
-                wst.enqueue_r2r(broadcast_command)
-                logger.info(
-                    "[Rollout] Enqueued R2R to WeightSyncThread (mode=%s, step=%s).",
-                    async_mode.value,
-                    broadcast_command.weight_step,
-                )
-            elif broadcast_all:
+        if async_mode != AsyncR2RSyncMode.DISABLED:
+            # One-member rounds still publish initial readiness and deferred
+            # validation/shutdown after their staged P2R has completed.
+            wst = self._weight_sync_thread
+            wst.enqueue_r2r(broadcast_command)
+            logger.info(
+                "[Rollout] Enqueued R2R to WeightSyncThread (mode=%s, step=%s).",
+                async_mode.value,
+                broadcast_command.weight_step,
+            )
+        elif len(dst_replica_names) > 1:
+            if broadcast_all:
                 # Synchronous full-model broadcast via grouped NCCL.
                 logger.info(
                     "[Rollout] Starting full-model broadcast (broadcast_all_params=true)."
@@ -1984,26 +1996,40 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             return
                     continue
 
-                wst = getattr(self, "_weight_sync_thread", None)
-                if wst is not None and isinstance(
-                    command, PolicyToRolloutUnicastCommand
-                ):
-                    if command.dst_replica_name == self.replica_name:
-                        wst.enqueue_p2r(command)
-                    else:
-                        logger.debug(
-                            "[Rollout] Skipping P2R for other replica %s",
-                            command.dst_replica_name,
-                        )
-                    continue
+                # Until the main loop drains its startup queue, older weight
+                # commands can still be waiting for model initialization there.
+                # Publishing WST existence alone must not let later commands
+                # overtake them. Switch routing atomically with queue admission.
+                route_lock = getattr(self, "_weight_route_lock", None)
+                if route_lock is None:
+                    route_lock = self.__dict__.setdefault(
+                        "_weight_route_lock", threading.Lock()
+                    )
+                with route_lock:
+                    wst = (
+                        getattr(self, "_weight_sync_thread", None)
+                        if getattr(self, "_wst_direct_routing_ready", False)
+                        else None
+                    )
+                    if wst is not None and isinstance(
+                        command, PolicyToRolloutUnicastCommand
+                    ):
+                        if command.dst_replica_name == self.replica_name:
+                            wst.enqueue_p2r(command)
+                        else:
+                            logger.debug(
+                                "[Rollout] Skipping P2R for other replica %s",
+                                command.dst_replica_name,
+                            )
+                        continue
 
-                if wst is not None and isinstance(
-                    command, RolloutToRolloutBroadcastCommand
-                ):
-                    wst.enqueue_r2r(command)
-                    continue
+                    if wst is not None and isinstance(
+                        command, RolloutToRolloutBroadcastCommand
+                    ):
+                        wst.enqueue_r2r(command)
+                        continue
 
-                self._command_queue.put(command)
+                    self._command_queue.put(command)
                 if isinstance(command, StopCommand):
                     stop_received = True
                     break
@@ -2229,9 +2255,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     ):
         """Consume all pending commands from the command queue.
 
-        In async R2R mode, P2R/R2R commands are routed directly to the
-        WeightSyncThread by ``query_command_from_controller`` and never
-        appear in ``_command_queue``.  The "wait for R2R after P2R"
+        After the startup command queue drains, async P2R/R2R commands route
+        directly to the WeightSyncThread. Before that handoff the main thread
+        preserves the publication order of queued weight commands.  The "wait for R2R after P2R"
         logic only applies when both command types flow through the
         queue (synchronous mode).
         """
@@ -2257,6 +2283,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             ):
                 break
             time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
+
+        route_lock = self.__dict__.setdefault("_weight_route_lock", threading.Lock())
+        with route_lock:
+            if (
+                getattr(self, "_weight_sync_thread", None) is not None
+                and self._command_queue.empty()
+            ):
+                self._wst_direct_routing_ready = True
 
     def send_end_signal(self):
         """

@@ -207,6 +207,7 @@ def test_live_weight_barrier_orders_reads_writes_and_poison(monkeypatch, failure
     worker.scheduler = scheduler_for()
     worker.scheduler._running.set()
     worker.inference_stream = object()
+    worker.replica_name = "rollout-0"
     calls = []
 
     def fence(timeout):
@@ -226,11 +227,17 @@ def test_live_weight_barrier_orders_reads_writes_and_poison(monkeypatch, failure
             raise RuntimeError("injected")
         return failure != "timeout"
 
+    def complete():
+        if not query():
+            raise TimeoutError("injected completion timeout")
+
     worker.rollout = SimpleNamespace(synchronize_generation=fence)
     monkeypatch.setattr(
-        control.torch.cuda, "Event", lambda: SimpleNamespace(record=record, query=query)
+        control.torch.cuda,
+        "Event",
+        lambda: SimpleNamespace(record=record, synchronize=complete),
     )
-    monkeypatch.setattr(control.constant, "COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT", 0)
+    monkeypatch.setattr(control.constant, "COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT", 3)
 
     def update():
         with worker._paused_async_live_weights():
@@ -251,19 +258,24 @@ def test_live_weight_barrier_orders_reads_writes_and_poison(monkeypatch, failure
         assert not worker.scheduler.is_paused()
 
 
-def test_sync_engine_does_not_use_async_fences(monkeypatch):
+def test_sync_engine_finishes_writes_without_async_backend_rpc(monkeypatch):
     worker = object.__new__(control.DisaggregatedRolloutControlWorker)
     worker.scheduler = None
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(async_r2r_sync="disabled"))
+    worker.replica_name = "rollout-0"
+    worker.inference_stream = object()
     worker.rollout = SimpleNamespace(synchronize_generation=Mock())
-    event = Mock(side_effect=AssertionError("unexpected GPU fence"))
-    monkeypatch.setattr(control.torch.cuda, "Event", event)
+    event = Mock()
+    monkeypatch.setattr(control.torch.cuda, "Event", lambda: event)
     with worker._paused_async_live_weights():
-        pass
+        event.synchronize.assert_not_called()
     worker.rollout.synchronize_generation.assert_not_called()
-    event.assert_not_called()
+    event.record.assert_called_once_with(worker.inference_stream)
+    event.synchronize.assert_called_once_with()
 
 
-def test_native_p2r_harness_binds_production_live_weight_context():
+def test_native_p2r_harness_binds_production_live_weight_context(monkeypatch):
+    monkeypatch.setattr(control.torch.cuda, "Event", Mock())
     # Load the actual lightweight class without importing the GPU/vLLM launcher
     # or constructing its model. The full eight-GPU suite exercises real copies.
     source = Path(__file__).with_name("launch_test_worker.py")

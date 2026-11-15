@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A warm native R2R peer stalls while a weight write owns its buffer."""
 
+import argparse
 from datetime import timedelta
 import os
 import time
@@ -17,13 +18,18 @@ from test_weight_adoption import make_worker
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode", choices=("buffer", "sync-full", "sync-trainable"), default="buffer"
+    )
+    args = parser.parse_args()
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     os.environ["COSMOS_NCCL_TIMEOUT_MS"] = "60000"
     dist.init_process_group("gloo", timeout=timedelta(seconds=45))
     device = torch.device("cuda", local_rank)
-    worker, _ = make_worker(device)
+    worker, model = make_worker(device)
     worker.replica_name = f"rollout-{rank}"
     worker.replica_name_to_rank = {"rollout-0": 0, "rollout-1": 1}
     worker.rank_in_rollout_repicas = rank
@@ -50,13 +56,23 @@ def main():
     command = SimpleNamespace(
         weight_step=1,
         total_steps=2,
+        trainable_only=False,
         src_replica_name="rollout-0",
         dst_replica_names=["rollout-0", "rollout-1"],
         replica_should_stop=lambda: False,
     )
     # The peer passed readiness and then stalled before its next native call.
-    with patch.object(ws, "r2r_barrier", return_value=True):
-        wst._execute_r2r(command)
+    if args.mode == "buffer":
+        with patch.object(ws, "r2r_barrier", return_value=True):
+            wst._execute_r2r(command)
+    else:
+        worker.config.rollout.async_r2r_sync = "disabled"
+        worker.config.rollout.broadcast_all_params = args.mode == "sync-full"
+        worker.rollout.model_param_map = lambda mapper: model.state_dict()
+        worker.weight_mapper = object()
+        worker.prepare_trainable_params = lambda: None
+        worker.trainable_params = set(model.state_dict())
+        worker.broadcast_to_all_rollout_replica(command)
     print("UNEXPECTED_WEIGHT_COMPLETION", flush=True)
     torch.cuda.current_stream().wait_event(wst._last_event)
     torch.cuda.synchronize()

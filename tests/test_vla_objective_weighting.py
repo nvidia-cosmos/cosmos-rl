@@ -204,7 +204,14 @@ def test_pi05_mask_preserves_finish_step_clamping(finish_step, expected_steps):
 @pytest.mark.parametrize("chunk_size", [1, 2, 3])
 @pytest.mark.parametrize("empty", [False, True])
 def test_production_objective_is_chunk_invariant(
-    monkeypatch, cls, weighting, expected, chunk_size, empty, partial=False
+    monkeypatch,
+    cls,
+    weighting,
+    expected,
+    chunk_size,
+    empty,
+    partial=False,
+    masked_old=None,
 ):
     if weighting is None and empty:
         pytest.skip(
@@ -244,6 +251,15 @@ def test_production_objective_is_chunk_invariant(
             return data
 
         trainer.data_packer.policy_collate_fn = partially_valid
+    if masked_old is not None:
+        original_collate = trainer.data_packer.policy_collate_fn
+
+        def invalid_padding(policy_input, max_chunks):
+            data = original_collate(policy_input, max_chunks)
+            data["old_log_probs"][~data["logprob_masks"].bool()] = masked_old
+            return data
+
+        trainer.data_packer.policy_collate_fn = invalid_padding
     trainer.data_packer.policy_collate_fn = Mock(
         wraps=trainer.data_packer.policy_collate_fn
     )
@@ -354,3 +370,24 @@ def test_new_objective_requires_explicit_configuration():
     assert VLAConfig().objective_weighting is None
     assert VLAConfig(objective_weighting="sample").objective_weighting == "sample"
     assert VLAConfig(objective_weighting="episode").objective_weighting == "episode"
+
+
+@pytest.mark.parametrize("cls", [PI05GRPOTrainer, OpenVLAGRPOTrainer])
+@pytest.mark.parametrize(
+    "weighting,expected", [("sample", 0.3), ("episode", 0.4), (None, 0.4)]
+)
+@pytest.mark.parametrize(
+    "masked_old", [float("nan"), float("inf"), float("-inf"), -1000.0]
+)
+def test_masked_old_scores_do_not_change_valid_training(
+    monkeypatch, cls, weighting, expected, masked_old
+):
+    test_production_objective_is_chunk_invariant(
+        monkeypatch,
+        cls,
+        weighting,
+        expected,
+        3,
+        False,
+        masked_old=masked_old,
+    )
