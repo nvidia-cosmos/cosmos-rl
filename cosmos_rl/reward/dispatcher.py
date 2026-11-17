@@ -21,6 +21,7 @@ from concurrent.futures import (
     Future,
     ProcessPoolExecutor,
     ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
 )
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
@@ -55,6 +56,8 @@ class RewardDispatcher:
         self.task_queue = Queue()
         self.payload_per_task = payload_per_task
         self.executor = None
+        self._dequeue_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
         self._shutdown_lock = threading.Lock()
         self._shutdown_thread = None
         self._shutdown_error = None
@@ -72,6 +75,7 @@ class RewardDispatcher:
         if timeout_s < 0:
             raise ValueError("timeout_s must be non-negative")
 
+        self._shutdown_event.set()
         with self._shutdown_lock:
             executor = self.executor
             remote = getattr(self, "is_remote", False)
@@ -437,13 +441,23 @@ class RewardDispatcher:
 
     def dequeue_rewards_cal(
         self,
+        block: bool = False,
+        *,
+        stop_event: Optional[threading.Event] = None,
     ) -> Tuple[Optional[List[RLPayload]], bool, int, bool]:
         """
-        Dequeue the reward calculation result.
-        If the task queue is empty, return None.
-        If the task is not done, return None.
-        If the task is done, return the result.
-        If the task queue is empty and all tasks are done, return None and True.
+        Dequeue the next reward result in FIFO order.
+
+        By default, an unfinished local Future returns immediately. ``block``
+        waits for that Future's completion, releasing both queue and consumer
+        locks while waiting. It never waits for new work on an empty queue.
+        Remote reward fetching retains its existing contract.
+
+        During a local completion wait, dispatcher shutdown or ``stop_event``
+        raises CancelledError without removing or canceling the pending task.
+        The one-second wait interval only checks shutdown; it does not impose
+        a deadline on reward calculation. Task errors and cancellation still
+        propagate from the single native dequeue's Future.result().
 
         Returns:
             Tuple[List[RLPayload], bool, int, bool]: (payloads, is_validation, step, all_done)
@@ -452,24 +466,33 @@ class RewardDispatcher:
                 step: the weight step where the payloads are generated
                 all_done: whether all pending tasks are done
         """
-        payloads = None
-        is_validation = False
-        step = -1
-        all_done = False
+        while True:
+            with self._dequeue_lock:
+                with self.task_queue.mutex:
+                    if not self.task_queue.queue:
+                        return None, False, -1, True
+                    task = self.task_queue.queue[0]
+                if self.is_remote:
+                    return (*self.reward_calculator.get_results(self.task_queue), False)
+                if not isinstance(task, Future):
+                    assert isinstance(task, tuple)
+                    return (*self.task_queue.get_nowait(), False)
+                if task.done():
+                    return (*self.task_queue.get_nowait().result(), False)
+                if not block:
+                    return None, False, -1, False
 
-        if not self.task_queue.empty():
-            if self.is_remote:
-                payloads, is_validation, step = self.reward_calculator.get_results(
-                    self.task_queue
-                )
-            elif not isinstance(self.task_queue.queue[0], Future):
-                assert isinstance(self.task_queue.queue[0], tuple)
-                payloads, is_validation, step = self.task_queue.get()
-            elif self.task_queue.queue[0].done():
-                payloads, is_validation, step = self.task_queue.get().result()
-        else:
-            all_done = True
-        return payloads, is_validation, step, all_done
+            if self._shutdown_event.is_set() or (
+                stop_event is not None and stop_event.is_set()
+            ):
+                raise CancelledError("Reward completion wait interrupted by shutdown")
+            try:
+                # exception() returns a task's own TimeoutError rather than
+                # raising it, so only a wait timeout is retried here. Native
+                # dequeue above retains ownership of error propagation.
+                task.exception(timeout=1.0)
+            except (FutureTimeoutError, CancelledError):
+                pass
 
     def is_empty(self) -> bool:
         """

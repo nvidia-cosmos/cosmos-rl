@@ -672,7 +672,7 @@ def test_rollout_reporter_accounts_for_excluded_completion():
     )
     worker = object.__new__(DisaggregatedRolloutControlWorker)
     worker.reward_dispatcher = SimpleNamespace(
-        dequeue_rewards_cal=lambda: next(results)
+        dequeue_rewards_cal=lambda **kwargs: next(results)
     )
     worker.config = SimpleNamespace(
         policy=SimpleNamespace(model_name_or_path="test-policy", model_revision=None),

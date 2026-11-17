@@ -119,6 +119,7 @@ run python -m pytest -q tests/test_r2r_command_selection.py
 run python -m pytest -q tests/test_multi_turn_termination.py
 run python -m pytest -q tests/test_multi_turn_distillation_guard.py
 run python -m pytest -q tests/test_async_rollout_phases.py
+run python -m pytest -q tests/test_reward_completion_wait.py
 run python -m pytest -q tests/test_p2r_temporary_queue.py tests/test_p2r_copyback_lifetime.py
 run python -m pytest -q tests/test_async_generation_lifetime.py
 run python -m pytest -q tests/test_async_weight_pause.py

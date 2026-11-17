@@ -1443,7 +1443,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         raise ValueError("Validation reward belongs to another step")
                     self._validation_session.report(payloads)
                 payloads, is_validation, current_step, empty = (
-                    self.reward_dispatcher.dequeue_rewards_cal()
+                    self.reward_dispatcher.dequeue_rewards_cal(
+                        block=True, stop_event=getattr(self, "shutdown_signal", None)
+                    )
                 )
         if self.should_report:
             # Empty reporting ranks owe the same identified terminal receipt,
@@ -2352,7 +2354,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     def report_rollouts(self, block=False):
         while True:
             payloads, is_validation, step, empty = (
-                self.reward_dispatcher.dequeue_rewards_cal()
+                self.reward_dispatcher.dequeue_rewards_cal(
+                    block=block, stop_event=getattr(self, "shutdown_signal", None)
+                )
             )
             if payloads is not None:
                 if is_validation:

@@ -225,7 +225,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def report_rollouts(self, block=False):
         while True:
             payloads, is_validation, step, empty = (
-                self.reward_dispatcher.dequeue_rewards_cal()
+                self.reward_dispatcher.dequeue_rewards_cal(
+                    block=block, stop_event=self.shutdown_signal
+                )
             )
             if payloads is not None:
                 if is_validation:
@@ -450,7 +452,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             )
                         self._validation_session.report(payloads)
                     payloads, is_validation, current_step, empty = (
-                        self.reward_dispatcher.dequeue_rewards_cal()
+                        self.reward_dispatcher.dequeue_rewards_cal(
+                            block=True, stop_event=self.shutdown_signal
+                        )
                     )
                 self._validation_session.report([], is_end=True)
                 self._completed_validation_round_id = self.validation_round_id
