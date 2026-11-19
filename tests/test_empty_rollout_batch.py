@@ -78,6 +78,7 @@ def test_common_guard_precedes_scatter_and_retains_empty_slot(rank, supported):
             slot = worker._prompt_queue.get_nowait()
             assert len(slot) == (1 if rank == 0 else 0)
             assert required_weight_version(slot) == 7
+            assert slot.global_prompt_count == 1
     worker.rollout.rollout_generation.assert_not_called()
     worker.rollout.submit_setup.assert_not_called()
 

@@ -37,10 +37,16 @@ class TestColocated(unittest.TestCase):
     def test_final_step_quality_refill(self):
         self.run_colocated("reject-final-group")
 
+    def test_final_step_prefetch_quality_refill(self):
+        self.run_colocated("reject-final-group", prefetch=True)
+
     def test_genuine_exhaustion_checkpoints_last_completed_update(self):
         self.run_colocated("exhaust-final-group")
 
-    def run_colocated(self, refill_case=None):
+    def test_prefetch_exhaustion_checkpoints_last_completed_update(self):
+        self.run_colocated("exhaust-final-group", prefetch=True)
+
+    def run_colocated(self, refill_case=None, *, prefetch=False):
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 1 if refill_case else 4
         port = network_util.find_available_port(8123)
@@ -59,6 +65,7 @@ class TestColocated(unittest.TestCase):
         )
         config["train"]["train_policy"]["mini_batch"] = 1
         config["rollout"]["n_generation"] = 8
+        config["rollout"]["prefetch_rollout"] = prefetch
         config["rollout"]["batch_size"] = 1
         config["rollout"]["max_response_length"] = 128
         config["mode"] = "colocated"

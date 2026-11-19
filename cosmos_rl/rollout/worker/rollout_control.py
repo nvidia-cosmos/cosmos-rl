@@ -2212,7 +2212,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             prompts_and_is_end = recv_prompts_and_is_end[0]
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
-            prompt_queue.put(PromptBatch(prompts, batch_version))
+            prompt_queue.put(
+                PromptBatch(
+                    prompts,
+                    batch_version,
+                    global_prompt_count=len(global_prompts),
+                )
+            )
         return is_end
 
     def consume_one_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):

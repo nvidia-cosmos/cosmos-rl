@@ -36,7 +36,7 @@ and exposes four override hooks for the per-backend bits.
 The same seam doubles as a place to overlap step (2)'s per-prompt
 work with step (4)'s in-flight engine call on the previous batch.
 When ``config.rollout.prefetch_rollout`` is ``True``, the rollout
-worker's ``_prefetch_loop`` calls :meth:`submit_setup` as soon as it
+worker calls :meth:`submit_setup` as soon as it
 hands a new prompt batch to the prompt queue; the mixin runs
 :meth:`_prepare_sample` for each payload on a background thread keyed
 by payload-object identity plus :meth:`_payload_key` so by the time the consumer hits
@@ -98,13 +98,20 @@ Threading model
 ---------------
 The bg setup worker is a single daemon thread.  ``_prepare_sample``
 must therefore be re-entrant w.r.t. the main thread that drives
-``rollout_generation``.  The default implementation
+``rollout_generation``. It selects the creating worker's CUDA device and
+runs without autograd, matching rollout inference. The default implementation
 (``data_packer.get_rollout_input``) is pure data shaping and is
 trivially safe; backends that do stateful preparation (e.g. building
-a sim env per prompt) own the synchronization.  The mixin itself
-holds no shared mutable state beyond the future map and uses an
-atomic dict swap so concurrent ``submit_setup`` and
-:meth:`_gather_prepared_samples` are safe.
+a sim env per prompt) own the synchronization. The mixin protects future
+registration, consumption and active callback ownership with a lock so
+concurrent ``submit_setup`` and :meth:`_gather_prepared_samples` are safe.
+
+Colocated workers coordinate prompt fetches on the control thread, using the
+same bounded queue and setup worker as disaggregated workers. Lookahead stops
+when queued prompts can cover the current update's missing samples. Prepared
+inputs are consumed before the learner changes the shared model; preparation
+callbacks must not leave untracked work using that model after they return.
+The first batch of each rollout phase is therefore a cold pipeline start.
 
 Edge cases
 ----------
@@ -117,7 +124,9 @@ Edge cases
   :meth:`_on_generation_error` (default: log + return ``[]``).
 * Resubmitting the same payload object replaces its previous future. Different
   objects remain distinct occurrences even when their dataset indices or custom
-  keys match. Payloads must remain unchanged until their preparation is consumed.
+  keys match. A running callback remains owned until it finishes, even if its
+  replacement is canceled after a batch failure. Payloads must remain unchanged
+  until their preparation is consumed.
 * Cold-start (a payload arrives at ``rollout_generation`` without a
   matching ``submit_setup`` call): falls back to inline preparation
   for that payload only.  This handles the very first batch of a run
@@ -148,6 +157,8 @@ import threading
 import time
 from concurrent.futures import Future
 from typing import Any, Dict, Hashable, List, Optional, Sequence, final
+
+import torch
 
 from cosmos_rl.utils.logging import logger as _default_logger
 
@@ -355,6 +366,8 @@ class RolloutGenerationMixin:
         # Retain owners until consumption/close so object IDs cannot be reused.
         self._setup_payloads: Dict[Hashable, Any] = {}
         self._setup_futures_lock = threading.Lock()
+        # Replacing a future cannot retire a callback that is already running.
+        self._setup_running: Optional[tuple[Any, Future]] = None
         self._setup_shutdown = threading.Event()
         self._setup_request_queue: "queue.Queue[Any]" = queue.Queue()
         self._setup_thread: Optional[threading.Thread] = None
@@ -364,6 +377,12 @@ class RolloutGenerationMixin:
         self._prefetch_enabled = bool(getattr(rollout_cfg, "prefetch_rollout", False))
 
         if self._prefetch_enabled:
+            # CUDA's current device and autograd state are thread-local. The
+            # worker process has already selected its rank-local device; do
+            # not let a new setup thread silently fall back to CUDA device 0.
+            self._setup_cuda_device = (
+                torch.cuda.current_device() if torch.cuda.is_initialized() else None
+            )
             self._setup_thread = threading.Thread(
                 target=self._setup_worker_loop,
                 name=thread_name,
@@ -425,8 +444,8 @@ class RolloutGenerationMixin:
     def submit_setup(self, payloads: Sequence[Any]) -> None:
         """Schedule training :meth:`_prepare_sample` for each payload.
 
-        Called from the rollout worker's ``_prefetch_loop`` thread after
-        it puts a batch on the prompt queue.  No-op when prefetch is
+        Called by the rollout worker's prompt producer when a batch is
+        admitted to the prompt queue.  No-op when prefetch is
         disabled or :meth:`setup_generation` was never called.
 
         This queue uses the training preparation context. Validation prepares
@@ -612,25 +631,49 @@ class RolloutGenerationMixin:
                     key = self._setup_key(payload)
                     futures[index] = self._setup_futures.pop(key, None)
                     self._setup_payloads.pop(key, None)
-        for payload, future in zip(payloads, futures, strict=True):
-            if future is not None:
-                t0 = time.perf_counter()
-                # Future.result re-raises whatever the hook raised.
-                results.append(future.result())
-                wait_ms_total += (time.perf_counter() - t0) * 1000.0
-                wait_count += 1
-            else:
-                t0 = time.perf_counter()
-                results.append(
-                    self._prepare_sample(
-                        payload,
-                        data_packer=data_packer,
-                        data_fetcher=data_fetcher,
-                        is_validation=is_validation,
+        try:
+            for payload, future in zip(payloads, futures, strict=True):
+                if future is not None:
+                    t0 = time.perf_counter()
+                    # Future.result re-raises whatever the hook raised.
+                    results.append(future.result())
+                    wait_ms_total += (time.perf_counter() - t0) * 1000.0
+                    wait_count += 1
+                else:
+                    t0 = time.perf_counter()
+                    results.append(
+                        self._prepare_sample(
+                            payload,
+                            data_packer=data_packer,
+                            data_fetcher=data_fetcher,
+                            is_validation=is_validation,
+                        )
                     )
-                )
-                inline_ms_total += (time.perf_counter() - t0) * 1000.0
-                inline_count += 1
+                    inline_ms_total += (time.perf_counter() - t0) * 1000.0
+                    inline_count += 1
+        except BaseException:
+            # Even a failed batch must finish any callback already using the
+            # shared model before colocated training can change its weights.
+            for future in futures:
+                if future is not None:
+                    future.cancel()
+            with self._setup_futures_lock:
+                running = self._setup_running
+                if (
+                    running is not None
+                    and any(payload is running[0] for payload in payloads)
+                    and running[1] not in futures
+                ):
+                    # Resubmission replaces the lookup entry, but cannot
+                    # cancel a callback already using this batch's model.
+                    futures.append(running[1])
+            for future in futures:
+                if future is not None:
+                    try:
+                        future.result()
+                    except BaseException:
+                        pass
+            raise
         self._last_gather_timing = {
             "inline_ms_total": inline_ms_total,
             "inline_count": inline_count,
@@ -639,42 +682,54 @@ class RolloutGenerationMixin:
         }
         return results
 
+    @torch.no_grad()
     def _setup_worker_loop(self) -> None:
         """Background thread body: pull (key, payload, future) and run the hook."""
+        if self._setup_cuda_device is not None:
+            torch.cuda.set_device(self._setup_cuda_device)
         while not self._setup_shutdown.is_set():
             try:
                 item = self._setup_request_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             key, payload, future = item
-            # Claim execution before preparation. Otherwise a replacement can
-            # cancel this still-PENDING future while its callback is running;
-            # publishing either the result or error would kill the setup thread.
-            with self._setup_futures_lock:
-                if self._setup_shutdown.is_set():
-                    future.cancel()
-                    continue
-                if not future.set_running_or_notify_cancel():
-                    continue
-            # Use the bound method so subclasses see ``self``.
             try:
-                # The setup worker doesn't have access to the
-                # ``data_packer`` / ``data_fetcher`` / ``is_validation``
-                # context from the eventual ``rollout_generation`` call
-                # because prefetch fires before the consumer hits the
-                # template method.  We resolve them from instance
-                # attributes the consumer set up (e.g. via
-                # ``post_init_hook``); backends that need request-scoped
-                # context should pass a closure-bound payload instead.
-                result = self._prepare_sample(
-                    payload,
-                    data_packer=getattr(self, "_prefetch_data_packer", None),
-                    data_fetcher=getattr(self, "_prefetch_data_fetcher", None),
-                    is_validation=False,
-                )
-                future.set_result(result)
-            except BaseException as err:  # noqa: BLE001 - propagate to consumer
-                future.set_exception(err)
+                # Claim execution before preparation. Otherwise a replacement can
+                # cancel this still-PENDING future while its callback is running;
+                # publishing either the result or error would kill the setup thread.
+                with self._setup_futures_lock:
+                    if self._setup_shutdown.is_set():
+                        future.cancel()
+                        continue
+                    if not future.set_running_or_notify_cancel():
+                        continue
+                    self._setup_running = (payload, future)
+                # Use the bound method so subclasses see ``self``.
+                try:
+                    # The setup worker doesn't have access to the
+                    # ``data_packer`` / ``data_fetcher`` / ``is_validation``
+                    # context from the eventual ``rollout_generation`` call
+                    # because prefetch fires before the consumer hits the
+                    # template method.  We resolve them from instance
+                    # attributes the consumer set up (e.g. via
+                    # ``post_init_hook``); backends that need request-scoped
+                    # context should pass a closure-bound payload instead.
+                    future.set_result(
+                        self._prepare_sample(
+                            payload,
+                            data_packer=getattr(self, "_prefetch_data_packer", None),
+                            data_fetcher=getattr(self, "_prefetch_data_fetcher", None),
+                            is_validation=False,
+                        )
+                    )
+                except BaseException as err:  # noqa: BLE001 - propagate to consumer
+                    future.set_exception(err)
+            finally:
+                with self._setup_futures_lock:
+                    self._setup_running = None
+                # Do not retain a consumed sample/future while queue.get waits
+                # through a colocated learner update (or a long fetch gap).
+                del item, key, payload, future
 
     # ------------------------------------------------------------------
     # Prefetch context (set once, used by the bg worker)

@@ -91,6 +91,8 @@ PY
 
 run python -c "from cosmos_rl._version import version; print(version)"
 run python -c "import cosmos_rl, os; print('cosmos_rl imported from:', cosmos_rl.__file__)"
+run python -m pytest -q tests/test_colocated_prompt_prefetch.py
+run torchrun --standalone --nproc-per-node=2 tests/colocated_prompt_prefetch_canary.py --benchmark
 run env COSMOS_TEST_TEACHER_BACKEND=nccl python -m pytest -q tests/test_teacher_update.py -k two_replicas
 run python tests/execution_workflow_canary.py
 
@@ -334,7 +336,8 @@ run /bin/bash -c "torchrun --nproc_per_node=2 tests/test_hf_models_tp.py"
 run python tests/test_activation_offload.py
 run python tests/test_policy_variant.py
 run python tests/test_deepep.py
-run python tests/test_colocated.py
+# Six model-loading/training cases share this entry.
+SUITE_TIMEOUT=30m run python tests/test_colocated.py
 run python tests/test_teacher_model.py
 run python -m pytest -q tests/test_teacher_channel.py
 run python -m pytest -q tests/test_teacher_update.py
