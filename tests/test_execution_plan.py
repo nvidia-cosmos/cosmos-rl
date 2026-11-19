@@ -106,7 +106,7 @@ def test_resumable_generation_rejects_unknown_or_moving_model_identity(revision)
     with pytest.raises(ValueError, match="immutable"):
         Config.model_validate(
             {
-                "train": {"train_policy": {"type": "grpo"}},
+                "train": {"train_policy": {"type": "grpo"}, "local_dataset": False},
                 "policy": {"model_revision": revision},
                 "execution": {
                     "path": "generate",
@@ -123,7 +123,7 @@ def test_resumable_generation_rejects_unknown_or_moving_model_identity(revision)
 def test_resumable_generation_accepts_full_commit_and_requires_app_semantics():
     output = {"path": "/corpus", "run_id": "run"}
     data = {
-        "train": {"train_policy": {"type": "grpo"}},
+        "train": {"train_policy": {"type": "grpo"}, "local_dataset": False},
         "policy": {"model_revision": "a" * 40},
         "execution": {"path": "generate", "output": output},
     }
@@ -138,6 +138,31 @@ def test_resumable_generation_accepts_full_commit_and_requires_app_semantics():
     }
     with pytest.raises(ValueError, match="immutable"):
         Config.model_validate(data)
+
+
+@pytest.mark.parametrize("local_dataset", [True, None])
+@pytest.mark.parametrize("bypass_reward", [True, False])
+def test_resumable_generation_requires_controller_visible_inputs(
+    local_dataset, bypass_reward
+):
+    train = {"train_policy": {"type": "grpo", "bypass_reward": bypass_reward}}
+    if local_dataset is not None:
+        train["local_dataset"] = local_dataset
+    with pytest.raises(ValueError, match="train.local_dataset=false"):
+        Config.model_validate(
+            {
+                "train": train,
+                "policy": {"model_revision": "a" * 40},
+                "execution": {
+                    "path": "generate",
+                    "output": {
+                        "path": "/corpus",
+                        "run_id": "run",
+                        "generation_fingerprint": "text-v1",
+                    },
+                },
+            }
+        )
 
 
 @pytest.mark.parametrize(

@@ -209,6 +209,7 @@ def run(root):
     }
     launch(root, "on-policy-distillation", opd)
     launch(root, "direct-pretraining", common)
+    generation["train"]["local_dataset"] = False
     launch(root, "generation", generation, training=False)
     dataset = CorpusDataset(root / "generated-corpus")
     assert len(dataset) == 4
