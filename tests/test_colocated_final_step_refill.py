@@ -4,6 +4,7 @@
 
 import asyncio
 from types import SimpleNamespace as NS
+from queue import Queue
 from unittest.mock import Mock
 
 import pytest
@@ -49,7 +50,11 @@ def run_final_batch(controller, contributions, prompts_per_call=1):
     state = NS(pending=0, calls=0, training=[], shutdown=False)
     groups = iter(contributions)
 
-    def generate():
+    def generate(*, remaining_samples):
+        assert (
+            remaining_samples
+            == controller.config.train.train_batch_per_replica - state.pending
+        )
         state.calls += 1
         assert state.calls <= len(contributions), "refill exceeded supplied prompts"
         end = prompt_end(controller)
@@ -86,6 +91,7 @@ def run_final_batch(controller, contributions, prompts_per_call=1):
             parallel_dims=NS(mesh={"dp": NS(size=lambda: 1)}),
             rollout_for_one_minor_step=generate,
             report_rollouts=Mock(),
+            _prompt_queue=Queue(),
             shutdown_signal=NS(is_set=lambda: state.shutdown),
         ),
     )

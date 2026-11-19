@@ -166,7 +166,10 @@ class ColocatedRLControlWorker(WorkerBase):
                     logger.debug(
                         f"[Rollout] Not enough rollouts generated for training in DAPO. Current pending samples: {self.controller.pending_policy_samples()}, required: {self.config.train.train_batch_per_replica}. Keep generating rollouts..."
                     )
-                is_end, _ = self.rollout.rollout_for_one_minor_step()
+                is_end, _ = self.rollout.rollout_for_one_minor_step(
+                    remaining_samples=self.config.train.train_batch_per_replica
+                    - pending_samples
+                )
                 self.rollout.report_rollouts(block=True)
                 self.controller.synchronize_rollouts()
                 pending_samples = self.controller.pending_policy_samples_all_replicas()
@@ -176,6 +179,9 @@ class ColocatedRLControlWorker(WorkerBase):
                 pending_samples >= self.config.train.train_batch_per_replica
             ):
                 break
+            assert self.rollout._prompt_queue.empty(), (
+                "Colocated preparation must not cross an optimizer update"
+            )
             self.controller.rollout_completed_for_data_fetch_n_training(pending_samples)
             self.policy.consume_command(DataFetchCommand)
 
@@ -212,6 +218,11 @@ class ColocatedRLControlWorker(WorkerBase):
             self.destroy_worker()
 
     def destroy_worker(self):
+        # Preparation may still be running after a fetch/generation failure.
+        # Fence it before releasing resources shared with the policy worker.
+        close = getattr(self.rollout.rollout, "shutdown_generation", None)
+        if callable(close):
+            close()
         if getattr(self.controller, "requested_stop_complete", False):
             self.rollout.unregister_from_controller()
             self.policy.handle_shutdown()
