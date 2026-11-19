@@ -578,6 +578,11 @@ combine logical run ID, source occurrence and original completion slot. The
 first committed output wins; duplicate attempts cannot replace it with another
 sample or different provenance. All completion outcomes, including generation
 failures, scores and quality decisions, remain visible in the corpus.</p>
+<p>Set <code class="docutils literal notranslate"><span class="pre">train.local_dataset=false</span></code> for resumable generation so the controller can
+compare prompts and reference answers before reusing committed results. For
+worker-local datasets, use <code class="docutils literal notranslate"><span class="pre">execution.output.resume=false</span></code> with a fresh output
+path and run ID. The controller receives only indices in this mode and cannot
+validate the inputs that workers load.</p>
 <p>On restart, committed manifest metadata is validated and complete occurrences are
 skipped. Partially committed prompts may generate again, filling missing slots
 while retaining earlier commits. Logical prompt limits include already-seen

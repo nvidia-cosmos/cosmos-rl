@@ -462,6 +462,12 @@ first committed output wins; duplicate attempts cannot replace it with another
 sample or different provenance. All completion outcomes, including generation
 failures, scores and quality decisions, remain visible in the corpus.
 
+Set `train.local_dataset=false` for resumable generation so the controller can
+compare prompts and reference answers before reusing committed results. For
+worker-local datasets, use `execution.output.resume=false` with a fresh output
+path and run ID. The controller receives only indices in this mode and cannot
+validate the inputs that workers load.
+
 On restart, committed manifest metadata is validated and complete occurrences are
 skipped. Partially committed prompts may generate again, filling missing slots
 while retaining earlier commits. Logical prompt limits include already-seen
