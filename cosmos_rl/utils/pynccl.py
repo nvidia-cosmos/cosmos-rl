@@ -369,7 +369,8 @@ def _run_functor_bounded(task: _Task) -> ncclComm_t:
     the blocked call return an error instead of wedging the worker thread.
 
     Communicator creation passes ``comm_idx=None`` because the communicator it
-    would abort does not exist yet, so that call stays unbounded here.
+    would abort does not exist yet. Its native initialization functor owns a
+    terminal deadline for that phase instead.
     """
     if task.comm_idx is None:
         return task.functor()
@@ -735,7 +736,17 @@ def create_nccl_comm(
     holder: Dict[str, ncclComm_t] = {}
 
     def _init_functor() -> ncclComm_t:
-        comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
+        # There is no communicator handle to abort until this host call returns.
+        # Keep ordinary asynchronous initialization timeouts recoverable, but a
+        # stuck native call must not strand the worker and mesh rebuild forever.
+        deadline = TransportDeadline(
+            _get_timeout_ms(timeout_ms) / 1000,
+            f"NCCL communicator initialization rank {rank}/{world_size}",
+        )
+        try:
+            comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
+        finally:
+            deadline.close()
         holder["comm"] = comm_local
         return comm_local
 

@@ -101,7 +101,7 @@ def test_filter_then_advantage_then_ingestion(mode, mask, minimum, monkeypatch):
     worker.enqueue_teacher_calculation = lambda payloads: payloads
     worker.reward_dispatcher = SimpleNamespace(
         enqueue_rewards_cal=enqueue,
-        dequeue_rewards_cal=lambda: pending.get()
+        dequeue_rewards_cal=lambda **kwargs: pending.get()
         if not pending.empty()
         else (None, False, -1, True),
     )

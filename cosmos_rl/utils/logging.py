@@ -40,6 +40,7 @@ logger.setLevel(_level)
 # and double-print for anyone who deliberately routes the "cosmos" logger.
 if not logger.hasHandlers():
     ch = logging.StreamHandler()
+    ch._cosmos_owned_handler = True
     ch.setLevel(_level)
     formatter = logging.Formatter(
         "[cosmos] %(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -91,5 +92,6 @@ def configure_logging(level=None) -> int:
     # logger now admits.  Handlers belonging to a host application are left
     # alone -- their levels are the host's business.
     for handler in logger.handlers:
-        handler.setLevel(resolved)
+        if getattr(handler, "_cosmos_owned_handler", False):
+            handler.setLevel(resolved)
     return resolved

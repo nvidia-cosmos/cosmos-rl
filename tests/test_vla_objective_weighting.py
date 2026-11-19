@@ -3,6 +3,7 @@
 """Exercise real VLA trainer loops with CPU model/clock substitutes."""
 
 from contextlib import contextmanager, nullcontext
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
@@ -204,7 +205,17 @@ def test_pi05_mask_preserves_finish_step_clamping(finish_step, expected_steps):
 @pytest.mark.parametrize("chunk_size", [1, 2, 3])
 @pytest.mark.parametrize("empty", [False, True])
 def test_production_objective_is_chunk_invariant(
-    monkeypatch, cls, weighting, expected, chunk_size, empty, partial=False
+    monkeypatch,
+    cls,
+    weighting,
+    expected,
+    chunk_size,
+    empty,
+    partial=False,
+    masked_old=None,
+    valid_old=None,
+    advantage=1.0,
+    score_dtype=None,
 ):
     if weighting is None and empty:
         pytest.skip(
@@ -229,8 +240,10 @@ def test_production_objective_is_chunk_invariant(
 
     monkeypatch.setattr(vla_data_packer, "_get_vla_constants", lambda: (1, 1, 1))
     trainer = object.__new__(cls)
-    trainer.device = torch.device("cpu")
-    trainer.model = Model()
+    trainer.device = torch.device(os.environ.get("COSMOS_VLA_TEST_DEVICE", "cpu"))
+    if trainer.device.type == "cuda":
+        assert torch.cuda.is_available(), "Required CUDA objective gate cannot skip"
+    trainer.model = Model().to(trainer.device)
     trainer.data_packer = Packer()
     if partial:
         original = trainer.data_packer.policy_collate_fn
@@ -244,6 +257,36 @@ def test_production_objective_is_chunk_invariant(
             return data
 
         trainer.data_packer.policy_collate_fn = partially_valid
+    if masked_old is not None:
+        original_collate = trainer.data_packer.policy_collate_fn
+
+        def invalid_padding(policy_input, max_chunks):
+            data = original_collate(policy_input, max_chunks)
+            data["old_log_probs"][~data["logprob_masks"].bool()] = masked_old
+            return data
+
+        trainer.data_packer.policy_collate_fn = invalid_padding
+    if valid_old is not None:
+        original_collate = trainer.data_packer.policy_collate_fn
+
+        def distant_valid_scores(policy_input, max_chunks):
+            data = original_collate(policy_input, max_chunks)
+            data["old_log_probs"][data["logprob_masks"].bool()] = valid_old
+            return data
+
+        trainer.data_packer.policy_collate_fn = distant_valid_scores
+    if score_dtype is not None:
+        trainer.model.to(dtype=score_dtype)
+        original_typed_collate = trainer.data_packer.policy_collate_fn
+
+        def typed_scores(policy_input, max_chunks):
+            data = original_typed_collate(policy_input, max_chunks)
+            return {
+                key: value.to(dtype=score_dtype) if value.is_floating_point() else value
+                for key, value in data.items()
+            }
+
+        trainer.data_packer.policy_collate_fn = typed_scores
     trainer.data_packer.policy_collate_fn = Mock(
         wraps=trainer.data_packer.policy_collate_fn
     )
@@ -303,7 +346,7 @@ def test_production_objective_is_chunk_invariant(
             task_id=0,
             trial_id=0,
             weight_version=0,
-            advantage=1.0,
+            advantage=advantage,
             finish_step=len(values),
         )
         for values in ([[], []] if empty else [[1.0, 2.0, 3.0], [6.0]])
@@ -354,3 +397,45 @@ def test_new_objective_requires_explicit_configuration():
     assert VLAConfig().objective_weighting is None
     assert VLAConfig(objective_weighting="sample").objective_weighting == "sample"
     assert VLAConfig(objective_weighting="episode").objective_weighting == "episode"
+
+
+@pytest.mark.parametrize("cls", [PI05GRPOTrainer, OpenVLAGRPOTrainer])
+@pytest.mark.parametrize(
+    "weighting,expected", [("sample", 0.3), ("episode", 0.4), (None, 0.4)]
+)
+@pytest.mark.parametrize(
+    "masked_old", [float("nan"), float("inf"), float("-inf"), -1000.0]
+)
+def test_masked_old_scores_do_not_change_valid_training(
+    monkeypatch, cls, weighting, expected, masked_old
+):
+    test_production_objective_is_chunk_invariant(
+        monkeypatch,
+        cls,
+        weighting,
+        expected,
+        3,
+        False,
+        masked_old=masked_old,
+    )
+
+
+@pytest.mark.parametrize("weighting", [None, "sample", "episode"])
+@pytest.mark.parametrize("valid_old", [-100.0, -1000.0])
+@pytest.mark.parametrize(
+    "score_dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64]
+)
+def test_zero_advantage_stays_zero_with_distant_finite_old_scores(
+    monkeypatch, weighting, valid_old, score_dtype
+):
+    test_production_objective_is_chunk_invariant(
+        monkeypatch,
+        OpenVLAGRPOTrainer,
+        weighting,
+        0.0,
+        3,
+        False,
+        valid_old=valid_old,
+        advantage=0.0,
+        score_dtype=score_dtype,
+    )

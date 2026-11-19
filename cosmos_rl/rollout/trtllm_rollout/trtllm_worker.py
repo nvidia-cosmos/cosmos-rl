@@ -27,6 +27,7 @@ from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout import TRTLLMRolloutWorkerBase
 from cosmos_rl.rollout import State
+from cosmos_rl.rollout.worker.weight_sync import completed_weight_transfer
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
@@ -471,68 +472,72 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         copy_stream = torch.cuda.Stream()
 
-        with torch.cuda.stream(self.inference_stream):
-            logger.debug(
-                f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
-            )
-            # recv the weight from policy
-            st = time.time()
-            total_bytes_received = 0
+        with completed_weight_transfer(
+            self.inference_stream,
+            f"TRT-LLM P2R {self.replica_name} step {command.weight_step}",
+        ):
+            with torch.cuda.stream(self.inference_stream):
+                logger.debug(
+                    f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
+                )
+                # recv the weight from policy
+                st = time.time()
+                total_bytes_received = 0
 
-            pending_bytes = [0]
-            pending_completions = []
+                pending_bytes = [0]
+                pending_completions = []
 
-            def flush_completions(pending_bytes, pending_completions):
-                recv_ready = torch.cuda.Event()
-                recv_ready.record()
-                with torch.cuda.stream(copy_stream):
-                    recv_ready.wait()
-                    logger.debug(
-                        f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
-                    )
-                    for completion in pending_completions:
-                        completion()
-                    pending_bytes[0] = 0
-                    pending_completions.clear()
-
-            p2r_group_size = constant.get_p2r_nccl_group_size(self.config)
-            for sync_round in iter_p2r_sync_rounds(
-                self.policy_to_rollout_recv_insts,
-                p2r_group_size,
-            ):
-                with (
-                    nccl_group(communicator_index)
-                    if p2r_group_size > 0
-                    else nullcontext()
-                ):
-                    for insts_group in sync_round:
-                        # insts_group: WeightSyncInstructionsGroup -> inst
-                        # collection for a full weight tensor.
-                        bytes_received, completion_fn = self.recv_weight_shard(
-                            self.global_rank,
-                            insts_group,
-                            communicator_index,
-                            command.do_weight_sync_check,
+                def flush_completions(pending_bytes, pending_completions):
+                    recv_ready = torch.cuda.Event()
+                    recv_ready.record()
+                    with torch.cuda.stream(copy_stream):
+                        recv_ready.wait()
+                        logger.debug(
+                            f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
                         )
-                        pending_bytes[0] += bytes_received
-                        pending_completions.append(completion_fn)
-                        total_bytes_received += bytes_received
-                flush_completions(pending_bytes, pending_completions)
+                        for completion in pending_completions:
+                            completion()
+                        pending_bytes[0] = 0
+                        pending_completions.clear()
 
-            with torch.cuda.stream(copy_stream):
-                copy_finished = torch.cuda.Event()
-                copy_finished.record()
+                p2r_group_size = constant.get_p2r_nccl_group_size(self.config)
+                for sync_round in iter_p2r_sync_rounds(
+                    self.policy_to_rollout_recv_insts,
+                    p2r_group_size,
+                ):
+                    with (
+                        nccl_group(communicator_index)
+                        if p2r_group_size > 0
+                        else nullcontext()
+                    ):
+                        for insts_group in sync_round:
+                            # insts_group: WeightSyncInstructionsGroup -> inst
+                            # collection for a full weight tensor.
+                            bytes_received, completion_fn = self.recv_weight_shard(
+                                self.global_rank,
+                                insts_group,
+                                communicator_index,
+                                command.do_weight_sync_check,
+                            )
+                            pending_bytes[0] += bytes_received
+                            pending_completions.append(completion_fn)
+                            total_bytes_received += bytes_received
+                    flush_completions(pending_bytes, pending_completions)
 
-            copy_finished.wait()
-            torch.cuda.synchronize()
+                with torch.cuda.stream(copy_stream):
+                    copy_finished = torch.cuda.Event()
+                    copy_finished.record()
 
-            time_eclapsed = time.time() - st
-            logger.info(
-                f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
-            )
-            if not self.cosmos_state.weight_synced():
-                self.cosmos_state.set_weight_synced()
-                self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
+                copy_finished.wait()
+                torch.cuda.synchronize()
+
+                time_eclapsed = time.time() - st
+                logger.info(
+                    f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
+                )
+                if not self.cosmos_state.weight_synced():
+                    self.cosmos_state.set_weight_synced()
+                    self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
     @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand, backend="trtllm"
@@ -554,36 +559,42 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
-            with torch.cuda.stream(self.inference_stream):
-                assert self.rank_in_rollout_repicas >= 0, (
-                    "[Rollout] rank in rollout replicas should be set before broadcast."
-                )
-                assert len(dst_replica_names) == len(self.replica_name_to_rank), (
-                    "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
-                )
+            with completed_weight_transfer(
+                self.inference_stream,
+                f"TRT-LLM R2R {self.replica_name} step {broadcast_command.weight_step}",
+            ):
+                with torch.cuda.stream(self.inference_stream):
+                    assert self.rank_in_rollout_repicas >= 0, (
+                        "[Rollout] rank in rollout replicas should be set before broadcast."
+                    )
+                    assert len(dst_replica_names) == len(self.replica_name_to_rank), (
+                        "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
+                    )
 
-                src_rank = self.replica_name_to_rank[src_replica_name]
+                    src_rank = self.replica_name_to_rank[src_replica_name]
 
-                for parameter in self.get_underlying_model().state_dict().values():
-                    recv_tensor = parameter
-                    if not parameter.is_contiguous():
-                        recv_tensor = parameter.contiguous()
+                    for parameter in self.get_underlying_model().state_dict().values():
+                        recv_tensor = parameter
+                        if not parameter.is_contiguous():
+                            recv_tensor = parameter.contiguous()
 
-                    if self.global_commnicator_idex < 0:
-                        raise RuntimeError(
-                            "[Rollout] rollout-to-rollout broadcast requested "
-                            "but no global mesh communicator exists (the "
-                            "controller reported the mesh unused when it was "
-                            "last rebuilt)."
+                        if self.global_commnicator_idex < 0:
+                            raise RuntimeError(
+                                "[Rollout] rollout-to-rollout broadcast requested "
+                                "but no global mesh communicator exists (the "
+                                "controller reported the mesh unused when it was "
+                                "last rebuilt)."
+                            )
+                        nccl_broadcast(
+                            recv_tensor, src_rank, self.global_commnicator_idex
                         )
-                    nccl_broadcast(recv_tensor, src_rank, self.global_commnicator_idex)
 
-                    if not parameter.is_contiguous():
-                        parameter.copy_(recv_tensor)
+                        if not parameter.is_contiguous():
+                            parameter.copy_(recv_tensor)
 
-                if not self.cosmos_state.weight_synced():
-                    self.cosmos_state.set_weight_synced()
-                    self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
+            if not self.cosmos_state.weight_synced():
+                self.cosmos_state.set_weight_synced()
+                self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step >= 0:

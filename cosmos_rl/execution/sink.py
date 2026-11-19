@@ -192,6 +192,11 @@ class GenerationLedger:
                     "prompt": payload.prompt,
                     "conversation": payload.conversation,
                     "extra_info": payload.extra_info,
+                    **(
+                        {"reference_answer": payload.reference_answer}
+                        if payload.reference_answer is not None
+                        else {}
+                    ),
                 }
             )
         )

@@ -108,6 +108,10 @@ run python -m pytest -q tests/test_collective_operation.py
 run python -m pytest -q tests/test_collective_error_reporting.py
 run python -m pytest -q tests/test_training_collective_contract.py
 run python -m pytest -q tests/test_weight_adoption.py
+run env COSMOS_WEIGHT_DEVICE=cuda:0 python -m pytest -q tests/test_weight_adoption.py -k 'not native_weight_peer_stall'
+run torchrun --standalone --nproc-per-node=2 tests/weight_adoption_canary.py
+run torchrun --standalone --nproc-per-node=2 tests/weight_adoption_canary.py --packed
+run python -m pytest -q tests/test_rollout_generation_mixin.py
 run python -m pytest -q tests/test_mpi_rank.py
 run python -m pytest -q tests/test_empty_rollout_batch.py
 run torchrun --standalone --nproc-per-node=2 tests/empty_rollout_batch_canary.py
@@ -117,6 +121,7 @@ run python -m pytest -q tests/test_r2r_command_selection.py
 run python -m pytest -q tests/test_multi_turn_termination.py
 run python -m pytest -q tests/test_multi_turn_distillation_guard.py
 run python -m pytest -q tests/test_async_rollout_phases.py
+run python -m pytest -q tests/test_reward_completion_wait.py
 run python -m pytest -q tests/test_p2r_temporary_queue.py tests/test_p2r_copyback_lifetime.py
 run python -m pytest -q tests/test_async_generation_lifetime.py
 run python -m pytest -q tests/test_async_weight_pause.py
@@ -137,12 +142,16 @@ run python -m pytest -q tests/test_checkpoint_immutable_step.py
 run python -m pytest -q tests/test_resume_selection_contract.py
 run python -m pytest -q tests/test_resume_execution_fence.py
 run python -m pytest -q tests/test_checkpoint_snapshot.py
+run python -m pytest -q tests/test_checkpoint_replay.py tests/test_controller_resume_adapter.py tests/test_resume_metadata_fail_fast.py
+run python -m pytest -q tests/test_requested_stop.py tests/test_generic_requested_stop.py tests/test_rl_worker_shutdown.py tests/test_colocated_command_poll.py
+run torchrun --standalone --nproc-per-node=2 tests/test_colocated_command_poll.py
 run python -m pytest -q tests/test_sft_membership.py
 run python -m pytest -q tests/test_dispatch_staleness.py
 run python -m pytest -q tests/test_running_dispatch_barrier.py
 run python -m pytest -q tests/test_trainer_batching_contract.py
 run python -m pytest -q tests/test_trainer_sample_alignment.py
 run python -m pytest -q tests/test_grpo_numerical_contract.py
+run python -m pytest -q tests/test_distributed_gradient_reduction.py tests/test_p2p_batching_e2e.py
 run python -m pytest -q tests/test_pipeline_objective_normalization.py
 run python -m pytest -q tests/test_grpo_pipeline_normalization.py
 run torchrun --standalone --nproc-per-node=2 tests/grpo_pipeline_canary.py --cpu
@@ -160,6 +169,7 @@ run python -m pytest -q tests/test_trainer_prefetch_notifications.py
 run python -m pytest -q tests/test_trainer_prefetch_publication.py
 run torchrun --standalone --nproc-per-node=4 tests/trainer_prefetch_cohort_canary.py --cpu
 run python -m pytest -q tests/test_nccl_prefetch_failfast.py
+run python -m pytest -q tests/test_transport_lifecycle.py tests/test_transport_failure_supervisor.py tests/test_unregister_best_effort.py
 run python -m pytest -q tests/test_receive_memory.py tests/test_receive_memory_cuda.py
 run python -m pytest -q tests/test_receive_rejection_outcomes.py
 if python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() >= 2 else 1)'; then
@@ -230,7 +240,7 @@ run python -m pytest -q tests/test_transport_terminal_contract.py
 run python -m pytest -q tests/test_nccl_operation_contract.py
 run python tests/test_nccl_data_packer_mixin.py
 run python tests/test_nccl_payload_pairing.py
-run python tests/test_nccl_rendezvous.py
+run python -m pytest -q tests/test_nccl_rendezvous.py
 run python tests/test_nccl_payload_producer.py
 run python -m pytest -q tests/test_payload_layout.py tests/test_payload_context.py
 run python tests/test_nccl_streams.py
@@ -336,7 +346,7 @@ run python tests/test_vllm_rollout_async.py
 run python tests/test_custom_args.py
 run python tests/test_colocated_separated.py
 run python tests/test_load_balanced_dataset.py
-run python tests/test_resume_data_index.py
+run python -m pytest -q tests/test_resume_data_index.py
 run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_data_loader.py"
 # run python tests/test_diffusion_rl_e2e.py
 # run /bin/bash -c "torchrun --nproc_per_node=8 tests/test_cosmos3_trajectory_equivalence.py"

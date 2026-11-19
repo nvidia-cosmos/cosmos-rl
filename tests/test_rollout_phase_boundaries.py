@@ -171,7 +171,11 @@ def test_wst_full_broadcast_marks_frozen_parameters_received_only_after_success(
     command = FakeCommand(dsts=("rollout-a", "rollout-b"))
     command.trainable_only = trainable_only
     monkeypatch.setattr(ws, "r2r_barrier", lambda *a, **k: outcome != "cancelled")
-    monkeypatch.setattr(ws.torch.cuda, "Event", lambda: SimpleNamespace(record=Mock()))
+    monkeypatch.setattr(
+        ws.torch.cuda,
+        "Event",
+        lambda: SimpleNamespace(record=Mock(), synchronize=Mock()),
+    )
 
     def broadcast(*args):
         assert not worker.non_trainable_params_received

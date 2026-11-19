@@ -297,3 +297,55 @@ def test_empty_effective_entropy_is_finite_and_has_zero_gradient(coefficient):
     assert metrics["effective_entropy"].item() == 0.0
     (metrics["effective_entropy"] + logits.sum() * 0).backward()
     assert not torch.count_nonzero(logits.grad)
+
+
+@pytest.mark.parametrize("delta", [0.5, 15.0, 80.0, 100.0, 1000.0])
+@pytest.mark.parametrize("reference_delta", [0.0, -1e-4, 1e-4, -0.2, 0.2])
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64]
+)
+@pytest.mark.parametrize("unbiased", [False, True])
+def test_unbiased_kl_extreme_importance_has_finite_clipped_gradient(
+    delta, reference_delta, dtype, unbiased
+):
+    from cosmos_rl.policy.config import Config
+
+    config = Config()
+    config.train.logprob_dtype = str(dtype).split(".")[-1]
+    config.train.train_policy.kl_beta = float(unbiased)
+    config.train.train_policy.unbiased_kl_estimate = unbiased
+    config.train.train_policy.loss_type = "token-sum"
+    config.train.train_policy.balance_dp_token = False
+    device = torch.device(os.environ.get("COSMOS_ALIGNMENT_DEVICE", "cpu"))
+    current = torch.tensor([-1.0], dtype=dtype, device=device, requires_grad=True)
+    old = current.detach() - delta
+    reference = current.detach() + reference_delta
+    mask = torch.tensor([[True]], device=device)
+    actual, _, kl = compute_loss(
+        current,
+        old,
+        reference,
+        torch.zeros(1, dtype=dtype, device=device),
+        torch.tensor([0, 1], device=device),
+        config,
+        mask,
+    )
+    # Float64 independently evaluates the existing estimator below overflow;
+    # above it, a positive KL is clipped to ten, and equal policies have zero KL.
+    probe = torch.tensor([-1.0], dtype=torch.float64, device=device, requires_grad=True)
+    if not unbiased or reference.item() == current.detach().item():
+        expected = probe.sum() * 0
+    elif delta >= 100:
+        expected = probe.sum() * 0 + 10
+    else:
+        log_ratio = reference.double() - probe
+        expected = (
+            (torch.exp(probe - old.double()) * (log_ratio.exp() - log_ratio - 1))
+            .clamp(-10, 10)
+            .sum()
+        )
+    expected.backward()
+    actual.backward()
+    torch.testing.assert_close(kl, expected.detach().to(kl), atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(current.grad, probe.grad.to(dtype), atol=1e-6, rtol=1e-5)
+    assert torch.isfinite(actual) and torch.isfinite(current.grad).all()

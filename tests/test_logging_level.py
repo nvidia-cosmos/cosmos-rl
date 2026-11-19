@@ -154,6 +154,22 @@ class TestConfigDrivenLevel(unittest.TestCase):
         self.assertEqual(before, "PROBE-BEFORE INFO")
         self.assertEqual(after, "PROBE-AFTER DEBUG True")
 
+    def test_direct_host_handler_keeps_its_filter(self):
+        out = _run(
+            """
+            host = logging.StreamHandler(io.StringIO())
+            host.setLevel(logging.ERROR)
+            logging.getLogger("cosmos").addHandler(host)
+            from cosmos_rl.utils.logging import logger, configure_logging
+            configure_logging("DEBUG")
+            print("PROBE", logging.getLevelName(logger.level),
+                  logging.getLevelName(host.level))
+            """,
+            env_level="",
+        )
+        probe = [ln for ln in out.splitlines() if ln.startswith("PROBE")][-1]
+        self.assertEqual(probe, "PROBE DEBUG ERROR")
+
     def test_env_overrides_config(self):
         # The operator's override must win: raising verbosity for one run
         # cannot require editing a config shared by every component.

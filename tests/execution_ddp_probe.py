@@ -162,6 +162,21 @@ def main():
             assert "source revision" in str(error)
         else:
             raise AssertionError("Different source snapshots entered training")
+        from unittest.mock import patch
+        from cosmos_rl.execution.corpus import CorpusDataset
+
+        def open_source(*args, **kwargs):
+            if rank == 1:
+                raise EOFError()
+            return CorpusDataset(*args, **kwargs)
+
+        with patch("cosmos_rl.execution.corpus.CorpusDataset", open_source):
+            try:
+                worker.build_runner()
+            except ValueError as error:
+                assert "Corpus source initialization failed: EOFError" in str(error)
+            else:
+                raise AssertionError("An empty-message source failure entered training")
         if rank == 1:
             from pathlib import Path
 

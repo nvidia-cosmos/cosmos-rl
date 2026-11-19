@@ -49,13 +49,15 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
         self.redis_for_remote = self.redis_controller
         self.redis_controller = dispatcher
 
-    def subscribe_remote_commands(self):
+    def subscribe_remote_commands(self, *, blocking: bool = True):
         """
         Subscribe and get commands from remote controller.
         """
         commands = []
         try:
-            commands = self.redis_for_remote.subscribe_command(self.replica_name)
+            commands = self.redis_for_remote.subscribe_command(
+                self.replica_name, blocking=blocking
+            )
         except Exception as e:
             logger.debug(
                 f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"

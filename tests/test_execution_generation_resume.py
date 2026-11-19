@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from torch.utils.data import Dataset
 
+from cosmos_rl.dispatcher.data.data_fetcher import (
+    ControllerDataFetcher,
+    WorkerDataFetcher,
+)
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.execution.corpus import CorpusDataset
 from cosmos_rl.execution.sink import CorpusResultSink, generation_metadata
@@ -28,6 +34,7 @@ def generation(tmp_path, *, generation=1, count=4):
     data["rollout"].update(
         n_generation=generation, max_inflight_prompts=8, max_prompts=count
     )
+    data["train"]["local_dataset"] = False
     item.config = Config.model_validate(data)
     item.data_fetcher = SimpleNamespace(
         get_batched_prompt=Mock(
@@ -106,6 +113,97 @@ def test_changed_source_is_rejected_before_reusing_a_logical_occurrence(tmp_path
     )
     with pytest.raises(ValueError, match="source changed"):
         resumed._get_rollout_only_prompts(1)
+
+
+class ScoringDataset(Dataset):
+    def __init__(self, answer):
+        self.answer = answer
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, index):
+        return "fixed prompt"
+
+    def get_reference_answer(self, index):
+        return self.answer
+
+
+def use_scoring_dataset(item, answer):
+    item.config.train.train_policy.bypass_reward = False
+    item.data_fetcher = ControllerDataFetcher(
+        item.config, dataset=ScoringDataset(answer)
+    )
+    return WorkerDataFetcher(item.config, None, None, dataset=ScoringDataset(answer))
+
+
+def commit_scored_result(item, payload, answer):
+    result = event(item, payload, text="A")
+    outcome = result.outcomes[0]
+    with_score = replace(outcome, score=float(outcome.completion == f"{answer}-0"))
+    writer = sink(item)
+    writer(replace(result, outcomes=(with_score,)))
+    writer.close()
+    item.rollout_only_state.settle(1)
+    item.finalize_generation()
+
+
+def test_changed_reference_answer_cannot_reuse_a_committed_score(tmp_path):
+    initial = generation(tmp_path, count=1)
+    use_scoring_dataset(initial, "A")
+    work, ended = initial._get_rollout_only_prompts(1)
+    assert ended and work[0].reference_answer == "A"
+    commit_scored_result(initial, work[0], work[0].reference_answer)
+    unchanged = generation(tmp_path, count=1)
+    use_scoring_dataset(unchanged, "A")
+    assert unchanged._get_rollout_only_prompts(1) == ([], True)
+    resumed = generation(tmp_path, count=1)
+    use_scoring_dataset(resumed, "B")
+    with pytest.raises(ValueError, match="source changed"):
+        resumed._get_rollout_only_prompts(1)
+    assert CorpusDataset(tmp_path)[0].rollout.reward == 1.0
+
+
+def test_worker_local_legacy_run_cannot_skip_changed_scoring_target(
+    tmp_path, monkeypatch
+):
+    initial = generation(tmp_path, count=1)
+    initial.config.train.local_dataset = True
+    worker = use_scoring_dataset(initial, "A")
+    # Create the corpus an earlier version could publish from index-only rows.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "cosmos_rl.execution.config.validate_generation_identity", lambda _: None
+        )
+        work, ended = initial._get_rollout_only_prompts(1)
+        assert ended and work[0].prompt is None and work[0].reference_answer is None
+        answer = worker.query_reference_answer(work[0].prompt_idx)
+        commit_scored_result(initial, work[0], answer)
+
+    resumed = generation(tmp_path, count=1)
+    # Also exercise the runtime guard for callers that mutate a validated Config.
+    resumed.config.train.local_dataset = True
+    worker = use_scoring_dataset(resumed, "B")
+    assert worker.query_reference_answer(0) == "B"
+    with pytest.raises(ValueError, match="train.local_dataset=false"):
+        resumed._get_rollout_only_prompts(1)
+    assert resumed.rollout_only_state.source_occurrences_seen == 0
+    assert CorpusDataset(tmp_path)[0].rollout.reward == 1.0
+
+
+def test_worker_local_one_off_can_generate_and_score(tmp_path):
+    item = generation(tmp_path, count=1)
+    data = item.config.model_dump()
+    data["train"]["local_dataset"] = True
+    data["execution"]["output"].update(resume=False, generation_fingerprint=None)
+    item.config = Config.model_validate(data)
+    worker = use_scoring_dataset(item, "A")
+    work, ended = item._get_rollout_only_prompts(1)
+    assert ended and work[0].reference_answer is None
+    commit_scored_result(
+        item, work[0], worker.query_reference_answer(work[0].prompt_idx)
+    )
+    assert CorpusDataset(tmp_path)[0].rollout.reward == 1.0
 
 
 def test_partial_prompt_publication_replays_only_missing_commit(tmp_path, monkeypatch):

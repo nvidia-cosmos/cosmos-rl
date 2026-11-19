@@ -104,6 +104,12 @@ def validate_generation_identity(config):
     output = config.execution.output
     if output is None or not output.resume:
         return
+    if config.train.local_dataset:
+        raise ValueError(
+            "Resumable generation requires train.local_dataset=false so the "
+            "controller can verify prompts and scoring targets before skipping work; "
+            "use execution.output.resume=false for worker-local datasets"
+        )
     actor = config.execution.actor
     revision = config.policy.model_revision
     if actor is not None and actor.weight_source == "checkpoint":
