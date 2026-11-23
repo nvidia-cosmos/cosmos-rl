@@ -95,6 +95,57 @@ def test_initial_weight_transfer_preserves_version_in_either_registration_order(
     assert policy_commands[:2] == [WeightResumeCommand, PolicyToRolloutUnicastCommand]
 
 
+@pytest.mark.parametrize("policy_position", [0, 1, 2, 3])
+def test_initial_weight_transfer_follows_the_rollout_mesh_build(policy_position):
+    # Workers execute commands in order: a first P2R queued ahead of BuildMesh
+    # holds its receiver in the transfer while the other rollouts wait in the
+    # mesh collective (job 8145682). Every registration order must queue
+    # BuildMesh first and send the first transfer exactly once.
+    policy, rollouts = PolicyStatusManager(), RolloutStatusManager()
+    config = SimpleNamespace(
+        train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
+        policy=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=1)),
+        rollout=SimpleNamespace(parallelism=SimpleNamespace(n_init_replicas=3)),
+    )
+    redis = Mock()
+    policy.current_step, policy.total_steps = 0, 20
+    policy.redis_handler = rollouts.redis_handler = redis
+    rollouts.policy_status_manager = policy
+    policy.post_register_hook = Mock()
+    policy.prepare_validation_round = Mock(return_value=None)
+    rollouts.trigger_rebuild_mesh = lambda replicas: BuildMeshCommand.trigger(
+        replicas, redis_handler=redis
+    )
+
+    order = ["rollout-0", "rollout-1", "rollout-2"]
+    order.insert(policy_position, "policy")
+    for name in order:
+        if name == "policy":
+            policy.register(atom(name), config, rollouts)
+        else:
+            rollouts.register(atom(name), config, policy)
+
+    published = [
+        (Command.depack(call.args[0]), call.args[1])
+        for call in redis.publish_command.call_args_list
+    ]
+    receivers = [
+        target
+        for cmd, target in published
+        if isinstance(cmd, PolicyToRolloutUnicastCommand) and target != "policy"
+    ]
+    assert len(receivers) == 1
+    for name in order[:policy_position] + order[policy_position + 1 :]:
+        kinds = [type(cmd) for cmd, target in published if target == name]
+        assert BuildMeshCommand in kinds
+        first_weights = [
+            index
+            for index, kind in enumerate(kinds)
+            if kind in (PolicyToRolloutUnicastCommand, RolloutToRolloutBroadcastCommand)
+        ]
+        assert first_weights and kinds.index(BuildMeshCommand) < first_weights[0]
+
+
 @pytest.mark.parametrize("role", [Role.POLICY, Role.ROLLOUT])
 def test_lost_registration_reply_does_not_repeat_lifecycle_commands(role):
     manager = PolicyStatusManager() if role == Role.POLICY else RolloutStatusManager()
