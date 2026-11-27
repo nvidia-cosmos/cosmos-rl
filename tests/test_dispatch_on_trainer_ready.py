@@ -127,6 +127,15 @@ def test_balancing_applies_to_uneven_replica_counts():
         assert sorted(_weight(r) for r in rank_rollouts) == [46, 177]
 
 
+def test_queued_rollouts_do_not_push_a_new_rollout_to_a_later_step():
+    # The next step takes every pending rollout, so queue depth must not make
+    # a fresh rollout look stale at admission.
+    replicas = [_replica("policy-0", 0, 1)]
+    manager = _ready_manager([1] * 7, replicas)
+
+    assert manager.next_rollout_training_step() == manager.current_step + 1
+
+
 def test_fixed_dispatch_still_waits_for_a_full_step():
     replicas = [_replica("policy-0", 0, 1), _replica("policy-1", 1, 1)]
     manager = _manager([1] * 3, replicas, count=2, key=None)

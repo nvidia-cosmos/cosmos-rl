@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import heapq
 import time
 import math
 import threading
@@ -284,6 +285,14 @@ class JobPhase(StrEnum):
 
     RUNNING = "running"
     DRAINING = "draining"
+
+
+def _dispatch_on_trainer_ready(config) -> bool:
+    """Whether a step starts on trainer readiness with every pending rollout.
+
+    SFT policy configs have no such field, hence the default.
+    """
+    return getattr(config.train.train_policy, "dispatch_on_trainer_ready", False)
 
 
 def _serialize_policy_lifecycle(method):
@@ -1089,9 +1098,7 @@ class PolicyStatusManager:
             self._fail_pending_policy_membership()
         if replica.in_mesh and len(valid_replicas) > 0:
             self.trigger_rebuild_mesh(valid_replicas)
-            if getattr(
-                self.config.train.train_policy, "dispatch_on_trainer_ready", False
-            ):
+            if _dispatch_on_trainer_ready(self.config):
                 # The survivors may be ready and waiting on a rollout completion
                 # that a replay-pool trainer does not need; losing a peer is the
                 # other transition that leaves them with nothing to wake them.
@@ -1273,36 +1280,41 @@ class PolicyStatusManager:
         """Send the first weights to a rollout that is already waiting.
 
         Rollouts that register after this point receive their P2R from the
-        rollout-side post_register_hook instead. A checkpoint actor sends no
-        weights to rollouts.
+        rollout-side post_register_hook instead. A checkpoint actor and
+        colocated mode send no weights to rollouts.
         """
-        if checkpoint_actor(config):
+        if checkpoint_actor(config) or getattr(config, "mode", None) == "colocated":
             return
-        any_valid_rollout_replica = None
-        sorted_rollout_replicas = sorted(
-            rollout_status_manager.rollout_replicas.values(),
+        valid_rollout_replicas = sorted(
+            (
+                r
+                for r in rollout_status_manager.rollout_replicas.values()
+                if r.all_atoms_arrived
+            ),
             key=lambda x: x.start_time,
         )
-        valid_rollout_replicas = []
-        for r in sorted_rollout_replicas:
-            if r.all_atoms_arrived:
-                valid_rollout_replicas.append(r)
-                if any_valid_rollout_replica is None:
-                    any_valid_rollout_replica = r
-        if any_valid_rollout_replica is None:
+        if not valid_rollout_replicas:
             logger.info(
                 "[Controller] No valid rollout replicas found, skip PolicyToRolloutUnicastCommand"
             )
             return
-        if len(valid_rollout_replicas) < config.rollout.parallelism.n_init_replicas:
+        if not rollout_status_manager.rollout_init_done:
             # The rollout mesh is built when the last rollout registers. A
             # transfer issued before that would run ahead of the mesh build
             # on its target, so the rollout-side post_register_hook issues it
-            # once both cohorts are complete.
+            # once both cohorts are complete. Gate on the cohort flag, not on
+            # the live count: a rollout lost after the cohort completed must
+            # not suppress the transfer to its survivors.
             logger.info(
                 "[Controller] Rollout cohort incomplete, the first PolicyToRolloutUnicastCommand follows the last rollout registration"
             )
             return
+        if any(r.weights_loaded_in_view_of_command for r in valid_rollout_replicas):
+            # The rollout-side post_register_hook already sent the first
+            # weights; a second P2R and R2R would repeat the transfer and the
+            # initial validation round.
+            return
+        any_valid_rollout_replica = valid_rollout_replicas[0]
         command.PolicyToRolloutUnicastCommand.trigger(
             src_replica=loaded_policy_replica,
             dst_replica=any_valid_rollout_replica,
@@ -1315,17 +1327,16 @@ class PolicyStatusManager:
             total_steps=None,
             redis_handler=self.redis_handler,
         )
-        if len(valid_rollout_replicas) >= config.rollout.parallelism.n_init_replicas:
-            command.RolloutToRolloutBroadcastCommand.trigger(
-                src_replica=any_valid_rollout_replica,
-                dst_replicas=valid_rollout_replicas,
-                weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
-                total_steps=None,
-                redis_handler=self.redis_handler,
-                validation_round_id=self.prepare_validation_round(
-                    self.current_step, None, valid_rollout_replicas
-                ),
-            )
+        command.RolloutToRolloutBroadcastCommand.trigger(
+            src_replica=any_valid_rollout_replica,
+            dst_replicas=valid_rollout_replicas,
+            weight_step=self.current_step,  # we must pass the current step to rollout replicas to track the weight version even in resume ckpt.
+            total_steps=None,
+            redis_handler=self.redis_handler,
+            validation_round_id=self.prepare_validation_round(
+                self.current_step, None, valid_rollout_replicas
+            ),
+        )
         logger.info(
             f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} after the policy cohort completed"
         )
@@ -1379,10 +1390,9 @@ class PolicyStatusManager:
                 # before the cohort was complete. Commands run in order on
                 # the loaded replica, so the broadcast above finishes before
                 # it blocks on rollout readiness here.
-                if config.mode != "colocated":
-                    self.trigger_initial_p2r(
-                        initialized_replica, config, rollout_status_manager
-                    )
+                self.trigger_initial_p2r(
+                    initialized_replica, config, rollout_status_manager
+                )
             # Set all policy replicas to `ready`
             for replica in valid_replicas:
                 self.set_status(replica.name, PolicyStatus.READY)
@@ -1466,9 +1476,7 @@ class PolicyStatusManager:
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
 
-        if self.policy_init_done and getattr(
-            config.train.train_policy, "dispatch_on_trainer_ready", False
-        ):
+        if self.policy_init_done and _dispatch_on_trainer_ready(config):
             # The other dispatch points are a rollout completion and a training
             # ACK, so without this the first step would wait for the first
             # finished episode, which a trainer serving itself from a replay pool
@@ -1634,6 +1642,9 @@ class PolicyStatusManager:
         rollouts are allowed.
         """
 
+        if _dispatch_on_trainer_ready(self.config):
+            # The next step takes every pending rollout.
+            return self.current_step + 1
         required_rollouts = self.config.train.train_batch_per_replica * max(
             len(self.get_all_atoms_arrived_replicas()), 1
         )
@@ -2128,6 +2139,10 @@ class PolicyStatusManager:
                 self.config.train.train_batch_per_replica
                 * max(len(self.get_all_atoms_arrived_replicas()), 1)
             )
+            if _dispatch_on_trainer_ready(self.config):
+                # The next step takes every pending rollout, so queue depth
+                # does not delay this one.
+                estimated_step = self.current_step
             if rank_pending is not None:
                 target = rollout.prompt_idx % len(rank_pending)
                 estimated_step = (
@@ -2507,11 +2522,7 @@ class PolicyStatusManager:
                 and (
                     _train_decrement > 0
                     # Without rollouts, such a step still updates the policy.
-                    or getattr(
-                        self.config.train.train_policy,
-                        "dispatch_on_trainer_ready",
-                        False,
-                    )
+                    or _dispatch_on_trainer_ready(self.config)
                 )
             ):
                 self.record_real_datafetch_acked(step, total_steps)
@@ -2818,7 +2829,7 @@ class PolicyStatusManager:
         if self.config.mode == "colocated":
             # Colocated mode always has enough rollouts since they are locally prepared.
             return True
-        if getattr(self.config.train.train_policy, "dispatch_on_trainer_ready", False):
+        if _dispatch_on_trainer_ready(self.config):
             # The trainer keeps its own replay data, so a step needs no rollouts.
             return True
 
@@ -3298,9 +3309,7 @@ class PolicyStatusManager:
         rank so far. Rollouts too few for any replica's round stay queued for
         the next step.
         """
-        if not getattr(
-            self.config.train.train_policy, "dispatch_on_trainer_ready", False
-        ):
+        if not _dispatch_on_trainer_ready(self.config):
             return [self.config.train.train_batch_per_replica] * len(replicas)
         dp_sizes = [replica.data_rank_count() for replica in replicas]
         counts = [0] * len(replicas)
@@ -3373,19 +3382,20 @@ class PolicyStatusManager:
                 )
             slots.extend((index, rank, dp_size) for rank in range(dp_size))
         assigned = {slot: [] for slot in slots}
-        load = dict.fromkeys(slots, 0.0)
+        # Min-heap of (weight sum, slot order) over slots with room; a full
+        # slot is not pushed back. Ties go to the earlier slot.
+        heap = [
+            (0.0, order)
+            for order, slot in enumerate(slots)
+            if counts[slot[0]] // slot[2] > 0
+        ]
         weights = [self._dispatch_weight(rollout, key) for rollout in rollouts]
         for i in sorted(range(len(rollouts)), key=lambda i: (-weights[i], i)):
-            slot = min(
-                (
-                    slot
-                    for slot in slots
-                    if len(assigned[slot]) < counts[slot[0]] // slot[2]
-                ),
-                key=load.__getitem__,
-            )
-            load[slot] += weights[i]
+            load, order = heapq.heappop(heap)
+            slot = slots[order]
             assigned[slot].append(rollouts[i])
+            if len(assigned[slot]) < counts[slot[0]] // slot[2]:
+                heapq.heappush(heap, (load + weights[i], order))
         streams = [[None] * count for count in counts]
         for (index, rank, dp_size), rollouts_of_slot in assigned.items():
             for turn, rollout in enumerate(rollouts_of_slot):
@@ -3887,9 +3897,11 @@ class RolloutStatusManager:
         # Before the rollout cohort is complete there is no BuildMesh yet, so a
         # transfer to an early rollout would again run ahead of its mesh build;
         # the last rollout registration (above) or trigger_initial_p2r issues it.
+        # Count only complete policy replicas: a replica with atoms still
+        # missing has not joined the policy-to-policy broadcast yet.
         policy_cohort_ready = getattr(
             policy_status_manager, "policy_init_done", True
-        ) or len(policy_status_manager.policy_replicas) >= (
+        ) or len(policy_status_manager.get_all_atoms_arrived_replicas()) >= (
             config.policy.parallelism.n_init_replicas
         )
         if (

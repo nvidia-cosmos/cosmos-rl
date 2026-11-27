@@ -21,6 +21,19 @@ def test_outbox_capacity_scales_with_replicas():
     assert outbox_capacity(1, 1) == 128
 
 
+def test_outbox_capacity_only_grows():
+    publisher = ControllerPublisher(
+        _BlockingTransport(), on_failure=lambda error: None, max_pending=256
+    )
+    try:
+        publisher.ensure_capacity(outbox_capacity(64, 128))
+        assert publisher.max_pending == 1536
+        publisher.ensure_capacity(outbox_capacity(1, 1))
+        assert publisher.max_pending == 1536
+    finally:
+        publisher._writer.shutdown(wait=False, cancel_futures=True)
+
+
 def test_outbox_rejects_only_beyond_its_capacity():
     transport = _BlockingTransport()
     failures = []

@@ -81,9 +81,10 @@ When the key is set, the controller reads a non-negative number from
 assigns the rollouts of the step to the `(replica, data rank)` slots so that the
 per-rank weight sums are as even as possible: rollouts are placed heaviest
 first, each on the slot with the smallest sum that still has room; equal weights
-keep arrival order. Every rank still receives exactly
-`train_batch_per_replica / dp_size` rollouts, the step still consumes the oldest
-`train_batch_per_replica x replicas` rollouts, and only the published
+keep arrival order. Every rank of a replica still receives exactly its
+replica's count divided by `dp_size` rollouts (`train_batch_per_replica`, or
+the per-replica count that `dispatch_on_trainer_ready` assigns), the step still
+consumes the oldest rollouts in its count, and only the published
 per-replica order is rearranged so that the existing worker-side sharding lands
 each rollout on its assigned rank. There is no protocol or worker change;
 counts, receipts and per-step accounting are unchanged, and the payload

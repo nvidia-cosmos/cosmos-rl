@@ -61,6 +61,11 @@ class ControllerPublisher:
             if error is not None:
                 self._fail(error)
 
+    def ensure_capacity(self, max_pending):
+        """Raise the outbox capacity as the replica cohort grows; never lower it."""
+        with self._lock:
+            self.max_pending = max(self.max_pending, max_pending)
+
     def publish_plan(self, plan):
         try:
             with self._lock:

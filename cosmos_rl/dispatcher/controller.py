@@ -1418,6 +1418,14 @@ maxmemory-policy noeviction
                 )
             else:
                 raise Exception(f"[Controller] Unknown role: {role}")
+            # Replicas beyond the configured initial counts (elastic scale-up)
+            # widen the same command fan-out bursts.
+            self.redis_controller.ensure_capacity(
+                outbox_capacity(
+                    len(self.policy_status_manager.policy_replicas),
+                    len(self.rollout_status_manager.rollout_replicas),
+                )
+            )
 
     async def unregister(self, replica_name: str):
         logger.info(f"[Controller] Unregistering replica {replica_name}")

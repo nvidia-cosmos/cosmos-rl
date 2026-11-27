@@ -355,8 +355,11 @@ def test_registration_retries_keep_session_and_changed_incarnation_rejected(
 def test_rollout_registration_rejects_unfenced_workers_before_mesh_changes():
     controller = object.__new__(Controller)
     controller.life_cycle_lock = asyncio.Lock()
-    controller.policy_status_manager = SimpleNamespace(stop_reason=None)
-    controller.rollout_status_manager = Mock()
+    controller.policy_status_manager = SimpleNamespace(
+        stop_reason=None, policy_replicas={}
+    )
+    controller.rollout_status_manager = Mock(rollout_replicas={})
+    controller.redis_controller = Mock()
     controller.config = object()
     atom = Atom(0, "127.0.0.1", "fixture", None, [0] * 4, [1] * 4, "source")
     with pytest.raises(ValueError, match="receipt-aware"):

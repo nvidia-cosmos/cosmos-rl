@@ -146,6 +146,72 @@ def test_initial_weight_transfer_follows_the_rollout_mesh_build(policy_position)
         assert first_weights and kinds.index(BuildMeshCommand) < first_weights[0]
 
 
+def _initial_p2r_fixture(policy_replicas, rollout_replicas):
+    policy, rollouts = PolicyStatusManager(), RolloutStatusManager()
+    config = SimpleNamespace(
+        train=SimpleNamespace(train_policy=SimpleNamespace(type="grpo")),
+        policy=SimpleNamespace(
+            parallelism=SimpleNamespace(n_init_replicas=policy_replicas)
+        ),
+        rollout=SimpleNamespace(
+            parallelism=SimpleNamespace(n_init_replicas=rollout_replicas)
+        ),
+    )
+    redis = Mock()
+    policy.current_step, policy.total_steps = 0, 20
+    policy.redis_handler = rollouts.redis_handler = redis
+    rollouts.policy_status_manager = policy
+    policy.post_register_hook = Mock()
+    policy.prepare_validation_round = Mock(return_value=None)
+    rollouts.trigger_rebuild_mesh = lambda replicas: BuildMeshCommand.trigger(
+        replicas, redis_handler=redis
+    )
+    return policy, rollouts, config, redis
+
+
+def _p2r_receivers(redis):
+    return [
+        call.args[1]
+        for call in redis.publish_command.call_args_list
+        if isinstance(Command.depack(call.args[0]), PolicyToRolloutUnicastCommand)
+        and call.args[1].startswith("rollout")
+    ]
+
+
+def test_partially_arrived_policy_replica_does_not_complete_the_policy_cohort():
+    # A second policy replica with atoms still missing has not joined the
+    # policy-to-policy broadcast, so a completing rollout cohort must wait.
+    policy, rollouts, config, redis = _initial_p2r_fixture(2, 1)
+    policy.register(atom("policy-0"), config, rollouts)
+    two_rank = atom("policy-1")
+    two_rank.group_size[MESH_NAMES.index("dp_shard")] = 2
+    policy.register(two_rank, config, rollouts)
+    assert not policy["policy-1"].all_atoms_arrived
+    rollouts.register(atom("rollout-0"), config, policy)
+    assert _p2r_receivers(redis) == []
+
+
+def test_initial_p2r_is_sent_once():
+    policy, rollouts, config, redis = _initial_p2r_fixture(1, 1)
+    rollouts.register(atom("rollout-0"), config, policy)
+    policy.register(atom("policy"), config, rollouts)
+    policy.trigger_initial_p2r(policy["policy"], config, rollouts)
+    assert _p2r_receivers(redis) == ["rollout-0"]
+
+
+def test_initial_p2r_reaches_survivors_of_a_completed_rollout_cohort():
+    # A rollout lost after its cohort completed must not leave the survivors
+    # without weights once the policy cohort completes.
+    policy, rollouts, config, redis = _initial_p2r_fixture(2, 2)
+    rollouts.register(atom("rollout-0"), config, policy)
+    rollouts.register(atom("rollout-1"), config, policy)
+    rollouts.rollout_replicas.pop("rollout-1")
+    policy.register(atom("policy-0"), config, rollouts)
+    policy["policy-0"].weights_loaded_in_view_of_command = True
+    policy.trigger_initial_p2r(policy["policy-0"], config, rollouts)
+    assert _p2r_receivers(redis) == ["rollout-0"]
+
+
 @pytest.mark.parametrize("role", [Role.POLICY, Role.ROLLOUT])
 def test_lost_registration_reply_does_not_repeat_lifecycle_commands(role):
     manager = PolicyStatusManager() if role == Role.POLICY else RolloutStatusManager()
