@@ -644,17 +644,34 @@ maxmemory-policy noeviction
         self._prune_refill_state(before_weight_version=starting_weight_version)
         replacements = getattr(self, "weight_version_to_replacement_prompt_issued", {})
         credits = getattr(self, "weight_version_to_replacement_prompt_num", {})
-        normal = {
-            version: max(
+        last_tracked = max(
+            (
+                version
+                for state in (self.weight_version_to_prompt_num, replacements, credits)
+                for version in state
+            ),
+            default=starting_weight_version - 1,
+        )
+        # Walk the window only until it holds n slots: every version past the last
+        # tracked one adds prompt_quota free slots, so the walk ends a few versions
+        # in even when allowed_outdated_steps leaves the window effectively unbounded.
+        normal: Dict[int, int] = {}
+        refill: Dict[int, int] = {}
+        slots = 0
+        version = starting_weight_version
+        while version <= ceiling and slots < n:
+            if version > last_tracked and prompt_quota <= 0:
+                break
+            normal[version] = max(
                 0,
                 prompt_quota
                 - self.weight_version_to_prompt_num.get(version, 0)
                 + replacements.get(version, 0),
             )
-            for version in range(starting_weight_version, ceiling + 1)
-        }
-        refill = {version: credits.get(version, 0) for version in normal}
-        bounded = min(n, sum(normal.values()) + sum(refill.values()))
+            refill[version] = credits.get(version, 0)
+            slots += normal[version] + refill[version]
+            version += 1
+        bounded = min(n, slots)
 
         # Preserve intentional soft-throttle overflow, but enforce a configured
         # hard ceiling over the whole batch. Round up to one complete prompt:

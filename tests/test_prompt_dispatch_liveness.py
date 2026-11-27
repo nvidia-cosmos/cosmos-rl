@@ -131,6 +131,27 @@ def test_window_diagnostics_include_capacity_and_admitted_work(caplog):
     assert "normal_slots={0: 1, 1: 1} refill_slots={0: 0, 1: 0}" in message
 
 
+def test_effectively_unbounded_staleness_window_does_not_stall_the_fetch():
+    """A huge allowed_outdated_steps (staleness checks switched off) stays O(n)."""
+
+    def timeout(*_):
+        raise TimeoutError("prompt fetch walked the whole staleness window")
+
+    previous = signal.signal(signal.SIGALRM, timeout)
+    signal.alarm(10)
+    try:
+        item = controller(lag=1_000_000_000)
+        first = fetch(item, 8)
+        assert [p.weight_version for p in first] == list(range(8))
+        assert discard(item, first[0], report="drop-first") == 1
+        second = fetch(item, 3)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    # The refill credit for version 0 comes first, then fresh versions.
+    assert [p.weight_version for p in second] == [0, 8, 9]
+
+
 def test_replayed_terminal_receipt_neither_settles_nor_refills_twice():
     item = controller()
     first = fetch(item, 1)[0]
