@@ -384,14 +384,34 @@ def test_local_reward_payload_remains_aligned_after_admission():
     ]
 
 
-def test_local_reward_forwards_extra_info_without_explicit_admission():
-    """A producer that never opts into admission still ships extra_info to the controller."""
+def test_local_reward_drops_extra_info_without_admission_or_balancing():
+    """Without explicit admission or dispatch balancing, extra_info stays on the producer."""
     calculator = LocalRewardCalculator()
     calculator.rl_algo = _TestAlgo([1.0, 2.0, 3.0, 4.0])
     calculator.config = SimpleNamespace(
         train=SimpleNamespace(
             non_text=True,
-            train_policy=SimpleNamespace(min_filter_prefix_tokens=None),
+            train_policy=SimpleNamespace(
+                min_filter_prefix_tokens=None, dispatch_balance_key=None
+            ),
+        )
+    )
+
+    result, _, _ = calculator.compute_rewards([_payload()], False, 4)
+
+    assert result[0].extra_info is None
+
+
+def test_local_reward_forwards_extra_info_for_dispatch_balancing():
+    """Dispatch balancing reads its weight from extra_info, so the payload keeps it."""
+    calculator = LocalRewardCalculator()
+    calculator.rl_algo = _TestAlgo([1.0, 2.0, 3.0, 4.0])
+    calculator.config = SimpleNamespace(
+        train=SimpleNamespace(
+            non_text=True,
+            train_policy=SimpleNamespace(
+                min_filter_prefix_tokens=None, dispatch_balance_key="aligned"
+            ),
         )
     )
 
