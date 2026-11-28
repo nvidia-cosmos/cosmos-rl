@@ -304,6 +304,16 @@ class Replica:
         atom = next(iter(self.atoms.values()))
         return math.prod(atom.group_size)
 
+    def data_rank_count(self) -> int:
+        """Number of data ranks the rollouts of one replica are sharded across.
+
+        Only the ``dp_shard`` axis splits rollouts; pipeline-, context- and
+        tensor-parallel atoms hold copies of the same data.
+        """
+        assert len(self.atoms) > 0, f"Replica {self.name} has no atoms"
+        atom = next(iter(self.atoms.values()))
+        return atom.group_size[MESH_NAMES.index("dp_shard")]
+
     @property
     def all_atoms_arrived(self) -> bool:
         assert len(self.atoms) > 0, f"Replica {self.name} has no atoms"

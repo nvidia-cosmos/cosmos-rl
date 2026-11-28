@@ -41,13 +41,15 @@ def _training_payload_from_rollouts(
     rollouts: List[Rollout],
     *,
     valid: bool,
+    keep_extra_info: bool,
 ) -> RLPayload:
     admission = rollout_group.completion_admission
     assert admission is not None
     selected = select_payload_completions(source_payload, admission)
-    if not admission.explicit:
-        # Preserve the historical local-reward payload shape when no producer
-        # opts into admission. The old reconstruction did not forward extra_info.
+    if not (admission.explicit or keep_extra_info):
+        # Preserve the historical local-reward payload shape: extra_info reaches the
+        # controller only with explicit admission or when dispatch balancing reads
+        # the per-rollout weight from it.
         selected.extra_info = None
     selected.reference_answer = None
     selected.valid = valid
@@ -354,13 +356,21 @@ class LocalRewardCalculator:
             for rollout_group in rollout_groups
         ]
         payload_list: List[RLPayload] = []
+        keep_extra_info = (
+            getattr(self.config.train.train_policy, "dispatch_balance_key", None)
+            is not None
+        )
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
         for idx, rollouts_group in enumerate(rollouts_list):
             rollout_group = rollout_groups[idx]
             if not rollouts_group:
                 payload_list.append(
                     _training_payload_from_rollouts(
-                        payloads[idx], rollout_group, [], valid=False
+                        payloads[idx],
+                        rollout_group,
+                        [],
+                        valid=False,
+                        keep_extra_info=keep_extra_info,
                     )
                 )
                 continue
@@ -409,14 +419,22 @@ class LocalRewardCalculator:
 
                 payload_list.append(
                     _training_payload_from_rollouts(
-                        payloads[idx], rollout_group, rollouts_group, valid=True
+                        payloads[idx],
+                        rollout_group,
+                        rollouts_group,
+                        valid=True,
+                        keep_extra_info=keep_extra_info,
                     )
                 )
             else:
                 # If the rewards are all the same, we need to sample one rollout from the group
                 payload_list.append(
                     _training_payload_from_rollouts(
-                        payloads[idx], rollout_group, rollouts_group, valid=False
+                        payloads[idx],
+                        rollout_group,
+                        rollouts_group,
+                        valid=False,
+                        keep_extra_info=keep_extra_info,
                     )
                 )
         return payload_list, False, step
