@@ -183,6 +183,35 @@ queue order, never dispatches a partial batch, and settles stale entries once.
 Discarded obsolete prompt slots stay spent, matching admission-time filtering.
 Configured lag remains authoritative: allowing one old step still permits it.
 No new divisibility restriction on generation count or default objective change.</p>
+<section id="weight-balanced-dispatch">
+<h2>Weight-balanced dispatch<a class="headerlink" href="#weight-balanced-dispatch" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">train.train_policy.dispatch_balance_key</span></code> defaults to <code class="docutils literal notranslate"><span class="pre">null</span></code>, which keeps FIFO
+round-robin dispatch: the controller publishes the rollouts of one training step
+in arrival order, interleaved across the arrived policy replicas, and each policy
+worker hands the <code class="docutils literal notranslate"><span class="pre">i</span></code>-th rollout of its replica stream to data rank <code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">%</span> <span class="pre">dp_size</span></code>.
+Equal counts per rank are already required by the worker.</p>
+<p>When the key is set, the controller reads a non-negative number from
+<code class="docutils literal notranslate"><span class="pre">rollout.extra_info[dispatch_balance_key]</span></code> for every rollout of the step and
+assigns the rollouts of the step to the <code class="docutils literal notranslate"><span class="pre">(replica,</span> <span class="pre">data</span> <span class="pre">rank)</span></code> slots so that the
+per-rank weight sums are as even as possible: rollouts are placed heaviest
+first, each on the slot with the smallest sum that still has room; equal weights
+keep arrival order. Every rank of a replica still receives exactly its
+replica’s count divided by <code class="docutils literal notranslate"><span class="pre">dp_size</span></code> rollouts (<code class="docutils literal notranslate"><span class="pre">train_batch_per_replica</span></code>, or
+the per-replica count that <code class="docutils literal notranslate"><span class="pre">dispatch_on_trainer_ready</span></code> assigns), the step still
+consumes the oldest rollouts in its count, and only the published
+per-replica order is rearranged so that the existing worker-side sharding lands
+each rollout on its assigned rank. There is no protocol or worker change;
+counts, receipts and per-step accounting are unchanged, and the payload
+lookahead reservation uses the same selection.</p>
+<p>Use it when rollouts differ widely in training cost: variable-length episodes
+from a simulator (weight = number of trainable rows or frames) or LLM GRPO with
+long and short completions (weight = completion token count). Without it, one
+data rank can receive several heavy rollouts while another receives only light
+ones, and every rank then waits for the slowest one in each collective. A
+rollout without the key, or with a non-numeric or negative value, counts as
+weight 0; the first such rollout is logged once. The option balances the shared
+queue only and cannot be combined with <code class="docutils literal notranslate"><span class="pre">data_dispatch_as_rank_in_mesh</span></code>.</p>
+</section>
 <section id="multi-replica-sft-membership">
 <h2>Multi-replica SFT membership<a class="headerlink" href="#multi-replica-sft-membership" title="Link to this heading"></a></h2>
 <p>Autonomous SFT seals its original cohort before the first mesh publication.
